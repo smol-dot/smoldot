@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fix randomness not being implemented properly, leading to the same random numbers always being generated. This issues leads to all instances of smoldot (even on different machines) always using the same networking key, which would lead to connectivity issues when multiple instances of smoldot connect to the same full node. Note that because perfect forward secrecy is used, it is not possible to retroactively decipher networking communications. Additionally, the fact that the same random numbers are always generated made smoldot vulnerable to HashDoS attacks. ([#142](https://github.com/smol-dot/smoldot/pull/142))
 - JSON-RPC requests without a `params` field are no longer invalid. ([#13](https://github.com/smol-dot/smoldot/pull/13))
 - Fix Merkle proofs whose trie root node has a size inferior to 32 bytes being considered as invalid. ([#3046](https://github.com/paritytech/smoldot/pull/3046))
 
