@@ -333,7 +333,6 @@ pub fn verify(
     let check_inherents_process = {
         // The second parameter of `BlockBuilder_check_inherents` contains information such as
         // the current timestamp.
-        // TODO: uncles?! it's a weird inherent as even in Substrate it's half implemented
         let inherent_data = inherents::InherentData {
             timestamp: u64::try_from(config.now_from_unix_epoch.as_millis())
                 .unwrap_or(u64::max_value()),
