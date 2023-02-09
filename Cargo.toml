@@ -82,7 +82,7 @@ smallvec = "1.10.0"
 snow = { version = "0.9.0", default-features = false, features = ["default-resolver"] }
 tiny-keccak = { version = "2.0", features = ["keccak"] }
 twox-hash = { version = "1.6.3", default-features = false }
-wasmi = { version = "0.9.1", default-features = false, features = ["core"] }  # TODO: having to add `core` is sketchy; maybe report this
+wasmi = { version = "0.25.0", default-features = false }
 
 # `database-sqlite` feature
 sqlite = { version = "0.27.3", optional = true, default-features = false, features = ["linkage"] }

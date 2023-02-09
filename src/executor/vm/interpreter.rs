@@ -19,11 +19,11 @@
 
 use super::{
     ExecOutcome, GlobalValueErr, HeapPages, ModuleError, NewErr, OutOfBoundsError, RunErr,
-    Signature, StartErr, Trap, ValueType, WasmValue,
+    Signature, StartErr, Trap, WasmValue,
 };
 
-use alloc::{borrow::ToOwned as _, boxed::Box, format, string::ToString as _, sync::Arc, vec::Vec};
-use core::{cell::RefCell, fmt};
+use alloc::{borrow::ToOwned as _, format, string::ToString as _, sync::Arc, vec::Vec};
+use core::fmt;
 
 /// See [`super::Module`].
 #[derive(Clone)]
@@ -37,7 +37,8 @@ pub struct Module {
 impl Module {
     /// See [`super::Module::new`].
     pub fn new(module_bytes: impl AsRef<[u8]>) -> Result<Self, ModuleError> {
-        let module = wasmi::Module::from_buffer(module_bytes.as_ref())
+        let engine = wasmi::Engine::default(); // TODO: investigate config
+        let module = wasmi::Module::new(&engine, module_bytes.as_ref())
             .map_err(|err| ModuleError(err.to_string()))?;
 
         Ok(Module {
@@ -48,17 +49,26 @@ impl Module {
 
 /// See [`super::VirtualMachinePrototype`].
 pub struct InterpreterPrototype {
-    /// Original module, with resolved imports.
-    module: wasmi::ModuleRef,
+    // TODO: doc
+    store: wasmi::Store<()>,
+
+    /// Original module.
+    module: Arc<wasmi::Module>,
+
+    /// Linker used to create instances.
+    linker: wasmi::Linker<()>,
+
+    /// An instance of the module.
+    instance: wasmi::Instance,
 
     /// Memory of the module instantiation.
-    memory: wasmi::MemoryRef,
+    memory: wasmi::Memory,
 
     /// Table of the indirect function calls.
     ///
     /// In Wasm, function pointers are in reality indices in a table called
     /// `__indirect_function_table`. This is this table, if it exists.
-    indirect_table: Option<wasmi::TableRef>,
+    indirect_table: Option<wasmi::Table>,
 }
 
 impl InterpreterPrototype {
@@ -67,125 +77,74 @@ impl InterpreterPrototype {
         module: &Module,
         mut symbols: impl FnMut(&str, &str, &Signature) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
-        struct ImportResolve<'a> {
-            functions: RefCell<&'a mut dyn FnMut(&str, &str, &Signature) -> Result<usize, ()>>,
-            import_memory: RefCell<&'a mut Option<wasmi::MemoryRef>>,
-        }
+        let mut store = wasmi::Store::new(module.inner.engine(), ());
 
-        impl<'a> wasmi::ImportResolver for ImportResolve<'a> {
-            fn resolve_func(
-                &self,
-                module_name: &str,
-                field_name: &str,
-                signature: &wasmi::Signature,
-            ) -> Result<wasmi::FuncRef, wasmi::Error> {
-                let closure = &mut **self.functions.borrow_mut();
-                let conv_signature = match TryFrom::try_from(signature) {
-                    Ok(i) => i,
-                    Err(_) => {
-                        return Err(wasmi::Error::Instantiation(format!(
-                            "Function with unsupported signature `{}`:`{}`",
-                            module_name, field_name
-                        )))
-                    }
-                };
-                let index = match closure(module_name, field_name, &conv_signature) {
-                    Ok(i) => i,
-                    Err(_) => {
-                        return Err(wasmi::Error::Host(Box::new(NewErrWrapper(
-                            NewErr::UnresolvedFunctionImport {
-                                module_name: module_name.to_owned(),
-                                function: field_name.to_owned(),
-                            },
-                        ))))
-                    }
-                };
-
-                Ok(wasmi::FuncInstance::alloc_host(signature.clone(), index))
-            }
-
-            fn resolve_global(
-                &self,
-                _module_name: &str,
-                _field_name: &str,
-                _global_type: &wasmi::GlobalDescriptor,
-            ) -> Result<wasmi::GlobalRef, wasmi::Error> {
-                Err(wasmi::Error::Instantiation(
-                    "Importing globals is not supported yet".to_owned(),
-                ))
-            }
-
-            fn resolve_memory(
-                &self,
-                module_name: &str,
-                field_name: &str,
-                memory_type: &wasmi::MemoryDescriptor,
-            ) -> Result<wasmi::MemoryRef, wasmi::Error> {
-                if module_name != "env" || field_name != "memory" {
-                    return Err(wasmi::Error::Host(Box::new(NewErrWrapper(
-                        NewErr::MemoryNotNamedMemory,
-                    ))));
-                }
-
-                // Considering that the memory can only be "env":"memory", and that each
-                // import has a unique name, this block can't be reached more than once.
-                debug_assert!(self.import_memory.borrow().is_none());
-
-                let memory = wasmi::MemoryInstance::alloc(
-                    wasmi::memory_units::Pages(memory_type.initial() as usize),
-                    memory_type
-                        .maximum()
-                        .map(|hp| wasmi::memory_units::Pages(hp as usize)),
-                )?;
-                **self.import_memory.borrow_mut() = Some(memory.clone());
-                Ok(memory)
-            }
-
-            fn resolve_table(
-                &self,
-                _module_name: &str,
-                _field_name: &str,
-                _table_type: &wasmi::TableDescriptor,
-            ) -> Result<wasmi::TableRef, wasmi::Error> {
-                Err(wasmi::Error::Instantiation(
-                    "Importing tables is not supported yet".to_owned(),
-                ))
-            }
-        }
-
-        // Wasmi provides an `Error::Host` variant that contains a ̀`Box<dyn wasmi::HostError>`
-        // that can be downcasted to anything.
-        // Unfortunately the `HostError` trait must be implemented manually, and in order to not
-        // have a leaky abstraction we don't implement it directly on `NewErr` but on a wrapper
-        // type.
-        #[derive(Debug, derive_more::Display)]
-        struct NewErrWrapper(NewErr);
-        impl wasmi::HostError for NewErrWrapper {}
-
+        let mut linker = wasmi::Linker::new();
         let mut import_memory = None;
-        let not_started = {
-            let resolver = ImportResolve {
-                functions: RefCell::new(&mut symbols),
-                import_memory: RefCell::new(&mut import_memory),
-            };
 
-            match wasmi::ModuleInstance::new(&module.inner, &resolver) {
-                Ok(m) => m,
-                Err(wasmi::Error::Host(err)) if err.is::<NewErrWrapper>() => {
-                    let underlying = err.downcast::<NewErrWrapper>().unwrap();
-                    return Err(underlying.0);
+        for import in module.inner.imports() {
+            let import = match import.ty() {
+                wasmi::ExternType::Func(func_type) => {
+                    let conv_signature = match Signature::try_from(func_type) {
+                        Ok(i) => i,
+                        Err(_) => {
+                            return Err(NewErr::ModuleError(ModuleError(format!(
+                                "Function with unsupported signature `{}`:`{}`",
+                                import.module(),
+                                import.name()
+                            ))))
+                        }
+                    };
+
+                    let index = match symbols(import.module(), import.name(), &conv_signature) {
+                        Ok(i) => i,
+                        Err(_) => {
+                            return Err(NewErr::UnresolvedFunctionImport {
+                                module_name: import.module().to_owned(),
+                                function: import.name().to_owned(),
+                            })
+                        }
+                    };
+
+                    // TODO: blocked by https://github.com/paritytech/wasmi/issues/658
+                    let func = wasmi::Func::wrap(&mut store, |input| {});
+
+                    linker.define(import.module(), import.name(), func);
                 }
-                Err(err) => return Err(NewErr::ModuleError(ModuleError(err.to_string()))),
-            }
-        };
+                wasmi::ExternType::Memory(memory_type) => {
+                    if import.module() != "env" || import.name() != "memory" {
+                        return Err(NewErr::MemoryNotNamedMemory);
+                    }
 
-        if not_started.has_start() {
-            return Err(NewErr::StartFunctionNotSupported);
+                    // Considering that the memory can only be "env":"memory", and that each
+                    // import has a unique name, this block can't be reached more than once.
+                    debug_assert!(import_memory.is_none());
+
+                    let memory = wasmi::Memory::new(&mut store, *memory_type)?;
+                    import_memory = Some(memory.clone());
+                    linker.define(import.module(), import.name(), memory);
+                }
+                wasmi::ExternType::Global(_) => {
+                    return Err(NewErr::ModuleError(ModuleError(
+                        "Importing globals is not supported".to_owned(),
+                    )))
+                }
+                wasmi::ExternType::Table(_) => {
+                    return Err(NewErr::ModuleError(ModuleError(
+                        "Importing tables is not supported".to_owned(),
+                    )))
+                }
+            };
         }
-        let module = not_started.assert_no_start();
+
+        let instance = linker
+            .instantiate(&mut store, &module.inner)
+            .unwrap() // TODO: no
+            .ensure_no_start(&mut store)
+            .map_err(|_| Err(NewErr::StartFunctionNotSupported))?;
 
         let memory = if let Some(import_memory) = import_memory {
-            if module
+            if instance
                 .export_by_name("memory")
                 .map_or(false, |m| m.as_memory().is_some())
             {
@@ -214,7 +173,10 @@ impl InterpreterPrototype {
         };
 
         Ok(InterpreterPrototype {
-            module,
+            store,
+            instance,
+            linker,
+            module: module.inner.clone(),
             memory,
             indirect_table,
         })
@@ -223,17 +185,15 @@ impl InterpreterPrototype {
     /// See [`super::VirtualMachinePrototype::global_value`].
     pub fn global_value(&self, name: &str) -> Result<u32, GlobalValueErr> {
         let value = self
-            .module
-            .export_by_name(name)
-            .ok_or(GlobalValueErr::NotFound)?
-            .as_global()
-            .ok_or(GlobalValueErr::Invalid)?
-            .get();
+            .instance
+            .get_global(&self.store, name)
+            .ok_or(GlobalValueErr::NotFound)? // TODO: we don't differentiate between "missing" and "invalid"
+            .get(&self.store);
 
         match value {
-            wasmi::RuntimeValue::I32(v) => match u32::try_from(v) {
+            wasmi::Value::I32(v) => match u32::try_from(v) {
                 Ok(v) => Ok(v),
-                Err(_) => Err(GlobalValueErr::Invalid),
+                Err(_) => Err(GlobalValueErr::Invalid), // Negative value.
             },
             _ => Err(GlobalValueErr::Invalid),
         }
@@ -259,60 +219,56 @@ impl InterpreterPrototype {
             Err(_) => return Err((StartErr::RequiredMemoryTooLarge, self)),
         };
 
-        if let Some(to_grow) = min_memory_pages.checked_sub(self.memory.current_size().0) {
+        if let Some(to_grow) = min_memory_pages.checked_sub(self.memory.current_pages().0) {
             if self
                 .memory
-                .grow(wasmi::memory_units::Pages(to_grow))
+                .grow(&mut self.store, wasmi::core::Pages::new(to_grow))
                 .is_err()
             {
                 return Err((StartErr::RequiredMemoryTooLarge, self));
             }
         }
 
-        let execution = match self.module.export_by_name(function_name) {
-            Some(wasmi::ExternVal::Func(f)) => {
+        let func_to_call = match self.instance.get_func(&self.store, function_name) {
+            Some(f) => {
                 // Try to convert the signature of the function to call, in order to make sure
                 // that the type of parameters and return value are supported.
-                if Signature::try_from(f.signature()).is_err() {
+                if Signature::try_from(f.ty()).is_err() {
                     return Err((StartErr::SignatureNotSupported, self));
                 }
 
-                wasmi::FuncInstance::invoke_resumable(
-                    &f,
-                    params
-                        .iter()
-                        .map(|v| wasmi::RuntimeValue::from(*v))
-                        .collect::<Vec<_>>(),
-                )
-                .map_err(|err| Trap(err.to_string()))
+                // TODO: check params types
+
+                f
             }
-            None => return Err((StartErr::FunctionNotFound, self)),
-            _ => return Err((StartErr::NotAFunction, self)),
+            None => return Err((StartErr::FunctionNotFound, self)), // TODO: we don't differentiate between `FunctionNotFound` and `NotAFunction` here
+        };
+
+        let has_output = {
+            let list = func_to_call.ty(&self.store).results();
+            // We don't support more than one return value. This is enforced by verifying the
+            // function signature above.
+            debug_assert!(list.len() <= 1);
+            !list.is_empty()
         };
 
         Ok(Interpreter {
+            store: self.store,
             _module: self.module,
             memory: self.memory,
-            execution: Some(execution),
-            interrupted: false,
+            linker: self.linker,
+            has_output,
+            execution: Some(Execution::NotStarted(
+                func_to_call,
+                params
+                    .iter()
+                    .map(|v| wasmi::Value::from(*v))
+                    .collect::<Vec<_>>(),
+            )),
             indirect_table: self.indirect_table,
         })
     }
 }
-
-// The fields related to `wasmi` do not implement `Send` because they use `std::rc::Rc`. `Rc`
-// does not implement `Send` because incrementing/decrementing the reference counter from
-// multiple threads simultaneously would be racy. It is however perfectly sound to move all the
-// instances of `Rc`s at once between threads, which is what we're doing here.
-//
-// This importantly means that we should never return a `Rc` (even by reference) across the API
-// boundary.
-//
-// For this reason, it would also be unsafe to implement `Clone` on `InterpreterPrototype`. A
-// user could clone the `InterpreterPrototype` and send it to another thread, which would be
-// undefined behaviour.
-// TODO: really annoying to have to use unsafe code
-unsafe impl Send for InterpreterPrototype {}
 
 impl fmt::Debug for InterpreterPrototype {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -322,67 +278,89 @@ impl fmt::Debug for InterpreterPrototype {
 
 /// See [`super::VirtualMachine`].
 pub struct Interpreter {
-    /// Original module, with resolved imports.
-    _module: wasmi::ModuleRef,
+    // TODO: doc
+    store: wasmi::Store<()>,
+
+    /// Original module.
+    _module: Arc<wasmi::Module>,
 
     /// Memory of the module instantiation.
-    memory: wasmi::MemoryRef,
+    memory: wasmi::Memory,
+
+    /// Linker used to create instances.
+    linker: wasmi::Linker<()>,
 
     /// Table of the indirect function calls.
     ///
     /// In Wasm, function pointers are in reality indices in a table called
     /// `__indirect_function_table`. This is this table, if it exists.
-    indirect_table: Option<wasmi::TableRef>,
+    indirect_table: Option<wasmi::Table>,
 
     /// Execution context of this virtual machine. This notably holds the program counter, state
     /// of the stack, and so on.
     ///
     /// This field is an `Option` because we need to be able to temporarily extract it.
     /// If `None`, the state machine is in a poisoned state and cannot run any code anymore.
-    /// Can contain an `Err` if the initialization failed, in which case the execution must
-    /// return an error immediately.
-    execution: Option<Result<wasmi::FuncInvocation<'static>, Trap>>,
+    execution: Option<Execution>,
 
-    /// If false, then one must call `execution.start_execution()` instead of `resume_execution()`.
-    /// This is a particularity of the Wasm interpreter that we don't want to expose in our API.
-    interrupted: bool,
+    /// `true` if the function being called as one output. `false` if it has zero output.
+    /// This information could also be obtained by looking at the type of the function, but having
+    /// a simple extra boolean makes it easier.
+    has_output: bool,
+}
+
+enum Execution {
+    Failed(Trap),
+    NotStarted(wasmi::Func, Vec<wasmi::Value>),
+    Started(wasmi::ResumableInvocation),
 }
 
 impl Interpreter {
     /// See [`super::VirtualMachine::run`].
     pub fn run(&mut self, value: Option<WasmValue>) -> Result<ExecOutcome, RunErr> {
-        let value = value.map(wasmi::RuntimeValue::from);
+        let mut output_storage = if self.has_output {
+            Some(wasmi::Value::I32(0))
+        } else {
+            None
+        };
 
-        struct DummyExternals;
-        impl wasmi::Externals for DummyExternals {
-            fn invoke_index(
-                &mut self,
-                index: usize,
-                args: wasmi::RuntimeArgs,
-            ) -> Result<Option<wasmi::RuntimeValue>, wasmi::Trap> {
-                Err(wasmi::TrapKind::Host(Box::new(Interrupt {
-                    index,
-                    args: args.as_ref().to_vec(),
-                }))
-                .into())
+        let mut outputs_storage_ptr = if let Some(output_storage) = output_storage.as_mut() {
+            &mut core::array::from_mut(output_storage)[..]
+        } else {
+            &mut []
+        };
+
+        let mut result = match self.execution.take() {
+            Some(Execution::NotStarted(func, params)) => {
+                if let Some(value) = value.as_ref() {
+                    return Err(RunErr::BadValueTy {
+                        expected: None,
+                        obtained: Some(value.ty()),
+                    });
+                }
+
+                func.call_resumable(&mut self.store, &params, outputs_storage_ptr)
             }
-        }
+            Some(Execution::Started(func)) => {
+                // TODO: check type of value
+                /*
 
-        #[derive(Debug)]
-        struct Interrupt {
-            index: usize,
-            args: Vec<wasmi::RuntimeValue>,
-        }
-        impl fmt::Display for Interrupt {
-            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                write!(f, "Interrupt")
+                if expected_ty != obtained_ty {
+                    return Err(RunErr::BadValueTy {
+                        expected: expected_ty,
+                        obtained: obtained_ty,
+                    });
+                } */
+
+                let value = value.map(wasmi::Value::from);
+                let inputs = match value.as_ref() {
+                    Some(v) => &core::array::from_ref(v)[..],
+                    None => &[],
+                };
+
+                func.resume(&mut self.store, inputs, outputs_storage_ptr)
             }
-        }
-        impl wasmi::HostError for Interrupt {}
-
-        let mut execution = match self.execution.take() {
-            Some(Ok(e)) => e,
-            Some(Err(err)) => {
+            Some(Execution::Failed(err)) => {
                 return Ok(ExecOutcome::Finished {
                     return_value: Err(err),
                 })
@@ -390,51 +368,18 @@ impl Interpreter {
             None => return Err(RunErr::Poisoned),
         };
 
-        // Since the signature of the function is checked at initialization to be supported, it is
-        // guaranteed that the conversions below won't panic.
-
-        let result = if self.interrupted {
-            let expected_ty = execution
-                .resumable_value_type()
-                .map(|v| ValueType::try_from(v).unwrap());
-            let obtained_ty = value
-                .as_ref()
-                .map(|v| ValueType::try_from(v.value_type()).unwrap());
-            if expected_ty != obtained_ty {
-                return Err(RunErr::BadValueTy {
-                    expected: expected_ty,
-                    obtained: obtained_ty,
-                });
-            }
-            execution.resume_execution(value, &mut DummyExternals)
-        } else {
-            if value.is_some() {
-                return Err(RunErr::BadValueTy {
-                    expected: None,
-                    obtained: value
-                        .as_ref()
-                        .map(|v| ValueType::try_from(v.value_type()).unwrap()),
-                });
-            }
-            self.interrupted = true;
-            execution.start_execution(&mut DummyExternals)
-        };
-
         match result {
-            Ok(return_value) => Ok(ExecOutcome::Finished {
-                return_value: Ok(return_value.map(|r| WasmValue::try_from(r).unwrap())),
-            }),
-            Err(wasmi::ResumableError::AlreadyStarted) => unreachable!(),
-            Err(wasmi::ResumableError::NotResumable) => unreachable!(),
-            Err(wasmi::ResumableError::Trap(ref trap)) if trap.kind().is_host() => {
-                let interrupt: &Interrupt = match trap.kind() {
-                    wasmi::TrapKind::Host(err) => match err.downcast_ref() {
-                        Some(e) => e,
-                        None => unreachable!(),
-                    },
-                    _ => unreachable!(),
-                };
-                self.execution = Some(Ok(execution));
+            Ok(wasmi::ResumableCall::Finished) => {
+                // Because we have checked the signature of the function, we know that this
+                // conversion can never fail.
+                let return_value = output_storage.map(|r| WasmValue::try_from(r).unwrap());
+                Ok(ExecOutcome::Finished {
+                    return_value: Ok(return_value),
+                })
+            }
+            Ok(wasmi::ResumableCall::Resumable(next)) => {
+                // TODO: use next.host_error().downcast_ref() and obtain the index and params
+                self.execution = Some(Execution::Started(next));
                 Ok(ExecOutcome::Interrupted {
                     id: interrupt.index,
                     params: interrupt
@@ -446,7 +391,7 @@ impl Interpreter {
                         .unwrap(),
                 })
             }
-            Err(wasmi::ResumableError::Trap(err)) => Ok(ExecOutcome::Finished {
+            Err(err) => Ok(ExecOutcome::Finished {
                 return_value: Err(Trap(err.to_string())),
             }),
         }
@@ -456,7 +401,7 @@ impl Interpreter {
     pub fn memory_size(&self) -> HeapPages {
         // Being a 32bits platform, it's impossible that the vm has a number of currently
         // allocated pages that can't fit in 32bits, so this unwrap can't fail.
-        HeapPages(u32::try_from(self.memory.current_size().0).unwrap())
+        HeapPages(u32::try_from(self.memory.current_pages().0).unwrap())
     }
 
     /// See [`super::VirtualMachine::read_memory`].
@@ -483,7 +428,7 @@ impl Interpreter {
             }
         }
 
-        let access = self.memory.direct_access();
+        let access = self.memory.data(&self.store);
         if max > access.as_ref().len() {
             return Err(OutOfBoundsError);
         }
@@ -503,35 +448,34 @@ impl Interpreter {
     /// See [`super::VirtualMachine::write_memory`].
     pub fn grow_memory(&mut self, additional: HeapPages) -> Result<(), OutOfBoundsError> {
         self.memory
-            .grow(wasmi::memory_units::Pages(
-                usize::try_from(additional.0).unwrap(),
-            ))
+            .grow(&mut self.store, wasmi::core::Pages::new(additional.0))
             .map_err(|_| OutOfBoundsError)?;
-
         Ok(())
     }
 
     /// See [`super::VirtualMachine::into_prototype`].
-    pub fn into_prototype(self) -> InterpreterPrototype {
+    pub fn into_prototype(mut self) -> InterpreterPrototype {
         // TODO: zero the memory
 
+        // Because we have successfully instantiated the module in the past, there's no reason
+        // why instantiating again could fail now and not before.
+        let instance = self
+            .linker
+            .instantiate(&mut self.store, &self._module)
+            .unwrap()
+            .ensure_no_start(&mut self.store)
+            .unwrap();
+
         InterpreterPrototype {
+            store: self.store,
+            instance,
+            linker: self.linker,
             module: self._module,
             memory: self.memory,
             indirect_table: self.indirect_table,
         }
     }
 }
-
-// The fields related to `wasmi` do not implement `Send` because they use `std::rc::Rc`. `Rc`
-// does not implement `Send` because incrementing/decrementing the reference counter from
-// multiple threads simultaneously would be racy. It is however perfectly sound to move all the
-// instances of `Rc`s at once between threads, which is what we're doing here.
-//
-// This importantly means that we should never return a `Rc` (even by reference) across the API
-// boundary.
-// TODO: really annoying to have to use unsafe code
-unsafe impl Send for Interpreter {}
 
 impl fmt::Debug for Interpreter {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
