@@ -92,8 +92,10 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     tracing::info!("smoldot full node");
     tracing::info!("Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.");
     tracing::info!("Copyright (C) 2023  Pierre Krieger.");
-    tracing::info!("This program comes with ABSOLUTELY NO WARRANTY.");    
-    tracing::info!("This is free software, and you are welcome to redistribute it under certain conditions.");
+    tracing::info!("This program comes with ABSOLUTELY NO WARRANTY.");
+    tracing::info!(
+        "This is free software, and you are welcome to redistribute it under certain conditions."
+    );
 
     // This warning message should be removed if/when the full node becomes mature.
     tracing::warn!(
