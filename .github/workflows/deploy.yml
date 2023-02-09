@@ -42,8 +42,8 @@ jobs:
         context: .
         file: ./bin/full-node/Dockerfile
         load: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        tags: docker.pkg.github.com/paritytech/smoldot/node:main
-    - run: docker push docker.pkg.github.com/paritytech/smoldot/node:main
+        tags: docker.pkg.github.com/smol-dot/smoldot/node:main
+    - run: docker push docker.pkg.github.com/smol-dot/smoldot/node:main
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
   docs-publish:
