@@ -399,9 +399,7 @@ impl Interpreter {
 
     /// See [`super::VirtualMachine::memory_size`].
     pub fn memory_size(&self) -> HeapPages {
-        // Being a 32bits platform, it's impossible that the vm has a number of currently
-        // allocated pages that can't fit in 32bits, so this unwrap can't fail.
-        HeapPages(u32::try_from(self.memory.current_pages().0).unwrap())
+        HeapPages(u32::from(self.memory.current_pages(&self.store)))
     }
 
     /// See [`super::VirtualMachine::read_memory`].
@@ -448,7 +446,10 @@ impl Interpreter {
     /// See [`super::VirtualMachine::write_memory`].
     pub fn grow_memory(&mut self, additional: HeapPages) -> Result<(), OutOfBoundsError> {
         self.memory
-            .grow(&mut self.store, wasmi::core::Pages::new(additional.0))
+            .grow(
+                &mut self.store,
+                wasmi::core::Pages::new(additional.0).ok_or(|_| OutOfBoundsError)?,
+            )
             .map_err(|_| OutOfBoundsError)?;
         Ok(())
     }
