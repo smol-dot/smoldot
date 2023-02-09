@@ -95,6 +95,13 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     tracing::info!("This program comes with ABSOLUTELY NO WARRANTY.");    
     tracing::info!("This is free software, and you are welcome to redistribute it under certain conditions.");
 
+    // This warning message should be removed if/when the full node becomes mature.
+    tracing::warn!(
+        "Please note that this full node is experimental. It is not feature complete and is \
+        known to panic often. Please report any panic you might encounter to \
+        <https://github.com/smol-dot/smoldot/issues>."
+    );
+
     let chain_spec = {
         let json: Cow<[u8]> = match &cli_options.chain {
             cli::CliChain::Polkadot => (&include_bytes!("../../polkadot.json")[..]).into(),
@@ -108,13 +115,6 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         smoldot::chain_spec::ChainSpec::from_json_bytes(&json)
             .expect("Failed to decode chain specs")
     };
-
-    // This warning message should be removed if/when the full node becomes mature.
-    tracing::warn!(
-        "Please note that this full node is experimental. It is not feature complete and is \
-        known to panic often. Please report any panic you might encounter to \
-        <https://github.com/smol-dot/smoldot/issues>."
-    );
 
     // TODO: don't unwrap?
     let genesis_chain_information = chain_spec.as_chain_information().unwrap().0;
