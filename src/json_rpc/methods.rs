@@ -1182,3 +1182,38 @@ where
 {
     serde::Serialize::serialize(&format!("0x{:x}", *num), serializer)
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn no_params_accepted() {
+        // No `params` field in the request.
+        let (_, call) = super::parse_json_call(
+            r#"{"jsonrpc":"2.0","id":2,"method":"chainSpec_unstable_chainName"}"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            call,
+            super::MethodCall::chainSpec_unstable_chainName {}
+        ));
+    }
+
+    #[test]
+    fn no_params_refused() {
+        // No `params` field in the request.
+        let err = super::parse_json_call(
+            r#"{"jsonrpc":"2.0","id":2,"method":"chainHead_unstable_follow"}"#,
+        );
+
+        assert!(matches!(
+            err,
+            Err(super::ParseError::Method {
+                request_id: "2",
+                error: super::MethodError::MissingParameters {
+                    rpc_method: "chainHead_unstable_follow"
+                }
+            })
+        ));
+    }
+}
