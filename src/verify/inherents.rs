@@ -44,14 +44,6 @@ pub struct InherentData {
     ///
     /// Its identifier passed to the runtime is: `timstap0`.
     pub timestamp: u64,
-    // TODO: figure out uncles
-    /*/// List of valid block headers that have the same height as the parent of the one being
-    /// generated.
-    ///
-    /// Its identifier passed to the runtime is: `uncles00`.
-    ///
-    /// `TUnc` must be an iterator yielding SCALE-encoded headers.
-    pub uncles: TUnc,*/
 
     // TODO: parachain-related inherents are missing
 }
