@@ -14,7 +14,7 @@ required-features = ["std"]
 [dependencies]
 blake2-rfc = { version = "0.2.18", default-features = false }
 derive_more = "0.99.17"
-either = { version = "1.8.0", default-features = false }
+either = { version = "1.8.1", default-features = false }
 event-listener = { version = "2.5.3" }
 fnv = { version = "1.0.7", default-features = false }
 futures = "0.3.25"
@@ -24,7 +24,7 @@ itertools = "0.10.5"
 log = { version = "0.4.17", default-features = false }
 lru = { version = "0.8.1", default-features = false }  # TODO: there's no way to use a custom hasher; remove this dependency
 rand = "0.8.5"
-serde = { version = "1.0.148", default-features = false, features = ["alloc", "derive"] }
+serde = { version = "1.0.152", default-features = false, features = ["alloc", "derive"] }
 serde_json = "1.0.89"
 slab = { version = "0.4.7", default-features = false }
 smoldot = { version = "0.5.0", path = "../..", default-features = false }
