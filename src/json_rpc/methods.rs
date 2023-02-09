@@ -121,6 +121,11 @@ pub enum MethodError<'a> {
         /// Reason why it failed.
         error: InvalidParameterError,
     },
+    /// The parameters of the function call are missing.
+    MissingParameters {
+        /// Name of the JSON-RPC method that was attempted to be called.
+        rpc_method: &'static str,
+    },
 }
 
 impl<'a> MethodError<'a> {
@@ -140,7 +145,8 @@ impl<'a> MethodError<'a> {
                 MethodError::UnknownMethod(_) => parse::ErrorResponse::MethodNotFound,
                 MethodError::InvalidParametersFormat { .. }
                 | MethodError::TooManyParameters { .. }
-                | MethodError::InvalidParameter { .. } => parse::ErrorResponse::InvalidParams,
+                | MethodError::InvalidParameter { .. }
+                | MethodError::MissingParameters { .. } => parse::ErrorResponse::InvalidParams,
             },
             None,
         )
@@ -230,7 +236,24 @@ macro_rules! define_methods {
 
                 $(
                     if name == stringify!($name) $($(|| name == stringify!($alias))*)* {
-                        // First, try parse parameters as if they were passed by name in a map.
+                        // First, if parameters are missing (i.e. the `params` field isn't there),
+                        // accept the call provided there is no parameter.
+                        if params.is_none() {
+                            // TODO: use `count(p_name) when stable; https://rust-lang.github.io/rfcs/3086-macro-metavar-expr.html
+                            if !has_params!($($p_name),*) {
+                                return Ok($rq_name::$name {
+                                    // This code can't be reached if there is any parameter, thus
+                                    // `unreachable!()` is never called.
+                                    $($p_name: unreachable!(),)*
+                                })
+                            } else {
+                                return Err(MethodError::MissingParameters {
+                                    rpc_method: stringify!($name),
+                                });
+                            }
+                        }
+
+                        // Then, try parse parameters as if they were passed by name in a map.
                         // For example, a method `my_method(foo: i32, bar: &str)` accepts
                         // parameters formatted as `{"foo":5, "bar":"hello"}`.
                         #[derive(serde::Deserialize)]
@@ -327,6 +350,15 @@ macro_rules! define_methods {
                 }
             }
         }
+    };
+}
+
+macro_rules! has_params {
+    () => {
+        false
+    };
+    ($p1:ident $(, $p:ident)*) => {
+        true
     };
 }
 
