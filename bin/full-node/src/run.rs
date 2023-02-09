@@ -89,6 +89,21 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         }
     }
 
+    tracing::info!("smoldot full node");
+    tracing::info!("Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.");
+    tracing::info!("Copyright (C) 2023  Pierre Krieger.");
+    tracing::info!("This program comes with ABSOLUTELY NO WARRANTY.");
+    tracing::info!(
+        "This is free software, and you are welcome to redistribute it under certain conditions."
+    );
+
+    // This warning message should be removed if/when the full node becomes mature.
+    tracing::warn!(
+        "Please note that this full node is experimental. It is not feature complete and is \
+        known to panic often. Please report any panic you might encounter to \
+        <https://github.com/smol-dot/smoldot/issues>."
+    );
+
     let chain_spec = {
         let json: Cow<[u8]> = match &cli_options.chain {
             cli::CliChain::Polkadot => (&include_bytes!("../../polkadot.json")[..]).into(),
@@ -102,13 +117,6 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         smoldot::chain_spec::ChainSpec::from_json_bytes(&json)
             .expect("Failed to decode chain specs")
     };
-
-    // This warning message should be removed if/when the full node becomes mature.
-    tracing::warn!(
-        "Please note that this full node is experimental. It is not feature complete and is \
-        known to panic often. Please report any panic you might encounter to \
-        <https://github.com/paritytech/smoldot/issues>."
-    );
 
     // TODO: don't unwrap?
     let genesis_chain_information = chain_spec.as_chain_information().unwrap().0;
@@ -155,7 +163,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     // Directory where we will store everything on the disk, such as the database, secret keys,
     // etc.
     let base_storage_directory =
-        if let Some(base) = directories::ProjectDirs::from("io", "paritytech", "smoldot") {
+        if let Some(base) = directories::ProjectDirs::from("io", "smoldot", "smoldot") {
             Some(base.data_dir().to_owned())
         } else {
             tracing::warn!(
