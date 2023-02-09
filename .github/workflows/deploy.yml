@@ -23,9 +23,15 @@ on:
     branches:
       - main
 
+# TODO: improve the security of this module
+permissions: read-all
+
 jobs:
   build-push-docker-image:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
     - uses: docker/setup-qemu-action@v2
     - uses: docker/setup-buildx-action@v2
@@ -48,6 +54,8 @@ jobs:
 
   docs-publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # Necessary to push on the `gh-pages` branch.
     container:
       image: rust:1
     steps:
@@ -115,6 +123,8 @@ jobs:
 
   deno-publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # Necessary in order to push tags.
     # This action checks if a certain git tag exists. If not, it compiles the JavaScript package,
     # then commits the compilation artifacts, tags the commit, and pushes the tag.
     steps:
