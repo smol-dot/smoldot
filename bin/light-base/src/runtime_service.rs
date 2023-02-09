@@ -193,10 +193,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// This function only returns once the runtime of the current finalized block is known. This
     /// might take a long time.
     ///
-    /// A name must be passed to be used for debugging purposes. At the time of writing of this
-    /// comment, the `#[must_use]` attribute doesn't work on asynchronous functions, making a name
-    /// extremely useful. If `#[must_use]` ever works on asynchronous functions, this `name` might
-    /// be removed.
+    /// A name must be passed to be used for debugging purposes.
     ///
     /// Only up to `buffer_size` block notifications are buffered in the channel. If the channel
     /// is full when a new notification is attempted to be pushed, the channel gets closed.
@@ -212,6 +209,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// warp syncing.
     ///
     /// See [`SubscribeAll`] for information about the return value.
+    #[must_use]
     pub async fn subscribe_all(
         &self,
         subscription_name: &'static str,
