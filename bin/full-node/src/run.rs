@@ -113,7 +113,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     tracing::warn!(
         "Please note that this full node is experimental. It is not feature complete and is \
         known to panic often. Please report any panic you might encounter to \
-        <https://github.com/paritytech/smoldot/issues>."
+        <https://github.com/smol-dot/smoldot/issues>."
     );
 
     // TODO: don't unwrap?
@@ -161,7 +161,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     // Directory where we will store everything on the disk, such as the database, secret keys,
     // etc.
     let base_storage_directory =
-        if let Some(base) = directories::ProjectDirs::from("io", "paritytech", "smoldot") {
+        if let Some(base) = directories::ProjectDirs::from("io", "smoldot", "smoldot") {
             Some(base.data_dir().to_owned())
         } else {
             tracing::warn!(
