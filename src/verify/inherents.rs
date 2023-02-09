@@ -44,7 +44,6 @@ pub struct InherentData {
     ///
     /// Its identifier passed to the runtime is: `timstap0`.
     pub timestamp: u64,
-
     // TODO: parachain-related inherents are missing
 }
 
