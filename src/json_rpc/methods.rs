@@ -121,6 +121,11 @@ pub enum MethodError<'a> {
         /// Reason why it failed.
         error: InvalidParameterError,
     },
+    /// The parameters of the function call are missing.
+    MissingParameters {
+        /// Name of the JSON-RPC method that was attempted to be called.
+        rpc_method: &'static str,
+    },
 }
 
 impl<'a> MethodError<'a> {
@@ -140,7 +145,8 @@ impl<'a> MethodError<'a> {
                 MethodError::UnknownMethod(_) => parse::ErrorResponse::MethodNotFound,
                 MethodError::InvalidParametersFormat { .. }
                 | MethodError::TooManyParameters { .. }
-                | MethodError::InvalidParameter { .. } => parse::ErrorResponse::InvalidParams,
+                | MethodError::InvalidParameter { .. }
+                | MethodError::MissingParameters { .. } => parse::ErrorResponse::InvalidParams,
             },
             None,
         )
@@ -219,16 +225,35 @@ macro_rules! define_methods {
                 parse::build_call(parse::Call {
                     id_json,
                     method: self.name(),
-                    params_json: &self.params_to_json_object(),
+                    // Note that we never skip the `params` field, even if empty. This is an
+                    // arbitrary choice.
+                    params_json: Some(&self.params_to_json_object()),
                 })
             }
 
-            fn from_defs(name: &'a str, params: &'a str) -> Result<Self, MethodError<'a>> {
+            fn from_defs(name: &'a str, params: Option<&'a str>) -> Result<Self, MethodError<'a>> {
                 #![allow(unused, unused_mut)]
 
                 $(
                     if name == stringify!($name) $($(|| name == stringify!($alias))*)* {
-                        // First, try parse parameters as if they were passed by name in a map.
+                        // First, if parameters are missing (i.e. the `params` field isn't there),
+                        // accept the call provided there is no parameter.
+                        if params.is_none() {
+                            // TODO: use `count(p_name) when stable; https://rust-lang.github.io/rfcs/3086-macro-metavar-expr.html
+                            if !has_params!($($p_name),*) {
+                                return Ok($rq_name::$name {
+                                    // This code can't be reached if there is any parameter, thus
+                                    // `unreachable!()` is never called.
+                                    $($p_name: unreachable!(),)*
+                                })
+                            } else {
+                                return Err(MethodError::MissingParameters {
+                                    rpc_method: stringify!($name),
+                                });
+                            }
+                        }
+
+                        // Then, try parse parameters as if they were passed by name in a map.
                         // For example, a method `my_method(foo: i32, bar: &str)` accepts
                         // parameters formatted as `{"foo":5, "bar":"hello"}`.
                         #[derive(serde::Deserialize)]
@@ -243,7 +268,7 @@ macro_rules! define_methods {
                             #[serde(borrow, skip)]
                             _dummy: core::marker::PhantomData<&'a ()>,
                         }
-                        if let Ok(params) = serde_json::from_str(params) {
+                        if let Some(Ok(params)) = params.as_ref().map(|p| serde_json::from_str(p)) {
                             let Params { _dummy: _, $($p_name),* } = params;
                             return Ok($rq_name::$name {
                                 $($p_name,)*
@@ -257,7 +282,7 @@ macro_rules! define_methods {
                         //
                         // The code below allocates a `Vec`, but at the time of writing there is
                         // no way to ask `serde_json` to parse an array without doing so.
-                        if let Ok(params) = serde_json::from_str::<Vec<&'a serde_json::value::RawValue>>(params) {
+                        if let Some(Ok(params)) = params.as_ref().map(|p| serde_json::from_str::<Vec<&'a serde_json::value::RawValue>>(p)) {
                             let mut n = 0;
                             $(
                                 // Missing parameters are implicitly equal to null.
@@ -325,6 +350,15 @@ macro_rules! define_methods {
                 }
             }
         }
+    };
+}
+
+macro_rules! has_params {
+    () => {
+        false
+    };
+    ($p1:ident $(, $p:ident)*) => {
+        true
     };
 }
 
@@ -1147,4 +1181,39 @@ where
     S: serde::Serializer,
 {
     serde::Serialize::serialize(&format!("0x{:x}", *num), serializer)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn no_params_accepted() {
+        // No `params` field in the request.
+        let (_, call) = super::parse_json_call(
+            r#"{"jsonrpc":"2.0","id":2,"method":"chainSpec_unstable_chainName"}"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            call,
+            super::MethodCall::chainSpec_unstable_chainName {}
+        ));
+    }
+
+    #[test]
+    fn no_params_refused() {
+        // No `params` field in the request.
+        let err = super::parse_json_call(
+            r#"{"jsonrpc":"2.0","id":2,"method":"chainHead_unstable_follow"}"#,
+        );
+
+        assert!(matches!(
+            err,
+            Err(super::ParseError::Method {
+                request_id: "2",
+                error: super::MethodError::MissingParameters {
+                    rpc_method: "chainHead_unstable_follow"
+                }
+            })
+        ));
+    }
 }

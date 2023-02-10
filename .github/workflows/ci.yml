@@ -19,9 +19,12 @@ name: continuous-integration
 
 on:
   pull_request:
+  merge_group:
   push:
     branches:
       - main   # Running the CI on the main branch is important in order to fill the caches that pull requests will pick up.
+
+permissions: read-all
 
 jobs:
   test-64bits:

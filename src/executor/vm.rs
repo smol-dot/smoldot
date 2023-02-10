@@ -503,7 +503,7 @@ impl TryFrom<wasmi::FuncType> for Signature {
 }
 
 /// Value that a Wasm function can accept or produce.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum WasmValue {
     /// A 32-bits integer. There is no fundamental difference between signed and unsigned
     /// integer, and the signed-ness should be determined depending on the context.

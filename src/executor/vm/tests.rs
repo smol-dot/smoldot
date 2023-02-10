@@ -17,6 +17,8 @@
 
 #![cfg(test)]
 
+use core::iter;
+
 #[test]
 fn is_send() {
     // Makes sure that the virtual machine types implement `Send`.
@@ -115,5 +117,54 @@ fn unsupported_type() {
 
     if let Ok(module2) = super::Module::new(input, super::ExecHint::ForceWasmi) {
         assert!(super::VirtualMachinePrototype::new(&module2, |_, _, _| Ok(0)).is_err());
+    }
+}
+
+#[test]
+fn basic_host_function_return_value_works() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "host" "hello" (func $host_hello (param i32) (result i32)))
+        (import "env" "memory" (memory $mem 0 4096))
+        (func (export "hello") (result i32)
+            (call $host_hello (i32.const 3))
+        )
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in iter::once(super::ExecHint::ForceWasmi)
+        .chain(super::ExecHint::force_wasmtime_if_available().into_iter())
+    {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+
+        let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
+
+        let mut vm = prototype
+            .start(super::HeapPages::new(1024), "hello", &[])
+            .unwrap();
+
+        let mut resume_value = None;
+        loop {
+            match vm.run(resume_value) {
+                Ok(super::ExecOutcome::Finished {
+                    return_value: Ok(value),
+                }) => {
+                    assert_eq!(value, Some(super::WasmValue::I32(3)));
+                    break;
+                }
+                Ok(super::ExecOutcome::Finished {
+                    return_value: Err(_),
+                }) => panic!(),
+                Ok(super::ExecOutcome::Interrupted { id: 0, params }) => {
+                    assert_eq!(params, vec![super::WasmValue::I32(3)]);
+                    resume_value = Some(super::WasmValue::I32(3));
+                }
+                Ok(super::ExecOutcome::Interrupted { .. }) => panic!(),
+                Err(_) => panic!(),
+            }
+        }
     }
 }

@@ -3,7 +3,7 @@ name = "smoldot-full-node"
 version = "0.1.0"
 authors = ["Parity Technologies <admin@parity.io>", "Pierre Krieger <pierre.krieger1708@gmail.com>"]
 description = "Substrate/Polkadot full node using smoldot"
-repository = "https://github.com/paritytech/smoldot"
+repository = "https://github.com/smol-dot/smoldot"
 license = "GPL-3.0-or-later WITH Classpath-exception-2.0"
 edition = "2021"
 publish = false
@@ -18,15 +18,15 @@ async-std = "1.12.0"
 atty = "0.2.14"
 blake2-rfc = { version = "0.2.18", default-features = false }
 clap = { version = "4.0.27", default-features = false, features = ["color", "derive", "help", "std", "suggestions", "usage"] }  # Note: enabling/disabling some features modifies the internal behavior of clap, be careful
-ctrlc = "3.2.4"
+ctrlc = "3.2.5"
 derive_more = "0.99.17"
 directories = "4.0.1"
 either = { version = "1.8.1", default-features = false }
 event-listener = { version = "2.5.3" }
 fnv = { version = "1.0.7", default-features = false }
-futures = { version = "0.3.25", default-features = false, features = ["std", "thread-pool"] }
+futures = { version = "0.3.26", default-features = false, features = ["std", "thread-pool"] }
 futures-timer = "3.0"
-hashbrown = { version = "0.13.1", default-features = false }
+hashbrown = { version = "0.13.2", default-features = false }
 hex = { version = "0.4.3", default-features = false }
 mick-jaeger = "0.1.8"
 rand = "0.8.5"
