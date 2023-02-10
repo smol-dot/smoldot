@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.10 - 2022-02-10
+
 ### Fixed
 
 - Fix randomness not being implemented properly, leading to the same random numbers always being generated. This issues leads to all instances of smoldot (even on different machines) always using the same networking key, which would lead to connectivity issues when multiple instances of smoldot connect to the same full node. Note that because perfect forward secrecy is used, it is not possible to retroactively decipher networking communications. Additionally, the fact that the same random numbers are always generated made smoldot vulnerable to HashDoS attacks. ([#142](https://github.com/smol-dot/smoldot/pull/142))
