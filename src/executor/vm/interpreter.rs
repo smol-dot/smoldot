@@ -266,13 +266,23 @@ impl InterpreterPrototype {
             None => return Err((StartErr::FunctionNotFound, self)), // TODO: we don't differentiate between `FunctionNotFound` and `NotAFunction` here
         };
 
-        let has_output = {
+        let dummy_output_value = {
             let func_to_call_ty = func_to_call.ty(&self.store);
             let list = func_to_call_ty.results();
             // We don't support more than one return value. This is enforced by verifying the
             // function signature above.
             debug_assert!(list.len() <= 1);
-            !list.is_empty()
+            if let Some(item) = list.first() {
+                Some(match *item {
+                    wasmi::core::ValueType::I32 => wasmi::Value::I32(0),
+                    wasmi::core::ValueType::I64 => wasmi::Value::I64(0),
+                    wasmi::core::ValueType::F32 => wasmi::Value::F32(0.0f32.into()),
+                    wasmi::core::ValueType::F64 => wasmi::Value::F64(0.0.into()),
+                    _ => unreachable!(),
+                })
+            } else {
+                None
+            }
         };
 
         Ok(Interpreter {
@@ -280,7 +290,7 @@ impl InterpreterPrototype {
             module: self.module,
             memory: self.memory,
             linker: self.linker,
-            has_output,
+            dummy_output_value: dummy_output_value,
             execution: Some(Execution::NotStarted(
                 func_to_call,
                 params
@@ -342,10 +352,10 @@ pub struct Interpreter {
     /// If `None`, the state machine is in a poisoned state and cannot run any code anymore.
     execution: Option<Execution>,
 
-    /// `true` if the function being called as one output. `false` if it has zero output.
-    /// This information could also be obtained by looking at the type of the function, but having
-    /// a simple extra boolean makes it easier.
-    has_output: bool,
+    /// Where the return value of the execution will be stored.
+    /// While this could be regenerated every time `run` is called, it is instead kept in the
+    /// `Interpreter` struct for convenience.
+    dummy_output_value: Option<wasmi::Value>,
 }
 
 enum Execution {
@@ -356,13 +366,7 @@ enum Execution {
 impl Interpreter {
     /// See [`super::VirtualMachine::run`].
     pub fn run(&mut self, value: Option<WasmValue>) -> Result<ExecOutcome, RunErr> {
-        let mut output_storage = if self.has_output {
-            Some(wasmi::Value::I32(0))
-        } else {
-            None
-        };
-
-        let outputs_storage_ptr = if let Some(output_storage) = output_storage.as_mut() {
+        let outputs_storage_ptr = if let Some(output_storage) = self.dummy_output_value.as_mut() {
             &mut core::array::from_mut(output_storage)[..]
         } else {
             &mut []
@@ -411,7 +415,10 @@ impl Interpreter {
             Ok(wasmi::ResumableCall::Finished) => {
                 // Because we have checked the signature of the function, we know that this
                 // conversion can never fail.
-                let return_value = output_storage.map(|r| WasmValue::try_from(r).unwrap());
+                let return_value = self
+                    .dummy_output_value
+                    .clone()
+                    .map(|r| WasmValue::try_from(r).unwrap());
                 Ok(ExecOutcome::Finished {
                     return_value: Ok(return_value),
                 })
