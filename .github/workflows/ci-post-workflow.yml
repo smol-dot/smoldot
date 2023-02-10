@@ -21,11 +21,11 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event.workflow_run.event == 'pull_request' }}
     permissions:
-      - actions: read
+      actions: read
       # Giving write access to PRs means that a malicious action could be a nuisance, but in
       # practice this is unlikely to happen, would have no major consequences, and would likely
       # be quickly detected.
-      - pull-requests: write
+      pull-requests: write
     steps:
       # TODO: use download-artifact action
       - uses: actions/github-script@v3.1.0

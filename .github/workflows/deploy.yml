@@ -19,6 +19,7 @@ name: deploy
 
 on:
   pull_request:  # All deployment steps are tested on PRs, but the actual deployment doesn't happen.
+  merge_group:
   push:
     branches:
       - main
