@@ -562,6 +562,18 @@ impl TryFrom<wasmi::Value> for WasmValue {
     }
 }
 
+impl<'a> TryFrom<&'a wasmi::Value> for WasmValue {
+    type Error = UnsupportedTypeError;
+
+    fn try_from(val: &'a wasmi::Value) -> Result<Self, Self::Error> {
+        match val {
+            wasmi::Value::I32(v) => Ok(WasmValue::I32(*v)),
+            wasmi::Value::I64(v) => Ok(WasmValue::I64(*v)),
+            _ => Err(UnsupportedTypeError),
+        }
+    }
+}
+
 impl From<WasmValue> for wasmi::Value {
     fn from(val: WasmValue) -> Self {
         match val {

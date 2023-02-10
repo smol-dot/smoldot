@@ -83,7 +83,7 @@ impl InterpreterPrototype {
         let mut import_memory = None;
 
         for import in module.inner.imports() {
-            let import = match import.ty() {
+            match import.ty() {
                 wasmi::ExternType::Func(func_type) => {
                     let conv_signature = match Signature::try_from(func_type) {
                         Ok(i) => i,
@@ -96,20 +96,34 @@ impl InterpreterPrototype {
                         }
                     };
 
-                    let index = match symbols(import.module(), import.name(), &conv_signature) {
-                        Ok(i) => i,
-                        Err(_) => {
-                            return Err(NewErr::UnresolvedFunctionImport {
-                                module_name: import.module().to_owned(),
-                                function: import.name().to_owned(),
-                            })
-                        }
-                    };
+                    let function_index =
+                        match symbols(import.module(), import.name(), &conv_signature) {
+                            Ok(i) => i,
+                            Err(_) => {
+                                return Err(NewErr::UnresolvedFunctionImport {
+                                    module_name: import.module().to_owned(),
+                                    function: import.name().to_owned(),
+                                })
+                            }
+                        };
 
-                    // TODO: blocked by https://github.com/paritytech/wasmi/issues/658
-                    let func = wasmi::Func::wrap(&mut store, |input| {});
+                    let func = wasmi::Func::new(
+                        &mut store,
+                        func_type.clone(),
+                        move |_caller, parameters, _ret| {
+                            Err(wasmi::core::Trap::from(InterruptedTrap {
+                                function_index,
+                                parameters: parameters
+                                    .iter()
+                                    .map(|v| WasmValue::try_from(v).unwrap())
+                                    .collect(),
+                            }))
+                        },
+                    );
 
-                    linker.define(import.module(), import.name(), func);
+                    // `define` returns an error in case of duplicate definition. Since we
+                    // enumerate over the imports, this can't happen.
+                    linker.define(import.module(), import.name(), func).unwrap();
                 }
                 wasmi::ExternType::Memory(memory_type) => {
                     if import.module() != "env" || import.name() != "memory" {
@@ -120,9 +134,16 @@ impl InterpreterPrototype {
                     // import has a unique name, this block can't be reached more than once.
                     debug_assert!(import_memory.is_none());
 
-                    let memory = wasmi::Memory::new(&mut store, *memory_type)?;
+                    let memory = wasmi::Memory::new(&mut store, *memory_type)
+                        .map_err(|err| ModuleError(err.to_string()))
+                        .map_err(NewErr::ModuleError)?;
                     import_memory = Some(memory.clone());
-                    linker.define(import.module(), import.name(), memory);
+
+                    // `define` returns an error in case of duplicate definition. Since we
+                    // enumerate over the imports, this can't happen.
+                    linker
+                        .define(import.module(), import.name(), memory)
+                        .unwrap();
                 }
                 wasmi::ExternType::Global(_) => {
                     return Err(NewErr::ModuleError(ModuleError(
@@ -134,43 +155,35 @@ impl InterpreterPrototype {
                         "Importing tables is not supported".to_owned(),
                     )))
                 }
-            };
+            }
         }
 
         let instance = linker
             .instantiate(&mut store, &module.inner)
             .unwrap() // TODO: no
             .ensure_no_start(&mut store)
-            .map_err(|_| Err(NewErr::StartFunctionNotSupported))?;
+            .map_err(|_| NewErr::StartFunctionNotSupported)?;
 
         let memory = if let Some(import_memory) = import_memory {
-            if instance
-                .export_by_name("memory")
-                .map_or(false, |m| m.as_memory().is_some())
-            {
+            if instance.get_memory(&store, "memory").is_some() {
                 return Err(NewErr::TwoMemories);
             }
 
             import_memory
-        } else if let Some(mem) = module.export_by_name("memory") {
-            if let Some(mem) = mem.as_memory() {
-                mem.clone()
-            } else {
-                return Err(NewErr::MemoryIsntMemory);
-            }
+        } else if let Some(mem) = instance.get_memory(&store, "memory") {
+            // TODO: we don't detect NewErr::MemoryIsntMemory
+            mem.clone()
         } else {
             return Err(NewErr::NoMemory);
         };
 
-        let indirect_table = if let Some(tbl) = module.export_by_name("__indirect_function_table") {
-            if let Some(tbl) = tbl.as_table() {
+        let indirect_table =
+            if let Some(tbl) = instance.get_table(&store, "__indirect_function_table") {
+                // TODO: we don't detect NewErr::IndirectTableIsntTable
                 Some(tbl.clone())
             } else {
-                return Err(NewErr::IndirectTableIsntTable);
-            }
-        } else {
-            None
-        };
+                None
+            };
 
         Ok(InterpreterPrototype {
             store,
@@ -202,29 +215,28 @@ impl InterpreterPrototype {
     /// See [`super::VirtualMachinePrototype::memory_max_pages`].
     pub fn memory_max_pages(&self) -> Option<HeapPages> {
         self.memory
-            .maximum()
-            .and_then(|hp| u32::try_from(hp.0).ok()) // An overflow in the maximum leads to returning `None`
-            .map(HeapPages)
+            .ty(&self.store)
+            .maximum_pages()
+            .map(|p| HeapPages(u32::from(p)))
     }
 
     /// See [`super::VirtualMachinePrototype::start`].
     pub fn start(
-        self,
+        mut self,
         min_memory_pages: HeapPages,
         function_name: &str,
         params: &[WasmValue],
     ) -> Result<Interpreter, (StartErr, Self)> {
-        let min_memory_pages = match usize::try_from(min_memory_pages.0) {
-            Ok(hp) => hp,
-            Err(_) => return Err((StartErr::RequiredMemoryTooLarge, self)),
-        };
+        if let Some(to_grow) = min_memory_pages
+            .0
+            .checked_sub(u32::from(self.memory.current_pages(&self.store)))
+        {
+            let to_grow = match wasmi::core::Pages::new(to_grow) {
+                Some(hp) => hp,
+                None => return Err((StartErr::RequiredMemoryTooLarge, self)),
+            };
 
-        if let Some(to_grow) = min_memory_pages.checked_sub(self.memory.current_pages().0) {
-            if self
-                .memory
-                .grow(&mut self.store, wasmi::core::Pages::new(to_grow))
-                .is_err()
-            {
+            if self.memory.grow(&mut self.store, to_grow).is_err() {
                 return Err((StartErr::RequiredMemoryTooLarge, self));
             }
         }
@@ -233,7 +245,7 @@ impl InterpreterPrototype {
             Some(f) => {
                 // Try to convert the signature of the function to call, in order to make sure
                 // that the type of parameters and return value are supported.
-                if Signature::try_from(f.ty()).is_err() {
+                if Signature::try_from(f.ty(&self.store)).is_err() {
                     return Err((StartErr::SignatureNotSupported, self));
                 }
 
@@ -245,7 +257,8 @@ impl InterpreterPrototype {
         };
 
         let has_output = {
-            let list = func_to_call.ty(&self.store).results();
+            let func_to_call_ty = func_to_call.ty(&self.store);
+            let list = func_to_call_ty.results();
             // We don't support more than one return value. This is enforced by verifying the
             // function signature above.
             debug_assert!(list.len() <= 1);
@@ -254,7 +267,7 @@ impl InterpreterPrototype {
 
         Ok(Interpreter {
             store: self.store,
-            _module: self.module,
+            module: self.module,
             memory: self.memory,
             linker: self.linker,
             has_output,
@@ -276,13 +289,29 @@ impl fmt::Debug for InterpreterPrototype {
     }
 }
 
+/// This dummy struct is meant to be converted to a `wasmi::core::Trap` and then back through
+/// downcasting, similar to `std::any::Any`.
+#[derive(Debug, Clone)]
+struct InterruptedTrap {
+    function_index: usize,
+    parameters: Vec<WasmValue>,
+}
+
+impl fmt::Display for InterruptedTrap {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Interrupted")
+    }
+}
+
+impl wasmi::core::HostError for InterruptedTrap {}
+
 /// See [`super::VirtualMachine`].
 pub struct Interpreter {
     // TODO: doc
     store: wasmi::Store<()>,
 
     /// Original module.
-    _module: Arc<wasmi::Module>,
+    module: Arc<wasmi::Module>,
 
     /// Memory of the module instantiation.
     memory: wasmi::Memory,
@@ -310,7 +339,6 @@ pub struct Interpreter {
 }
 
 enum Execution {
-    Failed(Trap),
     NotStarted(wasmi::Func, Vec<wasmi::Value>),
     Started(wasmi::ResumableInvocation),
 }
@@ -324,13 +352,13 @@ impl Interpreter {
             None
         };
 
-        let mut outputs_storage_ptr = if let Some(output_storage) = output_storage.as_mut() {
+        let outputs_storage_ptr = if let Some(output_storage) = output_storage.as_mut() {
             &mut core::array::from_mut(output_storage)[..]
         } else {
             &mut []
         };
 
-        let mut result = match self.execution.take() {
+        let result = match self.execution.take() {
             Some(Execution::NotStarted(func, params)) => {
                 if let Some(value) = value.as_ref() {
                     return Err(RunErr::BadValueTy {
@@ -360,11 +388,6 @@ impl Interpreter {
 
                 func.resume(&mut self.store, inputs, outputs_storage_ptr)
             }
-            Some(Execution::Failed(err)) => {
-                return Ok(ExecOutcome::Finished {
-                    return_value: Err(err),
-                })
-            }
             None => return Err(RunErr::Poisoned),
         };
 
@@ -378,18 +401,14 @@ impl Interpreter {
                 })
             }
             Ok(wasmi::ResumableCall::Resumable(next)) => {
-                // TODO: use next.host_error().downcast_ref() and obtain the index and params
+                let trap = next.host_error().downcast_ref::<InterruptedTrap>().unwrap();
+                let outcome = ExecOutcome::Interrupted {
+                    id: trap.function_index,
+                    params: trap.parameters.clone(),
+                };
+
                 self.execution = Some(Execution::Started(next));
-                Ok(ExecOutcome::Interrupted {
-                    id: interrupt.index,
-                    params: interrupt
-                        .args
-                        .iter()
-                        .copied()
-                        .map(TryFrom::try_from)
-                        .collect::<Result<_, _>>()
-                        .unwrap(),
-                })
+                Ok(outcome)
             }
             Err(err) => Ok(ExecOutcome::Finished {
                 return_value: Err(Trap(err.to_string())),
@@ -440,7 +459,20 @@ impl Interpreter {
 
     /// See [`super::VirtualMachine::write_memory`].
     pub fn write_memory(&mut self, offset: u32, value: &[u8]) -> Result<(), OutOfBoundsError> {
-        self.memory.set(offset, value).map_err(|_| OutOfBoundsError)
+        let memory_slice = self.memory.data_mut(&mut self.store);
+
+        let start = usize::try_from(offset).map_err(|_| OutOfBoundsError)?;
+        let end = start.checked_add(value.len()).ok_or(OutOfBoundsError)?;
+
+        if end > memory_slice.len() {
+            return Err(OutOfBoundsError);
+        }
+
+        if !value.is_empty() {
+            memory_slice[start..end].copy_from_slice(value);
+        }
+
+        Ok(())
     }
 
     /// See [`super::VirtualMachine::write_memory`].
@@ -448,7 +480,7 @@ impl Interpreter {
         self.memory
             .grow(
                 &mut self.store,
-                wasmi::core::Pages::new(additional.0).ok_or(|_| OutOfBoundsError)?,
+                wasmi::core::Pages::new(additional.0).ok_or(OutOfBoundsError)?,
             )
             .map_err(|_| OutOfBoundsError)?;
         Ok(())
@@ -462,7 +494,7 @@ impl Interpreter {
         // why instantiating again could fail now and not before.
         let instance = self
             .linker
-            .instantiate(&mut self.store, &self._module)
+            .instantiate(&mut self.store, &self.module)
             .unwrap()
             .ensure_no_start(&mut self.store)
             .unwrap();
@@ -471,7 +503,7 @@ impl Interpreter {
             store: self.store,
             instance,
             linker: self.linker,
-            module: self._module,
+            module: self.module,
             memory: self.memory,
             indirect_table: self.indirect_table,
         }
