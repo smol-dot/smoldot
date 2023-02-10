@@ -736,6 +736,9 @@ pub enum StartErr {
     /// The requested function has a signature that isn't supported.
     #[display(fmt = "Function to start uses unsupported signature.")]
     SignatureNotSupported,
+    /// The types of the provided parameters don't match the signature.
+    #[display(fmt = "The types of the provided parameters don't match the signature.")]
+    InvalidParameters,
 }
 
 /// Opaque error indicating an error while parsing or compiling the WebAssembly code.

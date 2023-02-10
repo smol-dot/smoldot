@@ -345,6 +345,8 @@ impl JitPrototype {
         // actually started here because we might still need to potentially access `store`
         // before being in the context of a function handler.
 
+        // TODO: check parameters and return InvalidParameters if err
+
         Ok(Jit {
             inner: JitInner::NotStarted {
                 store: self.store,

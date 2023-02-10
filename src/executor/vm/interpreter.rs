@@ -19,7 +19,7 @@
 
 use super::{
     ExecOutcome, GlobalValueErr, HeapPages, ModuleError, NewErr, OutOfBoundsError, RunErr,
-    Signature, StartErr, Trap, WasmValue,
+    Signature, StartErr, Trap, ValueType, WasmValue,
 };
 
 use alloc::{borrow::ToOwned as _, format, string::ToString as _, sync::Arc, vec::Vec};
@@ -242,16 +242,26 @@ impl InterpreterPrototype {
         }
 
         let func_to_call = match self.instance.get_func(&self.store, function_name) {
-            Some(f) => {
+            Some(function) => {
                 // Try to convert the signature of the function to call, in order to make sure
                 // that the type of parameters and return value are supported.
-                if Signature::try_from(f.ty(&self.store)).is_err() {
+                let Ok(signature) = Signature::try_from(function.ty(&self.store)) else {
                     return Err((StartErr::SignatureNotSupported, self));
+                };
+
+                // Check whether the types of the parameters are correct.
+                // This is necessary to do manually because for API purposes the call immediately
+                //starts, while in the internal implementation it doesn't actually.
+                if params.len() != signature.parameters().len() {
+                    return Err((StartErr::InvalidParameters, self));
+                }
+                for (obtained, expected) in params.iter().zip(signature.parameters()) {
+                    if obtained.ty() != *expected {
+                        return Err((StartErr::InvalidParameters, self));
+                    }
                 }
 
-                // TODO: check params types
-
-                f
+                function
             }
             None => return Err((StartErr::FunctionNotFound, self)), // TODO: we don't differentiate between `FunctionNotFound` and `NotAFunction` here
         };
@@ -370,15 +380,21 @@ impl Interpreter {
                 func.call_resumable(&mut self.store, &params, outputs_storage_ptr)
             }
             Some(Execution::Started(func)) => {
-                // TODO: check type of value
-                /*
-
-                if expected_ty != obtained_ty {
-                    return Err(RunErr::BadValueTy {
-                        expected: expected_ty,
-                        obtained: obtained_ty,
-                    });
-                } */
+                let expected = {
+                    let func_type = func.host_func().ty(&self.store);
+                    // We don't support functions with more than one result type. This should have
+                    // been checked at initialization.
+                    debug_assert!(func_type.results().len() <= 1);
+                    if let Some(r) = func_type.results().iter().next() {
+                        Some(ValueType::try_from(*r).unwrap())
+                    } else {
+                        None
+                    }
+                };
+                let obtained = value.as_ref().map(|v| v.ty());
+                if expected != obtained {
+                    return Err(RunErr::BadValueTy { expected, obtained });
+                }
 
                 let value = value.map(wasmi::Value::from);
                 let inputs = match value.as_ref() {
@@ -447,7 +463,7 @@ impl Interpreter {
 
         let access = self.memory.data(&self.store);
         if max > access.as_ref().len() {
-            return Err(OutOfBoundsError);
+            panic!(); //return Err(OutOfBoundsError);
         }
 
         Ok(AccessOffset {
@@ -461,11 +477,16 @@ impl Interpreter {
     pub fn write_memory(&mut self, offset: u32, value: &[u8]) -> Result<(), OutOfBoundsError> {
         let memory_slice = self.memory.data_mut(&mut self.store);
 
-        let start = usize::try_from(offset).map_err(|_| OutOfBoundsError)?;
-        let end = start.checked_add(value.len()).ok_or(OutOfBoundsError)?;
+        let start = usize::try_from(offset)
+            .map_err(|_| OutOfBoundsError)
+            .unwrap();
+        let end = start
+            .checked_add(value.len())
+            .ok_or(OutOfBoundsError)
+            .unwrap();
 
         if end > memory_slice.len() {
-            return Err(OutOfBoundsError);
+            panic!();
         }
 
         if !value.is_empty() {
@@ -480,9 +501,12 @@ impl Interpreter {
         self.memory
             .grow(
                 &mut self.store,
-                wasmi::core::Pages::new(additional.0).ok_or(OutOfBoundsError)?,
+                wasmi::core::Pages::new(additional.0)
+                    .ok_or(OutOfBoundsError)
+                    .unwrap(),
             )
-            .map_err(|_| OutOfBoundsError)?;
+            .map_err(|_| OutOfBoundsError)
+            .unwrap();
         Ok(())
     }
 
