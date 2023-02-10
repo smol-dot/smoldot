@@ -22,7 +22,7 @@ use crate::util::SipHasherBuild;
 use alloc::{
     collections::VecDeque,
     format,
-    string::{String, ToString as _},
+    string::String,
     vec::Vec,
 };
 use core::{
@@ -108,11 +108,12 @@ pub struct Config<TNow> {
 ///
 /// See [`Config::chains`].
 pub struct ChainConfig {
-    /// Identifier of the protocol, used on the wire to determine which chain messages refer to.
+    /// Optional identifier to insert into the networking protocol names. Used to differentiate
+    /// between chains with the same genesis hash.
     ///
     /// > **Note**: This value is typically found in the specification of the chain (the
     /// >           "chain spec").
-    pub protocol_id: String,
+    pub fork_id: Option<String>,
 
     /// Number of bytes of the block number in the networking protocol.
     pub block_number_bytes: usize,

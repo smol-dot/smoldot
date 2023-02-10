@@ -232,8 +232,8 @@ struct ChainKey {
     /// chain.
     relay_chain: Option<(Box<ChainKey>, u32)>,
 
-    /// Network protocol id, found in the chain specification.
-    protocol_id: String,
+    /// Networking fork id, found in the chain specification.
+    fork_id: Option<String>,
 }
 
 struct RunningChain<TPlat: platform::Platform> {
@@ -571,7 +571,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                     chain_spec.relay_chain().unwrap().1,
                 )
             }),
-            protocol_id: chain_spec.protocol_id().to_owned(),
+            fork_id: chain_spec.fork_id().map(|f| f.to_owned()),
         };
 
         // If the chain we are adding is a parachain, grab the services of the relay chain.
@@ -1023,7 +1023,7 @@ async fn start_services<TPlat: platform::Platform>(
                         .finalized_block_header
                         .hash(chain_spec.block_number_bytes().into()),
                 ),
-                protocol_id: chain_spec.protocol_id().to_string(),
+                fork_id: chain_spec.fork_id().map(|n| n.to_owned()),
                 block_number_bytes: usize::from(chain_spec.block_number_bytes()),
             }],
         })

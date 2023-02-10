@@ -62,12 +62,30 @@ pub(super) fn protocols<'a>(
     chains
         .flat_map(|chain| {
             iter::once(peers::NotificationProtocolConfig {
-                protocol_name: format!("/{}/block-announces/1", chain.protocol_id),
+                protocol_name: match &chain.fork_id {
+                    Some(fork_id) => {
+                        format!(
+                            "/{}/{}/block-announces/1",
+                            hex::encode(&chain.genesis_hash),
+                            fork_id
+                        )
+                    }
+                    None => format!("/{}/block-announces/1", hex::encode(&chain.genesis_hash)),
+                },
                 max_handshake_size: 1024 * 1024, // TODO: arbitrary
                 max_notification_size: 1024 * 1024,
             })
             .chain(iter::once(peers::NotificationProtocolConfig {
-                protocol_name: format!("/{}/transactions/1", chain.protocol_id),
+                protocol_name: match &chain.fork_id {
+                    Some(fork_id) => {
+                        format!(
+                            "/{}/{}/transactions/1",
+                            hex::encode(&chain.genesis_hash),
+                            fork_id
+                        )
+                    }
+                    None => format!("/{}/transactions/1", hex::encode(&chain.genesis_hash)),
+                },
                 max_handshake_size: 4,
                 max_notification_size: 16 * 1024 * 1024,
             }))
@@ -77,7 +95,16 @@ pub(super) fn protocols<'a>(
                 // chains, in order to make the rest of the code of this module more
                 // comprehensible.
                 iter::once(peers::NotificationProtocolConfig {
-                    protocol_name: "/paritytech/grandpa/1".to_string(),
+                    protocol_name: match &chain.fork_id {
+                        Some(fork_id) => {
+                            format!(
+                                "/{}/{}/grandpa/1",
+                                hex::encode(&chain.genesis_hash),
+                                fork_id
+                            )
+                        }
+                        None => format!("/{}/grandpa/1", hex::encode(&chain.genesis_hash)),
+                    },
                     max_handshake_size: 4,
                     max_notification_size: 1024 * 1024,
                 })

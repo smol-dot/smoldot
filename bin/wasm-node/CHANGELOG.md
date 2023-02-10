@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Update the network protocol names used on the wire to use the `forkId` field used in the chain specification (if present) and no longer the `protocolId` (which is deprecated). Blockchains based off of Substrate versions later than October 2022 fully support either version.
+
 ## 0.7.10 - 2022-02-10
 
 ### Fixed
