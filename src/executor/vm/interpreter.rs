@@ -160,7 +160,7 @@ impl InterpreterPrototype {
 
         let instance = linker
             .instantiate(&mut store, &module.inner)
-            .unwrap() // TODO: no
+            .map_err(|err| NewErr::ModuleError(ModuleError(err.to_string())))?
             .ensure_no_start(&mut store)
             .map_err(|_| NewErr::StartFunctionNotSupported)?;
 
@@ -463,7 +463,7 @@ impl Interpreter {
 
         let access = self.memory.data(&self.store);
         if max > access.as_ref().len() {
-            panic!(); //return Err(OutOfBoundsError);
+            return Err(OutOfBoundsError);
         }
 
         Ok(AccessOffset {
@@ -477,16 +477,11 @@ impl Interpreter {
     pub fn write_memory(&mut self, offset: u32, value: &[u8]) -> Result<(), OutOfBoundsError> {
         let memory_slice = self.memory.data_mut(&mut self.store);
 
-        let start = usize::try_from(offset)
-            .map_err(|_| OutOfBoundsError)
-            .unwrap();
-        let end = start
-            .checked_add(value.len())
-            .ok_or(OutOfBoundsError)
-            .unwrap();
+        let start = usize::try_from(offset).map_err(|_| OutOfBoundsError)?;
+        let end = start.checked_add(value.len()).ok_or(OutOfBoundsError)?;
 
         if end > memory_slice.len() {
-            panic!();
+            return Err(OutOfBoundsError);
         }
 
         if !value.is_empty() {
@@ -501,12 +496,9 @@ impl Interpreter {
         self.memory
             .grow(
                 &mut self.store,
-                wasmi::core::Pages::new(additional.0)
-                    .ok_or(OutOfBoundsError)
-                    .unwrap(),
+                wasmi::core::Pages::new(additional.0).ok_or(OutOfBoundsError)?,
             )
-            .map_err(|_| OutOfBoundsError)
-            .unwrap();
+            .map_err(|_| OutOfBoundsError)?;
         Ok(())
     }
 
