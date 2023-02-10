@@ -1,5 +1,5 @@
 {
-  "name": "@substrate/smoldot-light",
+  "name": "smoldot",
   "version": "0.7.10",
   "description": "Light client that connects to Polkadot and Substrate-based blockchains",
   "author": "Parity Technologies <admin@parity.io>",
