@@ -67,11 +67,7 @@ pub(super) fn protocols<'a>(
         iter::once(peers::ConfigRequestResponse {
             name: match &chain.fork_id {
                 Some(fork_id) => {
-                    format!(
-                        "/{}/{}/sync/2",
-                        hex::encode(&chain.genesis_hash),
-                        fork_id
-                    )
+                    format!("/{}/{}/sync/2", hex::encode(&chain.genesis_hash), fork_id)
                 }
                 None => format!("/{}/sync/2", hex::encode(&chain.genesis_hash)),
             },
@@ -82,11 +78,7 @@ pub(super) fn protocols<'a>(
         .chain(iter::once(peers::ConfigRequestResponse {
             name: match &chain.fork_id {
                 Some(fork_id) => {
-                    format!(
-                        "/{}/{}/light/2",
-                        hex::encode(&chain.genesis_hash),
-                        fork_id
-                    )
+                    format!("/{}/{}/light/2", hex::encode(&chain.genesis_hash), fork_id)
                 }
                 None => format!("/{}/light/2", hex::encode(&chain.genesis_hash)),
             },
@@ -100,11 +92,7 @@ pub(super) fn protocols<'a>(
         .chain(iter::once(peers::ConfigRequestResponse {
             name: match &chain.fork_id {
                 Some(fork_id) => {
-                    format!(
-                        "/{}/{}/kad",
-                        hex::encode(&chain.genesis_hash),
-                        fork_id
-                    )
+                    format!("/{}/{}/kad", hex::encode(&chain.genesis_hash), fork_id)
                 }
                 None => format!("/{}/kad", hex::encode(&chain.genesis_hash)),
             },
@@ -132,11 +120,7 @@ pub(super) fn protocols<'a>(
         .chain(iter::once(peers::ConfigRequestResponse {
             name: match &chain.fork_id {
                 Some(fork_id) => {
-                    format!(
-                        "/{}/{}/state/2",
-                        hex::encode(&chain.genesis_hash),
-                        fork_id
-                    )
+                    format!("/{}/{}/state/2", hex::encode(&chain.genesis_hash), fork_id)
                 }
                 None => format!("/{}/state/2", hex::encode(&chain.genesis_hash)),
             },

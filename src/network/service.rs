@@ -19,12 +19,7 @@ use crate::libp2p::{connection, multiaddr, peer_id, peers, PeerId};
 use crate::network::{kademlia, protocol};
 use crate::util::SipHasherBuild;
 
-use alloc::{
-    collections::VecDeque,
-    format,
-    string::String,
-    vec::Vec,
-};
+use alloc::{collections::VecDeque, format, string::String, vec::Vec};
 use core::{
     hash::Hash,
     iter,
