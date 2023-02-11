@@ -70,6 +70,10 @@ impl ChainSpec {
             structs::Genesis::StateRootHash(_) => true,
         });
 
+        if client_spec.relay_chain.is_some() != client_spec.para_id.is_some() {
+            return Err(ParseError(ParseErrorInner::Other));
+        }
+
         // Make sure that the light sync state can be successfully decoded.
         if let Some(light_sync_state) = &client_spec.light_sync_state {
             // TODO: this "4" constant is repeated
@@ -279,10 +283,13 @@ impl ChainSpec {
 
     // TODO: this API is probably unstable, as the meaning of the string is unclear
     pub fn relay_chain(&self) -> Option<(&str, u32)> {
-        self.client_spec
-            .parachain
-            .as_ref()
-            .map(|p| (p.relay_chain.as_str(), p.para_id))
+        match (
+            self.client_spec.relay_chain.as_ref(),
+            self.client_spec.para_id.as_ref(),
+        ) {
+            (Some(r), Some(p)) => Some((r.as_str(), *p)),
+            _ => None,
+        }
     }
 
     /// Gives access to what is known about the storage of the genesis block of the chain.
@@ -532,5 +539,94 @@ mod tests {
                 Bootnode::UnrecognizedFormat("/some/wrong/multiaddress")
             ]
         );
+    }
+
+    #[test]
+    fn relay_chain_para_id_either_both_present_or_absent() {
+        ChainSpec::from_json_bytes(
+            &r#"{
+            "name": "Test",
+            "id": "test",
+            "bootNodes": [],
+            "genesis": {
+              "raw": {
+                "top": {},
+                "childrenDefault": {}
+              }
+            }
+          }
+          "#,
+        )
+        .unwrap();
+
+        ChainSpec::from_json_bytes(
+            &r#"{
+            "name": "Test",
+            "id": "test",
+            "bootNodes": [],
+            "relay_chain": "foo",
+            "para_id": 1,
+            "genesis": {
+              "raw": {
+                "top": {},
+                "childrenDefault": {}
+              }
+            }
+          }
+          "#,
+        )
+        .unwrap();
+
+        ChainSpec::from_json_bytes(
+            &r#"{
+            "name": "Test",
+            "id": "test",
+            "bootNodes": [],
+            "relayChain": "foo",
+            "paraId": 1,
+            "genesis": {
+              "raw": {
+                "top": {},
+                "childrenDefault": {}
+              }
+            }
+          }
+          "#,
+        )
+        .unwrap();
+
+        assert!(ChainSpec::from_json_bytes(
+            &r#"{
+            "name": "Test",
+            "id": "test",
+            "bootNodes": [],
+            "relayChain": "foo",
+            "genesis": {
+              "raw": {
+                "top": {},
+                "childrenDefault": {}
+              }
+            }
+          }
+          "#,
+        )
+        .is_err());
+
+        assert!(ChainSpec::from_json_bytes(
+            &r#"{
+            "name": "Test",
+            "id": "test",
+            "bootNodes": [],
+            "paraId": 1,
+            "genesis": {
+              "raw": {
+                "top": {},
+                "childrenDefault": {}
+              }
+            }
+          }
+          "#,
+        )
+        .is_err());
     }
 }
