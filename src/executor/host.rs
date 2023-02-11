@@ -988,29 +988,35 @@ impl ReadyToRun {
 
                 // Any attempt at reading a key that starts with `CHILD_STORAGE_SPECIAL_PREFIX` is
                 // instead a child trie root hash.
-                let prefix = self
-                    .inner
-                    .vm
-                    .read_memory(
-                        key_ptr,
-                        cmp::min(key_size, DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len() as u32),
+                let (is_default_child_storage, is_child_storage) = {
+                    let prefix = self
+                        .inner
+                        .vm
+                        .read_memory(
+                            key_ptr,
+                            cmp::min(key_size, DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len() as u32),
+                        )
+                        .unwrap();
+
+                    (
+                        prefix.as_ref() == DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX,
+                        prefix.as_ref().starts_with(CHILD_STORAGE_SPECIAL_PREFIX),
                     )
-                    .unwrap();
-                if prefix.as_ref().starts_with(CHILD_STORAGE_SPECIAL_PREFIX) {
-                    if prefix.as_ref() == DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX {
-                        // TODO: this is actually misimplemented, as it should return the storage root at the point where `ext_storage_child_storage_root_version_1` was last called, or at the beginning of the call; see https://github.com/w3f/polkadot-spec/issues/577
-                        HostVm::ExternalStorageRoot(ExternalStorageRoot {
-                            inner: self.inner,
-                            child_trie_ptr_size: Some((
-                                key_ptr + DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len() as u32,
-                                key_size - DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len() as u32,
-                            )),
-                        })
-                    } else {
-                        // Write a SCALE-encoded `None`.
-                        self.inner
-                            .alloc_write_and_return_pointer_size(host_fn.name(), iter::once(&[0]))
-                    }
+                };
+
+                if is_default_child_storage {
+                    // TODO: this is actually misimplemented, as it should return the storage root at the point where `ext_storage_child_storage_root_version_1` was last called, or at the beginning of the call; see https://github.com/w3f/polkadot-spec/issues/577
+                    HostVm::ExternalStorageRoot(ExternalStorageRoot {
+                        inner: self.inner,
+                        child_trie_ptr_size: Some((
+                            key_ptr + DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len() as u32,
+                            key_size - DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len() as u32,
+                        )),
+                    })
+                } else if is_child_storage {
+                    // Write a SCALE-encoded `None`.
+                    self.inner
+                        .alloc_write_and_return_pointer_size(host_fn.name(), iter::once(&[0]))
                 } else {
                     HostVm::ExternalStorageGet(ExternalStorageGet {
                         key_ptr,
@@ -1196,20 +1202,24 @@ impl ReadyToRun {
             HostFunction::ext_storage_next_key_version_1 => {
                 let (key_ptr, key_size) = expect_pointer_size_raw!(0);
 
-                let prefix = self
-                    .inner
-                    .vm
-                    .read_memory(
-                        key_ptr,
-                        cmp::min(key_size, DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len() as u32),
-                    )
-                    .unwrap();
-                if prefix.as_ref() >= CHILD_STORAGE_SPECIAL_PREFIX
-                    && (prefix.as_ref() < DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX
-                        || prefix
-                            .as_ref()
-                            .starts_with(DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX))
-                {
+                let is_next_child_trie = {
+                    let prefix = self
+                        .inner
+                        .vm
+                        .read_memory(
+                            key_ptr,
+                            cmp::min(key_size, DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len() as u32),
+                        )
+                        .unwrap();
+
+                    prefix.as_ref() >= CHILD_STORAGE_SPECIAL_PREFIX
+                        && (prefix.as_ref() < DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX
+                            || prefix
+                                .as_ref()
+                                .starts_with(DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX))
+                };
+
+                if is_next_child_trie {
                     HostVm::ExternalStorageNextChildTrie(ExternalStorageNextChildTrie {
                         key_ptr,
                         key_size,
@@ -2456,14 +2466,21 @@ impl ExternalStorageNextKey {
     ///
     /// Must be passed `None` if the key is the last one in the storage.
     pub fn resume(self, follow_up: Option<&[u8]>) -> HostVm {
-        match (self.key(), follow_up, self.known_no_child_trie) {
-            (StorageKey::MainTrie { key }, follow_up, false)
+        let key = self
+            .inner
+            .vm
+            .read_memory(self.key_ptr, self.key_size)
+            .unwrap();
+
+        match (follow_up, self.known_no_child_trie) {
+            (follow_up, false)
                 if follow_up.map_or(true, |next| next >= CHILD_STORAGE_SPECIAL_PREFIX)
                     && key.as_ref() < CHILD_STORAGE_SPECIAL_PREFIX =>
             {
                 // Because the host function requires us to enumerate child tries as well, we
                 // transition to "next child trie" mode.
                 debug_assert!(key.as_ref() < DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX);
+                drop(key);
                 HostVm::ExternalStorageNextChildTrie(ExternalStorageNextChildTrie {
                     inner: self.inner,
                     key_ptr: self.key_ptr,
@@ -2471,14 +2488,15 @@ impl ExternalStorageNextKey {
                     known_key_after: Some(follow_up.map(|k| k.to_owned())),
                 })
             }
-            (StorageKey::MainTrie { key: _key }, Some(next), _) => {
-                debug_assert!(_key.as_ref() < next);
+            (Some(next), _) => {
+                debug_assert!(key.as_ref() < next);
 
                 if next.starts_with(CHILD_STORAGE_SPECIAL_PREFIX) {
                     // TODO: return error because invalid storage
                 }
 
                 let value_len_enc = util::encode_scale_compact_usize(next.len());
+                drop(key);
                 self.inner.alloc_write_and_return_pointer_size(
                     HostFunction::ext_storage_next_key_version_1.name(),
                     iter::once(&[1][..])
@@ -2486,14 +2504,14 @@ impl ExternalStorageNextKey {
                         .chain(iter::once(next)),
                 )
             }
-            (StorageKey::MainTrie { .. }, None, _) => {
+            (None, _) => {
                 // Write a SCALE-encoded `None`.
+                drop(key);
                 self.inner.alloc_write_and_return_pointer_size(
                     HostFunction::ext_storage_next_key_version_1.name(),
                     iter::once(&[0]),
                 )
             }
-            (StorageKey::ChildTrieDefault { .. }, ..) => todo!(), // Not reachable yet.
         }
     }
 }
