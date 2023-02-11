@@ -17,8 +17,6 @@
 
 #![cfg(test)]
 
-use core::iter;
-
 #[test]
 fn is_send() {
     // Makes sure that the virtual machine types implement `Send`.
@@ -29,7 +27,7 @@ fn is_send() {
 
 #[test]
 fn basic_seems_to_work() {
-    fn test(exec_hint: super::ExecHint) {
+    for exec_hint in super::ExecHint::available_engines() {
         let module = super::Module::new(
             &include_bytes!("./test-polkadot-runtime-v9160.wasm")[..],
             exec_hint,
@@ -63,60 +61,46 @@ fn basic_seems_to_work() {
             }
         }
     }
-
-    test(super::ExecHint::ForceWasmi);
-    if let Some(exec_hint) = super::ExecHint::force_wasmtime_if_available() {
-        test(exec_hint);
-    }
 }
 
 #[test]
 fn out_of_memory_access() {
-    let input = [
-        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x05, 0x03, 0x01, 0x00, 0x00, 0x0b, 0x06,
-        0x01, 0x00, 0x41, 0x03, 0x0b, 0x00,
-    ];
+    for exec_hint in super::ExecHint::available_engines() {
+        let input = [
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x05, 0x03, 0x01, 0x00, 0x00, 0x0b,
+            0x06, 0x01, 0x00, 0x41, 0x03, 0x0b, 0x00,
+        ];
 
-    if let Some(exec_hint) = super::ExecHint::force_wasmtime_if_available() {
-        let module1 = super::Module::new(input, exec_hint).unwrap();
-        assert!(super::VirtualMachinePrototype::new(&module1, |_, _, _| Ok(0)).is_err());
+        let module = super::Module::new(input, exec_hint).unwrap();
+        assert!(super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).is_err());
     }
-
-    let module2 = super::Module::new(input, super::ExecHint::ForceWasmi).unwrap();
-    assert!(super::VirtualMachinePrototype::new(&module2, |_, _, _| Ok(0)).is_err());
 }
 
 #[test]
 fn has_start_function() {
-    let input = [
-        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x02,
-        0x09, 0x01, 0x01, 0x71, 0x03, 0x69, 0x6d, 0x70, 0x00, 0x00, 0x08, 0x01, 0x00,
-    ];
+    for exec_hint in super::ExecHint::available_engines() {
+        let input = [
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x02, 0x09, 0x01, 0x01, 0x71, 0x03, 0x69, 0x6d, 0x70, 0x00, 0x00, 0x08, 0x01, 0x00,
+        ];
 
-    if let Some(exec_hint) = super::ExecHint::force_wasmtime_if_available() {
-        let module1 = super::Module::new(input, exec_hint).unwrap();
-        assert!(super::VirtualMachinePrototype::new(&module1, |_, _, _| Ok(0)).is_err());
+        let module = super::Module::new(input, exec_hint).unwrap();
+        assert!(super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).is_err());
     }
-
-    let module2 = super::Module::new(input, super::ExecHint::ForceWasmi).unwrap();
-    assert!(super::VirtualMachinePrototype::new(&module2, |_, _, _| Ok(0)).is_err());
 }
 
 #[test]
 fn unsupported_type() {
-    let input = [
-        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7b,
-        0x02, 0x0d, 0x01, 0x04, 0x74, 0x65, 0x73, 0x74, 0x04, 0x66, 0x75, 0x6e, 0x63, 0x00, 0x00,
-    ];
+    for exec_hint in super::ExecHint::available_engines() {
+        let input = [
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
+            0x7b, 0x02, 0x0d, 0x01, 0x04, 0x74, 0x65, 0x73, 0x74, 0x04, 0x66, 0x75, 0x6e, 0x63,
+            0x00, 0x00,
+        ];
 
-    if let Some(exec_hint) = super::ExecHint::force_wasmtime_if_available() {
-        if let Ok(module1) = super::Module::new(input, exec_hint) {
-            assert!(super::VirtualMachinePrototype::new(&module1, |_, _, _| Ok(0)).is_err());
+        if let Ok(module) = super::Module::new(input, exec_hint) {
+            assert!(super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).is_err());
         }
-    }
-
-    if let Ok(module2) = super::Module::new(input, super::ExecHint::ForceWasmi) {
-        assert!(super::VirtualMachinePrototype::new(&module2, |_, _, _| Ok(0)).is_err());
     }
 }
 
@@ -135,9 +119,7 @@ fn basic_host_function_return_value_works() {
     )
     .unwrap();
 
-    for exec_hint in iter::once(super::ExecHint::ForceWasmi)
-        .chain(super::ExecHint::force_wasmtime_if_available().into_iter())
-    {
+    for exec_hint in super::ExecHint::available_engines() {
         let module = super::Module::new(&module_bytes, exec_hint).unwrap();
 
         let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
