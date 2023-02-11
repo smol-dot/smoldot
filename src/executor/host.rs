@@ -1008,6 +1008,7 @@ impl ReadyToRun {
                     // TODO: this is actually misimplemented, as it should return the storage root at the point where `ext_storage_child_storage_root_version_1` was last called, or at the beginning of the call; see https://github.com/w3f/polkadot-spec/issues/577
                     HostVm::ExternalStorageRoot(ExternalStorageRoot {
                         inner: self.inner,
+                        calling: id,
                         child_trie_ptr_size: Some((
                             key_ptr + DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len() as u32,
                             key_size - DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len() as u32,
@@ -1073,16 +1074,52 @@ impl ReadyToRun {
             }
             HostFunction::ext_storage_exists_version_1 => {
                 let (key_ptr, key_size) = expect_pointer_size_raw!(0);
-                // TODO: detect child trie reads
-                HostVm::ExternalStorageGet(ExternalStorageGet {
-                    key_ptr,
-                    key_size,
-                    calling: id,
-                    value_out_ptr: None,
-                    offset: 0,
-                    max_size: 0,
-                    inner: self.inner,
-                })
+
+                // Any attempt at checking a key that starts with `CHILD_STORAGE_SPECIAL_PREFIX` is
+                // instead checking for the existence of a child trie.
+                let (is_default_child_storage, is_child_storage) = {
+                    let prefix = self
+                        .inner
+                        .vm
+                        .read_memory(
+                            key_ptr,
+                            cmp::min(key_size, DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len() as u32),
+                        )
+                        .unwrap();
+
+                    (
+                        prefix.as_ref() == DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX,
+                        prefix.as_ref().starts_with(CHILD_STORAGE_SPECIAL_PREFIX),
+                    )
+                };
+
+                if is_default_child_storage {
+                    // TODO: keep in mind the trick regarding the trie root value; see https://github.com/w3f/polkadot-spec/issues/577
+                    HostVm::ExternalStorageRoot(ExternalStorageRoot {
+                        inner: self.inner,
+                        calling: id,
+                        child_trie_ptr_size: Some((
+                            key_ptr + DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len() as u32,
+                            key_size - DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len() as u32,
+                        )),
+                    })
+                } else if is_child_storage {
+                    // Return `false`.
+                    HostVm::ReadyToRun(ReadyToRun {
+                        inner: self.inner,
+                        resume_value: Some(vm::WasmValue::I32(0)),
+                    })
+                } else {
+                    HostVm::ExternalStorageGet(ExternalStorageGet {
+                        key_ptr,
+                        key_size,
+                        calling: id,
+                        value_out_ptr: None,
+                        offset: 0,
+                        max_size: 0,
+                        inner: self.inner,
+                    })
+                }
             }
             HostFunction::ext_storage_clear_prefix_version_1 => {
                 let (prefix_ptr, prefix_size) = expect_pointer_size_raw!(0);
@@ -1169,6 +1206,7 @@ impl ReadyToRun {
             HostFunction::ext_storage_root_version_1 => {
                 HostVm::ExternalStorageRoot(ExternalStorageRoot {
                     inner: self.inner,
+                    calling: id,
                     child_trie_ptr_size: None,
                 })
             }
@@ -1178,6 +1216,7 @@ impl ReadyToRun {
                     trie::TrieEntryVersion::V0 => {
                         HostVm::ExternalStorageRoot(ExternalStorageRoot {
                             inner: self.inner,
+                            calling: id,
                             child_trie_ptr_size: None,
                         })
                     }
@@ -2370,6 +2409,10 @@ impl fmt::Debug for ExternalStorageClearPrefix {
 pub struct ExternalStorageRoot {
     inner: Inner,
 
+    /// Function currently being called by the Wasm code. Refers to an index within
+    /// [`Inner::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
+    calling: usize,
+
     /// Pointer and size of the child trie, if any. Guaranteed to be in range.
     child_trie_ptr_size: Option<(u32, u32)>,
 }
@@ -2395,11 +2438,50 @@ impl ExternalStorageRoot {
     /// Panics if `None` is passed and [`ExternalStorageRoot::trie`] returned [`Trie::MainTrie`].
     ///
     pub fn resume(self, hash: Option<&[u8; 32]>) -> HostVm {
-        // TODO: child tries support unfinished here /!\
-        self.inner.alloc_write_and_return_pointer_size(
-            HostFunction::ext_storage_root_version_1.name(),
-            iter::once(hash.unwrap()),
-        )
+        let host_fn = match self.inner.registered_functions[self.calling] {
+            FunctionImport::Resolved(f) => f,
+            FunctionImport::Unresolved { .. } => unreachable!(),
+        };
+
+        match host_fn {
+            HostFunction::ext_storage_get_version_1 => {
+                if let Some(hash) = hash {
+                    // Writing `Some(hash)`.
+                    let hash_len_enc = util::encode_scale_compact_usize(hash.len());
+                    self.inner.alloc_write_and_return_pointer_size(
+                        host_fn.name(),
+                        iter::once(&[1][..])
+                            .chain(iter::once(hash_len_enc.as_ref()))
+                            .chain(iter::once(&hash[..])),
+                    )
+                } else {
+                    // Write a SCALE-encoded `None`.
+                    self.inner
+                        .alloc_write_and_return_pointer_size(host_fn.name(), iter::once(&[0]))
+                }
+            }
+            HostFunction::ext_storage_exists_version_1 => HostVm::ReadyToRun(ReadyToRun {
+                inner: self.inner,
+                resume_value: Some(if hash.is_some() {
+                    vm::WasmValue::I32(1)
+                } else {
+                    vm::WasmValue::I32(0)
+                }),
+            }),
+            HostFunction::ext_storage_root_version_1 => {
+                self.inner.alloc_write_and_return_pointer_size(
+                    HostFunction::ext_storage_root_version_1.name(),
+                    iter::once(hash.unwrap()),
+                )
+            }
+            HostFunction::ext_storage_root_version_2 => {
+                self.inner.alloc_write_and_return_pointer_size(
+                    HostFunction::ext_storage_root_version_2.name(),
+                    iter::once(hash.unwrap()),
+                )
+            }
+            _ => unreachable!(),
+        }
     }
 }
 
