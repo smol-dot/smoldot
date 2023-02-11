@@ -1005,7 +1005,7 @@ impl ReadyToRun {
                 };
 
                 if is_default_child_storage {
-                    // TODO: this is actually misimplemented, as it should return the storage root at the point where `ext_storage_child_storage_root_version_1` was last called, or at the beginning of the call; see https://github.com/w3f/polkadot-spec/issues/577
+                    // TODO: what should happen if the child trie just got created? does it have a root or not?
                     HostVm::ExternalStorageRoot(ExternalStorageRoot {
                         inner: self.inner,
                         calling: id,
@@ -1094,7 +1094,7 @@ impl ReadyToRun {
                 };
 
                 if is_default_child_storage {
-                    // TODO: keep in mind the trick regarding the trie root value; see https://github.com/w3f/polkadot-spec/issues/577
+                    // TODO: what should happen if the child trie just got created? does it have a root or not?
                     HostVm::ExternalStorageRoot(ExternalStorageRoot {
                         inner: self.inner,
                         calling: id,
@@ -2428,10 +2428,35 @@ impl ExternalStorageRoot {
         }
     }
 
+    /// If this function returns `true`, then the provided root hash must take into account all
+    /// the writes that have been performed since the previous call of [`ExternalStorageRoot`]
+    /// with that trie where `commit_changes` was `true`.
+    pub fn commit_changes(&self) -> bool {
+        if self.child_trie_ptr_size.is_none() {
+            // For the main trie, the changes must always be committed.
+            true
+        } else {
+            let host_fn = match self.inner.registered_functions[self.calling] {
+                FunctionImport::Resolved(f) => f,
+                FunctionImport::Unresolved { .. } => unreachable!(),
+            };
+
+            match host_fn {
+                HostFunction::ext_storage_get_version_1
+                | HostFunction::ext_storage_exists_version_1 => false,
+                HostFunction::ext_storage_root_version_1
+                | HostFunction::ext_storage_root_version_2 => true,
+                _ => unreachable!(),
+            }
+        }
+    }
+
     /// Writes the trie root hash to the Wasm VM and prepares it for resume.
     ///
     /// Must be passed `None` if [`ExternalStorageRoot::trie`] returned [`Trie::ChildTrieDefault`]
     /// and the trie doesn't exist.
+    ///
+    /// See also the documentation of [`ExternalStorageRoot::commit_changes`].
     ///
     /// # Panic
     ///

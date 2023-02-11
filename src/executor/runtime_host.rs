@@ -753,6 +753,9 @@ impl Inner {
                         continue;
                     }
 
+                    // For the main trie, whether the changes must be committed is a dummy value.
+                    debug_assert!(req.commit_changes());
+
                     if self.root_calculation.is_none() {
                         self.root_calculation = Some(calculate_root::root_merkle_value(Some(
                             self.top_trie_root_calculation_cache.take().unwrap(),
