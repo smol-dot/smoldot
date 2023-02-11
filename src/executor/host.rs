@@ -200,7 +200,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::{fmt, hash::Hasher as _, iter, str};
+use core::{cmp, fmt, hash::Hasher as _, iter, str};
 use sha2::Digest as _;
 use tiny_keccak::Hasher as _;
 
@@ -549,6 +549,9 @@ pub enum HostVm {
     /// Need to provide the storage key that follows a specific one.
     #[from]
     ExternalStorageNextKey(ExternalStorageNextKey),
+    /// Need to provide the first child trie or the child trie that follows a specific one.
+    #[from]
+    ExternalStorageNextChildTrie(ExternalStorageNextChildTrie),
     /// Must the set value of an off-chain storage entry.
     #[from]
     ExternalOffchainStorageSet(ExternalOffchainStorageSet),
@@ -596,6 +599,7 @@ impl HostVm {
             HostVm::ExternalStorageClearPrefix(inner) => inner.inner.into_prototype(),
             HostVm::ExternalStorageRoot(inner) => inner.inner.into_prototype(),
             HostVm::ExternalStorageNextKey(inner) => inner.inner.into_prototype(),
+            HostVm::ExternalStorageNextChildTrie(inner) => inner.inner.into_prototype(),
             HostVm::ExternalOffchainStorageSet(inner) => inner.inner.into_prototype(),
             HostVm::SignatureVerification(inner) => inner.inner.into_prototype(),
             HostVm::CallRuntimeVersion(inner) => inner.inner.into_prototype(),
@@ -954,29 +958,76 @@ impl ReadyToRun {
             HostFunction::ext_storage_set_version_1 => {
                 let (key_ptr, key_size) = expect_pointer_size_raw!(0);
                 let (value_ptr, value_size) = expect_pointer_size_raw!(1);
-                HostVm::ExternalStorageSet(ExternalStorageSet {
-                    key_ptr,
-                    key_size,
-                    value: Some((value_ptr, value_size)),
-                    inner: self.inner,
-                })
+
+                // Any attempt at writing a key that starts with `CHILD_STORAGE_SPECIAL_PREFIX` is
+                // silently ignored, as per spec.
+                if key_size >= CHILD_STORAGE_SPECIAL_PREFIX.len() as u32
+                    && self
+                        .inner
+                        .vm
+                        .read_memory(key_ptr, CHILD_STORAGE_SPECIAL_PREFIX.len() as u32)
+                        .unwrap()
+                        .as_ref()
+                        == CHILD_STORAGE_SPECIAL_PREFIX
+                {
+                    HostVm::ReadyToRun(ReadyToRun {
+                        inner: self.inner,
+                        resume_value: None,
+                    })
+                } else {
+                    HostVm::ExternalStorageSet(ExternalStorageSet {
+                        key_ptr,
+                        key_size,
+                        value: Some((value_ptr, value_size)),
+                        inner: self.inner,
+                    })
+                }
             }
             HostFunction::ext_storage_get_version_1 => {
                 let (key_ptr, key_size) = expect_pointer_size_raw!(0);
-                HostVm::ExternalStorageGet(ExternalStorageGet {
-                    key_ptr,
-                    key_size,
-                    calling: id,
-                    value_out_ptr: None,
-                    offset: 0,
-                    max_size: u32::max_value(),
-                    inner: self.inner,
-                })
+
+                // Any attempt at reading a key that starts with `CHILD_STORAGE_SPECIAL_PREFIX` is
+                // instead a child trie root hash.
+                let prefix = self
+                    .inner
+                    .vm
+                    .read_memory(
+                        key_ptr,
+                        cmp::min(key_size, DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len() as u32),
+                    )
+                    .unwrap();
+                if prefix.as_ref().starts_with(CHILD_STORAGE_SPECIAL_PREFIX) {
+                    if prefix.as_ref() == DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX {
+                        // TODO: this is actually misimplemented, as it should return the storage root at the point where `ext_storage_child_storage_root_version_1` was last called, or at the beginning of the call; see https://github.com/w3f/polkadot-spec/issues/577
+                        HostVm::ExternalStorageRoot(ExternalStorageRoot {
+                            inner: self.inner,
+                            child_trie_ptr_size: Some((
+                                key_ptr + DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len() as u32,
+                                key_size - DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len() as u32,
+                            )),
+                        })
+                    } else {
+                        // Write a SCALE-encoded `None`.
+                        self.inner
+                            .alloc_write_and_return_pointer_size(host_fn.name(), iter::once(&[0]))
+                    }
+                } else {
+                    HostVm::ExternalStorageGet(ExternalStorageGet {
+                        key_ptr,
+                        key_size,
+                        calling: id,
+                        value_out_ptr: None,
+                        offset: 0,
+                        max_size: u32::max_value(),
+                        inner: self.inner,
+                    })
+                }
             }
             HostFunction::ext_storage_read_version_1 => {
                 let (key_ptr, key_size) = expect_pointer_size_raw!(0);
                 let (value_out_ptr, value_out_size) = expect_pointer_size_raw!(1);
                 let offset = expect_u32!(2);
+                // TODO: detect child trie reads
                 HostVm::ExternalStorageGet(ExternalStorageGet {
                     key_ptr,
                     key_size,
@@ -989,15 +1040,34 @@ impl ReadyToRun {
             }
             HostFunction::ext_storage_clear_version_1 => {
                 let (key_ptr, key_size) = expect_pointer_size_raw!(0);
-                HostVm::ExternalStorageSet(ExternalStorageSet {
-                    key_ptr,
-                    key_size,
-                    value: None,
-                    inner: self.inner,
-                })
+
+                // Any attempt at writing a key that starts with `CHILD_STORAGE_SPECIAL_PREFIX` is
+                // silently ignored, as per spec.
+                if key_size >= CHILD_STORAGE_SPECIAL_PREFIX.len() as u32
+                    && self
+                        .inner
+                        .vm
+                        .read_memory(key_ptr, CHILD_STORAGE_SPECIAL_PREFIX.len() as u32)
+                        .unwrap()
+                        .as_ref()
+                        == CHILD_STORAGE_SPECIAL_PREFIX
+                {
+                    HostVm::ReadyToRun(ReadyToRun {
+                        inner: self.inner,
+                        resume_value: None,
+                    })
+                } else {
+                    HostVm::ExternalStorageSet(ExternalStorageSet {
+                        key_ptr,
+                        key_size,
+                        value: None,
+                        inner: self.inner,
+                    })
+                }
             }
             HostFunction::ext_storage_exists_version_1 => {
                 let (key_ptr, key_size) = expect_pointer_size_raw!(0);
+                // TODO: detect child trie reads
                 HostVm::ExternalStorageGet(ExternalStorageGet {
                     key_ptr,
                     key_size,
@@ -1010,13 +1080,32 @@ impl ReadyToRun {
             }
             HostFunction::ext_storage_clear_prefix_version_1 => {
                 let (prefix_ptr, prefix_size) = expect_pointer_size_raw!(0);
-                HostVm::ExternalStorageClearPrefix(ExternalStorageClearPrefix {
-                    prefix_ptr,
-                    prefix_size,
-                    inner: self.inner,
-                    max_keys_to_remove: None,
-                    is_v2: false,
-                })
+
+                // Any attempt at clear a prefix that "intersects" (see code) with
+                // `CHILD_STORAGE_SPECIAL_PREFIX` is silently ignored, as per spec.
+                if CHILD_STORAGE_SPECIAL_PREFIX.starts_with(
+                    self.inner
+                        .vm
+                        .read_memory(
+                            prefix_size,
+                            cmp::min(prefix_size, CHILD_STORAGE_SPECIAL_PREFIX.len() as u32),
+                        )
+                        .unwrap()
+                        .as_ref(),
+                ) {
+                    HostVm::ReadyToRun(ReadyToRun {
+                        inner: self.inner,
+                        resume_value: None,
+                    })
+                } else {
+                    HostVm::ExternalStorageClearPrefix(ExternalStorageClearPrefix {
+                        prefix_ptr,
+                        prefix_size,
+                        inner: self.inner,
+                        max_keys_to_remove: None,
+                        is_v2: false,
+                    })
+                }
             }
             HostFunction::ext_storage_clear_prefix_version_2 => {
                 let (prefix_ptr, prefix_size) = expect_pointer_size_raw!(0);
@@ -1045,22 +1134,46 @@ impl ReadyToRun {
                     }
                 };
 
-                HostVm::ExternalStorageClearPrefix(ExternalStorageClearPrefix {
-                    prefix_ptr,
-                    prefix_size,
-                    inner: self.inner,
-                    max_keys_to_remove,
-                    is_v2: true,
-                })
+                // Any attempt at clear a prefix that "intersects" (see code) with
+                // `CHILD_STORAGE_SPECIAL_PREFIX` is silently ignored, as per spec.
+                if CHILD_STORAGE_SPECIAL_PREFIX.starts_with(
+                    self.inner
+                        .vm
+                        .read_memory(
+                            prefix_size,
+                            cmp::min(prefix_size, CHILD_STORAGE_SPECIAL_PREFIX.len() as u32),
+                        )
+                        .unwrap()
+                        .as_ref(),
+                ) {
+                    HostVm::ReadyToRun(ReadyToRun {
+                        inner: self.inner,
+                        resume_value: None,
+                    })
+                } else {
+                    HostVm::ExternalStorageClearPrefix(ExternalStorageClearPrefix {
+                        prefix_ptr,
+                        prefix_size,
+                        inner: self.inner,
+                        max_keys_to_remove,
+                        is_v2: true,
+                    })
+                }
             }
             HostFunction::ext_storage_root_version_1 => {
-                HostVm::ExternalStorageRoot(ExternalStorageRoot { inner: self.inner })
+                HostVm::ExternalStorageRoot(ExternalStorageRoot {
+                    inner: self.inner,
+                    child_trie_ptr_size: None,
+                })
             }
             HostFunction::ext_storage_root_version_2 => {
                 let state_version = expect_state_version!(0);
                 match state_version {
                     trie::TrieEntryVersion::V0 => {
-                        HostVm::ExternalStorageRoot(ExternalStorageRoot { inner: self.inner })
+                        HostVm::ExternalStorageRoot(ExternalStorageRoot {
+                            inner: self.inner,
+                            child_trie_ptr_size: None,
+                        })
                     }
                     trie::TrieEntryVersion::V1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
                 }
@@ -1082,22 +1195,64 @@ impl ReadyToRun {
             }
             HostFunction::ext_storage_next_key_version_1 => {
                 let (key_ptr, key_size) = expect_pointer_size_raw!(0);
-                HostVm::ExternalStorageNextKey(ExternalStorageNextKey {
-                    key_ptr,
-                    key_size,
-                    inner: self.inner,
-                })
+
+                let prefix = self
+                    .inner
+                    .vm
+                    .read_memory(
+                        key_ptr,
+                        cmp::min(key_size, DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len() as u32),
+                    )
+                    .unwrap();
+                if prefix.as_ref() >= CHILD_STORAGE_SPECIAL_PREFIX
+                    && (prefix.as_ref() < DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX
+                        || prefix
+                            .as_ref()
+                            .starts_with(DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX))
+                {
+                    HostVm::ExternalStorageNextChildTrie(ExternalStorageNextChildTrie {
+                        key_ptr,
+                        key_size,
+                        inner: self.inner,
+                        known_key_after: None,
+                    })
+                } else {
+                    HostVm::ExternalStorageNextKey(ExternalStorageNextKey {
+                        key_ptr,
+                        key_size,
+                        inner: self.inner,
+                        known_no_child_trie: false,
+                    })
+                }
             }
             HostFunction::ext_storage_append_version_1 => {
                 let (key_ptr, key_size) = expect_pointer_size_raw!(0);
                 let (value_ptr, value_size) = expect_pointer_size_raw!(1);
-                HostVm::ExternalStorageAppend(ExternalStorageAppend {
-                    key_ptr,
-                    key_size,
-                    value_ptr,
-                    value_size,
-                    inner: self.inner,
-                })
+
+                // Any attempt at writing a key that starts with `CHILD_STORAGE_SPECIAL_PREFIX` is
+                // silently ignored, as per spec.
+                if key_size >= CHILD_STORAGE_SPECIAL_PREFIX.len() as u32
+                    && self
+                        .inner
+                        .vm
+                        .read_memory(key_ptr, CHILD_STORAGE_SPECIAL_PREFIX.len() as u32)
+                        .unwrap()
+                        .as_ref()
+                        == CHILD_STORAGE_SPECIAL_PREFIX
+                {
+                    HostVm::ReadyToRun(ReadyToRun {
+                        inner: self.inner,
+                        resume_value: None,
+                    })
+                } else {
+                    HostVm::ExternalStorageAppend(ExternalStorageAppend {
+                        key_ptr,
+                        key_size,
+                        value_ptr,
+                        value_size,
+                        inner: self.inner,
+                    })
+                }
             }
             HostFunction::ext_storage_child_set_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_storage_child_get_version_1 => host_fn_not_implemented!(),
@@ -1866,11 +2021,18 @@ pub struct ExternalStorageGet {
 
 impl ExternalStorageGet {
     /// Returns the key whose value must be provided back with [`ExternalStorageGet::resume`].
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.inner
+    ///
+    /// > **Note**: While the runtime is able to query keys from the main trie that correspond to
+    /// >           child tries and obtain a valid value, this is handled entirely internally and
+    /// >           doesn't need to be handled by the API user. Providing the value is simply about
+    /// >           looking up an entry in a map.
+    pub fn key(&'_ self) -> StorageKey<impl AsRef<[u8]> + '_> {
+        let key = self
+            .inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
-            .unwrap()
+            .unwrap();
+        StorageKey::MainTrie { key }
     }
 
     /// Offset within the value that is requested.
@@ -2038,11 +2200,14 @@ pub struct ExternalStorageSet {
 
 impl ExternalStorageSet {
     /// Returns the key whose value must be set.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.inner
+    pub fn key(&'_ self) -> StorageKey<impl AsRef<[u8]> + '_> {
+        // Note: the host functions aren't implemented for child tries.
+        let key = self
+            .inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
-            .unwrap()
+            .unwrap();
+        StorageKey::MainTrie { key }
     }
 
     /// Returns the value to set.
@@ -2069,6 +2234,12 @@ impl fmt::Debug for ExternalStorageSet {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("ExternalStorageSet").finish()
     }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum StorageKey<T> {
+    MainTrie { key: T },
+    ChildTrieDefault { child_trie: T, key: T },
 }
 
 /// Must load a storage value, treat it as if it was a SCALE-encoded container, and put `value`
@@ -2106,11 +2277,13 @@ pub struct ExternalStorageAppend {
 
 impl ExternalStorageAppend {
     /// Returns the key whose value must be set.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.inner
+    pub fn key(&'_ self) -> StorageKey<impl AsRef<[u8]> + '_> {
+        let key = self
+            .inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
-            .unwrap()
+            .unwrap();
+        StorageKey::MainTrie { key }
     }
 
     /// Returns the value to append.
@@ -2156,11 +2329,13 @@ pub struct ExternalStorageClearPrefix {
 
 impl ExternalStorageClearPrefix {
     /// Returns the prefix whose keys must be removed.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.inner
+    pub fn prefix(&'_ self) -> StorageKey<impl AsRef<[u8]> + '_> {
+        let prefix = self
+            .inner
             .vm
             .read_memory(self.prefix_ptr, self.prefix_size)
-            .unwrap()
+            .unwrap();
+        StorageKey::MainTrie { key: prefix }
     }
 
     /// Returns the maximum number of keys to remove. `None` means "infinity".
@@ -2198,16 +2373,39 @@ impl fmt::Debug for ExternalStorageClearPrefix {
 }
 
 /// Must provide the trie root hash of the storage.
+// TODO: document whether this must take into account the write that have just been done
 pub struct ExternalStorageRoot {
     inner: Inner,
+
+    /// Pointer and size of the child trie, if any. Guaranteed to be in range.
+    child_trie_ptr_size: Option<(u32, u32)>,
 }
 
 impl ExternalStorageRoot {
+    /// Returns the trie whose root hash must be provided.
+    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+        if let Some((ptr, size)) = self.child_trie_ptr_size {
+            let child_trie = self.inner.vm.read_memory(ptr, size).unwrap();
+            Trie::ChildTrieDefault { child_trie }
+        } else {
+            Trie::MainTrie
+        }
+    }
+
     /// Writes the trie root hash to the Wasm VM and prepares it for resume.
-    pub fn resume(self, hash: &[u8; 32]) -> HostVm {
+    ///
+    /// Must be passed `None` if [`ExternalStorageRoot::trie`] returned [`Trie::ChildTrieDefault`]
+    /// and the trie doesn't exist.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `None` is passed and [`ExternalStorageRoot::trie`] returned [`Trie::MainTrie`].
+    ///
+    pub fn resume(self, hash: Option<&[u8; 32]>) -> HostVm {
+        // TODO: child tries support unfinished here /!\
         self.inner.alloc_write_and_return_pointer_size(
             HostFunction::ext_storage_root_version_1.name(),
-            iter::once(hash),
+            iter::once(hash.unwrap()),
         )
     }
 }
@@ -2218,43 +2416,84 @@ impl fmt::Debug for ExternalStorageRoot {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum Trie<T> {
+    MainTrie,
+    ChildTrieDefault { child_trie: T },
+}
+
 /// Must provide the storage key that follows, in lexicographic order, a specific one.
 pub struct ExternalStorageNextKey {
     inner: Inner,
 
-    /// Pointer to the key whose value must be set. Guaranteed to be in range.
+    /// Pointer to the key whose follow-up must be found. Guaranteed to be in range.
     key_ptr: u32,
-    /// Size of the key whose value must be set. Guaranteed to be in range.
+    /// Size of the key whose follow-up must be found. Guaranteed to be in range.
     key_size: u32,
+
+    /// `true` if we were in the [`ExternalStorageNextChildTrie`] before with the same key and no
+    /// child trie has been found that follows the given key. This saves a transition.
+    known_no_child_trie: bool,
 }
 
 impl ExternalStorageNextKey {
     /// Returns the key whose following key must be returned.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.inner
+    ///
+    /// > **Note**: While the runtime is able to obtain keys correspond to child tries by iterating
+    /// >           over keys, this is handled internally and doesn't need any special handling by
+    /// >           by the API user.
+    pub fn key(&'_ self) -> StorageKey<impl AsRef<[u8]> + '_> {
+        let key = self
+            .inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
-            .unwrap()
+            .unwrap();
+        debug_assert!(!key.as_ref().starts_with(CHILD_STORAGE_SPECIAL_PREFIX));
+        StorageKey::MainTrie { key }
     }
 
     /// Writes the follow-up key in the Wasm VM memory and prepares it for execution.
     ///
     /// Must be passed `None` if the key is the last one in the storage.
     pub fn resume(self, follow_up: Option<&[u8]>) -> HostVm {
-        if let Some(follow_up) = follow_up {
-            let value_len_enc = util::encode_scale_compact_usize(follow_up.len());
-            self.inner.alloc_write_and_return_pointer_size(
-                HostFunction::ext_storage_next_key_version_1.name(),
-                iter::once(&[1][..])
-                    .chain(iter::once(value_len_enc.as_ref()))
-                    .chain(iter::once(follow_up)),
-            )
-        } else {
-            // Write a SCALE-encoded `None`.
-            self.inner.alloc_write_and_return_pointer_size(
-                HostFunction::ext_storage_next_key_version_1.name(),
-                iter::once(&[0]),
-            )
+        match (self.key(), follow_up, self.known_no_child_trie) {
+            (StorageKey::MainTrie { key }, follow_up, false)
+                if follow_up.map_or(true, |next| next >= CHILD_STORAGE_SPECIAL_PREFIX)
+                    && key.as_ref() < CHILD_STORAGE_SPECIAL_PREFIX =>
+            {
+                // Because the host function requires us to enumerate child tries as well, we
+                // transition to "next child trie" mode.
+                debug_assert!(key.as_ref() < DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX);
+                HostVm::ExternalStorageNextChildTrie(ExternalStorageNextChildTrie {
+                    inner: self.inner,
+                    key_ptr: self.key_ptr,
+                    key_size: self.key_size,
+                    known_key_after: Some(follow_up.map(|k| k.to_owned())),
+                })
+            }
+            (StorageKey::MainTrie { key: _key }, Some(next), _) => {
+                debug_assert!(_key.as_ref() < next);
+
+                if next.starts_with(CHILD_STORAGE_SPECIAL_PREFIX) {
+                    // TODO: return error because invalid storage
+                }
+
+                let value_len_enc = util::encode_scale_compact_usize(next.len());
+                self.inner.alloc_write_and_return_pointer_size(
+                    HostFunction::ext_storage_next_key_version_1.name(),
+                    iter::once(&[1][..])
+                        .chain(iter::once(value_len_enc.as_ref()))
+                        .chain(iter::once(next)),
+                )
+            }
+            (StorageKey::MainTrie { .. }, None, _) => {
+                // Write a SCALE-encoded `None`.
+                self.inner.alloc_write_and_return_pointer_size(
+                    HostFunction::ext_storage_next_key_version_1.name(),
+                    iter::once(&[0]),
+                )
+            }
+            (StorageKey::ChildTrieDefault { .. }, ..) => todo!(), // Not reachable yet.
         }
     }
 }
@@ -2262,6 +2501,107 @@ impl ExternalStorageNextKey {
 impl fmt::Debug for ExternalStorageNextKey {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("ExternalStorageNextKey").finish()
+    }
+}
+
+/// Must provide the child trie that follows, in lexicographic order, a specific one.
+pub struct ExternalStorageNextChildTrie {
+    inner: Inner,
+
+    /// Pointer to the key whose follow-up must be found. Guaranteed to be in range.
+    /// Guaranteed to either start with `DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX` or be inferior
+    /// to `DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX`.
+    key_ptr: u32,
+    /// Size of the key whose follow-up must be found. Guaranteed to be in range.
+    key_size: u32,
+
+    /// If we were previously in the [`ExternalStorageNextKey`] state, contains the value provided
+    /// by the user. This avoids infinite loop where we switch back and forth between the
+    /// "next child trie" and "next key" states.
+    known_key_after: Option<Option<Vec<u8>>>,
+}
+
+impl ExternalStorageNextChildTrie {
+    /// Returns the child trie whose following child trie must be returned. `None` if the first
+    /// child trie must be returned.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        let key = self
+            .inner
+            .vm
+            .read_memory(self.key_ptr, self.key_size)
+            .unwrap();
+        debug_assert!(
+            key.as_ref()
+                .starts_with(DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX)
+                || key.as_ref() < DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX
+        );
+
+        if key
+            .as_ref()
+            .starts_with(DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX)
+        {
+            struct WithOffset<T>(T, usize);
+            impl<T: AsRef<[u8]>> AsRef<[u8]> for WithOffset<T> {
+                fn as_ref(&self) -> &[u8] {
+                    &self.0.as_ref()[self.1..]
+                }
+            }
+            Some(WithOffset(key, DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len()))
+        } else {
+            None
+        }
+    }
+
+    /// Writes the follow-up child trie in the Wasm VM memory and prepares it for execution.
+    ///
+    /// Must be passed `None` if there is no child trie after the requested one.
+    pub fn resume(self, follow_up: Option<&[u8]>) -> HostVm {
+        match (follow_up, &self.known_key_after) {
+            (Some(follow_up), _) => {
+                let value_len_enc = util::encode_scale_compact_usize(
+                    DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len() + follow_up.len(),
+                );
+                self.inner.alloc_write_and_return_pointer_size(
+                    HostFunction::ext_storage_next_key_version_1.name(),
+                    iter::once(&[1][..])
+                        .chain(iter::once(value_len_enc.as_ref()))
+                        .chain(iter::once(DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX))
+                        .chain(iter::once(follow_up)),
+                )
+            }
+            (None, Some(Some(known_key_after))) => {
+                if known_key_after.starts_with(CHILD_STORAGE_SPECIAL_PREFIX) {
+                    // TODO: return error because invalid storage
+                }
+
+                let value_len_enc = util::encode_scale_compact_usize(known_key_after.len());
+                self.inner.alloc_write_and_return_pointer_size(
+                    HostFunction::ext_storage_next_key_version_1.name(),
+                    iter::once(&[1][..])
+                        .chain(iter::once(value_len_enc.as_ref()))
+                        .chain(iter::once(&known_key_after[..])),
+                )
+            }
+            (None, Some(None)) => {
+                // Write a SCALE-encoded `None`.
+                self.inner.alloc_write_and_return_pointer_size(
+                    HostFunction::ext_storage_next_key_version_1.name(),
+                    iter::once(&[0]),
+                )
+            }
+            (None, None) => HostVm::ExternalStorageNextKey(ExternalStorageNextKey {
+                inner: self.inner,
+                key_ptr: self.key_ptr,
+                key_size: self.key_size,
+                known_no_child_trie: true,
+            }),
+        }
+    }
+}
+
+impl fmt::Debug for ExternalStorageNextChildTrie {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("ExternalStorageNextChildTrie").finish()
     }
 }
 
@@ -3100,6 +3440,11 @@ pub enum Error {
         function: &'static str,
     },
 }
+
+/// Writing and reading keys the main trie under this prefix obey weird rules.
+const CHILD_STORAGE_SPECIAL_PREFIX: &[u8] = b":child_storage:";
+/// Writing and reading keys the main trie under this prefix obey weird rules.
+const DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX: &[u8] = b":child_storage:default:";
 
 macro_rules! externalities {
     ($($ext:ident,)*) => {

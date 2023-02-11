@@ -147,7 +147,11 @@ impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
     pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
         match &self.inner.vm {
-            host::HostVm::ExternalStorageGet(req) => req.key(),
+            host::HostVm::ExternalStorageGet(req) => match req.key() {
+                // TODO: child tries are not implemented correctly
+                host::StorageKey::MainTrie { key } => key,
+                _ => unreachable!(),
+            },
 
             // We only create a `StorageGet` if the state is one of the above.
             _ => unreachable!(),
@@ -191,7 +195,11 @@ impl NextKey {
     /// Returns the key whose next key must be passed back.
     pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
         match &self.inner.vm {
-            host::HostVm::ExternalStorageNextKey(req) => req.key(),
+            host::HostVm::ExternalStorageNextKey(req) => match req.key() {
+                // TODO: child tries are not implemented correctly
+                host::StorageKey::MainTrie { key } => key,
+                _ => unreachable!(),
+            },
             _ => unreachable!(),
         }
     }
@@ -229,7 +237,7 @@ impl StorageRoot {
     pub fn resume(mut self, hash: &[u8; 32]) -> RuntimeHostVm {
         match self.inner.vm {
             host::HostVm::ExternalStorageRoot(req) => {
-                self.inner.vm = req.resume(hash);
+                self.inner.vm = req.resume(Some(hash));
             }
 
             // We only create a `StorageRoot` if the state is the one above.
@@ -358,13 +366,28 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageGet(req) => {
-                    self.vm = req.into();
-                    return RuntimeHostVm::StorageGet(StorageGet { inner: self });
+                    if let host::StorageKey::MainTrie { .. } = req.key() {
+                        self.vm = req.into();
+                        return RuntimeHostVm::StorageGet(StorageGet { inner: self });
+                    } else {
+                        // TODO: this is a dummy implementation and child tries are not implemented properly
+                        self.vm = req.resume(None)
+                    }
                 }
 
                 host::HostVm::ExternalStorageNextKey(req) => {
-                    self.vm = req.into();
-                    return RuntimeHostVm::NextKey(NextKey { inner: self });
+                    if let host::StorageKey::MainTrie { .. } = req.key() {
+                        self.vm = req.into();
+                        return RuntimeHostVm::NextKey(NextKey { inner: self });
+                    } else {
+                        // TODO: this is a dummy implementation and child tries are not implemented properly
+                        self.vm = req.resume(None)
+                    }
+                }
+
+                host::HostVm::ExternalStorageNextChildTrie(req) => {
+                    // TODO: this is a dummy implementation and child tries are not implemented properly
+                    self.vm = req.resume(None);
                 }
 
                 host::HostVm::SignatureVerification(req) => {
@@ -400,8 +423,13 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageRoot(req) => {
-                    self.vm = req.into();
-                    return RuntimeHostVm::StorageRoot(StorageRoot { inner: self });
+                    if let host::Trie::MainTrie = req.trie() {
+                        self.vm = req.into();
+                        return RuntimeHostVm::StorageRoot(StorageRoot { inner: self });
+                    } else {
+                        // TODO: this is a dummy implementation and child tries are not implemented properly
+                        self.vm = req.resume(None)
+                    }
                 }
 
                 host::HostVm::GetMaxLogLevel(resume) => {
