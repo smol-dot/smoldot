@@ -263,10 +263,11 @@ impl StorageGet {
                         self.inner
                             .top_trie_changes
                             .diff_insert(key.as_ref().to_vec(), value);
-                        self.inner.vm = req.resume();
                     }
                     _ => unreachable!(),
                 }
+
+                self.inner.vm = req.resume();
             }
             host::HostVm::ExternalStorageRoot(_) => {
                 if let calculate_root::RootMerkleValueCalculation::StorageValue(value_request) =
@@ -642,21 +643,29 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageGet(req) => {
-                    if let host::StorageKey::MainTrie { key } = req.key() {
-                        let search = self.top_trie_changes.diff_get(key.as_ref());
-                        if let Some(overlay) = search {
-                            self.vm = req.resume_full_value(overlay);
-                        } else {
-                            self.vm = req.into();
-                            return RuntimeHostVm::StorageGet(StorageGet { inner: self });
-                        }
+                    let search = {
+                        let key = match req.key() {
+                            host::StorageKey::MainTrie { key } => key,
+                            v => {
+                                drop(v);
+                                // TODO: this is a dummy implementation and child tries are not implemented properly
+                                self.vm = req.resume(None);
+                                continue;
+                            }
+                        };
+                        self.top_trie_changes.diff_get(key.as_ref())
+                    };
+
+                    if let Some(overlay) = search {
+                        self.vm = req.resume_full_value(overlay);
                     } else {
-                        // TODO: this is a dummy implementation and child tries are not implemented properly
-                        self.vm = req.resume(None)
+                        self.vm = req.into();
+                        return RuntimeHostVm::StorageGet(StorageGet { inner: self });
                     }
                 }
 
                 host::HostVm::ExternalStorageSet(req) => {
+                    // TODO: this is a dummy implementation and child tries are not implemented properly
                     if let host::StorageKey::MainTrie { key } = req.key() {
                         self.top_trie_root_calculation_cache
                             .as_mut()
@@ -679,50 +688,55 @@ impl Inner {
                                 entry.insert(previous_value);
                             }
                         }
-
-                        self.vm = req.resume();
-                    } else {
-                        // TODO: this is a dummy implementation and child tries are not implemented properly
-                        self.vm = req.resume()
                     }
+
+                    self.vm = req.resume()
                 }
 
                 host::HostVm::ExternalStorageAppend(req) => {
-                    if let host::StorageKey::MainTrie { key } = req.key() {
-                        self.top_trie_root_calculation_cache
-                            .as_mut()
-                            .unwrap()
-                            .storage_value_update(key.as_ref(), true);
-
-                        let current_value = self.top_trie_changes.diff_get(key.as_ref());
-                        if let Some(current_value) = current_value {
-                            let mut current_value = current_value.unwrap_or_default().to_vec();
-                            append_to_storage_value(&mut current_value, req.value().as_ref());
-                            let previous_value = self
-                                .top_trie_changes
-                                .diff_insert(key.as_ref().to_vec(), current_value);
-                            if let Some(top_trie_transaction_revert) =
-                                self.top_trie_transaction_revert.last_mut()
-                            {
-                                if let Entry::Vacant(entry) =
-                                    top_trie_transaction_revert.entry(key.as_ref().to_vec())
-                                {
-                                    entry.insert(previous_value);
-                                }
-                            }
+                    let key = match req.key() {
+                        host::StorageKey::MainTrie { key } => key,
+                        v => {
+                            drop(v);
+                            // TODO: this is a dummy implementation and child tries are not implemented properly
                             self.vm = req.resume();
-                        } else {
-                            self.vm = req.into();
-                            return RuntimeHostVm::StorageGet(StorageGet { inner: self });
+                            continue;
                         }
+                    };
+
+                    self.top_trie_root_calculation_cache
+                        .as_mut()
+                        .unwrap()
+                        .storage_value_update(key.as_ref(), true);
+
+                    let current_value = self.top_trie_changes.diff_get(key.as_ref());
+                    if let Some(current_value) = current_value {
+                        let mut current_value = current_value.unwrap_or_default().to_vec();
+                        append_to_storage_value(&mut current_value, req.value().as_ref());
+                        let previous_value = self
+                            .top_trie_changes
+                            .diff_insert(key.as_ref().to_vec(), current_value);
+                        if let Some(top_trie_transaction_revert) =
+                            self.top_trie_transaction_revert.last_mut()
+                        {
+                            if let Entry::Vacant(entry) =
+                                top_trie_transaction_revert.entry(key.as_ref().to_vec())
+                            {
+                                entry.insert(previous_value);
+                            }
+                        }
+                        drop(key);
+                        self.vm = req.resume();
                     } else {
-                        // TODO: this is a dummy implementation and child tries are not implemented properly
-                        self.vm = req.resume()
+                        drop(key);
+                        self.vm = req.into();
+                        return RuntimeHostVm::StorageGet(StorageGet { inner: self });
                     }
                 }
 
                 host::HostVm::ExternalStorageClearPrefix(req) => {
-                    if let host::StorageKey::MainTrie { .. } = req.prefix() {
+                    let is_main_trie = matches!(req.prefix(), host::StorageKey::MainTrie { .. });
+                    if is_main_trie {
                         self.vm = req.into();
                         return RuntimeHostVm::PrefixKeys(PrefixKeys { inner: self });
                     } else {
@@ -732,8 +746,8 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageRoot(req) => {
-                    if let host::Trie::MainTrie = req.trie() {
-                    } else {
+                    let is_main_trie = matches!(req.trie(), host::Trie::MainTrie);
+                    if !is_main_trie {
                         // TODO: this is a dummy implementation and child tries are not implemented properly
                         self.vm = req.resume(None);
                         continue;
@@ -778,7 +792,8 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageNextKey(req) => {
-                    if let host::StorageKey::MainTrie { .. } = req.key() {
+                    let is_main_trie = matches!(req.key(), host::StorageKey::MainTrie { .. });
+                    if is_main_trie {
                         self.vm = req.into();
                         return RuntimeHostVm::NextKey(NextKey {
                             inner: self,

@@ -366,7 +366,8 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageGet(req) => {
-                    if let host::StorageKey::MainTrie { .. } = req.key() {
+                    let is_main_trie = matches!(req.key(), host::StorageKey::MainTrie { .. });
+                    if is_main_trie {
                         self.vm = req.into();
                         return RuntimeHostVm::StorageGet(StorageGet { inner: self });
                     } else {
@@ -376,7 +377,8 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageNextKey(req) => {
-                    if let host::StorageKey::MainTrie { .. } = req.key() {
+                    let is_main_trie = matches!(req.key(), host::StorageKey::MainTrie { .. });
+                    if is_main_trie {
                         self.vm = req.into();
                         return RuntimeHostVm::NextKey(NextKey { inner: self });
                     } else {
@@ -423,7 +425,8 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageRoot(req) => {
-                    if let host::Trie::MainTrie = req.trie() {
+                    let is_main_trie = matches!(req.trie(), host::Trie::MainTrie);
+                    if is_main_trie {
                         self.vm = req.into();
                         return RuntimeHostVm::StorageRoot(StorageRoot { inner: self });
                     } else {
