@@ -1523,14 +1523,6 @@ impl ReadyToRun {
             HostFunction::ext_offchain_http_response_read_body_version_1 => {
                 host_fn_not_implemented!()
             }
-            HostFunction::ext_sandbox_instantiate_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_sandbox_invoke_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_sandbox_memory_new_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_sandbox_memory_get_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_sandbox_memory_set_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_sandbox_memory_teardown_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_sandbox_instance_teardown_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_sandbox_get_global_val_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_trie_blake2_256_root_version_1
             | HostFunction::ext_trie_blake2_256_root_version_2 => {
                 let state_version =
@@ -3199,14 +3191,6 @@ externalities! {
     ext_offchain_http_response_wait_version_1,
     ext_offchain_http_response_headers_version_1,
     ext_offchain_http_response_read_body_version_1,
-    ext_sandbox_instantiate_version_1,
-    ext_sandbox_invoke_version_1,
-    ext_sandbox_memory_new_version_1,
-    ext_sandbox_memory_get_version_1,
-    ext_sandbox_memory_set_version_1,
-    ext_sandbox_memory_teardown_version_1,
-    ext_sandbox_instance_teardown_version_1,
-    ext_sandbox_get_global_val_version_1,
     ext_trie_blake2_256_root_version_1,
     ext_trie_blake2_256_root_version_2,
     ext_trie_blake2_256_ordered_root_version_1,
@@ -3300,14 +3284,6 @@ impl HostFunction {
             HostFunction::ext_offchain_http_response_wait_version_1 => todo!(),
             HostFunction::ext_offchain_http_response_headers_version_1 => todo!(),
             HostFunction::ext_offchain_http_response_read_body_version_1 => todo!(),
-            HostFunction::ext_sandbox_instantiate_version_1 => todo!(),
-            HostFunction::ext_sandbox_invoke_version_1 => todo!(),
-            HostFunction::ext_sandbox_memory_new_version_1 => todo!(),
-            HostFunction::ext_sandbox_memory_get_version_1 => todo!(),
-            HostFunction::ext_sandbox_memory_set_version_1 => todo!(),
-            HostFunction::ext_sandbox_memory_teardown_version_1 => todo!(),
-            HostFunction::ext_sandbox_instance_teardown_version_1 => todo!(),
-            HostFunction::ext_sandbox_get_global_val_version_1 => todo!(),
             HostFunction::ext_trie_blake2_256_root_version_1 => 1,
             HostFunction::ext_trie_blake2_256_root_version_2 => 2,
             HostFunction::ext_trie_blake2_256_ordered_root_version_1 => 1,
