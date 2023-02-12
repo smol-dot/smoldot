@@ -1384,10 +1384,53 @@ impl ReadyToRun {
                 host_fn_not_implemented!()
             }
             HostFunction::ext_default_child_storage_clear_prefix_version_1 => {
-                host_fn_not_implemented!()
+                let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
+                let (prefix_ptr, prefix_size) = expect_pointer_size_raw!(1);
+                HostVm::ExternalStorageClearPrefix(ExternalStorageClearPrefix {
+                    prefix_ptr,
+                    prefix_size,
+                    child_trie_ptr_size: Some((child_trie_ptr, child_trie_size)),
+                    inner: self.inner,
+                    max_keys_to_remove: None,
+                    is_v2: false,
+                })
             }
             HostFunction::ext_default_child_storage_clear_prefix_version_2 => {
-                host_fn_not_implemented!()
+                let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
+                let (prefix_ptr, prefix_size) = expect_pointer_size_raw!(1);
+
+                let max_keys_to_remove = {
+                    let input = expect_pointer_size!(2);
+                    let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
+                        nom::combinator::all_consuming(util::nom_option_decode(
+                            nom::number::complete::le_u32,
+                        ))(input.as_ref())
+                        .map(|(_, parse_result)| parse_result);
+
+                    match parsing_result {
+                        Ok(val) => Ok(val),
+                        Err(_) => Err(()),
+                    }
+                };
+
+                let max_keys_to_remove = match max_keys_to_remove {
+                    Ok(l) => l,
+                    Err(()) => {
+                        return HostVm::Error {
+                            error: Error::ParamDecodeError,
+                            prototype: self.inner.into_prototype(),
+                        };
+                    }
+                };
+
+                HostVm::ExternalStorageClearPrefix(ExternalStorageClearPrefix {
+                    prefix_ptr,
+                    prefix_size,
+                    child_trie_ptr_size: Some((child_trie_ptr, child_trie_size)),
+                    inner: self.inner,
+                    max_keys_to_remove,
+                    is_v2: true,
+                })
             }
             HostFunction::ext_default_child_storage_set_version_1 => {
                 let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
@@ -2333,6 +2376,7 @@ impl fmt::Debug for ExternalStorageGet {
 }
 
 /// Must set the value of a storage entry.
+// TODO: what if it's a child trie and the child trie doesn't exist? create it?
 pub struct ExternalStorageSet {
     inner: Inner,
 
@@ -2704,6 +2748,7 @@ impl ExternalStorageNextKey {
     /// Writes the follow-up key in the Wasm VM memory and prepares it for execution.
     ///
     /// Must be passed `None` if the key is the last one in the storage.
+    // TODO: what if it's a child trie and the child trie doesn't exist?
     pub fn resume(self, follow_up: Option<&[u8]>) -> HostVm {
         let key = self
             .inner
