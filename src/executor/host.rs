@@ -1022,6 +1022,7 @@ impl ReadyToRun {
                     HostVm::ExternalStorageGet(ExternalStorageGet {
                         key_ptr,
                         key_size,
+                        child_trie_ptr_size: None,
                         calling: id,
                         value_out_ptr: None,
                         offset: 0,
@@ -1038,6 +1039,7 @@ impl ReadyToRun {
                 HostVm::ExternalStorageGet(ExternalStorageGet {
                     key_ptr,
                     key_size,
+                    child_trie_ptr_size: None,
                     calling: id,
                     value_out_ptr: Some(value_out_ptr),
                     offset,
@@ -1113,6 +1115,7 @@ impl ReadyToRun {
                     HostVm::ExternalStorageGet(ExternalStorageGet {
                         key_ptr,
                         key_size,
+                        child_trie_ptr_size: None,
                         calling: id,
                         value_out_ptr: None,
                         offset: 0,
@@ -1336,8 +1339,36 @@ impl ReadyToRun {
                     rollback: false,
                 }
             }
-            HostFunction::ext_default_child_storage_get_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_default_child_storage_read_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_default_child_storage_get_version_1 => {
+                let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
+                let (key_ptr, key_size) = expect_pointer_size_raw!(1);
+                HostVm::ExternalStorageGet(ExternalStorageGet {
+                    key_ptr,
+                    key_size,
+                    child_trie_ptr_size: Some((child_trie_ptr, child_trie_size)),
+                    calling: id,
+                    value_out_ptr: None,
+                    offset: 0,
+                    max_size: u32::max_value(),
+                    inner: self.inner,
+                })
+            }
+            HostFunction::ext_default_child_storage_read_version_1 => {
+                let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
+                let (key_ptr, key_size) = expect_pointer_size_raw!(1);
+                let (value_out_ptr, value_out_size) = expect_pointer_size_raw!(2);
+                let offset = expect_u32!(3);
+                HostVm::ExternalStorageGet(ExternalStorageGet {
+                    key_ptr,
+                    key_size,
+                    child_trie_ptr_size: Some((child_trie_ptr, child_trie_size)),
+                    calling: id,
+                    value_out_ptr: Some(value_out_ptr),
+                    offset,
+                    max_size: value_out_size,
+                    inner: self.inner,
+                })
+            }
             HostFunction::ext_default_child_storage_storage_kill_version_1 => {
                 host_fn_not_implemented!()
             }
@@ -1355,7 +1386,20 @@ impl ReadyToRun {
             }
             HostFunction::ext_default_child_storage_set_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_default_child_storage_clear_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_default_child_storage_exists_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_default_child_storage_exists_version_1 => {
+                let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
+                let (key_ptr, key_size) = expect_pointer_size_raw!(1);
+                HostVm::ExternalStorageGet(ExternalStorageGet {
+                    key_ptr,
+                    key_size,
+                    child_trie_ptr_size: Some((child_trie_ptr, child_trie_size)),
+                    calling: id,
+                    value_out_ptr: None,
+                    offset: 0,
+                    max_size: 0,
+                    inner: self.inner,
+                })
+            }
             HostFunction::ext_default_child_storage_next_key_version_1 => {
                 host_fn_not_implemented!()
             }
@@ -2045,6 +2089,8 @@ pub struct ExternalStorageGet {
     key_ptr: u32,
     /// Size of the key whose value must be loaded. Guaranteed to be in range.
     key_size: u32,
+    /// Pointer and size to the default child trie. `None` if main trie. Guaranteed to be in range.
+    child_trie_ptr_size: Option<(u32, u32)>,
     /// Offset within the value that the Wasm VM requires.
     offset: u32,
     /// Maximum size that the Wasm VM would accept.
@@ -2064,7 +2110,17 @@ impl ExternalStorageGet {
             .vm
             .read_memory(self.key_ptr, self.key_size)
             .unwrap();
-        StorageKey::MainTrie { key }
+
+        if let Some((child_trie_ptr, child_trie_size)) = self.child_trie_ptr_size {
+            let child_trie = self
+                .inner
+                .vm
+                .read_memory(child_trie_ptr, child_trie_size)
+                .unwrap();
+            StorageKey::ChildTrieDefault { child_trie, key }
+        } else {
+            StorageKey::MainTrie { key }
+        }
     }
 
     /// Offset within the value that is requested.
@@ -2146,7 +2202,8 @@ impl ExternalStorageGet {
         };
 
         match host_fn {
-            HostFunction::ext_storage_get_version_1 => {
+            HostFunction::ext_storage_get_version_1
+            | HostFunction::ext_default_child_storage_get_version_1 => {
                 if let Some((value, value_total_len)) = value {
                     // Writing `Some(value)`.
                     debug_assert_eq!(
@@ -2167,7 +2224,8 @@ impl ExternalStorageGet {
                         .alloc_write_and_return_pointer_size(host_fn.name(), iter::once(&[0]))
                 }
             }
-            HostFunction::ext_storage_read_version_1 => {
+            HostFunction::ext_storage_read_version_1
+            | HostFunction::ext_default_child_storage_read_version_1 => {
                 let outcome = if let Some((value, value_total_len)) = value {
                     let mut remaining_max_allowed = usize::try_from(self.max_size).unwrap();
                     let mut offset = self.value_out_ptr.unwrap();
@@ -2198,14 +2256,17 @@ impl ExternalStorageGet {
                     },
                 );
             }
-            HostFunction::ext_storage_exists_version_1 => HostVm::ReadyToRun(ReadyToRun {
-                inner: self.inner,
-                resume_value: Some(if value.is_some() {
-                    vm::WasmValue::I32(1)
-                } else {
-                    vm::WasmValue::I32(0)
-                }),
-            }),
+            HostFunction::ext_storage_exists_version_1
+            | HostFunction::ext_default_child_storage_exists_version_1 => {
+                HostVm::ReadyToRun(ReadyToRun {
+                    inner: self.inner,
+                    resume_value: Some(if value.is_some() {
+                        vm::WasmValue::I32(1)
+                    } else {
+                        vm::WasmValue::I32(0)
+                    }),
+                })
+            }
             _ => unreachable!(),
         }
     }
