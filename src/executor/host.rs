@@ -978,6 +978,7 @@ impl ReadyToRun {
                     HostVm::ExternalStorageSet(ExternalStorageSet {
                         key_ptr,
                         key_size,
+                        child_trie_ptr_size: None,
                         value: Some((value_ptr, value_size)),
                         inner: self.inner,
                     })
@@ -1069,6 +1070,7 @@ impl ReadyToRun {
                     HostVm::ExternalStorageSet(ExternalStorageSet {
                         key_ptr,
                         key_size,
+                        child_trie_ptr_size: None,
                         value: None,
                         inner: self.inner,
                     })
@@ -1147,6 +1149,7 @@ impl ReadyToRun {
                     HostVm::ExternalStorageClearPrefix(ExternalStorageClearPrefix {
                         prefix_ptr,
                         prefix_size,
+                        child_trie_ptr_size: None,
                         inner: self.inner,
                         max_keys_to_remove: None,
                         is_v2: false,
@@ -1200,6 +1203,7 @@ impl ReadyToRun {
                     HostVm::ExternalStorageClearPrefix(ExternalStorageClearPrefix {
                         prefix_ptr,
                         prefix_size,
+                        child_trie_ptr_size: None,
                         inner: self.inner,
                         max_keys_to_remove,
                         is_v2: true,
@@ -1384,8 +1388,29 @@ impl ReadyToRun {
             HostFunction::ext_default_child_storage_clear_prefix_version_2 => {
                 host_fn_not_implemented!()
             }
-            HostFunction::ext_default_child_storage_set_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_default_child_storage_clear_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_default_child_storage_set_version_1 => {
+                let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
+                let (key_ptr, key_size) = expect_pointer_size_raw!(1);
+                let (value_ptr, value_size) = expect_pointer_size_raw!(2);
+                HostVm::ExternalStorageSet(ExternalStorageSet {
+                    key_ptr,
+                    key_size,
+                    child_trie_ptr_size: Some((child_trie_ptr, child_trie_size)),
+                    value: Some((value_ptr, value_size)),
+                    inner: self.inner,
+                })
+            }
+            HostFunction::ext_default_child_storage_clear_version_1 => {
+                let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
+                let (key_ptr, key_size) = expect_pointer_size_raw!(1);
+                HostVm::ExternalStorageSet(ExternalStorageSet {
+                    key_ptr,
+                    key_size,
+                    child_trie_ptr_size: Some((child_trie_ptr, child_trie_size)),
+                    value: None,
+                    inner: self.inner,
+                })
+            }
             HostFunction::ext_default_child_storage_exists_version_1 => {
                 let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
                 let (key_ptr, key_size) = expect_pointer_size_raw!(1);
@@ -2306,6 +2331,8 @@ pub struct ExternalStorageSet {
     key_ptr: u32,
     /// Size of the key whose value must be set. Guaranteed to be in range.
     key_size: u32,
+    /// Pointer and size to the default child trie. `None` if main trie. Guaranteed to be in range.
+    child_trie_ptr_size: Option<(u32, u32)>,
 
     /// Pointer and size of the value to set. `None` for clearing. Guaranteed to be in range.
     value: Option<(u32, u32)>,
@@ -2314,13 +2341,22 @@ pub struct ExternalStorageSet {
 impl ExternalStorageSet {
     /// Returns the key whose value must be set.
     pub fn key(&'_ self) -> StorageKey<impl AsRef<[u8]> + '_> {
-        // Note: the host functions aren't implemented for child tries.
         let key = self
             .inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
             .unwrap();
-        StorageKey::MainTrie { key }
+
+        if let Some((child_trie_ptr, child_trie_size)) = self.child_trie_ptr_size {
+            let child_trie = self
+                .inner
+                .vm
+                .read_memory(child_trie_ptr, child_trie_size)
+                .unwrap();
+            StorageKey::ChildTrieDefault { child_trie, key }
+        } else {
+            StorageKey::MainTrie { key }
+        }
     }
 
     /// Returns the value to set.
@@ -2391,6 +2427,7 @@ pub struct ExternalStorageAppend {
 impl ExternalStorageAppend {
     /// Returns the key whose value must be set.
     pub fn key(&'_ self) -> StorageKey<impl AsRef<[u8]> + '_> {
+        // Note that there is no equivalent of this host function for child tries.
         let key = self
             .inner
             .vm
@@ -2432,6 +2469,8 @@ pub struct ExternalStorageClearPrefix {
     prefix_ptr: u32,
     /// Size of the prefix to remove. Guaranteed to be in range.
     prefix_size: u32,
+    /// Pointer and size to the default child trie. `None` if main trie. Guaranteed to be in range.
+    child_trie_ptr_size: Option<(u32, u32)>,
 
     /// Maximum number of keys to remove.
     max_keys_to_remove: Option<u32>,
@@ -2448,7 +2487,20 @@ impl ExternalStorageClearPrefix {
             .vm
             .read_memory(self.prefix_ptr, self.prefix_size)
             .unwrap();
-        StorageKey::MainTrie { key: prefix }
+
+        if let Some((child_trie_ptr, child_trie_size)) = self.child_trie_ptr_size {
+            let child_trie = self
+                .inner
+                .vm
+                .read_memory(child_trie_ptr, child_trie_size)
+                .unwrap();
+            StorageKey::ChildTrieDefault {
+                child_trie,
+                key: prefix,
+            }
+        } else {
+            StorageKey::MainTrie { key: prefix }
+        }
     }
 
     /// Returns the maximum number of keys to remove. `None` means "infinity".
