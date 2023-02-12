@@ -1151,7 +1151,7 @@ impl ReadyToRun {
                         child_trie_ptr_size: None,
                         inner: self.inner,
                         max_keys_to_remove: None,
-                        is_v2: false,
+                        calling: id,
                     })
                 }
             }
@@ -1204,7 +1204,7 @@ impl ReadyToRun {
                         child_trie_ptr_size: None,
                         inner: self.inner,
                         max_keys_to_remove,
-                        is_v2: true,
+                        calling: id,
                     })
                 }
             }
@@ -1379,12 +1379,11 @@ impl ReadyToRun {
                     child_trie_ptr_size: Some((child_trie_ptr, child_trie_size)),
                     inner: self.inner,
                     max_keys_to_remove: None,
-                    is_v2: false,
+                    calling: id,
                 })
             }
             HostFunction::ext_default_child_storage_storage_kill_version_2
             | HostFunction::ext_default_child_storage_storage_kill_version_3 => {
-                // TODO: difference between v2 and v3?
                 let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
 
                 let max_keys_to_remove = {
@@ -1416,7 +1415,7 @@ impl ReadyToRun {
                     child_trie_ptr_size: Some((child_trie_ptr, child_trie_size)),
                     inner: self.inner,
                     max_keys_to_remove,
-                    is_v2: true,
+                    calling: id,
                 })
             }
             HostFunction::ext_default_child_storage_clear_prefix_version_1 => {
@@ -1427,7 +1426,7 @@ impl ReadyToRun {
                     child_trie_ptr_size: Some((child_trie_ptr, child_trie_size)),
                     inner: self.inner,
                     max_keys_to_remove: None,
-                    is_v2: false,
+                    calling: id,
                 })
             }
             HostFunction::ext_default_child_storage_clear_prefix_version_2 => {
@@ -1463,7 +1462,7 @@ impl ReadyToRun {
                     child_trie_ptr_size: Some((child_trie_ptr, child_trie_size)),
                     inner: self.inner,
                     max_keys_to_remove,
-                    is_v2: true,
+                    calling: id,
                 })
             }
             HostFunction::ext_default_child_storage_set_version_1 => {
@@ -2553,6 +2552,9 @@ impl fmt::Debug for ExternalStorageAppend {
 // TODO: clarify whether the entire child trie must disappear if the prefix is []
 pub struct ExternalStorageClearPrefix {
     inner: Inner,
+    /// Function currently being called by the Wasm code. Refers to an index within
+    /// [`Inner::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
+    calling: usize,
 
     /// Pointer and size to the prefix. `None` if `&[]`. Guaranteed to be in range.
     prefix_ptr_size: Option<(u32, u32)>,
@@ -2561,9 +2563,6 @@ pub struct ExternalStorageClearPrefix {
 
     /// Maximum number of keys to remove.
     max_keys_to_remove: Option<u32>,
-
-    /// `true` if version 2 of the function is called, `false` for version 1.
-    is_v2: bool,
 }
 
 impl ExternalStorageClearPrefix {
@@ -2600,20 +2599,37 @@ impl ExternalStorageClearPrefix {
     /// Must be passed how many keys have been cleared, and whether some keys remaining to be
     /// cleared.
     pub fn resume(self, num_cleared: u32, some_keys_remain: bool) -> HostVm {
-        if self.is_v2 {
-            self.inner.alloc_write_and_return_pointer_size(
-                HostFunction::ext_storage_clear_prefix_version_2.name(),
-                [
-                    either::Left(if some_keys_remain { [1u8] } else { [0u8] }),
-                    either::Right(num_cleared.to_le_bytes()),
-                ]
-                .into_iter(),
-            )
-        } else {
-            HostVm::ReadyToRun(ReadyToRun {
-                inner: self.inner,
-                resume_value: None,
-            })
+        let host_fn = match self.inner.registered_functions[self.calling] {
+            FunctionImport::Resolved(f) => f,
+            FunctionImport::Unresolved { .. } => unreachable!(),
+        };
+
+        match host_fn {
+            HostFunction::ext_storage_clear_prefix_version_1
+            | HostFunction::ext_default_child_storage_storage_kill_version_1 => {
+                HostVm::ReadyToRun(ReadyToRun {
+                    inner: self.inner,
+                    resume_value: None,
+                })
+            }
+            HostFunction::ext_default_child_storage_storage_kill_version_2 => {
+                HostVm::ReadyToRun(ReadyToRun {
+                    inner: self.inner,
+                    resume_value: Some(vm::WasmValue::I32(if some_keys_remain { 0 } else { 1 })),
+                })
+            }
+            HostFunction::ext_storage_clear_prefix_version_2
+            | HostFunction::ext_default_child_storage_storage_kill_version_3 => {
+                self.inner.alloc_write_and_return_pointer_size(
+                    host_fn.name(),
+                    [
+                        either::Left(if some_keys_remain { [1u8] } else { [0u8] }),
+                        either::Right(num_cleared.to_le_bytes()),
+                    ]
+                    .into_iter(),
+                )
+            }
+            _ => unreachable!(),
         }
     }
 }
