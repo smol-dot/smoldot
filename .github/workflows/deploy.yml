@@ -153,6 +153,8 @@ jobs:
         working-directory: ./bin/wasm-node/javascript
       - run: npm publish --unsafe-perm --dry-run
         working-directory: ./bin/wasm-node/javascript
+      - run: cp ./README.md ./dist/mjs
+        working-directory: ./bin/wasm-node/javascript
       - run: |
           git add --force ./bin/wasm-node/javascript/dist/mjs  # --force bypasses the .gitignore
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
