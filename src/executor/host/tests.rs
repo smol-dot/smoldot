@@ -27,22 +27,24 @@ fn is_send() {
 
 #[test]
 fn basic_core_version() {
-    let proto = HostVmPrototype::new(Config {
-        module: &include_bytes!("./westend-runtime-v9300.wasm")[..],
-        heap_pages: HeapPages::new(2048),
-        exec_hint: ExecHint::ForceWasmi,
-        allow_unresolved_imports: true,
-    })
-    .unwrap();
+    for exec_hint in ExecHint::available_engines() {
+        let proto = HostVmPrototype::new(Config {
+            module: &include_bytes!("./westend-runtime-v9300.wasm")[..],
+            heap_pages: HeapPages::new(2048),
+            exec_hint,
+            allow_unresolved_imports: true,
+        })
+        .unwrap();
 
-    let mut vm = proto.run_no_param("Core_version").unwrap().run();
-    loop {
-        match vm {
-            HostVm::ReadyToRun(r) => vm = r.run(),
-            HostVm::Error { error, .. } => panic!("{:?}", error),
-            HostVm::Finished(f) => break,
-            HostVm::GetMaxLogLevel(r) => vm = r.resume(0),
-            _ => unreachable!(),
+        let mut vm = proto.run_no_param("Core_version").unwrap().run();
+        loop {
+            match vm {
+                HostVm::ReadyToRun(r) => vm = r.run(),
+                HostVm::Error { error, .. } => panic!("{:?}", error),
+                HostVm::Finished(f) => break,
+                HostVm::GetMaxLogLevel(r) => vm = r.resume(0),
+                _ => unreachable!(),
+            }
         }
     }
 }
