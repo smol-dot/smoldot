@@ -1403,8 +1403,28 @@ impl ReadyToRun {
             HostFunction::ext_default_child_storage_next_key_version_1 => {
                 host_fn_not_implemented!()
             }
-            HostFunction::ext_default_child_storage_root_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_default_child_storage_root_version_2 => host_fn_not_implemented!(),
+            HostFunction::ext_default_child_storage_root_version_1 => {
+                let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
+                HostVm::ExternalStorageRoot(ExternalStorageRoot {
+                    inner: self.inner,
+                    calling: id,
+                    child_trie_ptr_size: Some((child_trie_ptr, child_trie_size)),
+                })
+            }
+            HostFunction::ext_default_child_storage_root_version_2 => {
+                let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
+                let state_version = expect_state_version!(1);
+                match state_version {
+                    trie::TrieEntryVersion::V0 => {
+                        HostVm::ExternalStorageRoot(ExternalStorageRoot {
+                            inner: self.inner,
+                            calling: id,
+                            child_trie_ptr_size: Some((child_trie_ptr, child_trie_size)),
+                        })
+                    }
+                    trie::TrieEntryVersion::V1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
+                }
+            }
             HostFunction::ext_crypto_ed25519_public_keys_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ed25519_generate_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ed25519_sign_version_1 => host_fn_not_implemented!(),
@@ -2466,7 +2486,6 @@ impl fmt::Debug for ExternalStorageClearPrefix {
 }
 
 /// Must provide the trie root hash of the storage.
-// TODO: document whether this must take into account the write that have just been done
 pub struct ExternalStorageRoot {
     inner: Inner,
 
@@ -2506,7 +2525,9 @@ impl ExternalStorageRoot {
                 HostFunction::ext_storage_get_version_1
                 | HostFunction::ext_storage_exists_version_1 => false,
                 HostFunction::ext_storage_root_version_1
-                | HostFunction::ext_storage_root_version_2 => true,
+                | HostFunction::ext_storage_root_version_2
+                | HostFunction::ext_default_child_storage_root_version_1
+                | HostFunction::ext_default_child_storage_root_version_2 => true,
                 _ => unreachable!(),
             }
         }
@@ -2530,6 +2551,12 @@ impl ExternalStorageRoot {
         };
 
         match host_fn {
+            f @ (HostFunction::ext_storage_root_version_1
+            | HostFunction::ext_storage_root_version_2
+            | HostFunction::ext_default_child_storage_root_version_1
+            | HostFunction::ext_default_child_storage_root_version_2) => self
+                .inner
+                .alloc_write_and_return_pointer_size(f.name(), iter::once(hash.unwrap())),
             HostFunction::ext_storage_get_version_1 => {
                 if let Some(hash) = hash {
                     // Writing `Some(hash)`.
@@ -2554,18 +2581,6 @@ impl ExternalStorageRoot {
                     vm::WasmValue::I32(0)
                 }),
             }),
-            HostFunction::ext_storage_root_version_1 => {
-                self.inner.alloc_write_and_return_pointer_size(
-                    HostFunction::ext_storage_root_version_1.name(),
-                    iter::once(hash.unwrap()),
-                )
-            }
-            HostFunction::ext_storage_root_version_2 => {
-                self.inner.alloc_write_and_return_pointer_size(
-                    HostFunction::ext_storage_root_version_2.name(),
-                    iter::once(hash.unwrap()),
-                )
-            }
             _ => unreachable!(),
         }
     }
