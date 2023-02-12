@@ -1147,8 +1147,7 @@ impl ReadyToRun {
                     })
                 } else {
                     HostVm::ExternalStorageClearPrefix(ExternalStorageClearPrefix {
-                        prefix_ptr,
-                        prefix_size,
+                        prefix_ptr_size: Some((prefix_ptr, prefix_size)),
                         child_trie_ptr_size: None,
                         inner: self.inner,
                         max_keys_to_remove: None,
@@ -1201,8 +1200,7 @@ impl ReadyToRun {
                     })
                 } else {
                     HostVm::ExternalStorageClearPrefix(ExternalStorageClearPrefix {
-                        prefix_ptr,
-                        prefix_size,
+                        prefix_ptr_size: Some((prefix_ptr, prefix_size)),
                         child_trie_ptr_size: None,
                         inner: self.inner,
                         max_keys_to_remove,
@@ -1375,20 +1373,57 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_default_child_storage_storage_kill_version_1 => {
-                host_fn_not_implemented!()
+                let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
+                HostVm::ExternalStorageClearPrefix(ExternalStorageClearPrefix {
+                    prefix_ptr_size: None,
+                    child_trie_ptr_size: Some((child_trie_ptr, child_trie_size)),
+                    inner: self.inner,
+                    max_keys_to_remove: None,
+                    is_v2: false,
+                })
             }
-            HostFunction::ext_default_child_storage_storage_kill_version_2 => {
-                host_fn_not_implemented!()
-            }
-            HostFunction::ext_default_child_storage_storage_kill_version_3 => {
-                host_fn_not_implemented!()
+            HostFunction::ext_default_child_storage_storage_kill_version_2
+            | HostFunction::ext_default_child_storage_storage_kill_version_3 => {
+                // TODO: difference between v2 and v3?
+                let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
+
+                let max_keys_to_remove = {
+                    let input = expect_pointer_size!(1);
+                    let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
+                        nom::combinator::all_consuming(util::nom_option_decode(
+                            nom::number::complete::le_u32,
+                        ))(input.as_ref())
+                        .map(|(_, parse_result)| parse_result);
+
+                    match parsing_result {
+                        Ok(val) => Ok(val),
+                        Err(_) => Err(()),
+                    }
+                };
+
+                let max_keys_to_remove = match max_keys_to_remove {
+                    Ok(l) => l,
+                    Err(()) => {
+                        return HostVm::Error {
+                            error: Error::ParamDecodeError,
+                            prototype: self.inner.into_prototype(),
+                        };
+                    }
+                };
+
+                HostVm::ExternalStorageClearPrefix(ExternalStorageClearPrefix {
+                    prefix_ptr_size: None,
+                    child_trie_ptr_size: Some((child_trie_ptr, child_trie_size)),
+                    inner: self.inner,
+                    max_keys_to_remove,
+                    is_v2: true,
+                })
             }
             HostFunction::ext_default_child_storage_clear_prefix_version_1 => {
                 let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
                 let (prefix_ptr, prefix_size) = expect_pointer_size_raw!(1);
                 HostVm::ExternalStorageClearPrefix(ExternalStorageClearPrefix {
-                    prefix_ptr,
-                    prefix_size,
+                    prefix_ptr_size: Some((prefix_ptr, prefix_size)),
                     child_trie_ptr_size: Some((child_trie_ptr, child_trie_size)),
                     inner: self.inner,
                     max_keys_to_remove: None,
@@ -1424,8 +1459,7 @@ impl ReadyToRun {
                 };
 
                 HostVm::ExternalStorageClearPrefix(ExternalStorageClearPrefix {
-                    prefix_ptr,
-                    prefix_size,
+                    prefix_ptr_size: Some((prefix_ptr, prefix_size)),
                     child_trie_ptr_size: Some((child_trie_ptr, child_trie_size)),
                     inner: self.inner,
                     max_keys_to_remove,
@@ -2377,6 +2411,7 @@ impl fmt::Debug for ExternalStorageGet {
 
 /// Must set the value of a storage entry.
 // TODO: what if it's a child trie and the child trie doesn't exist? create it?
+// TODO: what if the value is None and this is the last entry in the child trie? should it be destroyed?
 pub struct ExternalStorageSet {
     inner: Inner,
 
@@ -2515,13 +2550,12 @@ impl fmt::Debug for ExternalStorageAppend {
 /// Must remove from the storage keys which start with a certain prefix. Use
 /// [`ExternalStorageClearPrefix::max_keys_to_remove`] to determine the maximum number of keys
 /// to remove.
+// TODO: clarify whether the entire child trie must disappear if the prefix is []
 pub struct ExternalStorageClearPrefix {
     inner: Inner,
 
-    /// Pointer to the prefix to remove. Guaranteed to be in range.
-    prefix_ptr: u32,
-    /// Size of the prefix to remove. Guaranteed to be in range.
-    prefix_size: u32,
+    /// Pointer and size to the prefix. `None` if `&[]`. Guaranteed to be in range.
+    prefix_ptr_size: Option<(u32, u32)>,
     /// Pointer and size to the default child trie. `None` if main trie. Guaranteed to be in range.
     child_trie_ptr_size: Option<(u32, u32)>,
 
@@ -2535,11 +2569,11 @@ pub struct ExternalStorageClearPrefix {
 impl ExternalStorageClearPrefix {
     /// Returns the prefix whose keys must be removed.
     pub fn prefix(&'_ self) -> StorageKey<impl AsRef<[u8]> + '_> {
-        let prefix = self
-            .inner
-            .vm
-            .read_memory(self.prefix_ptr, self.prefix_size)
-            .unwrap();
+        let prefix = if let Some((prefix_ptr, prefix_size)) = self.prefix_ptr_size {
+            either::Left(self.inner.vm.read_memory(prefix_ptr, prefix_size).unwrap())
+        } else {
+            either::Right(&[][..])
+        };
 
         if let Some((child_trie_ptr, child_trie_size)) = self.child_trie_ptr_size {
             let child_trie = self
@@ -2548,7 +2582,7 @@ impl ExternalStorageClearPrefix {
                 .read_memory(child_trie_ptr, child_trie_size)
                 .unwrap();
             StorageKey::ChildTrieDefault {
-                child_trie,
+                child_trie: either::Left(child_trie),
                 key: prefix,
             }
         } else {
