@@ -210,6 +210,7 @@ pub use runtime_version::{CoreVersion, CoreVersionError, CoreVersionRef};
 pub use vm::HeapPages;
 pub use zstd::Error as ModuleFormatError;
 
+mod tests;
 mod zstd;
 
 /// Configuration for [`HostVmPrototype::new`].
@@ -3393,16 +3394,5 @@ impl<'a> allocator::Memory for MemAccess<'a> {
         u32::from(self.memory_total_pages)
             .saturating_mul(64)
             .saturating_mul(1024)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::HostVm;
-
-    #[test]
-    fn is_send() {
-        fn req<T: Send>() {}
-        req::<HostVm>();
     }
 }
