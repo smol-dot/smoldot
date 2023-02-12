@@ -210,6 +210,7 @@ pub use runtime_version::{CoreVersion, CoreVersionError, CoreVersionRef};
 pub use vm::HeapPages;
 pub use zstd::Error as ModuleFormatError;
 
+mod tests;
 mod zstd;
 
 /// Configuration for [`HostVmPrototype::new`].
@@ -1099,15 +1100,6 @@ impl ReadyToRun {
                     inner: self.inner,
                 })
             }
-            HostFunction::ext_storage_child_set_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_storage_child_get_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_storage_child_read_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_storage_child_clear_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_storage_child_storage_kill_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_storage_child_exists_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_storage_child_clear_prefix_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_storage_child_root_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_storage_child_next_key_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_storage_start_transaction_version_1 => {
                 // TODO: a maximum depth is important in order to prevent a malicious runtime from crashing the client, but the depth needs to be the same as in Substrate; figure out
                 self.inner.storage_transaction_depth += 1;
@@ -1532,14 +1524,6 @@ impl ReadyToRun {
             HostFunction::ext_offchain_http_response_read_body_version_1 => {
                 host_fn_not_implemented!()
             }
-            HostFunction::ext_sandbox_instantiate_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_sandbox_invoke_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_sandbox_memory_new_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_sandbox_memory_get_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_sandbox_memory_set_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_sandbox_memory_teardown_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_sandbox_instance_teardown_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_sandbox_get_global_val_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_trie_blake2_256_root_version_1
             | HostFunction::ext_trie_blake2_256_root_version_2 => {
                 let state_version =
@@ -3146,15 +3130,6 @@ externalities! {
     ext_storage_changes_root_version_1,
     ext_storage_next_key_version_1,
     ext_storage_append_version_1,
-    ext_storage_child_set_version_1,
-    ext_storage_child_get_version_1,
-    ext_storage_child_read_version_1,
-    ext_storage_child_clear_version_1,
-    ext_storage_child_storage_kill_version_1,
-    ext_storage_child_exists_version_1,
-    ext_storage_child_clear_prefix_version_1,
-    ext_storage_child_root_version_1,
-    ext_storage_child_next_key_version_1,
     ext_storage_start_transaction_version_1,
     ext_storage_rollback_transaction_version_1,
     ext_storage_commit_transaction_version_1,
@@ -3217,14 +3192,6 @@ externalities! {
     ext_offchain_http_response_wait_version_1,
     ext_offchain_http_response_headers_version_1,
     ext_offchain_http_response_read_body_version_1,
-    ext_sandbox_instantiate_version_1,
-    ext_sandbox_invoke_version_1,
-    ext_sandbox_memory_new_version_1,
-    ext_sandbox_memory_get_version_1,
-    ext_sandbox_memory_set_version_1,
-    ext_sandbox_memory_teardown_version_1,
-    ext_sandbox_instance_teardown_version_1,
-    ext_sandbox_get_global_val_version_1,
     ext_trie_blake2_256_root_version_1,
     ext_trie_blake2_256_root_version_2,
     ext_trie_blake2_256_ordered_root_version_1,
@@ -3256,15 +3223,6 @@ impl HostFunction {
             HostFunction::ext_storage_changes_root_version_1 => 1,
             HostFunction::ext_storage_next_key_version_1 => 1,
             HostFunction::ext_storage_append_version_1 => 2,
-            HostFunction::ext_storage_child_set_version_1 => todo!(),
-            HostFunction::ext_storage_child_get_version_1 => todo!(),
-            HostFunction::ext_storage_child_read_version_1 => todo!(),
-            HostFunction::ext_storage_child_clear_version_1 => todo!(),
-            HostFunction::ext_storage_child_storage_kill_version_1 => todo!(),
-            HostFunction::ext_storage_child_exists_version_1 => todo!(),
-            HostFunction::ext_storage_child_clear_prefix_version_1 => todo!(),
-            HostFunction::ext_storage_child_root_version_1 => todo!(),
-            HostFunction::ext_storage_child_next_key_version_1 => todo!(),
             HostFunction::ext_storage_start_transaction_version_1 => 0,
             HostFunction::ext_storage_rollback_transaction_version_1 => 0,
             HostFunction::ext_storage_commit_transaction_version_1 => 0,
@@ -3327,14 +3285,6 @@ impl HostFunction {
             HostFunction::ext_offchain_http_response_wait_version_1 => todo!(),
             HostFunction::ext_offchain_http_response_headers_version_1 => todo!(),
             HostFunction::ext_offchain_http_response_read_body_version_1 => todo!(),
-            HostFunction::ext_sandbox_instantiate_version_1 => todo!(),
-            HostFunction::ext_sandbox_invoke_version_1 => todo!(),
-            HostFunction::ext_sandbox_memory_new_version_1 => todo!(),
-            HostFunction::ext_sandbox_memory_get_version_1 => todo!(),
-            HostFunction::ext_sandbox_memory_set_version_1 => todo!(),
-            HostFunction::ext_sandbox_memory_teardown_version_1 => todo!(),
-            HostFunction::ext_sandbox_instance_teardown_version_1 => todo!(),
-            HostFunction::ext_sandbox_get_global_val_version_1 => todo!(),
             HostFunction::ext_trie_blake2_256_root_version_1 => 1,
             HostFunction::ext_trie_blake2_256_root_version_2 => 2,
             HostFunction::ext_trie_blake2_256_ordered_root_version_1 => 1,
@@ -3444,16 +3394,5 @@ impl<'a> allocator::Memory for MemAccess<'a> {
         u32::from(self.memory_total_pages)
             .saturating_mul(64)
             .saturating_mul(1024)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::HostVm;
-
-    #[test]
-    fn is_send() {
-        fn req<T: Send>() {}
-        req::<HostVm>();
     }
 }

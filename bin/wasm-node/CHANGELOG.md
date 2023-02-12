@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- The alternative spellings `relayChain` and `paraId` for the `relay_chain` and `para_id` fields in chain specifications are now properly accepted as intended. ([#160](https://github.com/smol-dot/smoldot/pull/160))
+
+## 0.7.10 - 2022-02-10
+
+### Fixed
+
+- Fix randomness not being implemented properly, leading to the same random numbers always being generated. This issue lead to all instances of smoldot (even on different machines) always using the same networking key, which would lead to connectivity issues when multiple instances of smoldot connect to the same full node. Note that because perfect forward secrecy is used (and the randomness on the full node side was still functionning properly), it is not possible to retroactively decipher networking communications. Additionally, the fact that the same random numbers are always generated made smoldot vulnerable to HashDoS attacks. ([#142](https://github.com/smol-dot/smoldot/pull/142))
+- JSON-RPC requests without a `params` field are no longer invalid. ([#13](https://github.com/smol-dot/smoldot/pull/13))
 - Fix Merkle proofs whose trie root node has a size inferior to 32 bytes being considered as invalid. ([#3046](https://github.com/paritytech/smoldot/pull/3046))
 
 ## 0.7.9 - 2022-11-28

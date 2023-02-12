@@ -67,22 +67,15 @@ pub(super) struct ClientSpec {
     pub(super) consensus_engine: (),
     pub(super) genesis: Genesis,
     pub(super) light_sync_state: Option<LightSyncState>,
-    #[serde(flatten)]
-    pub(super) parachain: Option<ChainSpecParachain>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ChainSpecParachain {
     // Note that in Substrate/Cumulus this field is only named `relay_chain` and `relayChain` is
     // not accepted (as of 2022-06-09). This seems to be an oversight, as there are only two
     // fields that use snake_case while the rest uses camelCase. For this reason, smoldot
     // supports both.
-    #[serde(alias = "relayChain")]
-    pub(super) relay_chain: String,
+    #[serde(alias = "relay_chain")]
+    pub(super) relay_chain: Option<String>,
     // Same remark concerning the name as `relay_chain`
-    #[serde(alias = "paraId")]
-    pub(super) para_id: u32,
+    #[serde(alias = "para_id")]
+    pub(super) para_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

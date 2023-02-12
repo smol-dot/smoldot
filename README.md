@@ -11,8 +11,8 @@ The main development focus is currently around the wasm light node. Using https:
 
 The Wasm light node is published:
 
-- On NPM: <https://www.npmjs.com/package/@substrate/smoldot-light>
-- On Deno.land/x: <https://deno.land/x/smoldot> (URL to import: `https://deno.land/x/smoldot/index-deno.js`)
+- On NPM: <https://www.npmjs.com/package/smoldot>
+- On Deno.land/x: <https://deno.land/x/smoldot2> (URL to import: `https://deno.land/x/smoldot2/index-deno.js`)
 
 # Objectives
 
