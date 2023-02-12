@@ -1276,6 +1276,7 @@ impl ReadyToRun {
                     HostVm::ExternalStorageNextKey(ExternalStorageNextKey {
                         key_ptr,
                         key_size,
+                        child_trie_ptr_size: None,
                         inner: self.inner,
                         known_no_child_trie: false,
                     })
@@ -1426,7 +1427,15 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_default_child_storage_next_key_version_1 => {
-                host_fn_not_implemented!()
+                let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
+                let (key_ptr, key_size) = expect_pointer_size_raw!(1);
+                HostVm::ExternalStorageNextKey(ExternalStorageNextKey {
+                    key_ptr,
+                    key_size,
+                    child_trie_ptr_size: Some((child_trie_ptr, child_trie_size)),
+                    inner: self.inner,
+                    known_no_child_trie: false,
+                })
             }
             HostFunction::ext_default_child_storage_root_version_1 => {
                 let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
@@ -2658,6 +2667,8 @@ pub struct ExternalStorageNextKey {
     key_ptr: u32,
     /// Size of the key whose follow-up must be found. Guaranteed to be in range.
     key_size: u32,
+    /// Pointer and size of the child trie, if any. Guaranteed to be in range.
+    child_trie_ptr_size: Option<(u32, u32)>,
 
     /// `true` if we were in the [`ExternalStorageNextChildTrie`] before with the same key and no
     /// child trie has been found that follows the given key. This saves a transition.
@@ -2676,8 +2687,18 @@ impl ExternalStorageNextKey {
             .vm
             .read_memory(self.key_ptr, self.key_size)
             .unwrap();
-        debug_assert!(!key.as_ref().starts_with(CHILD_STORAGE_SPECIAL_PREFIX));
-        StorageKey::MainTrie { key }
+
+        if let Some((child_trie_ptr, child_trie_size)) = self.child_trie_ptr_size {
+            let child_trie = self
+                .inner
+                .vm
+                .read_memory(child_trie_ptr, child_trie_size)
+                .unwrap();
+            StorageKey::ChildTrieDefault { child_trie, key }
+        } else {
+            debug_assert!(!key.as_ref().starts_with(CHILD_STORAGE_SPECIAL_PREFIX));
+            StorageKey::MainTrie { key }
+        }
     }
 
     /// Writes the follow-up key in the Wasm VM memory and prepares it for execution.
@@ -2690,8 +2711,12 @@ impl ExternalStorageNextKey {
             .read_memory(self.key_ptr, self.key_size)
             .unwrap();
 
-        match (follow_up, self.known_no_child_trie) {
-            (follow_up, false)
+        match (
+            self.child_trie_ptr_size.is_some(),
+            follow_up,
+            self.known_no_child_trie,
+        ) {
+            (false, follow_up, false)
                 if follow_up.map_or(true, |next| next >= CHILD_STORAGE_SPECIAL_PREFIX)
                     && key.as_ref() < CHILD_STORAGE_SPECIAL_PREFIX =>
             {
@@ -2706,27 +2731,29 @@ impl ExternalStorageNextKey {
                     known_key_after: Some(follow_up.map(|k| k.to_owned())),
                 })
             }
-            (Some(next), _) => {
+            (_, Some(next), _) => {
                 debug_assert!(key.as_ref() < next);
 
-                if next.starts_with(CHILD_STORAGE_SPECIAL_PREFIX) {
+                if self.child_trie_ptr_size.is_none()
+                    && next.starts_with(CHILD_STORAGE_SPECIAL_PREFIX)
+                {
                     // TODO: return error because invalid storage
                 }
 
                 let value_len_enc = util::encode_scale_compact_usize(next.len());
                 drop(key);
                 self.inner.alloc_write_and_return_pointer_size(
-                    HostFunction::ext_storage_next_key_version_1.name(),
+                    HostFunction::ext_storage_next_key_version_1.name(), // TODO: no
                     iter::once(&[1][..])
                         .chain(iter::once(value_len_enc.as_ref()))
                         .chain(iter::once(next)),
                 )
             }
-            (None, _) => {
+            (_, None, _) => {
                 // Write a SCALE-encoded `None`.
                 drop(key);
                 self.inner.alloc_write_and_return_pointer_size(
-                    HostFunction::ext_storage_next_key_version_1.name(),
+                    HostFunction::ext_storage_next_key_version_1.name(), // TODO: no
                     iter::once(&[0]),
                 )
             }
@@ -2829,6 +2856,7 @@ impl ExternalStorageNextChildTrie {
                 inner: self.inner,
                 key_ptr: self.key_ptr,
                 key_size: self.key_size,
+                child_trie_ptr_size: None,
                 known_no_child_trie: true,
             }),
         }
