@@ -41,7 +41,7 @@ fn basic_core_version() {
             match vm {
                 HostVm::ReadyToRun(r) => vm = r.run(),
                 HostVm::Error { error, .. } => panic!("{:?}", error),
-                HostVm::Finished(f) => break,
+                HostVm::Finished(_) => break,
                 HostVm::GetMaxLogLevel(r) => vm = r.resume(0),
                 _ => unreachable!(),
             }
