@@ -182,7 +182,7 @@
 //!         // All the other variants correspond to function calls that the runtime might perform.
 //!         // `ExternalStorageGet` is shown here as an example.
 //!         HostVm::ExternalStorageGet(req) => {
-//!             println!("Runtime requires the storage value at {:?}", req.key().as_ref());
+//!             println!("Runtime requires the storage value at {:?}", req.key());
 //!             // Injects the value into the virtual machine and updates the state.
 //!             vm = req.resume(None); // Just a stub
 //!         }
@@ -2472,10 +2472,30 @@ impl fmt::Debug for ExternalStorageSet {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub enum StorageKey<T> {
     MainTrie { key: T },
     ChildTrieDefault { child_trie: T, key: T },
+}
+
+impl<T> fmt::Debug for StorageKey<T>
+where
+    T: AsRef<[u8]>,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StorageKey::MainTrie { key } => f
+                .debug_struct("StorageKey")
+                .field("key", &hex::encode(key.as_ref()))
+                .field("trie", &"<main trie>")
+                .finish(),
+            StorageKey::ChildTrieDefault { child_trie, key } => f
+                .debug_struct("StorageKey")
+                .field("key", &hex::encode(key.as_ref()))
+                .field("trie", &hex::encode(child_trie.as_ref()))
+                .finish(),
+        }
+    }
 }
 
 /// Must load a storage value, treat it as if it was a SCALE-encoded container, and put `value`
