@@ -100,7 +100,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
         "Smoldot has panicked" +
         (currentTask.name ? (" while executing task `" + currentTask.name + "`") : "") +
         ". This is a bug in smoldot. Please open an issue at " +
-        "https://github.com/paritytech/smoldot/issues with the following message:\n" +
+        "https://github.com/smol-dot/smoldot/issues with the following message:\n" +
         message
       );
       for (const chain of Array.from(chains.values())) {

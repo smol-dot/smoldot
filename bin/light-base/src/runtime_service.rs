@@ -2052,7 +2052,7 @@ impl SuccessfulRuntime {
                         log::warn!(
                             "Unresolved host function in runtime: `{}`:`{}`. Smoldot might \
                             encounter errors later on. Please report this issue in \
-                            https://github.com/paritytech/smoldot",
+                            https://github.com/smol-dot/smoldot",
                             module_name,
                             function
                         );

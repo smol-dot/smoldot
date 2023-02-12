@@ -81,7 +81,7 @@ mod jit;
 mod tests;
 
 use alloc::{string::String, vec::Vec};
-use core::fmt;
+use core::{fmt, iter};
 use smallvec::SmallVec;
 
 /// Compiled Wasm code.
@@ -361,6 +361,13 @@ pub enum ExecHint {
 }
 
 impl ExecHint {
+    /// Returns an iterator of all the [`ExecHint`] values corresponding to execution engines.
+    ///
+    /// > **Note**: This function is most useful for testing purposes.
+    pub fn available_engines() -> impl Iterator<Item = ExecHint> {
+        iter::once(ExecHint::ForceWasmi).chain(Self::force_wasmtime_if_available().into_iter())
+    }
+
     /// Returns `ForceWasmtime` if it is available on the current platform, and `None` otherwise.
     pub fn force_wasmtime_if_available() -> Option<ExecHint> {
         #[cfg(all(target_arch = "x86_64", feature = "std"))]
@@ -494,7 +501,7 @@ impl TryFrom<wasmi::Signature> for Signature {
 }
 
 /// Value that a Wasm function can accept or produce.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum WasmValue {
     /// A 32-bits integer. There is no fundamental difference between signed and unsigned
     /// integer, and the signed-ness should be determined depending on the context.
