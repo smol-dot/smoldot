@@ -592,6 +592,7 @@ impl HandshakeInProgress {
         };
 
         self.tx_buffer_encrypted.resize(512, 0);
+        self.tx_buffer_encrypted.make_contiguous(); // TODO: this is a hack to fix the follow-up debug_assert! from triggering; fixing this properly requires bigger changes
         debug_assert!(self.tx_buffer_encrypted.as_slices().1.is_empty());
         let written = self
             .inner
