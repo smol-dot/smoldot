@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Update the network protocol names used on the wire to use the `forkId` field used in the chain specification (if present) and no longer the `protocolId` (which is deprecated). Blockchains based off of Substrate versions later than October 2022 fully support either version.
+
 ### Fixed
 
 - The alternative spellings `relayChain` and `paraId` for the `relay_chain` and `para_id` fields in chain specifications are now properly accepted as intended. ([#160](https://github.com/smol-dot/smoldot/pull/160))

@@ -268,6 +268,8 @@ impl ChainSpec {
     ///
     /// It is possible for the JSON chain specs to not specify any protocol id, in which case a
     /// default value is returned.
+    ///
+    /// > **Note**: This mechanism is legacy and no longer used.
     pub fn protocol_id(&self) -> &str {
         self.client_spec.protocol_id.as_deref().unwrap_or("sup")
     }

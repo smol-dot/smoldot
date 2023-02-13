@@ -438,29 +438,33 @@ impl Signature {
     }
 }
 
-impl<'a> From<&'a Signature> for wasmi::Signature {
+impl<'a> From<&'a Signature> for wasmi::FuncType {
     fn from(sig: &'a Signature) -> Self {
-        wasmi::Signature::new(
+        wasmi::FuncType::new(
             sig.params
                 .iter()
                 .copied()
-                .map(wasmi::ValueType::from)
+                .map(wasmi::core::ValueType::from)
                 .collect::<Vec<_>>(),
-            sig.ret_ty.map(wasmi::ValueType::from),
+            sig.ret_ty.map(wasmi::core::ValueType::from),
         )
     }
 }
 
-impl From<Signature> for wasmi::Signature {
-    fn from(sig: Signature) -> wasmi::Signature {
-        wasmi::Signature::from(&sig)
+impl From<Signature> for wasmi::FuncType {
+    fn from(sig: Signature) -> wasmi::FuncType {
+        wasmi::FuncType::from(&sig)
     }
 }
 
-impl<'a> TryFrom<&'a wasmi::Signature> for Signature {
+impl<'a> TryFrom<&'a wasmi::FuncType> for Signature {
     type Error = UnsupportedTypeError;
 
-    fn try_from(sig: &'a wasmi::Signature) -> Result<Self, Self::Error> {
+    fn try_from(sig: &'a wasmi::FuncType) -> Result<Self, Self::Error> {
+        if sig.results().len() > 1 {
+            return Err(UnsupportedTypeError);
+        }
+
         Ok(Signature {
             params: sig
                 .params()
@@ -468,7 +472,12 @@ impl<'a> TryFrom<&'a wasmi::Signature> for Signature {
                 .copied()
                 .map(ValueType::try_from)
                 .collect::<Result<_, _>>()?,
-            ret_ty: sig.return_type().map(ValueType::try_from).transpose()?,
+            ret_ty: sig
+                .results()
+                .first()
+                .copied()
+                .map(ValueType::try_from)
+                .transpose()?,
         })
     }
 }
@@ -492,10 +501,10 @@ impl<'a> TryFrom<&'a wasmtime::FuncType> for Signature {
     }
 }
 
-impl TryFrom<wasmi::Signature> for Signature {
+impl TryFrom<wasmi::FuncType> for Signature {
     type Error = UnsupportedTypeError;
 
-    fn try_from(sig: wasmi::Signature) -> Result<Self, Self::Error> {
+    fn try_from(sig: wasmi::FuncType) -> Result<Self, Self::Error> {
         Signature::try_from(&sig)
     }
 }
@@ -548,23 +557,35 @@ impl WasmValue {
     }
 }
 
-impl TryFrom<wasmi::RuntimeValue> for WasmValue {
+impl TryFrom<wasmi::Value> for WasmValue {
     type Error = UnsupportedTypeError;
 
-    fn try_from(val: wasmi::RuntimeValue) -> Result<Self, Self::Error> {
+    fn try_from(val: wasmi::Value) -> Result<Self, Self::Error> {
         match val {
-            wasmi::RuntimeValue::I32(v) => Ok(WasmValue::I32(v)),
-            wasmi::RuntimeValue::I64(v) => Ok(WasmValue::I64(v)),
+            wasmi::Value::I32(v) => Ok(WasmValue::I32(v)),
+            wasmi::Value::I64(v) => Ok(WasmValue::I64(v)),
             _ => Err(UnsupportedTypeError),
         }
     }
 }
 
-impl From<WasmValue> for wasmi::RuntimeValue {
+impl<'a> TryFrom<&'a wasmi::Value> for WasmValue {
+    type Error = UnsupportedTypeError;
+
+    fn try_from(val: &'a wasmi::Value) -> Result<Self, Self::Error> {
+        match val {
+            wasmi::Value::I32(v) => Ok(WasmValue::I32(*v)),
+            wasmi::Value::I64(v) => Ok(WasmValue::I64(*v)),
+            _ => Err(UnsupportedTypeError),
+        }
+    }
+}
+
+impl From<WasmValue> for wasmi::Value {
     fn from(val: WasmValue) -> Self {
         match val {
-            WasmValue::I32(v) => wasmi::RuntimeValue::I32(v),
-            WasmValue::I64(v) => wasmi::RuntimeValue::I64(v),
+            WasmValue::I32(v) => wasmi::Value::I32(v),
+            WasmValue::I64(v) => wasmi::Value::I64(v),
         }
     }
 }
@@ -592,22 +613,22 @@ impl<'a> TryFrom<&'a wasmtime::Val> for WasmValue {
     }
 }
 
-impl From<ValueType> for wasmi::ValueType {
-    fn from(ty: ValueType) -> wasmi::ValueType {
+impl From<ValueType> for wasmi::core::ValueType {
+    fn from(ty: ValueType) -> wasmi::core::ValueType {
         match ty {
-            ValueType::I32 => wasmi::ValueType::I32,
-            ValueType::I64 => wasmi::ValueType::I64,
+            ValueType::I32 => wasmi::core::ValueType::I32,
+            ValueType::I64 => wasmi::core::ValueType::I64,
         }
     }
 }
 
-impl TryFrom<wasmi::ValueType> for ValueType {
+impl TryFrom<wasmi::core::ValueType> for ValueType {
     type Error = UnsupportedTypeError;
 
-    fn try_from(val: wasmi::ValueType) -> Result<Self, Self::Error> {
+    fn try_from(val: wasmi::core::ValueType) -> Result<Self, Self::Error> {
         match val {
-            wasmi::ValueType::I32 => Ok(ValueType::I32),
-            wasmi::ValueType::I64 => Ok(ValueType::I64),
+            wasmi::core::ValueType::I32 => Ok(ValueType::I32),
+            wasmi::core::ValueType::I64 => Ok(ValueType::I64),
             _ => Err(UnsupportedTypeError),
         }
     }
@@ -722,6 +743,9 @@ pub enum StartErr {
     /// The requested function has a signature that isn't supported.
     #[display(fmt = "Function to start uses unsupported signature.")]
     SignatureNotSupported,
+    /// The types of the provided parameters don't match the signature.
+    #[display(fmt = "The types of the provided parameters don't match the signature.")]
+    InvalidParameters,
 }
 
 /// Opaque error indicating an error while parsing or compiling the WebAssembly code.
