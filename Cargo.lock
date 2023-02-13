@@ -2937,8 +2937,8 @@ dependencies = [
 
 [[package]]
 name = "wasmi"
-version = "0.25.0"
-source = "git+https://github.com/paritytech/wasmi#852f14a7ef04b612776239160246203bed6f8f4d"
+version = "0.26.0"
+source = "git+https://github.com/paritytech/wasmi#5ef26a7e8c667e6800952e2e4e29c9e6d4de6b91"
 dependencies = [
  "spin",
  "wasmi_arena",
@@ -2949,12 +2949,12 @@ dependencies = [
 [[package]]
 name = "wasmi_arena"
 version = "0.4.0"
-source = "git+https://github.com/paritytech/wasmi#852f14a7ef04b612776239160246203bed6f8f4d"
+source = "git+https://github.com/paritytech/wasmi#5ef26a7e8c667e6800952e2e4e29c9e6d4de6b91"
 
 [[package]]
 name = "wasmi_core"
-version = "0.10.0"
-source = "git+https://github.com/paritytech/wasmi#852f14a7ef04b612776239160246203bed6f8f4d"
+version = "0.11.0"
+source = "git+https://github.com/paritytech/wasmi#5ef26a7e8c667e6800952e2e4e29c9e6d4de6b91"
 dependencies = [
  "downcast-rs",
  "libm 0.2.1",
@@ -2973,9 +2973,9 @@ dependencies = [
 
 [[package]]
 name = "wasmparser-nostd"
-version = "0.99.0"
+version = "0.100.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d5d5a1286081982312e2c6dc6c4d215ad18da679a75d9ace9c25eb624363a0c"
+checksum = "9157cab83003221bfd385833ab587a039f5d6fa7304854042ba358a3b09e0724"
 dependencies = [
  "indexmap-nostd",
 ]
