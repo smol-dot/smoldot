@@ -65,13 +65,23 @@ pub(super) fn protocols<'a>(
     .chain(chains.flat_map(|chain| {
         // TODO: limits are arbitrary
         iter::once(peers::ConfigRequestResponse {
-            name: format!("/{}/sync/2", chain.protocol_id),
+            name: match &chain.fork_id {
+                Some(fork_id) => {
+                    format!("/{}/{}/sync/2", hex::encode(&chain.genesis_hash), fork_id)
+                }
+                None => format!("/{}/sync/2", hex::encode(&chain.genesis_hash)),
+            },
             inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 1024 },
             max_response_size: 16 * 1024 * 1024,
             inbound_allowed: chain.allow_inbound_block_requests,
         })
         .chain(iter::once(peers::ConfigRequestResponse {
-            name: format!("/{}/light/2", chain.protocol_id),
+            name: match &chain.fork_id {
+                Some(fork_id) => {
+                    format!("/{}/{}/light/2", hex::encode(&chain.genesis_hash), fork_id)
+                }
+                None => format!("/{}/light/2", hex::encode(&chain.genesis_hash)),
+            },
             inbound_config: peers::ConfigRequestResponseIn::Payload {
                 max_size: 1024 * 512,
             },
@@ -80,21 +90,40 @@ pub(super) fn protocols<'a>(
             inbound_allowed: false,
         }))
         .chain(iter::once(peers::ConfigRequestResponse {
-            name: format!("/{}/kad", chain.protocol_id),
+            name: match &chain.fork_id {
+                Some(fork_id) => {
+                    format!("/{}/{}/kad", hex::encode(&chain.genesis_hash), fork_id)
+                }
+                None => format!("/{}/kad", hex::encode(&chain.genesis_hash)),
+            },
             inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 1024 },
             max_response_size: 1024 * 1024,
             // TODO: `false` here means we don't insert ourselves in the DHT, which is the polite thing to do for as long as Kad isn't implemented
             inbound_allowed: false,
         }))
         .chain(iter::once(peers::ConfigRequestResponse {
-            name: format!("/{}/sync/warp", chain.protocol_id),
+            name: match &chain.fork_id {
+                Some(fork_id) => {
+                    format!(
+                        "/{}/{}/sync/warp",
+                        hex::encode(&chain.genesis_hash),
+                        fork_id
+                    )
+                }
+                None => format!("/{}/sync/warp", hex::encode(&chain.genesis_hash)),
+            },
             inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 32 },
             max_response_size: 16 * 1024 * 1024,
             // We don't support inbound warp sync requests (yet).
             inbound_allowed: false,
         }))
         .chain(iter::once(peers::ConfigRequestResponse {
-            name: format!("/{}/state/2", chain.protocol_id),
+            name: match &chain.fork_id {
+                Some(fork_id) => {
+                    format!("/{}/{}/state/2", hex::encode(&chain.genesis_hash), fork_id)
+                }
+                None => format!("/{}/state/2", hex::encode(&chain.genesis_hash)),
+            },
             inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 1024 },
             // The sender tries to cap the response to 2MiB. However, if one storage item
             // is larger than 2MiB, the response is allowed to be bigger, as otherwise it

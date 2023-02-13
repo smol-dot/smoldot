@@ -100,11 +100,9 @@ pub struct ChainConfig {
     /// Number and hash of the current best block. Can later be updated with // TODO: which function?
     pub best_block: (u64, [u8; 32]),
 
-    /// Identifier of the chain to connect to.
-    ///
-    /// Each blockchain has (or should have) a different "protocol id". This value identifies the
-    /// chain, so as to not introduce conflicts in the networking messages.
-    pub protocol_id: String,
+    /// Optional identifier to insert into the networking protocol names. Used to differentiate
+    /// between chains with the same genesis hash.
+    pub fork_id: Option<String>,
 
     /// Number of bytes of the block number in the networking protocol.
     pub block_number_bytes: usize,
@@ -221,7 +219,7 @@ impl NetworkService {
             chains.push(service::ChainConfig {
                 in_slots: 25,
                 out_slots: 25,
-                protocol_id: chain.protocol_id.clone(),
+                fork_id: chain.fork_id.clone(),
                 block_number_bytes: chain.block_number_bytes,
                 best_hash: chain.best_block.1,
                 best_number: chain.best_block.0,
