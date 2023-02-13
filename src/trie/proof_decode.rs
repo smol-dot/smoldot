@@ -545,6 +545,24 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             storage_value: StorageValue::None,
                             children: Children { children_bitmap: 0 },
                         });
+                    } else if let Some((descendant, _)) = self
+                        .entries
+                        .range::<[nibble::Nibble], _>((
+                            ops::Bound::Included(&key[..]),
+                            ops::Bound::Unbounded,
+                        ))
+                        .next()
+                        .filter(|(k, _)| k.starts_with(key))
+                    {
+                        // There exists a node in the proof that starts with `key`. Consequently,
+                        // we know that `key` doesn't correspond to a node that exists.
+                        let nibble = descendant[key.len()];
+                        return Some(TrieNodeInfo {
+                            storage_value: StorageValue::None,
+                            children: Children {
+                                children_bitmap: 1 << u8::from(nibble),
+                            },
+                        });
                     } else if self
                         .entries
                         .range::<[nibble::Nibble], _>((
@@ -554,7 +572,6 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                         .next()
                         .map_or(false, |(k, _)| k.starts_with(&key[..found_key.len() + 1]))
                     {
-                        // Child present.
                         // There exists at least one node in the proof that starts with
                         // `key[..found_key.len() + 1]` but that isn't `key`, and there isn't any
                         // branch node at the common ancestor between this node and `key`, as
