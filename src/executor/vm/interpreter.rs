@@ -309,8 +309,8 @@ impl fmt::Debug for InterpreterPrototype {
     }
 }
 
-/// This dummy struct is meant to be converted to a `wasmi::core::Trap` and then back through
-/// downcasting, similar to `std::any::Any`.
+/// This dummy struct is meant to be converted to a `wasmi::core::Trap` and then back, similar to
+/// `std::any::Any`.
 #[derive(Debug, Clone)]
 struct InterruptedTrap {
     function_index: usize,
