@@ -41,7 +41,7 @@
 use super::{nibble, proof_node_codec};
 
 use alloc::{collections::BTreeMap, vec, vec::Vec};
-use core::{mem, ops};
+use core::{fmt, mem, ops};
 
 /// Configuration to pass to [`decode_and_verify_proof`].
 pub struct Config<'a, I> {
@@ -331,6 +331,35 @@ pub struct DecodedTrieProof<T> {
     entries: BTreeMap<Vec<nibble::Nibble>, (StorageValueInner, ops::Range<usize>, u16)>,
 }
 
+impl<T: AsRef<[u8]>> fmt::Debug for DecodedTrieProof<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map()
+            .entries(self.iter_ordered().map(|(nibbles, entry)| {
+                struct Dummy<'a>(&'a [nibble::Nibble]);
+                impl<'a> fmt::Debug for Dummy<'a> {
+                    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                        if self.0.is_empty() {
+                            write!(f, "∅")?
+                        }
+                        for nibble in self.0 {
+                            write!(f, "{:x}", *nibble)?
+                        }
+                        Ok(())
+                    }
+                }
+
+                (
+                    Dummy(nibbles),
+                    (
+                        entry.trie_node_info.children,
+                        entry.trie_node_info.storage_value,
+                    ),
+                )
+            }))
+            .finish()
+    }
+}
+
 impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// Returns a list of all elements of the proof, ordered by key in lexicographic order.
     ///
@@ -584,7 +613,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
 }
 
 /// Storage value of the node.
-#[derive(Debug, Copy, Clone)]
+#[derive(Copy, Clone)]
 pub enum StorageValue<'a> {
     /// The storage value was found in the proof. Contains the value.
     Known(&'a [u8]),
@@ -593,6 +622,29 @@ pub enum StorageValue<'a> {
     HashKnownValueMissing(&'a [u8; 32]),
     /// The node doesn't have a storage value.
     None,
+}
+
+impl<'a> fmt::Debug for StorageValue<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StorageValue::Known(v) if v.len() <= 48 => {
+                write!(f, "0x{}", hex::encode(v))
+            }
+            StorageValue::Known(v) => {
+                write!(
+                    f,
+                    "0x{}…{} ({} bytes)",
+                    hex::encode(&v[0..4]),
+                    hex::encode(&v[v.len() - 4..]),
+                    v.len(),
+                )
+            }
+            StorageValue::HashKnownValueMissing(hash) => {
+                write!(f, "hash(0x{})", hex::encode(hash))
+            }
+            StorageValue::None => write!(f, "<none>"),
+        }
+    }
 }
 
 /// Possible error returned by [`decode_and_verify_proof`].
@@ -649,7 +701,7 @@ pub struct TrieNodeInfo<'a> {
 }
 
 /// See [`TrieNodeInfo::children`].
-#[derive(Debug, Copy, Clone)]
+#[derive(Copy, Clone)]
 pub struct Children {
     /// If `(children_bitmap & (1 << n)) == 1` (where `n is in 0..16`), then this node has a
     /// child whose key starts with the key of the parent, followed with
@@ -682,6 +734,18 @@ impl Children {
                 k.push(nibble);
                 k
             })
+    }
+}
+
+impl fmt::Debug for Children {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:016x}", self.children_bitmap)
+    }
+}
+
+impl fmt::Binary for Children {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:016x}", self.children_bitmap)
     }
 }
 
