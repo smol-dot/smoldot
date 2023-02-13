@@ -573,10 +573,11 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                         .map_or(false, |(k, _)| k.starts_with(&key[..found_key.len() + 1]))
                     {
                         // There exists at least one node in the proof that starts with
-                        // `key[..found_key.len() + 1]` but that isn't `key`, and there isn't any
-                        // branch node at the common ancestor between this node and `key`, as
-                        // otherwise would have found it when iterating earlier. This branch node
-                        // can't be missing from the proof as otherwise the proof would be invalid.
+                        // `key[..found_key.len() + 1]` but that isn't `key` and doesn't start
+                        // with key, and there isn't any branch node at the common ancestor between
+                        // this node and `key`, as otherwise would have found it when iterating
+                        // earlier. This branch node can't be missing from the proof as otherwise
+                        // the proof would be invalid.
                         // Thus, the requested key doesn't exist in the trie.
                         return Some(TrieNodeInfo {
                             storage_value: StorageValue::None,
