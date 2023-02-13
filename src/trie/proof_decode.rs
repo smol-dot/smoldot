@@ -739,13 +739,13 @@ impl Children {
 
 impl fmt::Debug for Children {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:016x}", self.children_bitmap)
+        write!(f, "{:016b}", self.children_bitmap)
     }
 }
 
 impl fmt::Binary for Children {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:016x}", self.children_bitmap)
+        write!(f, "{:016b}", self.children_bitmap)
     }
 }
 
