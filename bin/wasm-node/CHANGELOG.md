@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.11 - 2022-02-13
+
 ### Changed
 
 - Update the network protocol names used on the wire to use the `forkId` field used in the chain specification (if present) and no longer the `protocolId` (which is deprecated). Blockchains based off of Substrate versions later than October 2022 fully support either version. ([#155](https://github.com/smol-dot/smoldot/pull/155))
