@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fix `state_getKeys` and `state_getKeysPaged` sometimes returning an empty list.
 - The alternative spellings `relayChain` and `paraId` for the `relay_chain` and `para_id` fields in chain specifications are now properly accepted as intended. ([#160](https://github.com/smol-dot/smoldot/pull/160))
 
 ## 0.7.10 - 2022-02-10
