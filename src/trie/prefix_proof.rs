@@ -32,6 +32,8 @@ use super::{nibble, proof_decode};
 use alloc::{vec, vec::Vec};
 use core::{fmt, iter, mem};
 
+mod tests;
+
 /// Configuration to pass to [`prefix_scan`].
 pub struct Config<'a> {
     /// Prefix that all the keys must share.
@@ -188,5 +190,3 @@ pub enum Error {
     /// One or more entries in the proof are missing.
     MissingProofEntry,
 }
-
-// TODO: needs tests
