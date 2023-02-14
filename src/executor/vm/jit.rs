@@ -321,15 +321,23 @@ impl JitPrototype {
 
         // Try to convert the signature of the function to call, in order to make sure
         // that the type of parameters and return value are supported.
-        if Signature::try_from(&function_to_call.ty(&self.store)).is_err() {
+        let Ok(signature) = Signature::try_from(&function_to_call.ty(&self.store)) else {
             return Err((StartErr::SignatureNotSupported, self));
+        };
+
+        // Check the types of the provided parameters.
+        if params.len() != signature.parameters().len() {
+            return Err((StartErr::InvalidParameters, self));
+        }
+        for (obtained, expected) in params.iter().zip(signature.parameters()) {
+            if obtained.ty() != *expected {
+                return Err((StartErr::InvalidParameters, self));
+            }
         }
 
         // This function only performs all the verifications and preparations, but the call isn't
         // actually started here because we might still need to potentially access `store`
         // before being in the context of a function handler.
-
-        // TODO: check parameters and return InvalidParameters if err
 
         Ok(Jit {
             inner: JitInner::NotStarted {
