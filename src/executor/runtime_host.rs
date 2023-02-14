@@ -210,8 +210,16 @@ impl StorageGet {
         }
 
         match &self.inner.vm {
-            host::HostVm::ExternalStorageGet(req) => Three::A(req.key()),
-            host::HostVm::ExternalStorageAppend(req) => Three::B(req.key()),
+            host::HostVm::ExternalStorageGet(req) => Three::A(match req.key() {
+                // TODO: child tries are not implemented correctly
+                host::StorageKey::MainTrie { key } => key,
+                _ => unreachable!(),
+            }),
+            host::HostVm::ExternalStorageAppend(req) => Three::B(match req.key() {
+                // TODO: child tries are not implemented correctly
+                host::StorageKey::MainTrie { key } => key,
+                _ => unreachable!(),
+            }),
             host::HostVm::ExternalStorageRoot(_) => {
                 if let calculate_root::RootMerkleValueCalculation::StorageValue(value_request) =
                     self.inner.root_calculation.as_ref().unwrap()
@@ -247,12 +255,18 @@ impl StorageGet {
                 self.inner.vm = req.resume_full_value(value.as_ref().map(|v| &v[..]));
             }
             host::HostVm::ExternalStorageAppend(req) => {
-                // TODO: could be less overhead?
-                let mut value = value.unwrap_or_default();
-                append_to_storage_value(&mut value, req.value().as_ref());
-                self.inner
-                    .top_trie_changes
-                    .diff_insert(req.key().as_ref().to_vec(), value);
+                match req.key() {
+                    host::StorageKey::MainTrie { key } => {
+                        // TODO: could be less overhead?
+                        let mut value = value.unwrap_or_default();
+                        append_to_storage_value(&mut value, req.value().as_ref());
+                        self.inner
+                            .top_trie_changes
+                            .diff_insert(key.as_ref().to_vec(), value);
+                    }
+                    _ => unreachable!(),
+                }
+
                 self.inner.vm = req.resume();
             }
             host::HostVm::ExternalStorageRoot(_) => {
@@ -286,7 +300,11 @@ impl PrefixKeys {
     /// Returns the prefix whose keys to load.
     pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
         match &self.inner.vm {
-            host::HostVm::ExternalStorageClearPrefix(req) => either::Left(req.prefix()),
+            host::HostVm::ExternalStorageClearPrefix(req) => either::Left(match req.prefix() {
+                // TODO: child tries are not implemented correctly
+                host::StorageKey::MainTrie { key } => key,
+                _ => unreachable!(),
+            }),
             host::HostVm::ExternalStorageRoot { .. } => either::Right(&[]),
 
             // We only create a `PrefixKeys` if the state is one of the above.
@@ -309,7 +327,11 @@ impl PrefixKeys {
                 let max_keys_to_remove = req.max_keys_to_remove();
                 let mut keys_removed_so_far = 0u32;
 
-                let prefix = req.prefix().as_ref().to_owned();
+                let prefix = match req.prefix() {
+                    host::StorageKey::MainTrie { key } => key.as_ref().to_owned(),
+                    _ => unreachable!(),
+                };
+
                 let mut after_overlay = self
                     .inner
                     .top_trie_changes
@@ -417,7 +439,11 @@ impl NextKey {
         }
 
         match &self.inner.vm {
-            host::HostVm::ExternalStorageNextKey(req) => either::Right(req.key()),
+            host::HostVm::ExternalStorageNextKey(req) => either::Right(match req.key() {
+                // TODO: child tries are not implemented correctly
+                host::StorageKey::MainTrie { key } => key,
+                _ => unreachable!(),
+            }),
             _ => unreachable!(),
         }
     }
@@ -434,7 +460,10 @@ impl NextKey {
         match self.inner.vm {
             host::HostVm::ExternalStorageNextKey(req) => {
                 let search = {
-                    let req_key = req.key();
+                    let req_key = match req.key() {
+                        host::StorageKey::MainTrie { key } => key,
+                        _ => unreachable!(),
+                    };
                     let requested_key = if let Some(key_overwrite) = &self.key_overwrite {
                         &key_overwrite[..]
                     } else {
@@ -614,7 +643,19 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageGet(req) => {
-                    let search = self.top_trie_changes.diff_get(req.key().as_ref());
+                    let search = {
+                        let key = match req.key() {
+                            host::StorageKey::MainTrie { key } => key,
+                            v => {
+                                drop(v);
+                                // TODO: this is a dummy implementation and child tries are not implemented properly
+                                self.vm = req.resume(None);
+                                continue;
+                            }
+                        };
+                        self.top_trie_changes.diff_get(key.as_ref())
+                    };
+
                     if let Some(overlay) = search {
                         self.vm = req.resume_full_value(overlay);
                     } else {
@@ -624,66 +665,97 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageSet(req) => {
-                    self.top_trie_root_calculation_cache
-                        .as_mut()
-                        .unwrap()
-                        .storage_value_update(req.key().as_ref(), req.value().is_some());
+                    // TODO: this is a dummy implementation and child tries are not implemented properly
+                    if let host::StorageKey::MainTrie { key } = req.key() {
+                        self.top_trie_root_calculation_cache
+                            .as_mut()
+                            .unwrap()
+                            .storage_value_update(key.as_ref(), req.value().is_some());
 
-                    let previous_value = if let Some(value) = req.value() {
-                        self.top_trie_changes
-                            .diff_insert(req.key().as_ref(), value.as_ref())
-                    } else {
-                        self.top_trie_changes.diff_insert_erase(req.key().as_ref())
-                    };
+                        let previous_value = if let Some(value) = req.value() {
+                            self.top_trie_changes
+                                .diff_insert(key.as_ref(), value.as_ref())
+                        } else {
+                            self.top_trie_changes.diff_insert_erase(key.as_ref())
+                        };
 
-                    if let Some(top_trie_transaction_revert) =
-                        self.top_trie_transaction_revert.last_mut()
-                    {
-                        if let Entry::Vacant(entry) =
-                            top_trie_transaction_revert.entry(req.key().as_ref().to_vec())
+                        if let Some(top_trie_transaction_revert) =
+                            self.top_trie_transaction_revert.last_mut()
                         {
-                            entry.insert(previous_value);
+                            if let Entry::Vacant(entry) =
+                                top_trie_transaction_revert.entry(key.as_ref().to_vec())
+                            {
+                                entry.insert(previous_value);
+                            }
                         }
                     }
 
-                    self.vm = req.resume();
+                    self.vm = req.resume()
                 }
 
                 host::HostVm::ExternalStorageAppend(req) => {
+                    let key = match req.key() {
+                        host::StorageKey::MainTrie { key } => key,
+                        v => {
+                            drop(v);
+                            // TODO: this is a dummy implementation and child tries are not implemented properly
+                            self.vm = req.resume();
+                            continue;
+                        }
+                    };
+
                     self.top_trie_root_calculation_cache
                         .as_mut()
                         .unwrap()
-                        .storage_value_update(req.key().as_ref(), true);
+                        .storage_value_update(key.as_ref(), true);
 
-                    let current_value = self.top_trie_changes.diff_get(req.key().as_ref());
+                    let current_value = self.top_trie_changes.diff_get(key.as_ref());
                     if let Some(current_value) = current_value {
                         let mut current_value = current_value.unwrap_or_default().to_vec();
                         append_to_storage_value(&mut current_value, req.value().as_ref());
                         let previous_value = self
                             .top_trie_changes
-                            .diff_insert(req.key().as_ref().to_vec(), current_value);
+                            .diff_insert(key.as_ref().to_vec(), current_value);
                         if let Some(top_trie_transaction_revert) =
                             self.top_trie_transaction_revert.last_mut()
                         {
                             if let Entry::Vacant(entry) =
-                                top_trie_transaction_revert.entry(req.key().as_ref().to_vec())
+                                top_trie_transaction_revert.entry(key.as_ref().to_vec())
                             {
                                 entry.insert(previous_value);
                             }
                         }
+                        drop(key);
                         self.vm = req.resume();
                     } else {
+                        drop(key);
                         self.vm = req.into();
                         return RuntimeHostVm::StorageGet(StorageGet { inner: self });
                     }
                 }
 
                 host::HostVm::ExternalStorageClearPrefix(req) => {
-                    self.vm = req.into();
-                    return RuntimeHostVm::PrefixKeys(PrefixKeys { inner: self });
+                    let is_main_trie = matches!(req.prefix(), host::StorageKey::MainTrie { .. });
+                    if is_main_trie {
+                        self.vm = req.into();
+                        return RuntimeHostVm::PrefixKeys(PrefixKeys { inner: self });
+                    } else {
+                        // TODO: this is a dummy implementation and child tries are not implemented properly
+                        self.vm = req.resume(0, false);
+                    }
                 }
 
                 host::HostVm::ExternalStorageRoot(req) => {
+                    let is_main_trie = matches!(req.trie(), host::Trie::MainTrie);
+                    if !is_main_trie {
+                        // TODO: this is a dummy implementation and child tries are not implemented properly
+                        self.vm = req.resume(None);
+                        continue;
+                    }
+
+                    // For the main trie, whether the changes must be committed is a dummy value.
+                    debug_assert!(req.commit_changes());
+
                     if self.root_calculation.is_none() {
                         self.root_calculation = Some(calculate_root::root_merkle_value(Some(
                             self.top_trie_root_calculation_cache.take().unwrap(),
@@ -693,7 +765,7 @@ impl Inner {
                     match self.root_calculation.take().unwrap() {
                         calculate_root::RootMerkleValueCalculation::Finished { hash, cache } => {
                             self.top_trie_root_calculation_cache = Some(cache);
-                            self.vm = req.resume(&hash);
+                            self.vm = req.resume(Some(&hash));
                         }
                         calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
                             self.vm = req.into();
@@ -723,11 +795,22 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageNextKey(req) => {
-                    self.vm = req.into();
-                    return RuntimeHostVm::NextKey(NextKey {
-                        inner: self,
-                        key_overwrite: None,
-                    });
+                    let is_main_trie = matches!(req.key(), host::StorageKey::MainTrie { .. });
+                    if is_main_trie {
+                        self.vm = req.into();
+                        return RuntimeHostVm::NextKey(NextKey {
+                            inner: self,
+                            key_overwrite: None,
+                        });
+                    } else {
+                        // TODO: this is a dummy implementation and child tries are not implemented properly
+                        self.vm = req.resume(None);
+                    }
+                }
+
+                host::HostVm::ExternalStorageNextChildTrie(req) => {
+                    // TODO: this is a dummy implementation and child tries are not implemented properly
+                    self.vm = req.resume(None);
                 }
 
                 host::HostVm::ExternalOffchainStorageSet(req) => {
