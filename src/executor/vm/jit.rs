@@ -19,7 +19,7 @@
 
 use super::{
     ExecOutcome, GlobalValueErr, HeapPages, ModuleError, NewErr, OutOfBoundsError, RunErr,
-    Signature, StartErr, Trap, WasmValue,
+    Signature, StartErr, Trap, ValueType, WasmValue,
 };
 
 use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
@@ -74,6 +74,9 @@ pub struct JitPrototype {
 
     /// Reference to the memory used by the module.
     memory: wasmtime::Memory,
+
+    /// The type associated with [`JitPrototype`].
+    memory_type: wasmtime::MemoryType,
 }
 
 impl JitPrototype {
@@ -92,28 +95,37 @@ impl JitPrototype {
             let mut imports = Vec::with_capacity(module.inner.imports().len());
             for import in module.inner.imports() {
                 match import.ty() {
-                    wasmtime::ExternType::Func(f) => {
-                        let function_index = if let Ok(ty) = TryFrom::try_from(&f) {
-                            symbols(import.module(), import.name(), &ty).ok()
-                        } else {
-                            None
-                        };
-
-                        let function_index = match function_index {
-                            Some(idx) => idx,
-                            None => {
-                                return Err(NewErr::UnresolvedFunctionImport {
-                                    module_name: import.module().to_owned(),
-                                    function: import.name().to_owned(),
-                                })
-                            }
-                        };
+                    wasmtime::ExternType::Func(func_type) => {
+                        // Note that if `Signature::try_from` fails, a `UnresolvedFunctionImport` is
+                        // also returned. This is because it is not possible for the function to
+                        // resolve anyway if its signature can't be represented.
+                        let function_index =
+                            match Signature::try_from(&func_type)
+                                .ok()
+                                .and_then(|conv_signature| {
+                                    symbols(import.module(), import.name(), &conv_signature).ok()
+                                }) {
+                                Some(i) => i,
+                                None => {
+                                    return Err(NewErr::UnresolvedFunctionImport {
+                                        module_name: import.module().to_owned(),
+                                        function: import.name().to_owned(),
+                                    })
+                                }
+                            };
 
                         let shared = shared.clone();
 
+                        // Obtain `expected_return_ty`. We know that the type is supported due to
+                        // the signature check earlier.
+                        let expected_return_ty = func_type
+                            .results()
+                            .next()
+                            .map(|v| ValueType::try_from(v).unwrap());
+
                         imports.push(wasmtime::Extern::Func(wasmtime::Func::new_async(
                             &mut store,
-                            f.clone(),
+                            func_type,
                             move |mut caller, params, ret_val| {
                                 // This closure is executed whenever the Wasm VM calls a
                                 // host function.
@@ -137,6 +149,7 @@ impl JitPrototype {
                                                     .map(TryFrom::try_from)
                                                     .collect::<Result<_, _>>()
                                                     .unwrap(),
+                                                expected_return_ty,
                                                 in_interrupted_waker: None, // Filled below
                                                 memory_pointer: memory.data_ptr(&caller) as usize,
                                                 memory_size: memory.data_size(&mut caller),
@@ -181,6 +194,7 @@ impl JitPrototype {
                                                 in_interrupted_waker: Some(cx.waker().clone()),
                                                 memory_pointer: memory.data_ptr(&caller) as usize,
                                                 memory_size: memory.data_size(&caller),
+                                                expected_return_ty,
                                             };
                                             Poll::Pending
                                         }
@@ -210,9 +224,7 @@ impl JitPrototype {
                         )));
                     }
                     wasmtime::ExternType::Global(_) | wasmtime::ExternType::Table(_) => {
-                        return Err(NewErr::ModuleError(ModuleError(
-                            "global/table imports not supported".to_string(),
-                        )));
+                        return Err(NewErr::ImportTypeNotSupported);
                     }
                     wasmtime::ExternType::Memory(m) => {
                         if import.module() != "env" || import.name() != "memory" {
@@ -246,7 +258,7 @@ impl JitPrototype {
         let instance = wasmtime::Instance::new_async(&mut store, &module.inner, &imports)
             .now_or_never()
             .ok_or(NewErr::StartFunctionNotSupported)? // TODO: hacky error value, as the error could also be different
-            .map_err(|err| NewErr::ModuleError(ModuleError(err.to_string())))?;
+            .map_err(|err| NewErr::Other(err.to_string()))?;
 
         // Now that we are passed the `start` stage, update the state of execution.
         *shared.lock().unwrap() = Shared::Poisoned;
@@ -268,11 +280,14 @@ impl JitPrototype {
             (None, None) => return Err(NewErr::NoMemory),
         };
 
+        let memory_type = memory.ty(&store);
+
         Ok(JitPrototype {
             store,
             instance,
             shared,
             memory,
+            memory_type,
         })
     }
 
@@ -321,15 +336,23 @@ impl JitPrototype {
 
         // Try to convert the signature of the function to call, in order to make sure
         // that the type of parameters and return value are supported.
-        if Signature::try_from(&function_to_call.ty(&self.store)).is_err() {
+        let Ok(signature) = Signature::try_from(&function_to_call.ty(&self.store)) else {
             return Err((StartErr::SignatureNotSupported, self));
+        };
+
+        // Check the types of the provided parameters.
+        if params.len() != signature.parameters().len() {
+            return Err((StartErr::InvalidParameters, self));
+        }
+        for (obtained, expected) in params.iter().zip(signature.parameters()) {
+            if obtained.ty() != *expected {
+                return Err((StartErr::InvalidParameters, self));
+            }
         }
 
         // This function only performs all the verifications and preparations, but the call isn't
         // actually started here because we might still need to potentially access `store`
         // before being in the context of a function handler.
-
-        // TODO: check parameters and return InvalidParameters if err
 
         Ok(Jit {
             inner: JitInner::NotStarted {
@@ -340,6 +363,7 @@ impl JitPrototype {
             instance: self.instance,
             shared: self.shared,
             memory: self.memory,
+            memory_type: self.memory_type,
         })
     }
 }
@@ -398,6 +422,8 @@ enum Shared {
         memory_pointer: usize,
         /// See [`Shared::WithinFunctionCall::memory_size`].
         memory_size: usize,
+        /// See [`Shared::WithinFunctionCall::expected_return_ty`].
+        expected_return_ty: Option<ValueType>,
         /// See [`Shared::WithinFunctionCall::in_interrupted_waker`].
         in_interrupted_waker: Option<Waker>,
     },
@@ -409,6 +435,9 @@ enum Shared {
         /// Size of the virtual machine memory in bytes. This size is invalidated if the memory
         /// is grown, which can happen between function calls.
         memory_size: usize,
+
+        /// Type of the return value of the function.
+        expected_return_ty: Option<ValueType>,
 
         /// `Waker` that `wasmtime` has passed to the future that is waiting for `return_value`.
         /// This value is most likely not very useful, because [`Jit::run`] always polls the outer
@@ -443,6 +472,9 @@ pub struct Jit {
 
     /// See [`JitPrototype::memory`].
     memory: wasmtime::Memory,
+
+    /// See [`JitPrototype::memory_type`].
+    memory_type: wasmtime::MemoryType,
 }
 
 enum JitInner {
@@ -481,8 +513,24 @@ impl Jit {
                 match mem::replace(&mut *shared_lock, Shared::Poisoned) {
                     Shared::WithinFunctionCall {
                         in_interrupted_waker,
-                        ..
+                        expected_return_ty,
+                        memory_pointer,
+                        memory_size,
                     } => {
+                        let provided_value_ty = value.as_ref().map(|v| v.ty());
+                        if expected_return_ty != provided_value_ty {
+                            *shared_lock = Shared::WithinFunctionCall {
+                                in_interrupted_waker,
+                                expected_return_ty,
+                                memory_pointer,
+                                memory_size,
+                            };
+                            return Err(RunErr::BadValueTy {
+                                expected: expected_return_ty,
+                                obtained: provided_value_ty,
+                            });
+                        }
+
                         *shared_lock = Shared::Return {
                             return_value: value,
                             memory: self.memory,
@@ -498,6 +546,13 @@ impl Jit {
             JitInner::Done(_) => return Err(RunErr::Poisoned),
             JitInner::Poisoned => unreachable!(),
             JitInner::NotStarted { .. } => {
+                if value.is_some() {
+                    return Err(RunErr::BadValueTy {
+                        expected: None,
+                        obtained: value.as_ref().map(|v| v.ty()),
+                    });
+                }
+
                 let (function_to_call, params, mut store) =
                     match mem::replace(&mut self.inner, JitInner::Poisoned) {
                         JitInner::NotStarted {
@@ -507,8 +562,6 @@ impl Jit {
                         } => (function_to_call, params, store),
                         _ => unreachable!(),
                     };
-
-                // TODO: check that value is None
 
                 *self.shared.try_lock().unwrap() = Shared::OutsideFunctionCall {
                     memory: self.memory,
@@ -592,11 +645,13 @@ impl Jit {
                         parameters,
                         memory_pointer,
                         memory_size,
+                        expected_return_ty,
                         in_interrupted_waker,
                     } => {
                         *shared_lock = Shared::WithinFunctionCall {
                             memory_pointer,
                             memory_size,
+                            expected_return_ty,
                             in_interrupted_waker,
                         };
 
@@ -706,14 +761,15 @@ impl Jit {
 
     /// See [`super::VirtualMachine::grow_memory`].
     pub fn grow_memory(&mut self, additional: HeapPages) -> Result<(), OutOfBoundsError> {
-        // TODO: must check whether additional is within bounds
         let additional = u64::from(u32::from(additional));
 
         match &mut self.inner {
             JitInner::NotStarted { store, .. } | JitInner::Done(store) => {
                 // This is the simple case: we still have access to the `store` and can perform
                 // the growth synchronously.
-                self.memory.grow(store, additional).unwrap();
+                self.memory
+                    .grow(store, additional)
+                    .map_err(|_| OutOfBoundsError)?;
             }
             JitInner::Poisoned => unreachable!(),
             JitInner::Executing(function_call) => {
@@ -723,9 +779,33 @@ impl Jit {
                 let mut shared_lock = self.shared.try_lock().unwrap();
                 match mem::replace(&mut *shared_lock, Shared::Poisoned) {
                     Shared::WithinFunctionCall {
+                        memory_pointer,
+                        memory_size,
+                        expected_return_ty,
                         in_interrupted_waker,
-                        ..
                     } => {
+                        // We check now what the memory bounds are, as it is more difficult to
+                        // recover from `grow` returning an error than checking manually.
+                        let current_pages = if memory_size == 0 {
+                            0
+                        } else {
+                            1 + u64::try_from((memory_size - 1) / (64 * 1024)).unwrap()
+                        };
+                        if self
+                            .memory_type
+                            .maximum()
+                            .map_or(false, |max| current_pages + additional > max)
+                        {
+                            // Put everything back as it was.
+                            *shared_lock = Shared::WithinFunctionCall {
+                                memory_pointer,
+                                memory_size,
+                                expected_return_ty,
+                                in_interrupted_waker,
+                            };
+                            return Err(OutOfBoundsError);
+                        }
+
                         if let Some(waker) = in_interrupted_waker {
                             waker.wake();
                         }
@@ -814,6 +894,7 @@ impl Jit {
             instance: self.instance,
             shared: self.shared,
             memory: self.memory,
+            memory_type: self.memory_type,
         }
     }
 }

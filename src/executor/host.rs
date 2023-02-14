@@ -285,7 +285,7 @@ impl HostVmPrototype {
         let runtime_version = runtime_version::find_embedded_runtime_version(&module)
             .ok()
             .flatten(); // TODO: return error instead of using `ok()`? unclear
-        let module = vm::Module::new(module, config.exec_hint).map_err(vm::NewErr::ModuleError)?;
+        let module = vm::Module::new(module, config.exec_hint).map_err(NewErr::InvalidWasm)?;
         Self::from_module(
             module,
             config.heap_pages,
@@ -3649,12 +3649,15 @@ impl Inner {
 /// Error that can happen when initializing a VM.
 #[derive(Debug, derive_more::From, derive_more::Display, Clone)]
 pub enum NewErr {
-    /// Error while initializing the virtual machine.
-    #[display(fmt = "{}", _0)]
-    VirtualMachine(vm::NewErr),
     /// Error in the format of the runtime code.
     #[display(fmt = "{}", _0)]
     BadFormat(ModuleFormatError),
+    /// Error while compiling the WebAssembly code.
+    #[display(fmt = "{}", _0)]
+    InvalidWasm(vm::ModuleError),
+    /// Error while initializing the virtual machine.
+    #[display(fmt = "{}", _0)]
+    VirtualMachine(vm::NewErr),
     /// Error while calling `Core_version` to determine the runtime version.
     #[display(fmt = "Error while calling Core_version: {}", _0)]
     CoreVersion(CoreVersionError),
