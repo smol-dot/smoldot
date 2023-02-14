@@ -535,10 +535,10 @@ fn wrong_type_returned_by_host_function_call() {
     let module_bytes = wat::parse_str(
         r#"
     (module
-        (import "host" "hello" (func $host_hello (param i32) (result i32)))
+        (import "host" "hello" (func $host_hello (param i64) (result i32)))
         (import "env" "memory" (memory $mem 8 16))
         (func (export "hello") (result i32)
-            (call $host_hello (i32.const 3))
+            (call $host_hello (i64.const 3))
         )
     )
     "#,
