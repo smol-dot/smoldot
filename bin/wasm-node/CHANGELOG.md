@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The Wasm virtual machine no longer tries to grab a table symbol named `__indirect_function_table`. This removes support for an old Substrate feature that no longer exists.
+
 ## 0.7.11 - 2022-02-13
 
 ### Changed

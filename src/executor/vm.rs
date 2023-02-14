@@ -30,16 +30,6 @@
 //! meaning, but will later be passed back to the user through [`ExecOutcome::Interrupted::id`]
 //! when the corresponding function is called.
 //!
-//! The WebAssembly code can export functions in two different ways:
-//!
-//! - Some functions are exported through an `(export)` statement.
-//!   See <https://webassembly.github.io/spec/core/bikeshed/#export-section%E2%91%A0>.
-//! - Some functions are stored in a global table called `__indirect_function_table`, and are
-//!   later referred to by their index in this table. This is how the concept of "function
-//!   pointers" commonly found in low-level programming languages is translated in WebAssembly.
-//!
-//! > **Note**: At the time of writing, it isn't possible to call the second type of functions yet.
-//!
 //! Use [`VirtualMachinePrototype::start`] in order to start executing a function exported through
 //! an `(export)` statement.
 //!
@@ -48,17 +38,6 @@
 //! the WebAssembly code calls a host function. In the latter case, [`ExecOutcome::Interrupted`]
 //! is returned and the virtual machine is now paused. Once the logic of the host function has
 //! been executed, call `run` again, passing the return value of that host function.
-//!
-//! # About `__indirect_function_table`
-//!
-//! At initialization, the virtual machine will look for a table named `__indirect_function_table`.
-//! If present, this table is expected to contain functions. These functions can then be referred
-//! to by their index in this table. This is how the concept of "function pointers" commonly found
-//! in programming languages is translated in WebAssembly.
-//!
-//! > **Note**: When compiling C, C++, Rust, or similar languages to WebAssembly, one must pass
-//! >           the `--export-table` option to the LLVM linker in order for this symbol to be
-//! >           exported.
 //!
 //! # About imported vs exported memory
 //!
@@ -712,9 +691,6 @@ pub enum NewErr {
     NoMemory,
     /// Wasm module both imports and exports a memory.
     TwoMemories,
-    /// If a `__indirect_function_table` symbol is provided, it must be a table.
-    #[display(fmt = "If a \"__indirect_function_table\" symbol is provided, it must be a table.")]
-    IndirectTableIsntTable,
     /// Failed to allocate memory for the virtual machine.
     CouldntAllocateMemory,
     /// Error while parsing or compiling the WebAssembly code.

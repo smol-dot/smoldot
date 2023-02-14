@@ -63,12 +63,6 @@ pub struct InterpreterPrototype {
 
     /// Memory of the module instantiation.
     memory: wasmi::Memory,
-
-    /// Table of the indirect function calls.
-    ///
-    /// In Wasm, function pointers are in reality indices in a table called
-    /// `__indirect_function_table`. This is this table, if it exists.
-    indirect_table: Option<wasmi::Table>,
 }
 
 impl InterpreterPrototype {
@@ -177,21 +171,12 @@ impl InterpreterPrototype {
             return Err(NewErr::NoMemory);
         };
 
-        let indirect_table =
-            if let Some(tbl) = instance.get_table(&store, "__indirect_function_table") {
-                // TODO: we don't detect NewErr::IndirectTableIsntTable
-                Some(tbl.clone())
-            } else {
-                None
-            };
-
         Ok(InterpreterPrototype {
             store,
             instance,
             linker,
             module: module.inner.clone(),
             memory,
-            indirect_table,
         })
     }
 
@@ -298,7 +283,6 @@ impl InterpreterPrototype {
                     .map(|v| wasmi::Value::from(*v))
                     .collect::<Vec<_>>(),
             )),
-            indirect_table: self.indirect_table,
         })
     }
 }
@@ -338,12 +322,6 @@ pub struct Interpreter {
 
     /// Linker used to create instances.
     linker: wasmi::Linker<()>,
-
-    /// Table of the indirect function calls.
-    ///
-    /// In Wasm, function pointers are in reality indices in a table called
-    /// `__indirect_function_table`. This is this table, if it exists.
-    indirect_table: Option<wasmi::Table>,
 
     /// Execution context of this virtual machine. This notably holds the program counter, state
     /// of the stack, and so on.
@@ -528,7 +506,6 @@ impl Interpreter {
             linker: self.linker,
             module: self.module,
             memory: self.memory,
-            indirect_table: self.indirect_table,
         }
     }
 }
