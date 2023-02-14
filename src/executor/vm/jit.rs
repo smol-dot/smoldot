@@ -74,10 +74,6 @@ pub struct JitPrototype {
 
     /// Reference to the memory used by the module.
     memory: wasmtime::Memory,
-
-    /// Reference to the table of indirect functions, in case we need to access it.
-    /// `None` if the module doesn't export such table.
-    indirect_table: Option<wasmtime::Table>,
 }
 
 impl JitPrototype {
@@ -272,23 +268,11 @@ impl JitPrototype {
             (None, None) => return Err(NewErr::NoMemory),
         };
 
-        let indirect_table =
-            if let Some(tbl) = instance.get_export(&mut store, "__indirect_function_table") {
-                if let Some(tbl) = tbl.into_table() {
-                    Some(tbl)
-                } else {
-                    return Err(NewErr::IndirectTableIsntTable);
-                }
-            } else {
-                None
-            };
-
         Ok(JitPrototype {
             store,
             instance,
             shared,
             memory,
-            indirect_table,
         })
     }
 
@@ -356,7 +340,6 @@ impl JitPrototype {
             instance: self.instance,
             shared: self.shared,
             memory: self.memory,
-            indirect_table: self.indirect_table,
         })
     }
 }
@@ -460,9 +443,6 @@ pub struct Jit {
 
     /// See [`JitPrototype::memory`].
     memory: wasmtime::Memory,
-
-    /// See [`JitPrototype::indirect_table`].
-    indirect_table: Option<wasmtime::Table>,
 }
 
 enum JitInner {
@@ -834,7 +814,6 @@ impl Jit {
             instance: self.instance,
             shared: self.shared,
             memory: self.memory,
-            indirect_table: self.indirect_table,
         }
     }
 }
