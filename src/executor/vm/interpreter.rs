@@ -282,7 +282,7 @@ impl InterpreterPrototype {
                     .iter()
                     .map(|v| wasmi::Value::from(*v))
                     .collect::<Vec<_>>(),
-            ))
+            )),
         })
     }
 }
