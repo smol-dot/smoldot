@@ -19,7 +19,7 @@
 
 use super::{
     ExecOutcome, GlobalValueErr, HeapPages, ModuleError, NewErr, OutOfBoundsError, RunErr,
-    Signature, StartErr, Trap, WasmValue,
+    Signature, StartErr, Trap, ValueType, WasmValue,
 };
 
 use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
@@ -116,6 +116,13 @@ impl JitPrototype {
 
                         let shared = shared.clone();
 
+                        // Obtain `expected_return_ty`. We know that the type is supported due to
+                        // the signature check earlier.
+                        let expected_return_ty = func_type
+                            .params()
+                            .next()
+                            .map(|v| ValueType::try_from(v).unwrap());
+
                         imports.push(wasmtime::Extern::Func(wasmtime::Func::new_async(
                             &mut store,
                             func_type,
@@ -142,6 +149,7 @@ impl JitPrototype {
                                                     .map(TryFrom::try_from)
                                                     .collect::<Result<_, _>>()
                                                     .unwrap(),
+                                                expected_return_ty,
                                                 in_interrupted_waker: None, // Filled below
                                                 memory_pointer: memory.data_ptr(&caller) as usize,
                                                 memory_size: memory.data_size(&mut caller),
@@ -186,6 +194,7 @@ impl JitPrototype {
                                                 in_interrupted_waker: Some(cx.waker().clone()),
                                                 memory_pointer: memory.data_ptr(&caller) as usize,
                                                 memory_size: memory.data_size(&caller),
+                                                expected_return_ty,
                                             };
                                             Poll::Pending
                                         }
@@ -413,6 +422,8 @@ enum Shared {
         memory_pointer: usize,
         /// See [`Shared::WithinFunctionCall::memory_size`].
         memory_size: usize,
+        /// See [`Shared::WithinFunctionCall::expected_return_ty`].
+        expected_return_ty: Option<ValueType>,
         /// See [`Shared::WithinFunctionCall::in_interrupted_waker`].
         in_interrupted_waker: Option<Waker>,
     },
@@ -424,6 +435,9 @@ enum Shared {
         /// Size of the virtual machine memory in bytes. This size is invalidated if the memory
         /// is grown, which can happen between function calls.
         memory_size: usize,
+
+        /// Type of the return value of the function.
+        expected_return_ty: Option<ValueType>,
 
         /// `Waker` that `wasmtime` has passed to the future that is waiting for `return_value`.
         /// This value is most likely not very useful, because [`Jit::run`] always polls the outer
@@ -499,8 +513,24 @@ impl Jit {
                 match mem::replace(&mut *shared_lock, Shared::Poisoned) {
                     Shared::WithinFunctionCall {
                         in_interrupted_waker,
-                        ..
+                        expected_return_ty,
+                        memory_pointer,
+                        memory_size,
                     } => {
+                        let provided_value_ty = value.as_ref().map(|v| v.ty());
+                        if expected_return_ty != provided_value_ty {
+                            *shared_lock = Shared::WithinFunctionCall {
+                                in_interrupted_waker,
+                                expected_return_ty,
+                                memory_pointer,
+                                memory_size,
+                            };
+                            return Err(RunErr::BadValueTy {
+                                expected: expected_return_ty,
+                                obtained: provided_value_ty,
+                            });
+                        }
+
                         *shared_lock = Shared::Return {
                             return_value: value,
                             memory: self.memory,
@@ -516,6 +546,13 @@ impl Jit {
             JitInner::Done(_) => return Err(RunErr::Poisoned),
             JitInner::Poisoned => unreachable!(),
             JitInner::NotStarted { .. } => {
+                if value.is_some() {
+                    return Err(RunErr::BadValueTy {
+                        expected: None,
+                        obtained: value.as_ref().map(|v| v.ty()),
+                    });
+                }
+
                 let (function_to_call, params, mut store) =
                     match mem::replace(&mut self.inner, JitInner::Poisoned) {
                         JitInner::NotStarted {
@@ -525,8 +562,6 @@ impl Jit {
                         } => (function_to_call, params, store),
                         _ => unreachable!(),
                     };
-
-                // TODO: check that value is None
 
                 *self.shared.try_lock().unwrap() = Shared::OutsideFunctionCall {
                     memory: self.memory,
@@ -610,11 +645,13 @@ impl Jit {
                         parameters,
                         memory_pointer,
                         memory_size,
+                        expected_return_ty,
                         in_interrupted_waker,
                     } => {
                         *shared_lock = Shared::WithinFunctionCall {
                             memory_pointer,
                             memory_size,
+                            expected_return_ty,
                             in_interrupted_waker,
                         };
 
@@ -744,6 +781,7 @@ impl Jit {
                     Shared::WithinFunctionCall {
                         memory_pointer,
                         memory_size,
+                        expected_return_ty,
                         in_interrupted_waker,
                     } => {
                         // We check now what the memory bounds are, as it is more difficult to
@@ -762,6 +800,7 @@ impl Jit {
                             *shared_lock = Shared::WithinFunctionCall {
                                 memory_pointer,
                                 memory_size,
+                                expected_return_ty,
                                 in_interrupted_waker,
                             };
                             return Err(OutOfBoundsError);
