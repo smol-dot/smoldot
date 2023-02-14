@@ -116,6 +116,8 @@ fn basic_host_function_return_value_works() {
         (import "env" "memory" (memory $mem 0 4096))
         (func (export "hello") (result i32)
             (call $host_hello (i32.const 3))
+            (i32.const 2)
+            i32.add
         )
     )
     "#,
@@ -137,7 +139,7 @@ fn basic_host_function_return_value_works() {
                 Ok(super::ExecOutcome::Finished {
                     return_value: Ok(value),
                 }) => {
-                    assert_eq!(value, Some(super::WasmValue::I32(3)));
+                    assert_eq!(value, Some(super::WasmValue::I32(5)));
                     break;
                 }
                 Ok(super::ExecOutcome::Finished {
