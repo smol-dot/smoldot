@@ -500,6 +500,69 @@ fn try_to_call_global() {
 }
 
 #[test]
+fn wrong_type_provided_initially() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "host" "hello" (func $host_hello (param i32) (result i32)))
+        (import "env" "memory" (memory $mem 8 16))
+        (func (export "hello") (result i32)
+            (call $host_hello (i32.const 3))
+        )
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+
+        let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
+
+        let mut vm = prototype
+            .start(super::HeapPages::new(0), "hello", &[])
+            .unwrap();
+
+        assert!(matches!(
+            vm.run(Some(super::WasmValue::I32(3))),
+            Err(super::RunErr::BadValueTy { .. })
+        ));
+    }
+}
+
+#[test]
+fn wrong_type_returned_by_host_function_call() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "host" "hello" (func $host_hello (param i32) (result i32)))
+        (import "env" "memory" (memory $mem 8 16))
+        (func (export "hello") (result i32)
+            (call $host_hello (i32.const 3))
+        )
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+
+        let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
+
+        let mut vm = prototype
+            .start(super::HeapPages::new(0), "hello", &[])
+            .unwrap();
+
+        let Ok(super::ExecOutcome::Interrupted { id: 0, .. }) = vm.run(None) else { panic!() };
+        assert!(matches!(
+            vm.run(Some(super::WasmValue::I64(3))),
+            Err(super::RunErr::BadValueTy { .. })
+        ));
+    }
+}
+
+#[test]
 fn memory_grown_by_minimum() {
     let module_bytes = wat::parse_str(
         r#"
