@@ -74,6 +74,9 @@ pub struct JitPrototype {
 
     /// Reference to the memory used by the module.
     memory: wasmtime::Memory,
+
+    /// The type associated with [`JitPrototype`].
+    memory_type: wasmtime::MemoryType,
 }
 
 impl JitPrototype {
@@ -268,11 +271,14 @@ impl JitPrototype {
             (None, None) => return Err(NewErr::NoMemory),
         };
 
+        let memory_type = memory.ty(&store);
+
         Ok(JitPrototype {
             store,
             instance,
             shared,
             memory,
+            memory_type,
         })
     }
 
@@ -348,6 +354,7 @@ impl JitPrototype {
             instance: self.instance,
             shared: self.shared,
             memory: self.memory,
+            memory_type: self.memory_type,
         })
     }
 }
@@ -451,6 +458,9 @@ pub struct Jit {
 
     /// See [`JitPrototype::memory`].
     memory: wasmtime::Memory,
+
+    /// See [`JitPrototype::memory_type`].
+    memory_type: wasmtime::MemoryType,
 }
 
 enum JitInner {
@@ -714,14 +724,15 @@ impl Jit {
 
     /// See [`super::VirtualMachine::grow_memory`].
     pub fn grow_memory(&mut self, additional: HeapPages) -> Result<(), OutOfBoundsError> {
-        // TODO: must check whether additional is within bounds
         let additional = u64::from(u32::from(additional));
 
         match &mut self.inner {
             JitInner::NotStarted { store, .. } | JitInner::Done(store) => {
                 // This is the simple case: we still have access to the `store` and can perform
                 // the growth synchronously.
-                self.memory.grow(store, additional).unwrap();
+                self.memory
+                    .grow(store, additional)
+                    .map_err(|_| OutOfBoundsError)?;
             }
             JitInner::Poisoned => unreachable!(),
             JitInner::Executing(function_call) => {
@@ -731,9 +742,31 @@ impl Jit {
                 let mut shared_lock = self.shared.try_lock().unwrap();
                 match mem::replace(&mut *shared_lock, Shared::Poisoned) {
                     Shared::WithinFunctionCall {
+                        memory_pointer,
+                        memory_size,
                         in_interrupted_waker,
-                        ..
                     } => {
+                        // We check now what the memory bounds are, as it is more difficult to
+                        // recover from `grow` returning an error than checking manually.
+                        let current_pages = if memory_size == 0 {
+                            0
+                        } else {
+                            1 + u64::try_from((memory_size - 1) / (64 * 1024)).unwrap()
+                        };
+                        if self
+                            .memory_type
+                            .maximum()
+                            .map_or(false, |max| current_pages + additional > max)
+                        {
+                            // Put everything back as it was.
+                            *shared_lock = Shared::WithinFunctionCall {
+                                memory_pointer,
+                                memory_size,
+                                in_interrupted_waker,
+                            };
+                            return Err(OutOfBoundsError);
+                        }
+
                         if let Some(waker) = in_interrupted_waker {
                             waker.wake();
                         }
@@ -822,6 +855,7 @@ impl Jit {
             instance: self.instance,
             shared: self.shared,
             memory: self.memory,
+            memory_type: self.memory_type,
         }
     }
 }

@@ -499,4 +499,146 @@ fn try_to_call_global() {
     }
 }
 
+#[test]
+fn memory_grown_by_minimum() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 16 4096))
+        (func (export "hello") (result i32) i32.const 0)
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+        let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
+        let interpreter = prototype
+            .start(super::HeapPages::new(1024), "hello", &[])
+            .unwrap();
+        assert_eq!(interpreter.memory_size(), super::HeapPages::new(1024));
+    }
+}
+
+#[test]
+fn memory_min_specified_in_wasm() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 16 4096))
+        (func (export "hello") (result i32) i32.const 0)
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+        let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
+        let interpreter = prototype
+            .start(super::HeapPages::new(2), "hello", &[])
+            .unwrap();
+        assert_eq!(interpreter.memory_size(), super::HeapPages::new(16));
+    }
+}
+
+#[test]
+fn memory_grow_works() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 16 4096))
+        (func (export "hello") (result i32) i32.const 0)
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+        let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
+        let mut interpreter = prototype
+            .start(super::HeapPages::new(2), "hello", &[])
+            .unwrap();
+        assert_eq!(interpreter.memory_size(), super::HeapPages::new(16));
+        interpreter.grow_memory(super::HeapPages::new(3)).unwrap();
+        assert_eq!(interpreter.memory_size(), super::HeapPages::new(19));
+        assert!(interpreter.grow_memory(super::HeapPages::new(10)).is_err());
+    }
+}
+
+#[test]
+fn memory_grow_detects_limit() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 16 22))
+        (func (export "hello") (result i32) i32.const 0)
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+        let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
+        let mut interpreter = prototype
+            .start(super::HeapPages::new(2), "hello", &[])
+            .unwrap();
+        assert_eq!(interpreter.memory_size(), super::HeapPages::new(16));
+        assert!(interpreter.grow_memory(super::HeapPages::new(10)).is_err());
+    }
+}
+
+#[test]
+fn memory_grow_detects_limit_within_host_function() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "host" "hello" (func $host_hello (param i32) (result i32)))
+        (import "env" "memory" (memory $mem 8 16))
+        (func (export "hello") (result i32)
+            (call $host_hello (i32.const 3))
+        )
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+
+        let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
+
+        let mut vm = prototype
+            .start(super::HeapPages::new(0), "hello", &[])
+            .unwrap();
+
+        let mut resume_value = None;
+        loop {
+            match vm.run(resume_value) {
+                Ok(super::ExecOutcome::Finished {
+                    return_value: Ok(value),
+                }) => {
+                    assert_eq!(value, Some(super::WasmValue::I32(3)));
+                    break;
+                }
+                Ok(super::ExecOutcome::Finished {
+                    return_value: Err(_),
+                }) => panic!(),
+                Ok(super::ExecOutcome::Interrupted { id: 0, params }) => {
+                    assert_eq!(params, vec![super::WasmValue::I32(3)]);
+                    assert!(vm.grow_memory(super::HeapPages::new(12)).is_err());
+                    resume_value = Some(super::WasmValue::I32(3));
+                }
+                Ok(super::ExecOutcome::Interrupted { .. }) => panic!(),
+                Err(_) => panic!(),
+            }
+        }
+    }
+}
+
+// TODO: test for memory reads and writes, including within host functions
+
 // TODO: test that the memory gets reinitialized when reusing the prototype
