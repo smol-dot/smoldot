@@ -5,6 +5,7 @@
 ### Changed
 
 - The Wasm virtual machine no longer tries to grab a table symbol named `__indirect_function_table`. This removes support for an old Substrate feature that no longer exists.
+- The signature of host functions called by the Wasm runtime is now checked when the Wasm code is compiled rather than when the functions are called.
 
 ## 0.7.11 - 2022-02-13
 
