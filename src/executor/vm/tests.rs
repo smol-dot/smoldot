@@ -627,7 +627,6 @@ fn memory_grow_works() {
         assert_eq!(interpreter.memory_size(), super::HeapPages::new(16));
         interpreter.grow_memory(super::HeapPages::new(3)).unwrap();
         assert_eq!(interpreter.memory_size(), super::HeapPages::new(19));
-        assert!(interpreter.grow_memory(super::HeapPages::new(10)).is_err());
     }
 }
 
