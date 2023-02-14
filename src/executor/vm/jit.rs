@@ -119,7 +119,7 @@ impl JitPrototype {
                         // Obtain `expected_return_ty`. We know that the type is supported due to
                         // the signature check earlier.
                         let expected_return_ty = func_type
-                            .params()
+                            .results()
                             .next()
                             .map(|v| ValueType::try_from(v).unwrap());
 
