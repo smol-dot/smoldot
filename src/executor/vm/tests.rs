@@ -341,3 +341,156 @@ fn start_function_forbidden() {
         ));
     }
 }
+
+#[test]
+fn max_memory_pages() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 0 4096))
+        (global $g (export "test") i32 (i32.const 12))
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+        let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
+        assert_eq!(
+            prototype.memory_max_pages().unwrap(),
+            super::HeapPages::new(4096)
+        );
+    }
+}
+
+#[test]
+fn get_global() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 0 4096))
+        (global $g (export "test") i32 (i32.const 12))
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+        let mut prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
+        assert_eq!(prototype.global_value("test").unwrap(), 12);
+    }
+}
+
+#[test]
+fn call_non_existing_function() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 0 4096))
+        (func (export "hello") (result i32) i32.const 0)
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+        let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
+        assert!(matches!(
+            prototype.start(super::HeapPages::new(1024), "doesntexist", &[]),
+            Err((super::StartErr::FunctionNotFound, _))
+        ));
+    }
+}
+
+#[test]
+fn required_memory_exceeds_limit() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 0 4096))
+        (func (export "hello") (result i32) i32.const 0)
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+        let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
+        assert!(matches!(
+            prototype.start(super::HeapPages::new(8192), "hello", &[]),
+            Err((super::StartErr::RequiredMemoryTooLarge, _))
+        ));
+    }
+}
+
+#[test]
+fn call_signature_not_supported() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 0 4096))
+        (func (export "hello") (result externref) unreachable)
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+        let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
+        assert!(matches!(
+            prototype.start(super::HeapPages::new(1024), "hello", &[]),
+            Err((super::StartErr::SignatureNotSupported, _))
+        ));
+    }
+}
+
+#[test]
+fn bad_params_types() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 0 4096))
+        (func (export "hello") (param i32) (result i32) i32.const 0)
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+        let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
+        assert!(matches!(
+            prototype.start(super::HeapPages::new(1024), "hello", &[]),
+            Err((super::StartErr::InvalidParameters, _))
+        ));
+    }
+}
+
+#[test]
+fn try_to_call_global() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 0 4096))
+        (global $g (export "hello") i32 (i32.const 12))
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+        let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
+        assert!(matches!(
+            prototype.start(super::HeapPages::new(1024), "hello", &[]),
+            Err((super::StartErr::NotAFunction, _))
+        ));
+    }
+}
+
+// TODO: test that the memory gets reinitialized when reusing the prototype
