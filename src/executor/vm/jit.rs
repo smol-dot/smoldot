@@ -92,28 +92,30 @@ impl JitPrototype {
             let mut imports = Vec::with_capacity(module.inner.imports().len());
             for import in module.inner.imports() {
                 match import.ty() {
-                    wasmtime::ExternType::Func(f) => {
-                        let function_index = if let Ok(ty) = TryFrom::try_from(&f) {
-                            symbols(import.module(), import.name(), &ty).ok()
-                        } else {
-                            None
-                        };
-
-                        let function_index = match function_index {
-                            Some(idx) => idx,
-                            None => {
-                                return Err(NewErr::UnresolvedFunctionImport {
-                                    module_name: import.module().to_owned(),
-                                    function: import.name().to_owned(),
-                                })
-                            }
-                        };
+                    wasmtime::ExternType::Func(func_type) => {
+                        // Note that if `Signature::try_from` fails, a `UnresolvedFunctionImport` is
+                        // also returned. This is because it is not possible for the function to
+                        // resolve anyway if its signature can't be represented.
+                        let function_index =
+                            match Signature::try_from(&func_type)
+                                .ok()
+                                .and_then(|conv_signature| {
+                                    symbols(import.module(), import.name(), &conv_signature).ok()
+                                }) {
+                                Some(i) => i,
+                                None => {
+                                    return Err(NewErr::UnresolvedFunctionImport {
+                                        module_name: import.module().to_owned(),
+                                        function: import.name().to_owned(),
+                                    })
+                                }
+                            };
 
                         let shared = shared.clone();
 
                         imports.push(wasmtime::Extern::Func(wasmtime::Func::new_async(
                             &mut store,
-                            f.clone(),
+                            func_type,
                             move |mut caller, params, ret_val| {
                                 // This closure is executed whenever the Wasm VM calls a
                                 // host function.
@@ -210,9 +212,7 @@ impl JitPrototype {
                         )));
                     }
                     wasmtime::ExternType::Global(_) | wasmtime::ExternType::Table(_) => {
-                        return Err(NewErr::ModuleError(ModuleError(
-                            "global/table imports not supported".to_string(),
-                        )));
+                        return Err(NewErr::ImportTypeNotSupported);
                     }
                     wasmtime::ExternType::Memory(m) => {
                         if import.module() != "env" || import.name() != "memory" {
@@ -246,7 +246,7 @@ impl JitPrototype {
         let instance = wasmtime::Instance::new_async(&mut store, &module.inner, &imports)
             .now_or_never()
             .ok_or(NewErr::StartFunctionNotSupported)? // TODO: hacky error value, as the error could also be different
-            .map_err(|err| NewErr::ModuleError(ModuleError(err.to_string())))?;
+            .map_err(|err| NewErr::Other(err.to_string()))?;
 
         // Now that we are passed the `start` stage, update the state of execution.
         *shared.lock().unwrap() = Shared::Poisoned;

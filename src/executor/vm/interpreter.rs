@@ -22,7 +22,7 @@ use super::{
     Signature, StartErr, Trap, ValueType, WasmValue,
 };
 
-use alloc::{borrow::ToOwned as _, format, string::ToString as _, sync::Arc, vec::Vec};
+use alloc::{borrow::ToOwned as _, string::ToString as _, sync::Arc, vec::Vec};
 use core::fmt;
 
 /// See [`super::Module`].
@@ -79,21 +79,17 @@ impl InterpreterPrototype {
         for import in module.inner.imports() {
             match import.ty() {
                 wasmi::ExternType::Func(func_type) => {
-                    let conv_signature = match Signature::try_from(func_type) {
-                        Ok(i) => i,
-                        Err(_) => {
-                            return Err(NewErr::ModuleError(ModuleError(format!(
-                                "Function with unsupported signature `{}`:`{}`",
-                                import.module(),
-                                import.name()
-                            ))))
-                        }
-                    };
-
+                    // Note that if `Signature::try_from` fails, a `UnresolvedFunctionImport` is
+                    // also returned. This is because it is not possible for the function to
+                    // resolve anyway if its signature can't be represented.
                     let function_index =
-                        match symbols(import.module(), import.name(), &conv_signature) {
-                            Ok(i) => i,
-                            Err(_) => {
+                        match Signature::try_from(func_type)
+                            .ok()
+                            .and_then(|conv_signature| {
+                                symbols(import.module(), import.name(), &conv_signature).ok()
+                            }) {
+                            Some(i) => i,
+                            None => {
                                 return Err(NewErr::UnresolvedFunctionImport {
                                     module_name: import.module().to_owned(),
                                     function: import.name().to_owned(),
@@ -129,8 +125,7 @@ impl InterpreterPrototype {
                     debug_assert!(import_memory.is_none());
 
                     let memory = wasmi::Memory::new(&mut store, *memory_type)
-                        .map_err(|err| ModuleError(err.to_string()))
-                        .map_err(NewErr::ModuleError)?;
+                        .map_err(|_| NewErr::CouldntAllocateMemory)?;
                     import_memory = Some(memory.clone());
 
                     // `define` returns an error in case of duplicate definition. Since we
@@ -139,22 +134,15 @@ impl InterpreterPrototype {
                         .define(import.module(), import.name(), memory)
                         .unwrap();
                 }
-                wasmi::ExternType::Global(_) => {
-                    return Err(NewErr::ModuleError(ModuleError(
-                        "Importing globals is not supported".to_owned(),
-                    )))
-                }
-                wasmi::ExternType::Table(_) => {
-                    return Err(NewErr::ModuleError(ModuleError(
-                        "Importing tables is not supported".to_owned(),
-                    )))
+                wasmi::ExternType::Global(_) | wasmi::ExternType::Table(_) => {
+                    return Err(NewErr::ImportTypeNotSupported)
                 }
             }
         }
 
         let instance = linker
             .instantiate(&mut store, &module.inner)
-            .map_err(|err| NewErr::ModuleError(ModuleError(err.to_string())))?
+            .map_err(|err| NewErr::Other(err.to_string()))?
             .ensure_no_start(&mut store)
             .map_err(|_| NewErr::StartFunctionNotSupported)?;
 

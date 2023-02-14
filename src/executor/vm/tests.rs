@@ -17,6 +17,9 @@
 
 #![cfg(test)]
 
+// Here is a helpful link for the WAT format:
+// <https://developer.mozilla.org/en-US/docs/WebAssembly/Understanding_the_text_format>
+
 #[test]
 fn is_send() {
     // Makes sure that the virtual machine types implement `Send`.
@@ -148,5 +151,193 @@ fn basic_host_function_return_value_works() {
                 Err(_) => panic!(),
             }
         }
+    }
+}
+
+#[test]
+fn no_memory() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "host" "hello" (func $host_hello (param i32) (result i32)))
+        (func (export "hello") (result i32)
+            (call $host_hello (i32.const 3))
+        )
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+        assert!(matches!(
+            super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)),
+            Err(super::NewErr::NoMemory)
+        ));
+    }
+}
+
+#[test]
+fn memory_misnamed() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "host" "hello" (func $host_hello (param i32) (result i32)))
+        (import "env" "memoryyyyy" (memory $mem 0 4096))
+        (func (export "hello") (result i32)
+            (call $host_hello (i32.const 3))
+        )
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+        assert!(matches!(
+            super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)),
+            Err(super::NewErr::MemoryNotNamedMemory)
+        ));
+    }
+}
+
+#[test]
+fn two_memories() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "host" "hello" (func $host_hello (param i32) (result i32)))
+        (import "env" "memory" (memory $mem 0 4096))
+        (memory (export "memory") 0 4096)
+        (func (export "hello") (result i32)
+            (call $host_hello (i32.const 3))
+        )
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        // Note that at the moment this module fails to compile altogether because the
+        // multi-memory Wasm proposal isn't finalized yet. Even once finalized, we want to deny
+        // this feature in smoldot.
+        if let Ok(module) = super::Module::new(&module_bytes, exec_hint) {
+            assert!(matches!(
+                super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)),
+                Err(super::NewErr::TwoMemories)
+            ));
+        }
+    }
+}
+
+#[test]
+fn exported_memory_works() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "host" "hello" (func $host_hello (param i32) (result i32)))
+        (memory (export "memory") 0 4096)
+        (func (export "hello") (result i32)
+            (call $host_hello (i32.const 3))
+        )
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+        super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
+    }
+}
+
+#[test]
+fn unresolved_function() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "host" "hello" (func $host_hello (param i32) (result i32)))
+        (import "env" "memory" (memory $mem 0 4096))
+        (func (export "hello") (result i32)
+            (call $host_hello (i32.const 3))
+        )
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+        assert!(matches!(
+            super::VirtualMachinePrototype::new(&module, |_, _, _| Err(())),
+            Err(super::NewErr::UnresolvedFunctionImport { .. })
+        ));
+    }
+}
+
+#[test]
+fn unsupported_signature() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "host" "hello" (func $host_hello (param i32) (param externref) (result i32)))
+        (import "env" "memory" (memory $mem 0 4096))
+        (func (export "hello") (result i32) i32.const 0)
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+        assert!(matches!(
+            super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)),
+            Err(super::NewErr::UnresolvedFunctionImport { .. })
+        ));
+    }
+}
+
+#[test]
+fn unsupported_import_type() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "mytable" (table 1 funcref))
+        (import "env" "memory" (memory $mem 0 4096))
+        (func (export "hello") (result i32) i32.const 0)
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+        assert!(matches!(
+            super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)),
+            Err(super::NewErr::ImportTypeNotSupported)
+        ));
+    }
+}
+
+#[test]
+fn start_function_forbidden() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 0 4096))
+        (func $s)
+        (start $s)
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+        // TODO: `Ok(_)` shouldn't be accepted, but wasmtime doesn't really make it possible to detect the start function at the moment
+        assert!(matches!(
+            super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)),
+            Err(super::NewErr::StartFunctionNotSupported) | Ok(_)
+        ));
     }
 }

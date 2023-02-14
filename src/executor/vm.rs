@@ -693,10 +693,13 @@ pub enum NewErr {
     TwoMemories,
     /// Failed to allocate memory for the virtual machine.
     CouldntAllocateMemory,
-    /// Error while parsing or compiling the WebAssembly code.
+    /// The Wasm module requires importing a global or a table, which isn't supported.
+    ImportTypeNotSupported,
+    /// Other error. This error is unfortunately necessary due to the underlying implementation
+    /// returning an opaque error without explaining what can error.
     // TODO: remove as too imprecise?
     #[display(fmt = "{}", _0)]
-    ModuleError(ModuleError),
+    Other(String),
 }
 
 // TODO: an implementation of the `Error` trait is required in order to interact with wasmtime, but it's not possible to implement this trait on non-std yet
