@@ -265,45 +265,36 @@ impl Prepare {
 
     /// Turns this prototype into an actual virtual machine. This requires choosing which function
     /// to execute.
-    ///
-    /// The `min_memory_pages` value describes the minimum number of pages of Wasm memory that
-    /// should be initially available to the Wasm function call. In other words, the Wasm code
-    /// must be able to write to any memory location inferior to `min_memory_pages * 64 * 1024`.
     pub fn start(
         self,
-        min_memory_pages: HeapPages,
         function_name: &str,
         params: &[WasmValue],
     ) -> Result<VirtualMachine, (StartErr, VirtualMachinePrototype)> {
         Ok(VirtualMachine {
             inner: match self.inner {
                 #[cfg(all(target_arch = "x86_64", feature = "std"))]
-                PrepareInner::Jit(inner) => {
-                    match inner.start(min_memory_pages, function_name, params) {
-                        Ok(vm) => VirtualMachineInner::Jit(vm),
-                        Err((err, proto)) => {
-                            return Err((
-                                err,
-                                VirtualMachinePrototype {
-                                    inner: VirtualMachinePrototypeInner::Jit(proto),
-                                },
-                            ));
-                        }
+                PrepareInner::Jit(inner) => match inner.start(function_name, params) {
+                    Ok(vm) => VirtualMachineInner::Jit(vm),
+                    Err((err, proto)) => {
+                        return Err((
+                            err,
+                            VirtualMachinePrototype {
+                                inner: VirtualMachinePrototypeInner::Jit(proto),
+                            },
+                        ));
                     }
-                }
-                PrepareInner::Interpreter(inner) => {
-                    match inner.start(min_memory_pages, function_name, params) {
-                        Ok(vm) => VirtualMachineInner::Interpreter(vm),
-                        Err((err, proto)) => {
-                            return Err((
-                                err,
-                                VirtualMachinePrototype {
-                                    inner: VirtualMachinePrototypeInner::Interpreter(proto),
-                                },
-                            ));
-                        }
+                },
+                PrepareInner::Interpreter(inner) => match inner.start(function_name, params) {
+                    Ok(vm) => VirtualMachineInner::Interpreter(vm),
+                    Err((err, proto)) => {
+                        return Err((
+                            err,
+                            VirtualMachinePrototype {
+                                inner: VirtualMachinePrototypeInner::Interpreter(proto),
+                            },
+                        ));
                     }
-                }
+                },
             },
         })
     }
@@ -841,9 +832,6 @@ impl std::error::Error for NewErr {}
 /// Error that can happen when calling [`Prepare::start`].
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum StartErr {
-    /// Number of heap pages that have been required is above the limits imposed by the Wasm
-    /// module.
-    RequiredMemoryTooLarge,
     /// Couldn't find the requested function.
     #[display(fmt = "Function to start was not found.")]
     FunctionNotFound,

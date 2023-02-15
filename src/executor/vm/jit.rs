@@ -403,24 +403,9 @@ impl Prepare {
     /// See [`super::Prepare::start`].
     pub fn start(
         mut self,
-        min_memory_pages: HeapPages,
         function_name: &str,
         params: &[WasmValue],
     ) -> Result<Jit, (StartErr, JitPrototype)> {
-        let min_memory_pages = u64::from(min_memory_pages.0);
-        if let Some(to_grow) =
-            min_memory_pages.checked_sub(self.inner.memory.size(&self.inner.store))
-        {
-            if self
-                .inner
-                .memory
-                .grow(&mut self.inner.store, to_grow)
-                .is_err()
-            {
-                return Err((StartErr::RequiredMemoryTooLarge, self.inner));
-            }
-        }
-
         let function_to_call = match self
             .inner
             .instance

@@ -485,7 +485,6 @@ impl HostVmPrototype {
         // Now start executing the function. We pass as parameter the location and size of the
         // input data.
         let vm = match vm.start(
-            vm::HeapPages::new(1 + self.heap_base / (64 * 1024)),
             function_to_call,
             &[
                 vm::WasmValue::I32(i32::from_ne_bytes(data_ptr.to_ne_bytes())),

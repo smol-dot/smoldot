@@ -292,28 +292,9 @@ impl Prepare {
     /// See [`super::Prepare::start`].
     pub fn start(
         mut self,
-        min_memory_pages: HeapPages,
         function_name: &str,
         params: &[WasmValue],
     ) -> Result<Interpreter, (StartErr, InterpreterPrototype)> {
-        if let Some(to_grow) = min_memory_pages.0.checked_sub(u32::from(
-            self.inner.memory.current_pages(&self.inner.store),
-        )) {
-            let to_grow = match wasmi::core::Pages::new(to_grow) {
-                Some(hp) => hp,
-                None => return Err((StartErr::RequiredMemoryTooLarge, self.inner)),
-            };
-
-            if self
-                .inner
-                .memory
-                .grow(&mut self.inner.store, to_grow)
-                .is_err()
-            {
-                return Err((StartErr::RequiredMemoryTooLarge, self.inner));
-            }
-        }
-
         let func_to_call = match self
             .inner
             .instance
