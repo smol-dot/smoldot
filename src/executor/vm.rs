@@ -30,8 +30,8 @@
 //! meaning, but will later be passed back to the user through [`ExecOutcome::Interrupted::id`]
 //! when the corresponding function is called.
 //!
-//! Use [`VirtualMachinePrototype::start`] in order to start executing a function exported through
-//! an `(export)` statement.
+//! Use [`VirtualMachinePrototype::prepare`] then [`Prepare::start`] in order to start executing
+//! a function exported through an `(export)` statement.
 //!
 //! Call [`VirtualMachine::run`] on the [`VirtualMachine`] returned by `start` in order to run the
 //! WebAssembly code. The `run` method returns either if the function being called returns, or if
@@ -838,7 +838,7 @@ pub enum NewErr {
 #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 impl std::error::Error for NewErr {}
 
-/// Error that can happen when calling [`VirtualMachinePrototype::start`].
+/// Error that can happen when calling [`Prepare::start`].
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum StartErr {
     /// Number of heap pages that have been required is above the limits imposed by the Wasm
