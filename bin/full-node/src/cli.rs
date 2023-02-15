@@ -82,7 +82,7 @@ pub struct CliOptionsRun {
     /// `Multiaddr` of an additional node to try to connect to on startup.
     #[arg(long, value_parser = parse_bootnode)]
     pub additional_bootnode: Vec<Bootnode>,
-    /// Bind point of the JSON-RPC server ("none" or <ip>:<port>).
+    /// Bind point of the JSON-RPC server ("none" or `<ip>:<port>`).
     #[arg(long, default_value = "127.0.0.1:9944", value_parser = parse_json_rpc_address)]
     pub json_rpc_address: JsonRpcAddress,
     /// List of secret phrases to insert in the keystore of the node. Used to author blocks.
