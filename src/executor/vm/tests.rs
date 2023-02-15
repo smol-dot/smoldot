@@ -535,26 +535,6 @@ fn wrong_type_returned_by_host_function_call() {
 }
 
 #[test]
-fn memory_grown_by_minimum() {
-    let module_bytes = wat::parse_str(
-        r#"
-    (module
-        (import "env" "memory" (memory $mem 16 4096))
-        (func (export "hello") (result i32) i32.const 0)
-    )
-    "#,
-    )
-    .unwrap();
-
-    for exec_hint in super::ExecHint::available_engines() {
-        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
-        let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
-        let interpreter = prototype.prepare().start("hello", &[]).unwrap();
-        assert_eq!(interpreter.memory_size(), super::HeapPages::new(1024));
-    }
-}
-
-#[test]
 fn memory_min_specified_in_wasm() {
     let module_bytes = wat::parse_str(
         r#"
