@@ -312,59 +312,9 @@ impl JitPrototype {
         }
     }
 
-    /// See [`super::VirtualMachinePrototype::start`].
-    pub fn start(
-        mut self,
-        min_memory_pages: HeapPages,
-        function_name: &str,
-        params: &[WasmValue],
-    ) -> Result<Jit, (StartErr, Self)> {
-        let min_memory_pages = u64::from(min_memory_pages.0);
-        if let Some(to_grow) = min_memory_pages.checked_sub(self.memory.size(&self.store)) {
-            if self.memory.grow(&mut self.store, to_grow).is_err() {
-                return Err((StartErr::RequiredMemoryTooLarge, self));
-            }
-        }
-
-        let function_to_call = match self.instance.get_export(&mut self.store, function_name) {
-            Some(export) => match export.into_func() {
-                Some(f) => f,
-                None => return Err((StartErr::NotAFunction, self)),
-            },
-            None => return Err((StartErr::FunctionNotFound, self)),
-        };
-
-        // Try to convert the signature of the function to call, in order to make sure
-        // that the type of parameters and return value are supported.
-        let Ok(signature) = Signature::try_from(&function_to_call.ty(&self.store)) else {
-            return Err((StartErr::SignatureNotSupported, self));
-        };
-
-        // Check the types of the provided parameters.
-        if params.len() != signature.parameters().len() {
-            return Err((StartErr::InvalidParameters, self));
-        }
-        for (obtained, expected) in params.iter().zip(signature.parameters()) {
-            if obtained.ty() != *expected {
-                return Err((StartErr::InvalidParameters, self));
-            }
-        }
-
-        // This function only performs all the verifications and preparations, but the call isn't
-        // actually started here because we might still need to potentially access `store`
-        // before being in the context of a function handler.
-
-        Ok(Jit {
-            inner: JitInner::NotStarted {
-                store: self.store,
-                function_to_call,
-                params: params.iter().map(|v| (*v).into()).collect::<Vec<_>>(),
-            },
-            instance: self.instance,
-            shared: self.shared,
-            memory: self.memory,
-            memory_type: self.memory_type,
-        })
+    /// See [`super::VirtualMachinePrototype::prepare`].
+    pub fn prepare(mut self) -> Prepare {
+        Prepare { inner: self }
     }
 }
 
@@ -382,6 +332,85 @@ unsafe impl Send for JitPrototype {}
 impl fmt::Debug for JitPrototype {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("JitPrototype").finish()
+    }
+}
+
+/// See [`super::Prepare`].
+pub struct Prepare {
+    inner: JitPrototype,
+}
+
+impl Prepare {
+    /// See [`super::Prepare::start`].
+    pub fn start(
+        mut self,
+        min_memory_pages: HeapPages,
+        function_name: &str,
+        params: &[WasmValue],
+    ) -> Result<Jit, (StartErr, JitPrototype)> {
+        let min_memory_pages = u64::from(min_memory_pages.0);
+        if let Some(to_grow) =
+            min_memory_pages.checked_sub(self.inner.memory.size(&self.inner.store))
+        {
+            if self
+                .inner
+                .memory
+                .grow(&mut self.inner.store, to_grow)
+                .is_err()
+            {
+                return Err((StartErr::RequiredMemoryTooLarge, self.inner));
+            }
+        }
+
+        let function_to_call = match self
+            .inner
+            .instance
+            .get_export(&mut self.inner.store, function_name)
+        {
+            Some(export) => match export.into_func() {
+                Some(f) => f,
+                None => return Err((StartErr::NotAFunction, self.inner)),
+            },
+            None => return Err((StartErr::FunctionNotFound, self.inner)),
+        };
+
+        // Try to convert the signature of the function to call, in order to make sure
+        // that the type of parameters and return value are supported.
+        let Ok(signature) = Signature::try_from(&function_to_call.ty(&self.inner.store)) else {
+            return Err((StartErr::SignatureNotSupported, self.inner));
+        };
+
+        // Check the types of the provided parameters.
+        if params.len() != signature.parameters().len() {
+            return Err((StartErr::InvalidParameters, self.inner));
+        }
+        for (obtained, expected) in params.iter().zip(signature.parameters()) {
+            if obtained.ty() != *expected {
+                return Err((StartErr::InvalidParameters, self.inner));
+            }
+        }
+
+        // This function only performs all the verifications and preparations, but the call isn't
+        // actually started here because we might still need to potentially access `store`
+        // before being in the context of a function handler.
+
+        Ok(Jit {
+            inner: JitInner::NotStarted {
+                store: self.inner.store,
+                function_to_call,
+                params: params.iter().map(|v| (*v).into()).collect::<Vec<_>>(),
+            },
+            instance: self.inner.instance,
+            shared: self.inner.shared,
+            memory: self.inner.memory,
+            memory_type: self.inner.memory_type,
+        })
+    }
+}
+
+impl fmt::Debug for Prepare {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("Prepare").finish()
     }
 }
 

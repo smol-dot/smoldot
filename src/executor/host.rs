@@ -450,7 +450,7 @@ impl HostVmPrototype {
 
         // Now create the actual virtual machine. We pass as parameter `heap_base` as the location
         // of the input data.
-        let mut vm = match self.vm_proto.start(
+        let mut vm = match self.vm_proto.prepare().start(
             vm::HeapPages::new(1 + (data_len_u32 + self.heap_base) / (64 * 1024)), // TODO: `data_len_u32 + ` is a hack for the start value; solve with https://github.com/paritytech/smoldot/issues/132
             function_to_call,
             &[

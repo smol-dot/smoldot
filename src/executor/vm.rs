@@ -160,6 +160,44 @@ impl VirtualMachinePrototype {
         }
     }
 
+    /// Prepares the prototype for running a function.
+    ///
+    /// This preliminary step is necessary as it allows reading and writing memory before starting
+    /// the actual execution..
+    pub fn prepare(mut self) -> Prepare {
+        match self.inner {
+            #[cfg(all(target_arch = "x86_64", feature = "std"))]
+            VirtualMachinePrototypeInner::Jit(inner) => Prepare {
+                inner: PrepareInner::Jit(inner.prepare()),
+            },
+            VirtualMachinePrototypeInner::Interpreter(inner) => Prepare {
+                inner: PrepareInner::Interpreter(inner.prepare()),
+            },
+        }
+    }
+}
+
+impl fmt::Debug for VirtualMachinePrototype {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match &self.inner {
+            #[cfg(all(target_arch = "x86_64", feature = "std"))]
+            VirtualMachinePrototypeInner::Jit(inner) => fmt::Debug::fmt(inner, f),
+            VirtualMachinePrototypeInner::Interpreter(inner) => fmt::Debug::fmt(inner, f),
+        }
+    }
+}
+
+pub struct Prepare {
+    inner: PrepareInner,
+}
+
+enum PrepareInner {
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    Jit(jit::Prepare),
+    Interpreter(interpreter::Prepare),
+}
+
+impl Prepare {
     /// Turns this prototype into an actual virtual machine. This requires choosing which function
     /// to execute.
     ///
@@ -171,25 +209,33 @@ impl VirtualMachinePrototype {
         min_memory_pages: HeapPages,
         function_name: &str,
         params: &[WasmValue],
-    ) -> Result<VirtualMachine, (StartErr, Self)> {
+    ) -> Result<VirtualMachine, (StartErr, VirtualMachinePrototype)> {
         Ok(VirtualMachine {
             inner: match self.inner {
                 #[cfg(all(target_arch = "x86_64", feature = "std"))]
-                VirtualMachinePrototypeInner::Jit(inner) => {
+                PrepareInner::Jit(inner) => {
                     match inner.start(min_memory_pages, function_name, params) {
                         Ok(vm) => VirtualMachineInner::Jit(vm),
                         Err((err, proto)) => {
-                            self.inner = VirtualMachinePrototypeInner::Jit(proto);
-                            return Err((err, self));
+                            return Err((
+                                err,
+                                VirtualMachinePrototype {
+                                    inner: VirtualMachinePrototypeInner::Jit(proto),
+                                },
+                            ));
                         }
                     }
                 }
-                VirtualMachinePrototypeInner::Interpreter(inner) => {
+                PrepareInner::Interpreter(inner) => {
                     match inner.start(min_memory_pages, function_name, params) {
                         Ok(vm) => VirtualMachineInner::Interpreter(vm),
                         Err((err, proto)) => {
-                            self.inner = VirtualMachinePrototypeInner::Interpreter(proto);
-                            return Err((err, self));
+                            return Err((
+                                err,
+                                VirtualMachinePrototype {
+                                    inner: VirtualMachinePrototypeInner::Interpreter(proto),
+                                },
+                            ));
                         }
                     }
                 }
@@ -198,12 +244,12 @@ impl VirtualMachinePrototype {
     }
 }
 
-impl fmt::Debug for VirtualMachinePrototype {
+impl fmt::Debug for Prepare {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self.inner {
             #[cfg(all(target_arch = "x86_64", feature = "std"))]
-            VirtualMachinePrototypeInner::Jit(inner) => fmt::Debug::fmt(inner, f),
-            VirtualMachinePrototypeInner::Interpreter(inner) => fmt::Debug::fmt(inner, f),
+            PrepareInner::Jit(inner) => fmt::Debug::fmt(inner, f),
+            PrepareInner::Interpreter(inner) => fmt::Debug::fmt(inner, f),
         }
     }
 }

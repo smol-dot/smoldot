@@ -43,6 +43,7 @@ fn basic_seems_to_work() {
         // the Substrate/Polkadot allocator.
 
         let mut vm = prototype
+            .prepare()
             .start(
                 super::HeapPages::new(1024),
                 "Core_version",
@@ -130,6 +131,7 @@ fn basic_host_function_return_value_works() {
         let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
 
         let mut vm = prototype
+            .prepare()
             .start(super::HeapPages::new(1024), "hello", &[])
             .unwrap();
 
@@ -401,7 +403,9 @@ fn call_non_existing_function() {
         let module = super::Module::new(&module_bytes, exec_hint).unwrap();
         let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
         assert!(matches!(
-            prototype.start(super::HeapPages::new(1024), "doesntexist", &[]),
+            prototype
+                .prepare()
+                .start(super::HeapPages::new(1024), "doesntexist", &[]),
             Err((super::StartErr::FunctionNotFound, _))
         ));
     }
@@ -423,7 +427,9 @@ fn required_memory_exceeds_limit() {
         let module = super::Module::new(&module_bytes, exec_hint).unwrap();
         let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
         assert!(matches!(
-            prototype.start(super::HeapPages::new(8192), "hello", &[]),
+            prototype
+                .prepare()
+                .start(super::HeapPages::new(8192), "hello", &[]),
             Err((super::StartErr::RequiredMemoryTooLarge, _))
         ));
     }
@@ -445,7 +451,9 @@ fn call_signature_not_supported() {
         let module = super::Module::new(&module_bytes, exec_hint).unwrap();
         let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
         assert!(matches!(
-            prototype.start(super::HeapPages::new(1024), "hello", &[]),
+            prototype
+                .prepare()
+                .start(super::HeapPages::new(1024), "hello", &[]),
             Err((super::StartErr::SignatureNotSupported, _))
         ));
     }
@@ -467,7 +475,9 @@ fn bad_params_types() {
         let module = super::Module::new(&module_bytes, exec_hint).unwrap();
         let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
         assert!(matches!(
-            prototype.start(super::HeapPages::new(1024), "hello", &[]),
+            prototype
+                .prepare()
+                .start(super::HeapPages::new(1024), "hello", &[]),
             Err((super::StartErr::InvalidParameters, _))
         ));
     }
@@ -489,7 +499,9 @@ fn try_to_call_global() {
         let module = super::Module::new(&module_bytes, exec_hint).unwrap();
         let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
         assert!(matches!(
-            prototype.start(super::HeapPages::new(1024), "hello", &[]),
+            prototype
+                .prepare()
+                .start(super::HeapPages::new(1024), "hello", &[]),
             // TODO: wasmi doesn't properly detect NotAFunction at the moment
             Err((
                 super::StartErr::NotAFunction | super::StartErr::FunctionNotFound,
@@ -520,6 +532,7 @@ fn wrong_type_provided_initially() {
         let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
 
         let mut vm = prototype
+            .prepare()
             .start(super::HeapPages::new(0), "hello", &[])
             .unwrap();
 
@@ -551,6 +564,7 @@ fn wrong_type_returned_by_host_function_call() {
         let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
 
         let mut vm = prototype
+            .prepare()
             .start(super::HeapPages::new(0), "hello", &[])
             .unwrap();
 
@@ -578,6 +592,7 @@ fn memory_grown_by_minimum() {
         let module = super::Module::new(&module_bytes, exec_hint).unwrap();
         let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
         let interpreter = prototype
+            .prepare()
             .start(super::HeapPages::new(1024), "hello", &[])
             .unwrap();
         assert_eq!(interpreter.memory_size(), super::HeapPages::new(1024));
@@ -600,6 +615,7 @@ fn memory_min_specified_in_wasm() {
         let module = super::Module::new(&module_bytes, exec_hint).unwrap();
         let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
         let interpreter = prototype
+            .prepare()
             .start(super::HeapPages::new(2), "hello", &[])
             .unwrap();
         assert_eq!(interpreter.memory_size(), super::HeapPages::new(16));
@@ -622,6 +638,7 @@ fn memory_grow_works() {
         let module = super::Module::new(&module_bytes, exec_hint).unwrap();
         let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
         let mut interpreter = prototype
+            .prepare()
             .start(super::HeapPages::new(2), "hello", &[])
             .unwrap();
         assert_eq!(interpreter.memory_size(), super::HeapPages::new(16));
@@ -646,6 +663,7 @@ fn memory_grow_detects_limit() {
         let module = super::Module::new(&module_bytes, exec_hint).unwrap();
         let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
         let mut interpreter = prototype
+            .prepare()
             .start(super::HeapPages::new(2), "hello", &[])
             .unwrap();
         assert_eq!(interpreter.memory_size(), super::HeapPages::new(16));
@@ -674,6 +692,7 @@ fn memory_grow_detects_limit_within_host_function() {
         let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
 
         let mut vm = prototype
+            .prepare()
             .start(super::HeapPages::new(0), "hello", &[])
             .unwrap();
 

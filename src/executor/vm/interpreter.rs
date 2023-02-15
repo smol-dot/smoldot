@@ -193,54 +193,80 @@ impl InterpreterPrototype {
             .map(|p| HeapPages(u32::from(p)))
     }
 
-    /// See [`super::VirtualMachinePrototype::start`].
+    /// See [`super::VirtualMachinePrototype::prepare`].
+    pub fn prepare(mut self) -> Prepare {
+        Prepare { inner: self }
+    }
+}
+
+impl fmt::Debug for InterpreterPrototype {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("InterpreterPrototype").finish()
+    }
+}
+
+/// See [`super::Prepare`].
+pub struct Prepare {
+    inner: InterpreterPrototype,
+}
+
+impl Prepare {
+    /// See [`super::Prepare::start`].
     pub fn start(
         mut self,
         min_memory_pages: HeapPages,
         function_name: &str,
         params: &[WasmValue],
-    ) -> Result<Interpreter, (StartErr, Self)> {
-        if let Some(to_grow) = min_memory_pages
-            .0
-            .checked_sub(u32::from(self.memory.current_pages(&self.store)))
-        {
+    ) -> Result<Interpreter, (StartErr, InterpreterPrototype)> {
+        if let Some(to_grow) = min_memory_pages.0.checked_sub(u32::from(
+            self.inner.memory.current_pages(&self.inner.store),
+        )) {
             let to_grow = match wasmi::core::Pages::new(to_grow) {
                 Some(hp) => hp,
-                None => return Err((StartErr::RequiredMemoryTooLarge, self)),
+                None => return Err((StartErr::RequiredMemoryTooLarge, self.inner)),
             };
 
-            if self.memory.grow(&mut self.store, to_grow).is_err() {
-                return Err((StartErr::RequiredMemoryTooLarge, self));
+            if self
+                .inner
+                .memory
+                .grow(&mut self.inner.store, to_grow)
+                .is_err()
+            {
+                return Err((StartErr::RequiredMemoryTooLarge, self.inner));
             }
         }
 
-        let func_to_call = match self.instance.get_func(&self.store, function_name) {
+        let func_to_call = match self
+            .inner
+            .instance
+            .get_func(&self.inner.store, function_name)
+        {
             Some(function) => {
                 // Try to convert the signature of the function to call, in order to make sure
                 // that the type of parameters and return value are supported.
-                let Ok(signature) = Signature::try_from(function.ty(&self.store)) else {
-                    return Err((StartErr::SignatureNotSupported, self));
+                let Ok(signature) = Signature::try_from(function.ty(&self.inner.store)) else {
+                    return Err((StartErr::SignatureNotSupported, self.inner));
                 };
 
                 // Check whether the types of the parameters are correct.
                 // This is necessary to do manually because for API purposes the call immediately
                 //starts, while in the internal implementation it doesn't actually.
                 if params.len() != signature.parameters().len() {
-                    return Err((StartErr::InvalidParameters, self));
+                    return Err((StartErr::InvalidParameters, self.inner));
                 }
                 for (obtained, expected) in params.iter().zip(signature.parameters()) {
                     if obtained.ty() != *expected {
-                        return Err((StartErr::InvalidParameters, self));
+                        return Err((StartErr::InvalidParameters, self.inner));
                     }
                 }
 
                 function
             }
-            None => return Err((StartErr::FunctionNotFound, self)), // TODO: we don't differentiate between `FunctionNotFound` and `NotAFunction` here
+            None => return Err((StartErr::FunctionNotFound, self.inner)), // TODO: we don't differentiate between `FunctionNotFound` and `NotAFunction` here
         };
 
         let dummy_output_value = {
-            let func_to_call_ty = func_to_call.ty(&self.store);
+            let func_to_call_ty = func_to_call.ty(&self.inner.store);
             let list = func_to_call_ty.results();
             // We don't support more than one return value. This is enforced by verifying the
             // function signature above.
@@ -259,10 +285,10 @@ impl InterpreterPrototype {
         };
 
         Ok(Interpreter {
-            store: self.store,
-            module: self.module,
-            memory: self.memory,
-            linker: self.linker,
+            store: self.inner.store,
+            module: self.inner.module,
+            memory: self.inner.memory,
+            linker: self.inner.linker,
             dummy_output_value: dummy_output_value,
             execution: Some(Execution::NotStarted(
                 func_to_call,
@@ -275,9 +301,9 @@ impl InterpreterPrototype {
     }
 }
 
-impl fmt::Debug for InterpreterPrototype {
+impl fmt::Debug for Prepare {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("InterpreterPrototype").finish()
+        f.debug_tuple("Prepare").finish()
     }
 }
 
