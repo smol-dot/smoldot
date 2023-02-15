@@ -211,6 +211,13 @@ pub struct Prepare {
 }
 
 impl Prepare {
+    /// See [`super::Prepare::memory_size`].
+    pub fn memory_size(&self) -> HeapPages {
+        HeapPages(u32::from(
+            self.inner.memory.current_pages(&self.inner.store),
+        ))
+    }
+
     /// See [`super::Prepare::read_memory`].
     pub fn read_memory(
         &'_ self,

@@ -198,6 +198,15 @@ enum PrepareInner {
 }
 
 impl Prepare {
+    /// Returns the size of the memory, in bytes.
+    pub fn memory_size(&self) -> HeapPages {
+        match &self.inner {
+            #[cfg(all(target_arch = "x86_64", feature = "std"))]
+            PrepareInner::Jit(inner) => inner.memory_size(),
+            PrepareInner::Interpreter(inner) => inner.memory_size(),
+        }
+    }
+
     /// Copies the given memory range into a `Vec<u8>`.
     ///
     /// Returns an error if the range is invalid or out of range.
