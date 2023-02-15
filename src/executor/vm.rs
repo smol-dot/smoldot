@@ -394,6 +394,17 @@ pub struct Signature {
     ret_ty: Option<ValueType>,
 }
 
+// TODO: figure out how to optimize so that we can use this macro in a const context
+#[macro_export]
+macro_rules! signature {
+    (($($param:expr),* $(,)?) => ()) => {
+        $crate::executor::vm::Signature::from_components(smallvec::smallvec!($($param),*), None)
+    };
+    (($($param:expr),* $(,)?) => $ret:expr) => {
+        $crate::executor::vm::Signature::from_components(smallvec::smallvec!($($param),*), Some($ret))
+    };
+}
+
 impl Signature {
     /// Creates a [`Signature`] from the given parameter types and return type.
     pub fn new(
@@ -404,6 +415,15 @@ impl Signature {
             params: params.collect(),
             ret_ty: ret_ty.into(),
         }
+    }
+
+    // TODO: find a way to remove? it is used only by the signature! macro
+    #[doc(hidden)]
+    pub(crate) fn from_components(
+        params: SmallVec<[ValueType; 8]>,
+        ret_ty: Option<ValueType>,
+    ) -> Self {
+        Signature { params, ret_ty }
     }
 
     /// Returns a list of all the types of the parameters.
