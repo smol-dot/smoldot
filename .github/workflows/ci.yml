@@ -30,7 +30,7 @@ jobs:
   test-64bits:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.65
+      image: rust:1.67
     steps:
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v2
@@ -39,7 +39,7 @@ jobs:
   test-32bits:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.65
+      image: rust:1.67
     steps:
     - run: apt-get update && apt install -y libc6-dev-i386
     - uses: actions/checkout@v3
@@ -50,7 +50,7 @@ jobs:
   wasm-node-check:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.65
+      image: rust:1.67
     steps:
     - run: apt-get update && apt install -y binaryen # For `wasm-opt`
     - uses: actions/checkout@v3
@@ -66,12 +66,13 @@ jobs:
   wasm-node-size-diff:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.65
+      image: rust:1.67
     steps:
     - run: apt-get update && apt install -y binaryen # For `wasm-opt`
     - uses: actions/checkout@v3
       with:
         fetch-depth: 0  # Necessary to fetch pull request base below
+    - run: git config --system --add safe.directory /__w/smoldot/smoldot  # TODO: this is a temporary workaround for https://github.com/actions/checkout/issues/1169
     - uses: Swatinem/rust-cache@v2
     - uses: actions/setup-node@v3.5.1
       with:
@@ -101,7 +102,7 @@ jobs:
   check-features:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.65
+      image: rust:1.67
     steps:
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v2
@@ -145,7 +146,7 @@ jobs:
   check-rustdoc-links:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.65
+      image: rust:1.67
     steps:
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v2
