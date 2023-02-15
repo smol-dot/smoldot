@@ -211,6 +211,11 @@ pub struct Prepare {
 }
 
 impl Prepare {
+    /// See [`super::Prepare::into_prototype`].
+    pub fn into_prototype(self) -> InterpreterPrototype {
+        self.inner
+    }
+
     /// See [`super::Prepare::memory_size`].
     pub fn memory_size(&self) -> HeapPages {
         HeapPages(u32::from(

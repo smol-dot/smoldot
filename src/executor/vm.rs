@@ -198,6 +198,21 @@ enum PrepareInner {
 }
 
 impl Prepare {
+    /// Turns back this virtual machine into a prototype.
+    pub fn into_prototype(self) -> VirtualMachinePrototype {
+        VirtualMachinePrototype {
+            inner: match self.inner {
+                #[cfg(all(target_arch = "x86_64", feature = "std"))]
+                PrepareInner::Jit(inner) => {
+                    VirtualMachinePrototypeInner::Jit(inner.into_prototype())
+                }
+                PrepareInner::Interpreter(inner) => {
+                    VirtualMachinePrototypeInner::Interpreter(inner.into_prototype())
+                }
+            },
+        }
+    }
+
     /// Returns the size of the memory, in bytes.
     pub fn memory_size(&self) -> HeapPages {
         match &self.inner {

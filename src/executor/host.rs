@@ -466,7 +466,10 @@ impl HostVmPrototype {
             data_len_u32,
         ) {
             Ok(p) => p,
-            Err(_) => return Err((StartErr::DataSizeOverflow, todo!())), // TODO:
+            Err(_) => {
+                self.vm_proto = vm.into_prototype();
+                return Err((StartErr::DataSizeOverflow, self));
+            }
         };
 
         // Writing the input data into the VM.

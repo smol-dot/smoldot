@@ -341,6 +341,11 @@ pub struct Prepare {
 }
 
 impl Prepare {
+    /// See [`super::Prepare::into_prototype`].
+    pub fn into_prototype(self) -> JitPrototype {
+        self.inner
+    }
+
     /// See [`super::Prepare::memory_size`].
     pub fn memory_size(&self) -> HeapPages {
         let heap_pages = self.inner.memory.size(&self.inner.store);
