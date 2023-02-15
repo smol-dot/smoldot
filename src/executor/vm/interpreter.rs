@@ -211,6 +211,72 @@ pub struct Prepare {
 }
 
 impl Prepare {
+    /// See [`super::Prepare::read_memory`].
+    pub fn read_memory(
+        &'_ self,
+        offset: u32,
+        size: u32,
+    ) -> Result<impl AsRef<[u8]> + '_, OutOfBoundsError> {
+        let offset = usize::try_from(offset).map_err(|_| OutOfBoundsError)?;
+
+        let max = offset
+            .checked_add(size.try_into().map_err(|_| OutOfBoundsError)?)
+            .ok_or(OutOfBoundsError)?;
+
+        struct AccessOffset<T> {
+            access: T,
+            offset: usize,
+            max: usize,
+        }
+
+        impl<T: AsRef<[u8]>> AsRef<[u8]> for AccessOffset<T> {
+            fn as_ref(&self) -> &[u8] {
+                &self.access.as_ref()[self.offset..self.max]
+            }
+        }
+
+        let access = self.inner.memory.data(&self.inner.store);
+        if max > access.as_ref().len() {
+            return Err(OutOfBoundsError);
+        }
+
+        Ok(AccessOffset {
+            access,
+            offset,
+            max,
+        })
+    }
+
+    /// See [`super::Prepare::write_memory`].
+    pub fn write_memory(&mut self, offset: u32, value: &[u8]) -> Result<(), OutOfBoundsError> {
+        let memory_slice = self.inner.memory.data_mut(&mut self.inner.store);
+
+        let start = usize::try_from(offset).map_err(|_| OutOfBoundsError)?;
+        let end = start.checked_add(value.len()).ok_or(OutOfBoundsError)?;
+
+        if end > memory_slice.len() {
+            return Err(OutOfBoundsError);
+        }
+
+        if !value.is_empty() {
+            memory_slice[start..end].copy_from_slice(value);
+        }
+
+        Ok(())
+    }
+
+    /// See [`super::Prepare::write_memory`].
+    pub fn grow_memory(&mut self, additional: HeapPages) -> Result<(), OutOfBoundsError> {
+        self.inner
+            .memory
+            .grow(
+                &mut self.inner.store,
+                wasmi::core::Pages::new(additional.0).ok_or(OutOfBoundsError)?,
+            )
+            .map_err(|_| OutOfBoundsError)?;
+        Ok(())
+    }
+
     /// See [`super::Prepare::start`].
     pub fn start(
         mut self,

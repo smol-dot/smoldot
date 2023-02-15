@@ -341,6 +341,54 @@ pub struct Prepare {
 }
 
 impl Prepare {
+    /// See [`super::Prepare::read_memory`].
+    pub fn read_memory(
+        &'_ self,
+        offset: u32,
+        size: u32,
+    ) -> Result<impl AsRef<[u8]> + '_, OutOfBoundsError> {
+        let memory_slice = self.inner.memory.data(&self.inner.store);
+
+        let start = usize::try_from(offset).map_err(|_| OutOfBoundsError)?;
+        let end = start
+            .checked_add(usize::try_from(size).map_err(|_| OutOfBoundsError)?)
+            .ok_or(OutOfBoundsError)?;
+
+        if end > memory_slice.len() {
+            return Err(OutOfBoundsError);
+        }
+
+        Ok(&memory_slice[start..end])
+    }
+
+    /// See [`super::Prepare::write_memory`].
+    pub fn write_memory(&mut self, offset: u32, value: &[u8]) -> Result<(), OutOfBoundsError> {
+        let memory_slice = self.inner.memory.data_mut(&mut self.inner.store);
+
+        let start = usize::try_from(offset).map_err(|_| OutOfBoundsError)?;
+        let end = start.checked_add(value.len()).ok_or(OutOfBoundsError)?;
+
+        if end > memory_slice.len() {
+            return Err(OutOfBoundsError);
+        }
+
+        if !value.is_empty() {
+            memory_slice[start..end].copy_from_slice(value);
+        }
+
+        Ok(())
+    }
+
+    /// See [`super::Prepare::grow_memory`].
+    pub fn grow_memory(&mut self, additional: HeapPages) -> Result<(), OutOfBoundsError> {
+        let additional = u64::from(u32::from(additional));
+        self.inner
+            .memory
+            .grow(&mut self.inner.store, additional)
+            .map_err(|_| OutOfBoundsError)?;
+        Ok(())
+    }
+
     /// See [`super::Prepare::start`].
     pub fn start(
         mut self,

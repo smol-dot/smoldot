@@ -198,6 +198,47 @@ enum PrepareInner {
 }
 
 impl Prepare {
+    /// Copies the given memory range into a `Vec<u8>`.
+    ///
+    /// Returns an error if the range is invalid or out of range.
+    pub fn read_memory(
+        &'_ self,
+        offset: u32,
+        size: u32,
+    ) -> Result<impl AsRef<[u8]> + '_, OutOfBoundsError> {
+        Ok(match &self.inner {
+            #[cfg(all(target_arch = "x86_64", feature = "std"))]
+            PrepareInner::Jit(inner) => either::Left(inner.read_memory(offset, size)?),
+            #[cfg(all(target_arch = "x86_64", feature = "std"))]
+            PrepareInner::Interpreter(inner) => either::Right(inner.read_memory(offset, size)?),
+            #[cfg(not(all(target_arch = "x86_64", feature = "std")))]
+            PrepareInner::Interpreter(inner) => inner.read_memory(offset, size)?,
+        })
+    }
+
+    /// Write the data at the given memory location.
+    ///
+    /// Returns an error if the range is invalid or out of range.
+    pub fn write_memory(&mut self, offset: u32, value: &[u8]) -> Result<(), OutOfBoundsError> {
+        match &mut self.inner {
+            #[cfg(all(target_arch = "x86_64", feature = "std"))]
+            PrepareInner::Jit(inner) => inner.write_memory(offset, value),
+            PrepareInner::Interpreter(inner) => inner.write_memory(offset, value),
+        }
+    }
+
+    /// Increases the size of the memory by the given number of pages.
+    ///
+    /// Returns an error if the size of the memory can't be expanded more. This can be known ahead
+    /// of time by using [`VirtualMachinePrototype::memory_max_pages`].
+    pub fn grow_memory(&mut self, additional: HeapPages) -> Result<(), OutOfBoundsError> {
+        match &mut self.inner {
+            #[cfg(all(target_arch = "x86_64", feature = "std"))]
+            PrepareInner::Jit(inner) => inner.grow_memory(additional),
+            PrepareInner::Interpreter(inner) => inner.grow_memory(additional),
+        }
+    }
+
     /// Turns this prototype into an actual virtual machine. This requires choosing which function
     /// to execute.
     ///
