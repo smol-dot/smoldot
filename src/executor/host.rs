@@ -4140,11 +4140,9 @@ impl HostFunction {
                 crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
             }
             HostFunction::ext_offchain_index_set_version_1 => {
-                // TODO: not documented on https://spec.polkadot.network/
                 crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => ())
             }
             HostFunction::ext_offchain_index_clear_version_1 => {
-                // TODO: not documented on https://spec.polkadot.network/
                 crate::signature!((vm::ValueType::I64) => ())
             }
             HostFunction::ext_offchain_is_validator_version_1 => {
@@ -4253,7 +4251,6 @@ impl HostFunction {
                 crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I64) => ())
             }
             HostFunction::ext_logging_max_level_version_1 => {
-                // TODO: not documented on https://spec.polkadot.network/
                 crate::signature!(() => vm::ValueType::I32)
             }
         }

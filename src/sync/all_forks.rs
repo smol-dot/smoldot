@@ -1997,10 +1997,10 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                         let finalized_blocks = finalized_blocks_iter
                             .map(|b| (b.header, b.user_data))
                             .collect::<Vec<_>>();
-                        self.parent
-                            .inner
-                            .blocks
-                            .set_finalized_block_height(finalized_blocks.last().unwrap().0.number);
+                        let _finalized_blocks =
+                            self.parent.inner.blocks.set_finalized_block_height(
+                                finalized_blocks.last().unwrap().0.number,
+                            );
                         FinalityProofVerifyOutcome::NewFinalized {
                             finalized_blocks,
                             updates_best_block,
@@ -2052,10 +2052,10 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                         let finalized_blocks = finalized_blocks_iter
                             .map(|b| (b.header, b.user_data))
                             .collect::<Vec<_>>();
-                        self.parent
-                            .inner
-                            .blocks
-                            .set_finalized_block_height(finalized_blocks.last().unwrap().0.number);
+                        let _finalized_blocks =
+                            self.parent.inner.blocks.set_finalized_block_height(
+                                finalized_blocks.last().unwrap().0.number,
+                            );
                         FinalityProofVerifyOutcome::NewFinalized {
                             finalized_blocks,
                             updates_best_block,

@@ -162,17 +162,18 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
     // Directory where we will store everything on the disk, such as the database, secret keys,
     // etc.
-    let base_storage_directory =
-        if let Some(base) = directories::ProjectDirs::from("io", "smoldot", "smoldot") {
-            Some(base.data_dir().to_owned())
-        } else {
-            tracing::warn!(
-                "Failed to fetch $HOME directory. Falling back to storing everything in memory, \
+    let base_storage_directory = if cli_options.tmp {
+        None
+    } else if let Some(base) = directories::ProjectDirs::from("io", "smoldot", "smoldot") {
+        Some(base.data_dir().to_owned())
+    } else {
+        tracing::warn!(
+            "Failed to fetch $HOME directory. Falling back to storing everything in memory, \
                 meaning that everything will be lost when the node stops. If this is intended, \
                 please make this explicit by passing the `--tmp` flag instead."
-            );
-            None
-        };
+        );
+        None
+    };
 
     let (database, database_existed) = {
         // Directory supposed to contain the database.

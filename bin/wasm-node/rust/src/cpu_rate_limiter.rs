@@ -91,22 +91,15 @@ impl<T: Future> Future for CpuRateLimiter<T> {
                 // Because `Duration::mul_f64` and `Duration::from_secs_f64` panic in case of
                 // overflow, we need to do the operation of multiplying and checking the bounds
                 // manually.
-                let mut after_poll_sleep =
+                let after_poll_sleep =
                     poll_duration.as_secs_f64() * *this.max_divided_by_rate_limit_minus_one;
                 debug_assert!(after_poll_sleep >= 0.0 && !after_poll_sleep.is_nan());
-                let max_duration_float: f64 = Duration::MAX.as_secs_f64(); // TODO: turn this into a `const` once `as_secs_f64` is `const`
-                if after_poll_sleep
-                    .partial_cmp(&max_duration_float)
-                    .map(|ord| ord.is_ge())
-                    .unwrap_or(true)
-                {
-                    after_poll_sleep = max_duration_float;
-                }
-                // TODO: use try_from_secs_f64 when it's stable https://github.com/rust-lang/rust/issues/83400
 
                 this.prevent_poll_until.set(crate::timers::Delay::new_at(
-                    after_polling + Duration::from_secs_f64(after_poll_sleep),
+                    after_polling
+                        + Duration::try_from_secs_f64(after_poll_sleep).unwrap_or(Duration::MAX),
                 ));
+
                 Poll::Pending
             }
         }
