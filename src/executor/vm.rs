@@ -164,7 +164,7 @@ impl VirtualMachinePrototype {
     ///
     /// This preliminary step is necessary as it allows reading and writing memory before starting
     /// the actual execution..
-    pub fn prepare(mut self) -> Prepare {
+    pub fn prepare(self) -> Prepare {
         match self.inner {
             #[cfg(all(target_arch = "x86_64", feature = "std"))]
             VirtualMachinePrototypeInner::Jit(inner) => Prepare {
@@ -270,7 +270,7 @@ impl Prepare {
     /// should be initially available to the Wasm function call. In other words, the Wasm code
     /// must be able to write to any memory location inferior to `min_memory_pages * 64 * 1024`.
     pub fn start(
-        mut self,
+        self,
         min_memory_pages: HeapPages,
         function_name: &str,
         params: &[WasmValue],

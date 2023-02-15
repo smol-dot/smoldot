@@ -194,7 +194,7 @@ impl InterpreterPrototype {
     }
 
     /// See [`super::VirtualMachinePrototype::prepare`].
-    pub fn prepare(mut self) -> Prepare {
+    pub fn prepare(self) -> Prepare {
         Prepare { inner: self }
     }
 }
