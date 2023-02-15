@@ -291,7 +291,7 @@ impl Prepare {
 
     /// See [`super::Prepare::start`].
     pub fn start(
-        mut self,
+        self,
         function_name: &str,
         params: &[WasmValue],
     ) -> Result<Interpreter, (StartErr, InterpreterPrototype)> {
