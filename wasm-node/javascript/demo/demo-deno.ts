@@ -20,7 +20,7 @@
 import * as smoldot from '../dist/mjs/index-deno.js';
 
 // Load the chain spec file.
-const chainSpec = new TextDecoder("utf-8").decode(await Deno.readFile("../../westend.json"));
+const chainSpec = new TextDecoder("utf-8").decode(await Deno.readFile('../../demo-chain-specs/westend.json'));
 
 const client = smoldot.start({
     maxLogLevel: 3,  // Can be increased for more verbosity

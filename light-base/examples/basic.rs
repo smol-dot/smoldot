@@ -49,7 +49,7 @@ fn main() {
             // The most important field of the configuration is the chain specification. This is a
             // JSON document containing all the information necessary for the client to connect to said
             // chain.
-            specification: include_str!("../../polkadot.json"),
+            specification: include_str!("../../demo-chain-specs/polkadot.json"),
 
             // If `true`, the chain will not be able to handle JSON-RPC requests. This can be used
             // to save up some resources.

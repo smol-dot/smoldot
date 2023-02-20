@@ -12,7 +12,7 @@ rustup install nightly
 In order to start fuzzing:
 
 ```bash
-cargo +nightly fuzz run --fuzz-dir ./bin/fuzz <bin>
+cargo +nightly fuzz run --fuzz-dir ./fuzz <bin>
 ```
 
 Where `<bin>` is one of the files in the `fuzz_targets` directory.

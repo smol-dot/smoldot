@@ -61,7 +61,7 @@ jobs:
     - uses: denoland/setup-deno@v1
       with:
         deno-version: v1.x
-    - run: cd bin/wasm-node/javascript && RUSTFLAGS=-Dwarnings npm install-ci-test
+    - run: cd wasm-node/javascript && RUSTFLAGS=-Dwarnings npm install-ci-test
 
   wasm-node-size-diff:
     runs-on: ubuntu-latest
@@ -82,10 +82,10 @@ jobs:
         crate: twiggy
         version: 0.7
     - run: git checkout ${{ github.event.pull_request.base.sha }}
-    - run: cd bin/wasm-node/javascript && npm ci && npm run-script build
+    - run: cd bin/wasm-node/javascript && npm ci && npm run-script build  # TODO: must remove the `bin/` ASAP
     - run: cp ./target/wasm32-wasi/min-size-release/smoldot_light_wasm.wasm ./.ci-parent-build.wasm  # TODO: maybe get the path from the `npm build` output or something?
     - run: git checkout ${{ github.event.pull_request.head.sha }}
-    - run: cd bin/wasm-node/javascript && npm ci && npm run-script build
+    - run: cd wasm-node/javascript && npm ci && npm run-script build
     - run: twiggy diff ./.ci-parent-build.wasm ./target/wasm32-wasi/min-size-release/smoldot_light_wasm.wasm > ./twiggy-diff  # TODO: maybe get the path from the `npm build` output or something?
     # Now that we've generated the diff in a `./twiggy-diff` file, the next step is to upload
     # the PR number and diff content as an artifact that will then be picked up by a
@@ -140,8 +140,8 @@ jobs:
     - uses: Swatinem/rust-cache@v2
       with:
         workspaces: |
-          ./bin/fuzz
-    - run: cargo fuzz build --fuzz-dir ./bin/fuzz
+          ./fuzz
+    - run: cargo fuzz build --fuzz-dir ./fuzz
 
   check-rustdoc-links:
     runs-on: ubuntu-latest
@@ -170,7 +170,7 @@ jobs:
         # The fuzzing targets are in a different package and thus need to be checked separately.
         with:
           command: fmt
-          args: --manifest-path ./bin/fuzz/Cargo.toml --all -- --check
+          args: --manifest-path ./fuzz/Cargo.toml --all -- --check
 
   # TODO: as explained in the official repo (https://github.com/actions-rs/clippy), this action uses unstable GH actions features, but has the huge advantage of not requiring `GITHUB_TOKEN` and working on PRs from forked repositories ; should eventually replace `actions-rs/clippy@master` with a specific version
   clippy:
@@ -223,9 +223,9 @@ jobs:
           override: true
       # Compares whether the version in `package.json` matches the version in `Cargo.toml`.
       - id: js-version
-        run: echo "::set-output name=version::`jq .version ./bin/wasm-node/javascript/package.json`"
+        run: echo "::set-output name=version::`jq .version ./wasm-node/javascript/package.json`"
       - id: rust-version
-        run: echo "::set-output name=version::`cargo read-manifest --manifest-path=./bin/wasm-node/rust/Cargo.toml | jq .version`"
+        run: echo "::set-output name=version::`cargo read-manifest --manifest-path=./wasm-node/rust/Cargo.toml | jq .version`"
       - run: exit 1
         if: ${{ steps.js-version.outputs.version == '' }}   # Defensive test against mistakes in the CI script
       - run: exit 1

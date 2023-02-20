@@ -25,15 +25,15 @@ import * as fs from 'node:fs';
 // List of files containing chains available to the user.
 // The first item has a specific role in that we always connect to it at initialization.
 const chainSpecsFiles = [
-    '../../westend.json',
-    '../../westend-westmint.json',
-    '../../polkadot.json',
-    '../../polkadot-acala.json',
-    '../../kusama.json',
-    '../../kusama-statemine.json',
-    '../../kusama-karura.json',
-    '../../rococo.json',
-    '../../rococo-canvas.json',
+    '../../demo-chain-specs/westend.json',
+    '../../demo-chain-specs/westend-westmint.json',
+    '../../demo-chain-specs/polkadot.json',
+    '../../demo-chain-specs/polkadot-acala.json',
+    '../../demo-chain-specs/kusama.json',
+    '../../demo-chain-specs/kusama-statemine.json',
+    '../../demo-chain-specs/kusama-karura.json',
+    '../../demo-chain-specs/rococo.json',
+    '../../demo-chain-specs/rococo-canvas.json',
 ];
 
 // Load all the files in a single map.
