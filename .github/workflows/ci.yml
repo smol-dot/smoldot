@@ -82,7 +82,7 @@ jobs:
         crate: twiggy
         version: 0.7
     - run: git checkout ${{ github.event.pull_request.base.sha }}
-    - run: cd wasm-node/javascript && npm ci && npm run-script build  # TODO: must remove the `bin/` ASAP
+    - run: cd wasm-node/javascript && npm ci && npm run-script build
     - run: cp ./target/wasm32-wasi/min-size-release/smoldot_light_wasm.wasm ./.ci-parent-build.wasm  # TODO: maybe get the path from the `npm build` output or something?
     - run: git checkout ${{ github.event.pull_request.head.sha }}
     - run: cd wasm-node/javascript && npm ci && npm run-script build
