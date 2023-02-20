@@ -30,8 +30,8 @@
 //! meaning, but will later be passed back to the user through [`ExecOutcome::Interrupted::id`]
 //! when the corresponding function is called.
 //!
-//! Use [`VirtualMachinePrototype::start`] in order to start executing a function exported through
-//! an `(export)` statement.
+//! Use [`VirtualMachinePrototype::prepare`] then [`Prepare::start`] in order to start executing
+//! a function exported through an `(export)` statement.
 //!
 //! Call [`VirtualMachine::run`] on the [`VirtualMachine`] returned by `start` in order to run the
 //! WebAssembly code. The `run` method returns either if the function being called returns, or if
@@ -160,41 +160,20 @@ impl VirtualMachinePrototype {
         }
     }
 
-    /// Turns this prototype into an actual virtual machine. This requires choosing which function
-    /// to execute.
+    /// Prepares the prototype for running a function.
     ///
-    /// The `min_memory_pages` value describes the minimum number of pages of Wasm memory that
-    /// should be initially available to the Wasm function call. In other words, the Wasm code
-    /// must be able to write to any memory location inferior to `min_memory_pages * 64 * 1024`.
-    pub fn start(
-        mut self,
-        min_memory_pages: HeapPages,
-        function_name: &str,
-        params: &[WasmValue],
-    ) -> Result<VirtualMachine, (StartErr, Self)> {
-        Ok(VirtualMachine {
-            inner: match self.inner {
-                #[cfg(all(target_arch = "x86_64", feature = "std"))]
-                VirtualMachinePrototypeInner::Jit(inner) => {
-                    match inner.start(min_memory_pages, function_name, params) {
-                        Ok(vm) => VirtualMachineInner::Jit(vm),
-                        Err((err, proto)) => {
-                            self.inner = VirtualMachinePrototypeInner::Jit(proto);
-                            return Err((err, self));
-                        }
-                    }
-                }
-                VirtualMachinePrototypeInner::Interpreter(inner) => {
-                    match inner.start(min_memory_pages, function_name, params) {
-                        Ok(vm) => VirtualMachineInner::Interpreter(vm),
-                        Err((err, proto)) => {
-                            self.inner = VirtualMachinePrototypeInner::Interpreter(proto);
-                            return Err((err, self));
-                        }
-                    }
-                }
+    /// This preliminary step is necessary as it allows reading and writing memory before starting
+    /// the actual execution..
+    pub fn prepare(self) -> Prepare {
+        match self.inner {
+            #[cfg(all(target_arch = "x86_64", feature = "std"))]
+            VirtualMachinePrototypeInner::Jit(inner) => Prepare {
+                inner: PrepareInner::Jit(inner.prepare()),
             },
-        })
+            VirtualMachinePrototypeInner::Interpreter(inner) => Prepare {
+                inner: PrepareInner::Interpreter(inner.prepare()),
+            },
+        }
     }
 }
 
@@ -204,6 +183,129 @@ impl fmt::Debug for VirtualMachinePrototype {
             #[cfg(all(target_arch = "x86_64", feature = "std"))]
             VirtualMachinePrototypeInner::Jit(inner) => fmt::Debug::fmt(inner, f),
             VirtualMachinePrototypeInner::Interpreter(inner) => fmt::Debug::fmt(inner, f),
+        }
+    }
+}
+
+pub struct Prepare {
+    inner: PrepareInner,
+}
+
+enum PrepareInner {
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    Jit(jit::Prepare),
+    Interpreter(interpreter::Prepare),
+}
+
+impl Prepare {
+    /// Turns back this virtual machine into a prototype.
+    pub fn into_prototype(self) -> VirtualMachinePrototype {
+        VirtualMachinePrototype {
+            inner: match self.inner {
+                #[cfg(all(target_arch = "x86_64", feature = "std"))]
+                PrepareInner::Jit(inner) => {
+                    VirtualMachinePrototypeInner::Jit(inner.into_prototype())
+                }
+                PrepareInner::Interpreter(inner) => {
+                    VirtualMachinePrototypeInner::Interpreter(inner.into_prototype())
+                }
+            },
+        }
+    }
+
+    /// Returns the size of the memory, in bytes.
+    pub fn memory_size(&self) -> HeapPages {
+        match &self.inner {
+            #[cfg(all(target_arch = "x86_64", feature = "std"))]
+            PrepareInner::Jit(inner) => inner.memory_size(),
+            PrepareInner::Interpreter(inner) => inner.memory_size(),
+        }
+    }
+
+    /// Copies the given memory range into a `Vec<u8>`.
+    ///
+    /// Returns an error if the range is invalid or out of range.
+    pub fn read_memory(
+        &'_ self,
+        offset: u32,
+        size: u32,
+    ) -> Result<impl AsRef<[u8]> + '_, OutOfBoundsError> {
+        Ok(match &self.inner {
+            #[cfg(all(target_arch = "x86_64", feature = "std"))]
+            PrepareInner::Jit(inner) => either::Left(inner.read_memory(offset, size)?),
+            #[cfg(all(target_arch = "x86_64", feature = "std"))]
+            PrepareInner::Interpreter(inner) => either::Right(inner.read_memory(offset, size)?),
+            #[cfg(not(all(target_arch = "x86_64", feature = "std")))]
+            PrepareInner::Interpreter(inner) => inner.read_memory(offset, size)?,
+        })
+    }
+
+    /// Write the data at the given memory location.
+    ///
+    /// Returns an error if the range is invalid or out of range.
+    pub fn write_memory(&mut self, offset: u32, value: &[u8]) -> Result<(), OutOfBoundsError> {
+        match &mut self.inner {
+            #[cfg(all(target_arch = "x86_64", feature = "std"))]
+            PrepareInner::Jit(inner) => inner.write_memory(offset, value),
+            PrepareInner::Interpreter(inner) => inner.write_memory(offset, value),
+        }
+    }
+
+    /// Increases the size of the memory by the given number of pages.
+    ///
+    /// Returns an error if the size of the memory can't be expanded more. This can be known ahead
+    /// of time by using [`VirtualMachinePrototype::memory_max_pages`].
+    pub fn grow_memory(&mut self, additional: HeapPages) -> Result<(), OutOfBoundsError> {
+        match &mut self.inner {
+            #[cfg(all(target_arch = "x86_64", feature = "std"))]
+            PrepareInner::Jit(inner) => inner.grow_memory(additional),
+            PrepareInner::Interpreter(inner) => inner.grow_memory(additional),
+        }
+    }
+
+    /// Turns this prototype into an actual virtual machine. This requires choosing which function
+    /// to execute.
+    pub fn start(
+        self,
+        function_name: &str,
+        params: &[WasmValue],
+    ) -> Result<VirtualMachine, (StartErr, VirtualMachinePrototype)> {
+        Ok(VirtualMachine {
+            inner: match self.inner {
+                #[cfg(all(target_arch = "x86_64", feature = "std"))]
+                PrepareInner::Jit(inner) => match inner.start(function_name, params) {
+                    Ok(vm) => VirtualMachineInner::Jit(vm),
+                    Err((err, proto)) => {
+                        return Err((
+                            err,
+                            VirtualMachinePrototype {
+                                inner: VirtualMachinePrototypeInner::Jit(proto),
+                            },
+                        ));
+                    }
+                },
+                PrepareInner::Interpreter(inner) => match inner.start(function_name, params) {
+                    Ok(vm) => VirtualMachineInner::Interpreter(vm),
+                    Err((err, proto)) => {
+                        return Err((
+                            err,
+                            VirtualMachinePrototype {
+                                inner: VirtualMachinePrototypeInner::Interpreter(proto),
+                            },
+                        ));
+                    }
+                },
+            },
+        })
+    }
+}
+
+impl fmt::Debug for Prepare {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match &self.inner {
+            #[cfg(all(target_arch = "x86_64", feature = "std"))]
+            PrepareInner::Jit(inner) => fmt::Debug::fmt(inner, f),
+            PrepareInner::Interpreter(inner) => fmt::Debug::fmt(inner, f),
         }
     }
 }
@@ -727,12 +829,9 @@ pub enum NewErr {
 #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 impl std::error::Error for NewErr {}
 
-/// Error that can happen when calling [`VirtualMachinePrototype::start`].
+/// Error that can happen when calling [`Prepare::start`].
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum StartErr {
-    /// Number of heap pages that have been required is above the limits imposed by the Wasm
-    /// module.
-    RequiredMemoryTooLarge,
     /// Couldn't find the requested function.
     #[display(fmt = "Function to start was not found.")]
     FunctionNotFound,

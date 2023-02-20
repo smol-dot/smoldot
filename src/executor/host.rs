@@ -436,6 +436,7 @@ impl HostVmPrototype {
         function_to_call: &str,
         data: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
     ) -> Result<ReadyToRun, (StartErr, Self)> {
+        // Determine the total length of `data`.
         let mut data_len_u32: u32 = 0;
         for data in data.clone() {
             let len = match u32::try_from(data.as_ref().len()) {
@@ -448,13 +449,45 @@ impl HostVmPrototype {
             };
         }
 
-        // Now create the actual virtual machine. We pass as parameter `heap_base` as the location
-        // of the input data.
-        let mut vm = match self.vm_proto.start(
-            vm::HeapPages::new(1 + (data_len_u32 + self.heap_base) / (64 * 1024)), // TODO: `data_len_u32 + ` is a hack for the start value; solve with https://github.com/paritytech/smoldot/issues/132
+        // Initialize the state of the memory allocator. This is the allocator that is used in
+        // order to allocate space for the input data, and also later used when the Wasm code
+        // requests variable-length data.
+        let mut allocator = allocator::FreeingBumpHeapAllocator::new(self.heap_base);
+
+        // Prepare the virtual machine for execution.
+        let mut vm = self.vm_proto.prepare();
+
+        // Write the input data in the VM's memory using the allocator.
+        let data_ptr = match allocator.allocate(
+            &mut MemAccess {
+                vm: MemAccessVm::Prepare(&mut vm),
+                memory_total_pages: self.memory_total_pages,
+            },
+            data_len_u32,
+        ) {
+            Ok(p) => p,
+            Err(_) => {
+                self.vm_proto = vm.into_prototype();
+                return Err((StartErr::DataSizeOverflow, self));
+            }
+        };
+
+        // Writing the input data into the VM.
+        let mut data_ptr_iter = data_ptr;
+        for data in data {
+            let data = data.as_ref();
+            vm.write_memory(data_ptr_iter, data).unwrap();
+            data_ptr_iter = data_ptr_iter
+                .checked_add(u32::try_from(data.len()).unwrap())
+                .unwrap();
+        }
+
+        // Now start executing the function. We pass as parameter the location and size of the
+        // input data.
+        let vm = match vm.start(
             function_to_call,
             &[
-                vm::WasmValue::I32(i32::from_ne_bytes(self.heap_base.to_ne_bytes())),
+                vm::WasmValue::I32(i32::from_ne_bytes(data_ptr.to_ne_bytes())),
                 vm::WasmValue::I32(i32::from_ne_bytes(data_len_u32.to_ne_bytes())),
             ],
         ) {
@@ -464,20 +497,6 @@ impl HostVmPrototype {
                 return Err((error.into(), self));
             }
         };
-
-        // Now writing the input data into the VM.
-        let mut after_input_data = self.heap_base;
-        for data in data {
-            let data = data.as_ref();
-            vm.write_memory(after_input_data, data).unwrap();
-            after_input_data = after_input_data
-                .checked_add(u32::try_from(data.len()).unwrap())
-                .unwrap();
-        }
-
-        // Initialize the state of the memory allocator. This is the allocator that is later used
-        // when the Wasm code requests variable-length data.
-        let allocator = allocator::FreeingBumpHeapAllocator::new(after_input_data);
 
         Ok(ReadyToRun {
             resume_value: None,
@@ -2085,7 +2104,7 @@ impl ReadyToRun {
                 let pointer = expect_u32!(0);
                 match self.inner.allocator.deallocate(
                     &mut MemAccess {
-                        vm: &mut self.inner.vm,
+                        vm: MemAccessVm::Running(&mut self.inner.vm),
                         memory_total_pages: self.inner.memory_total_pages,
                     },
                     pointer,
@@ -3586,7 +3605,7 @@ impl Inner {
         // Use the allocator to decide where the value will be written.
         let dest_ptr = match self.allocator.allocate(
             &mut MemAccess {
-                vm: &mut self.vm,
+                vm: MemAccessVm::Running(&mut self.vm),
                 memory_total_pages: self.memory_total_pages,
             },
             size,
@@ -4244,8 +4263,13 @@ impl HostFunction {
 // `memory_total_pages` is equal to `heap_base + heap_pages`, while in reality, because we grow
 // memory lazily, there might be fewer.
 struct MemAccess<'a> {
-    vm: &'a mut vm::VirtualMachine,
+    vm: MemAccessVm<'a>,
     memory_total_pages: HeapPages,
+}
+
+enum MemAccessVm<'a> {
+    Prepare(&'a mut vm::Prepare),
+    Running(&'a mut vm::VirtualMachine),
 }
 
 impl<'a> allocator::Memory for MemAccess<'a> {
@@ -4266,27 +4290,54 @@ impl<'a> allocator::Memory for MemAccess<'a> {
         // Offset of the memory page where the last byte of the value will be read.
         let accessed_memory_page_end = HeapPages::new((ptr + 7) / (64 * 1024));
         // Number of pages currently allocated.
-        let current_num_pages = self.vm.memory_size();
+        let current_num_pages = match self.vm {
+            MemAccessVm::Prepare(ref vm) => vm.memory_size(),
+            MemAccessVm::Running(ref vm) => vm.memory_size(),
+        };
         debug_assert!(current_num_pages <= self.memory_total_pages);
 
         if accessed_memory_page_end < current_num_pages {
             // This is the simple case: the memory access is in bounds.
-            let bytes = self.vm.read_memory(ptr, 8).unwrap();
-            Ok(u64::from_le_bytes(
-                <[u8; 8]>::try_from(bytes.as_ref()).unwrap(),
-            ))
+            match self.vm {
+                MemAccessVm::Prepare(ref vm) => {
+                    let bytes = vm.read_memory(ptr, 8).unwrap();
+                    Ok(u64::from_le_bytes(
+                        <[u8; 8]>::try_from(bytes.as_ref()).unwrap(),
+                    ))
+                }
+                MemAccessVm::Running(ref vm) => {
+                    let bytes = vm.read_memory(ptr, 8).unwrap();
+                    Ok(u64::from_le_bytes(
+                        <[u8; 8]>::try_from(bytes.as_ref()).unwrap(),
+                    ))
+                }
+            }
         } else if accessed_memory_page_start < current_num_pages {
             // Memory access is partially in bounds. This is the most complicated situation.
-            let partial_bytes = self
-                .vm
-                .read_memory(ptr, u32::from(current_num_pages) * 64 * 1024 - ptr)
-                .unwrap();
-            let partial_bytes = partial_bytes.as_ref();
-            debug_assert!(partial_bytes.len() < 8);
+            match self.vm {
+                MemAccessVm::Prepare(ref vm) => {
+                    let partial_bytes = vm
+                        .read_memory(ptr, u32::from(current_num_pages) * 64 * 1024 - ptr)
+                        .unwrap();
+                    let partial_bytes = partial_bytes.as_ref();
+                    debug_assert!(partial_bytes.len() < 8);
 
-            let mut out = [0; 8];
-            out[..partial_bytes.len()].copy_from_slice(partial_bytes);
-            Ok(u64::from_le_bytes(out))
+                    let mut out = [0; 8];
+                    out[..partial_bytes.len()].copy_from_slice(partial_bytes);
+                    Ok(u64::from_le_bytes(out))
+                }
+                MemAccessVm::Running(ref vm) => {
+                    let partial_bytes = vm
+                        .read_memory(ptr, u32::from(current_num_pages) * 64 * 1024 - ptr)
+                        .unwrap();
+                    let partial_bytes = partial_bytes.as_ref();
+                    debug_assert!(partial_bytes.len() < 8);
+
+                    let mut out = [0; 8];
+                    out[..partial_bytes.len()].copy_from_slice(partial_bytes);
+                    Ok(u64::from_le_bytes(out))
+                }
+            }
         } else {
             // Everything out bounds. Memory is zero.
             Ok(0)
@@ -4304,9 +4355,12 @@ impl<'a> allocator::Memory for MemAccess<'a> {
         let written_memory_page = HeapPages::new((ptr + 7) / (64 * 1024));
 
         // Grow the memory more if necessary.
-        // Please note the `=`. For example if we write to page 0, we want to have at least 1 page
+        // Please note the `<=`. For example if we write to page 0, we want to have at least 1 page
         // allocated.
-        let current_num_pages = self.vm.memory_size();
+        let current_num_pages = match self.vm {
+            MemAccessVm::Prepare(ref vm) => vm.memory_size(),
+            MemAccessVm::Running(ref vm) => vm.memory_size(),
+        };
         debug_assert!(current_num_pages <= self.memory_total_pages);
         if current_num_pages <= written_memory_page {
             // For now, we grow the memory just enough to fit.
@@ -4317,10 +4371,16 @@ impl<'a> allocator::Memory for MemAccess<'a> {
 
             // We check at initialization that the virtual machine is capable of growing up to
             // `memory_total_pages`, meaning that this `unwrap` can't panic.
-            self.vm.grow_memory(to_grow).unwrap();
+            match self.vm {
+                MemAccessVm::Prepare(ref mut vm) => vm.grow_memory(to_grow).unwrap(),
+                MemAccessVm::Running(ref mut vm) => vm.grow_memory(to_grow).unwrap(),
+            }
         }
 
-        self.vm.write_memory(ptr, &bytes).unwrap();
+        match self.vm {
+            MemAccessVm::Prepare(ref mut vm) => vm.write_memory(ptr, &bytes).unwrap(),
+            MemAccessVm::Running(ref mut vm) => vm.write_memory(ptr, &bytes).unwrap(),
+        }
         Ok(())
     }
 

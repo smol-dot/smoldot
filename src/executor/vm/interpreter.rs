@@ -193,54 +193,139 @@ impl InterpreterPrototype {
             .map(|p| HeapPages(u32::from(p)))
     }
 
-    /// See [`super::VirtualMachinePrototype::start`].
-    pub fn start(
-        mut self,
-        min_memory_pages: HeapPages,
-        function_name: &str,
-        params: &[WasmValue],
-    ) -> Result<Interpreter, (StartErr, Self)> {
-        if let Some(to_grow) = min_memory_pages
-            .0
-            .checked_sub(u32::from(self.memory.current_pages(&self.store)))
-        {
-            let to_grow = match wasmi::core::Pages::new(to_grow) {
-                Some(hp) => hp,
-                None => return Err((StartErr::RequiredMemoryTooLarge, self)),
-            };
+    /// See [`super::VirtualMachinePrototype::prepare`].
+    pub fn prepare(self) -> Prepare {
+        Prepare { inner: self }
+    }
+}
 
-            if self.memory.grow(&mut self.store, to_grow).is_err() {
-                return Err((StartErr::RequiredMemoryTooLarge, self));
+impl fmt::Debug for InterpreterPrototype {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("InterpreterPrototype").finish()
+    }
+}
+
+/// See [`super::Prepare`].
+pub struct Prepare {
+    inner: InterpreterPrototype,
+}
+
+impl Prepare {
+    /// See [`super::Prepare::into_prototype`].
+    pub fn into_prototype(self) -> InterpreterPrototype {
+        self.inner
+    }
+
+    /// See [`super::Prepare::memory_size`].
+    pub fn memory_size(&self) -> HeapPages {
+        HeapPages(u32::from(
+            self.inner.memory.current_pages(&self.inner.store),
+        ))
+    }
+
+    /// See [`super::Prepare::read_memory`].
+    pub fn read_memory(
+        &'_ self,
+        offset: u32,
+        size: u32,
+    ) -> Result<impl AsRef<[u8]> + '_, OutOfBoundsError> {
+        let offset = usize::try_from(offset).map_err(|_| OutOfBoundsError)?;
+
+        let max = offset
+            .checked_add(size.try_into().map_err(|_| OutOfBoundsError)?)
+            .ok_or(OutOfBoundsError)?;
+
+        struct AccessOffset<T> {
+            access: T,
+            offset: usize,
+            max: usize,
+        }
+
+        impl<T: AsRef<[u8]>> AsRef<[u8]> for AccessOffset<T> {
+            fn as_ref(&self) -> &[u8] {
+                &self.access.as_ref()[self.offset..self.max]
             }
         }
 
-        let func_to_call = match self.instance.get_func(&self.store, function_name) {
+        let access = self.inner.memory.data(&self.inner.store);
+        if max > access.as_ref().len() {
+            return Err(OutOfBoundsError);
+        }
+
+        Ok(AccessOffset {
+            access,
+            offset,
+            max,
+        })
+    }
+
+    /// See [`super::Prepare::write_memory`].
+    pub fn write_memory(&mut self, offset: u32, value: &[u8]) -> Result<(), OutOfBoundsError> {
+        let memory_slice = self.inner.memory.data_mut(&mut self.inner.store);
+
+        let start = usize::try_from(offset).map_err(|_| OutOfBoundsError)?;
+        let end = start.checked_add(value.len()).ok_or(OutOfBoundsError)?;
+
+        if end > memory_slice.len() {
+            return Err(OutOfBoundsError);
+        }
+
+        if !value.is_empty() {
+            memory_slice[start..end].copy_from_slice(value);
+        }
+
+        Ok(())
+    }
+
+    /// See [`super::Prepare::write_memory`].
+    pub fn grow_memory(&mut self, additional: HeapPages) -> Result<(), OutOfBoundsError> {
+        self.inner
+            .memory
+            .grow(
+                &mut self.inner.store,
+                wasmi::core::Pages::new(additional.0).ok_or(OutOfBoundsError)?,
+            )
+            .map_err(|_| OutOfBoundsError)?;
+        Ok(())
+    }
+
+    /// See [`super::Prepare::start`].
+    pub fn start(
+        self,
+        function_name: &str,
+        params: &[WasmValue],
+    ) -> Result<Interpreter, (StartErr, InterpreterPrototype)> {
+        let func_to_call = match self
+            .inner
+            .instance
+            .get_func(&self.inner.store, function_name)
+        {
             Some(function) => {
                 // Try to convert the signature of the function to call, in order to make sure
                 // that the type of parameters and return value are supported.
-                let Ok(signature) = Signature::try_from(function.ty(&self.store)) else {
-                    return Err((StartErr::SignatureNotSupported, self));
+                let Ok(signature) = Signature::try_from(function.ty(&self.inner.store)) else {
+                    return Err((StartErr::SignatureNotSupported, self.inner));
                 };
 
                 // Check whether the types of the parameters are correct.
                 // This is necessary to do manually because for API purposes the call immediately
                 //starts, while in the internal implementation it doesn't actually.
                 if params.len() != signature.parameters().len() {
-                    return Err((StartErr::InvalidParameters, self));
+                    return Err((StartErr::InvalidParameters, self.inner));
                 }
                 for (obtained, expected) in params.iter().zip(signature.parameters()) {
                     if obtained.ty() != *expected {
-                        return Err((StartErr::InvalidParameters, self));
+                        return Err((StartErr::InvalidParameters, self.inner));
                     }
                 }
 
                 function
             }
-            None => return Err((StartErr::FunctionNotFound, self)), // TODO: we don't differentiate between `FunctionNotFound` and `NotAFunction` here
+            None => return Err((StartErr::FunctionNotFound, self.inner)), // TODO: we don't differentiate between `FunctionNotFound` and `NotAFunction` here
         };
 
         let dummy_output_value = {
-            let func_to_call_ty = func_to_call.ty(&self.store);
+            let func_to_call_ty = func_to_call.ty(&self.inner.store);
             let list = func_to_call_ty.results();
             // We don't support more than one return value. This is enforced by verifying the
             // function signature above.
@@ -259,10 +344,10 @@ impl InterpreterPrototype {
         };
 
         Ok(Interpreter {
-            store: self.store,
-            module: self.module,
-            memory: self.memory,
-            linker: self.linker,
+            store: self.inner.store,
+            module: self.inner.module,
+            memory: self.inner.memory,
+            linker: self.inner.linker,
             dummy_output_value: dummy_output_value,
             execution: Some(Execution::NotStarted(
                 func_to_call,
@@ -275,9 +360,9 @@ impl InterpreterPrototype {
     }
 }
 
-impl fmt::Debug for InterpreterPrototype {
+impl fmt::Debug for Prepare {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("InterpreterPrototype").finish()
+        f.debug_tuple("Prepare").finish()
     }
 }
 
