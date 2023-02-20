@@ -5,7 +5,7 @@
 The code in this repository is split in two parts:
 
 - A library part, whose `Cargo.toml` is found at the root of the repository and whose source code is in `lib/src`.
-- Binaries, found in the `bin` directory.
+- Binaries, found in the other directory.
 
 The coding rules of these two parts differ.
 The code in the library part provides a set of unopinionated tools (more information below), while the binaries take an opinionated approach as to how a node should behave.

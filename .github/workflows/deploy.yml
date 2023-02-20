@@ -47,7 +47,7 @@ jobs:
     - uses: docker/build-push-action@v3.2.0
       with:
         context: .
-        file: ./bin/full-node/Dockerfile
+        file: ./full-node/Dockerfile
         load: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         tags: docker.pkg.github.com/smol-dot/smoldot/node:main
     - run: docker push docker.pkg.github.com/smol-dot/smoldot/node:main
@@ -67,17 +67,17 @@ jobs:
         with:
           node-version: current
       - run: npm install
-        working-directory: ./repo/bin/wasm-node/javascript
+        working-directory: ./repo/wasm-node/javascript
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --verbose --all-features --no-deps --package smoldot --package smoldot-light
         working-directory: ./repo
       - run: npm run doc
-        working-directory: ./repo/bin/wasm-node/javascript
+        working-directory: ./repo/wasm-node/javascript
       - run: |
           mkdir -p ./upload/doc-rust
           mkdir -p ./upload/doc-javascript
           mv ./repo/target/doc/* ./upload/doc-rust
-          mv ./repo/bin/wasm-node/javascript/dist/doc/* ./upload/doc-javascript
+          mv ./repo/wasm-node/javascript/dist/doc/* ./upload/doc-javascript
       - run: |
           git config user.email "github-action@users.noreply.github.com"
           git config user.name "GitHub Action"
@@ -110,16 +110,16 @@ jobs:
           profile: minimal
       - uses: Swatinem/rust-cache@v2
       - run: npm install
-        working-directory: ./bin/wasm-node/javascript
+        working-directory: ./wasm-node/javascript
       - run: npm publish --unsafe-perm --dry-run
-        working-directory: ./bin/wasm-node/javascript
+        working-directory: ./wasm-node/javascript
       - uses: JS-DevTools/npm-publish@v1
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         # Warning: this GitHub action doesn't seem to run prepublish scripts, hence
         # the `npm publish --dry-run` done right above is important to ensure this.
         with:
           token: ${{ secrets.NPM_TOKEN }}
-          package: ./bin/wasm-node/javascript/package.json
+          package: ./wasm-node/javascript/package.json
           access: public
 
   deno-publish:
@@ -146,17 +146,17 @@ jobs:
           profile: minimal
       - uses: Swatinem/rust-cache@v2
       - id: compute-tag  # Compute the tag that we might push.
-        run: echo "::set-output name=tag::light-js-deno-v`jq -r .version ./bin/wasm-node/javascript/package.json`"
+        run: echo "::set-output name=tag::light-js-deno-v`jq -r .version ./wasm-node/javascript/package.json`"
       - id: check-tag-exists  # Check whether the tag already exists.
         run: echo "::set-output name=num-existing::`git tag -l | grep ${{ steps.compute-tag.outputs.tag }} | wc -l`"
       - run: npm install
-        working-directory: ./bin/wasm-node/javascript
+        working-directory: ./wasm-node/javascript
       - run: npm publish --unsafe-perm --dry-run
-        working-directory: ./bin/wasm-node/javascript
+        working-directory: ./wasm-node/javascript
       - run: cp ./README.md ./dist/mjs
-        working-directory: ./bin/wasm-node/javascript
+        working-directory: ./wasm-node/javascript
       - run: |
-          git add --force ./bin/wasm-node/javascript/dist/mjs  # --force bypasses the .gitignore
+          git add --force ./wasm-node/javascript/dist/mjs  # --force bypasses the .gitignore
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git commit -m "Deno version publishing"

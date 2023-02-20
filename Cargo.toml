@@ -1,10 +1,10 @@
 [workspace]
-default-members = ["lib", "bin/full-node"]
+default-members = ["lib", "full-node"]
 members = [
     "lib",
-    "bin/full-node",
-    "bin/light-base",
-    "bin/wasm-node/rust",
+    "full-node",
+    "light-base",
+    "wasm-node/rust",
 ]
 
 [profile.dev]

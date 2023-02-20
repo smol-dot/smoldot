@@ -106,9 +106,9 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
     let chain_spec = {
         let json: Cow<[u8]> = match &cli_options.chain {
-            cli::CliChain::Polkadot => (&include_bytes!("../../../demo-chain-specs/polkadot.json")[..]).into(),
-            cli::CliChain::Kusama => (&include_bytes!("../../../demo-chain-specs/kusama.json")[..]).into(),
-            cli::CliChain::Westend => (&include_bytes!("../../../demo-chain-specs/westend.json")[..]).into(),
+            cli::CliChain::Polkadot => (&include_bytes!("../../demo-chain-specs/polkadot.json")[..]).into(),
+            cli::CliChain::Kusama => (&include_bytes!("../../demo-chain-specs/kusama.json")[..]).into(),
+            cli::CliChain::Westend => (&include_bytes!("../../demo-chain-specs/westend.json")[..]).into(),
             cli::CliChain::Custom(path) => {
                 fs::read(path).expect("Failed to read chain specs").into()
             }
