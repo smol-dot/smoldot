@@ -16,8 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::super::{
-    vm, vm::ExecHint, Config, Error, HeapPages, HostVm, HostVmPrototype, ModuleFormatError, NewErr,
-    StartErr,
+    vm, vm::ExecHint, Config, Error, HeapPages, HostVm, HostVmPrototype, NewErr, StartErr,
 };
 use super::with_core_version_custom_sections;
 
@@ -581,3 +580,5 @@ fn unresolved_host_function_called() {
         }
     }
 }
+
+// TODO: consider more tests for the other errors here, or add them on a host-function case-by-case basis
