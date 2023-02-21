@@ -19,8 +19,9 @@
 
 use super::{vm::ExecHint, Config, HeapPages, HostVm, HostVmPrototype};
 
-mod initialization;
 mod host_algorithms;
+mod initialization;
+mod run;
 
 // TODO: test all host functions
 
