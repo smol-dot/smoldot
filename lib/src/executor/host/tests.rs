@@ -19,6 +19,7 @@
 
 use super::{vm::ExecHint, Config, HeapPages, HostVm, HostVmPrototype};
 
+mod initialization;
 mod host_algorithms;
 
 /// Adds to the provided Wasm bytecode the custom sections containing the runtime version and
