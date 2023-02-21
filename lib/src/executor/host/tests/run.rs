@@ -387,3 +387,197 @@ fn bad_return_value() {
         }
     }
 }
+
+#[test]
+fn returned_ptr_out_of_range() {
+    /* Source code:
+
+        #[no_mangle]
+        extern "C" fn test(_: i32, _: i32) -> i64 {
+            let ptr = 0xffff_fff0usize as u32;
+            let sz = 5 as u32;
+
+            i64::from_ne_bytes((u64::from(sz) << 32 | u64::from(ptr)).to_ne_bytes())
+        }
+    */
+    let module_bytes = with_core_version_custom_sections(
+        wat::parse_str(
+            r#"
+    (module
+        (type (;0;) (func (param i32 i32) (result i64)))
+        (func (;0;) (type 0) (param i32 i32) (result i64)
+            i64.const 25769803760)
+        (table (;0;) 1 1 funcref)
+        (memory (;0;) 16)
+        (global (;0;) (mut i32) (i32.const 1048576))
+        (global (;1;) i32 (i32.const 1048576))
+        (global (;2;) i32 (i32.const 1048576))
+        (export "memory" (memory 0))
+        (export "test" (func 0))
+        (export "__data_end" (global 1))
+        (export "__heap_base" (global 2))
+    )
+    "#,
+        )
+        .unwrap(),
+    );
+
+    for exec_hint in ExecHint::available_engines() {
+        let proto = HostVmPrototype::new(Config {
+            allow_unresolved_imports: false,
+            exec_hint,
+            heap_pages: HeapPages::new(1024),
+            module: &module_bytes,
+        })
+        .unwrap();
+
+        let mut vm = HostVm::from(proto.run("test", &[]).unwrap());
+        loop {
+            match vm {
+                HostVm::ReadyToRun(r) => vm = r.run(),
+                HostVm::Error {
+                    error: Error::ReturnedPtrOutOfRange { .. },
+                    ..
+                } => {
+                    break;
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+#[test]
+fn returned_size_out_of_range() {
+    /* Source code:
+
+        #[no_mangle]
+        extern "C" fn test(_: i32, _: i32) -> i64 {
+            let ptr = 5 as u32;
+            let sz = 0xffff_fff0usize as u32;
+
+            i64::from_ne_bytes((u64::from(sz) << 32 | u64::from(ptr)).to_ne_bytes())
+        }
+    */
+    let module_bytes = with_core_version_custom_sections(
+        wat::parse_str(
+            r#"
+    (module
+        (type (;0;) (func (param i32 i32) (result i64)))
+        (func (;0;) (type 0) (param i32 i32) (result i64)
+            i64.const -68719476731)
+        (table (;0;) 1 1 funcref)
+        (memory (;0;) 16)
+        (global (;0;) (mut i32) (i32.const 1048576))
+        (global (;1;) i32 (i32.const 1048576))
+        (global (;2;) i32 (i32.const 1048576))
+        (export "memory" (memory 0))
+        (export "test" (func 0))
+        (export "__data_end" (global 1))
+        (export "__heap_base" (global 2))
+    )
+    "#,
+        )
+        .unwrap(),
+    );
+
+    for exec_hint in ExecHint::available_engines() {
+        let proto = HostVmPrototype::new(Config {
+            allow_unresolved_imports: false,
+            exec_hint,
+            heap_pages: HeapPages::new(1024),
+            module: &module_bytes,
+        })
+        .unwrap();
+
+        let mut vm = HostVm::from(proto.run("test", &[]).unwrap());
+        loop {
+            match vm {
+                HostVm::ReadyToRun(r) => vm = r.run(),
+                HostVm::Error {
+                    error: Error::ReturnedPtrOutOfRange { .. },
+                    ..
+                } => {
+                    break;
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+#[test]
+fn unresolved_host_function_called() {
+    /* Source code:
+        extern {
+            fn host_function_that_doesnt_exist();
+        }
+
+        #[no_mangle]
+        extern "C" fn test(_: i32, _: i32) -> i64 {
+            unsafe {
+                host_function_that_doesnt_exist()
+            }
+
+            0
+        }
+    */
+    let module_bytes = with_core_version_custom_sections(
+        wat::parse_str(
+            r#"
+    (module
+        (type (;0;) (func))
+        (type (;1;) (func (param i32 i32) (result i64)))
+        (import "env" "host_function_that_doesnt_exist" (func (;0;) (type 0)))
+        (func (;1;) (type 1) (param i32 i32) (result i64)
+          call 0
+          i64.const 0)
+        (table (;0;) 1 1 funcref)
+        (memory (;0;) 16)
+        (global (;0;) (mut i32) (i32.const 1048576))
+        (global (;1;) i32 (i32.const 1048576))
+        (global (;2;) i32 (i32.const 1048576))
+        (export "memory" (memory 0))
+        (export "test" (func 1))
+        (export "__data_end" (global 1))
+        (export "__heap_base" (global 2))
+    )
+    "#,
+        )
+        .unwrap(),
+    );
+
+    for exec_hint in ExecHint::available_engines() {
+        match HostVmPrototype::new(Config {
+            allow_unresolved_imports: false,
+            exec_hint,
+            heap_pages: HeapPages::new(1024),
+            module: &module_bytes,
+        }) {
+            Err(NewErr::VirtualMachine(vm::NewErr::UnresolvedFunctionImport { .. })) => {}
+            _ => panic!(),
+        }
+
+        let proto = HostVmPrototype::new(Config {
+            allow_unresolved_imports: true,
+            exec_hint,
+            heap_pages: HeapPages::new(1024),
+            module: &module_bytes,
+        })
+        .unwrap();
+
+        let mut vm = HostVm::from(proto.run("test", &[]).unwrap());
+        loop {
+            match vm {
+                HostVm::ReadyToRun(r) => vm = r.run(),
+                HostVm::Error {
+                    error: Error::UnresolvedFunctionCalled { .. },
+                    ..
+                } => {
+                    break;
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
