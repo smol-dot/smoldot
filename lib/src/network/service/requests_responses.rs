@@ -979,12 +979,13 @@ impl fmt::Debug for EncodedGrandpaWarpSyncResponse {
 }
 
 /// Undecoded but valid state response.
+// TODO: merge with EncodedMerkleProof?
 #[derive(Clone)]
 pub struct EncodedStateResponse(Vec<u8>);
 
 impl EncodedStateResponse {
-    /// Returns the decoded version of the state response.
-    pub fn decode(&self) -> Vec<&[u8]> {
+    /// Returns the Merkle proof of the state response.
+    pub fn decode(&self) -> &[u8] {
         match protocol::decode_state_response(&self.0) {
             Ok(r) => r,
             Err(_) => unreachable!(),
