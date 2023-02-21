@@ -22,6 +22,8 @@ use super::{vm::ExecHint, Config, HeapPages, HostVm, HostVmPrototype};
 mod initialization;
 mod host_algorithms;
 
+// TODO: test all host functions
+
 /// Adds to the provided Wasm bytecode the custom sections containing the runtime version and
 /// runtime APIs, that the module wants to find in the Wasm module.
 fn with_core_version_custom_sections(mut wasm: Vec<u8>) -> Vec<u8> {
