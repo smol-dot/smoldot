@@ -342,7 +342,11 @@ pub struct Prepare {
 
 impl Prepare {
     /// See [`super::Prepare::into_prototype`].
-    pub fn into_prototype(self) -> JitPrototype {
+    pub fn into_prototype(mut self) -> JitPrototype {
+        // Zero-ing the memory to cancel any write that might have been performed.
+        // TODO: use the pooling allocator to re-allocate a new memory, instead of zeroing
+        self.inner.memory.data_mut(&mut self.inner.store).fill(0);
+
         self.inner
     }
 
@@ -916,7 +920,7 @@ impl Jit {
 
     /// See [`super::VirtualMachine::into_prototype`].
     pub fn into_prototype(self) -> JitPrototype {
-        let store = match self.inner {
+        let mut store = match self.inner {
             JitInner::NotStarted { store, .. } | JitInner::Done(store) => store,
             JitInner::Poisoned => unreachable!(),
             JitInner::Executing(mut function_call) => {
@@ -949,18 +953,9 @@ impl Jit {
             }
         };
 
-        // TODO: necessary?
-        /*// Zero-ing the memory.
-        if let Some(memory) = &self.memory {
-            // Soundness: the documentation of wasmtime precisely explains what is safe or not.
-            // Basically, we are safe as long as we are sure that we don't potentially grow the
-            // buffer (which would invalidate the buffer pointer).
-            unsafe {
-                for byte in memory.data_mut() {
-                    *byte = 0;
-                }
-            }
-        }*/
+        // Zero-ing the memory.
+        // TODO: use the pooling allocator to re-allocate a new memory, instead of zeroing
+        self.memory.data_mut(&mut store).fill(0);
 
         JitPrototype {
             store,

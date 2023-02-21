@@ -212,7 +212,10 @@ pub struct Prepare {
 
 impl Prepare {
     /// See [`super::Prepare::into_prototype`].
-    pub fn into_prototype(self) -> InterpreterPrototype {
+    pub fn into_prototype(mut self) -> InterpreterPrototype {
+        // Zero-ing the memory to cancel any write that might have been performed.
+        self.inner.memory.data_mut(&mut self.inner.store).fill(0);
+
         self.inner
     }
 
@@ -562,7 +565,8 @@ impl Interpreter {
 
     /// See [`super::VirtualMachine::into_prototype`].
     pub fn into_prototype(mut self) -> InterpreterPrototype {
-        // TODO: zero the memory
+        // Zero the memory.
+        self.memory.data_mut(&mut self.store).fill(0);
 
         // Because we have successfully instantiated the module in the past, there's no reason
         // why instantiating again could fail now and not before.
