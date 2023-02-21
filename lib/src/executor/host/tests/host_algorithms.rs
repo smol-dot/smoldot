@@ -179,3 +179,5 @@ fn ext_hashing_keccak_256_version_1() {
         }
     }
 }
+
+// TODO: test the other algorithms
