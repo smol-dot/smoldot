@@ -169,4 +169,44 @@ fn unresolved_host_functions_setting() {
     }
 }
 
+#[test]
+fn host_function_bad_signature() {
+    // The `ext_allocator_malloc_version_1` host function exists but its actual signature
+    // is `(i32) -> i32`.
+    let module_bytes = with_core_version_custom_sections(
+        wat::parse_str(
+            r#"
+    (module
+        (import "env" "memory" (memory 0))
+        (import "env" "ext_allocator_malloc_version_1" (func (param i64) (result i64)))
+        (global (export "__heap_base") i32 (i32.const 0))
+    )
+    "#,
+        )
+        .unwrap(),
+    );
+
+    for exec_hint in ExecHint::available_engines() {
+        match HostVmPrototype::new(Config {
+            allow_unresolved_imports: true,
+            exec_hint,
+            heap_pages: HeapPages::new(1024),
+            module: &module_bytes,
+        }) {
+            Ok(_) => {}
+            _ => panic!(),
+        }
+
+        match HostVmPrototype::new(Config {
+            allow_unresolved_imports: false,
+            exec_hint,
+            heap_pages: HeapPages::new(1024),
+            module: &module_bytes,
+        }) {
+            Err(NewErr::VirtualMachine(vm::NewErr::UnresolvedFunctionImport { .. })) => {}
+            _ => panic!(),
+        }
+    }
+}
+
 // TODO: add tests for the runtime version gathering after clarifying the errors in host.rs
