@@ -50,8 +50,6 @@
 
 use crate::util::protobuf;
 
-use alloc::vec::Vec;
-
 /// Description of a state request that can be sent to a peer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateRequest<'a> {
@@ -79,7 +77,7 @@ pub enum StateRequestStart<'a> {
     },
 }
 
-// See https://github.com/paritytech/substrate/blob/c8653447fc8ef8d95a92fe164c96dffb37919e85/client/network/sync/src/schema/api.v1.proto#L73-L106
+// See <https://github.com/paritytech/substrate/blob/088a7fc5e66cc08b1a5ac2fbe53e19baf7349489/client/network/sync/src/schema/api.v1.proto#L72-L105>
 // for protocol definition.
 
 /// Builds the bytes corresponding to a state request.
@@ -111,27 +109,20 @@ pub fn build_state_request(
 
 /// Decodes a response to a state request.
 ///
-/// On success, contains a list of Merkle proof entries.
-pub fn decode_state_response(
-    response_bytes: &[u8],
-) -> Result<Vec<&[u8]>, DecodeStateResponseError> {
+/// On success, contains a Merkle proof.
+pub fn decode_state_response(response_bytes: &[u8]) -> Result<&[u8], DecodeStateResponseError> {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode! {
-            #[required] proof = 2 => nom::combinator::map_parser(protobuf::bytes_tag_decode, nom::combinator::flat_map(
-                crate::util::nom_scale_compact_usize,
-                move |num_elems| {
-                    nom::multi::many_m_n(num_elems, num_elems, nom::multi::length_data(crate::util::nom_scale_compact_usize))
-                },
-            )),
+            #[required] proof = 2 => protobuf::bytes_tag_decode,
         }),
     );
 
-    let decoded = match nom::Finish::finish(parser(response_bytes)) {
-        Ok((_, entries)) => entries,
+    let proof = match nom::Finish::finish(parser(response_bytes)) {
+        Ok((_, proof)) => proof.proof,
         Err(_) => return Err(DecodeStateResponseError::ProtobufDecode),
     };
 
-    Ok(decoded.proof)
+    Ok(proof)
 }
 
 /// Error potentially returned by [`decode_state_response`].
