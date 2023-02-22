@@ -47,7 +47,6 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::Instrument as _;
 
 /// Configuration for a [`ConsensusService`].
 pub struct Config<'a> {
@@ -120,7 +119,6 @@ pub struct ConsensusService {
 
 impl ConsensusService {
     /// Initializes the [`ConsensusService`] with the given configuration.
-    #[tracing::instrument(level = "trace", skip(config))]
     pub async fn new(config: Config<'_>) -> Arc<Self> {
         // Perform the initial access to the database to load a bunch of information.
         let (
@@ -185,7 +183,7 @@ impl ConsensusService {
             ]
             && finalized_block_number <= 1500988
         {
-            tracing::warn!(
+            log::warn!(
                 "The Kusama chain is known to be borked at block #1491596. The official Polkadot \
                 client works around this issue by hardcoding a fork in its source code. Smoldot \
                 does not support this hardcoded fork and will thus fail to sync past this block."
@@ -264,9 +262,7 @@ impl ConsensusService {
                 jaeger_service: config.jaeger_service,
             };
 
-            Box::pin(background_sync.run().instrument(
-                tracing::trace_span!(parent: None, "sync-background", root = %HashDisplay(&finalized_block_hash)),
-            ))
+            Box::pin(background_sync.run())
         });
 
         Arc::new(ConsensusService { sync_state })
@@ -276,7 +272,6 @@ impl ConsensusService {
     ///
     /// > **Important**: This doesn't represent the content of the database.
     // TODO: maybe remove this in favour of the database; seems like a better idea
-    #[tracing::instrument(level = "trace", skip(self))]
     pub async fn sync_state(&self) -> SyncState {
         self.sync_state.lock().await.clone()
     }
@@ -391,7 +386,6 @@ struct NetworkSourceInfo {
 }
 
 impl SyncBackground {
-    #[tracing::instrument(level = "trace", skip(self))]
     async fn run(mut self) {
         loop {
             self.start_network_requests().await;
@@ -634,13 +628,11 @@ impl SyncBackground {
         // TODO: it is possible that the current best block is already the same authoring slot as the slot we want to claim ; unclear how to solve this
 
         let parent_number = self.sync.best_block_number();
-        let span = tracing::info_span!(
-            "block-authoring",
-            parent_hash = %HashDisplay(&self.sync.best_block_hash()),
+        log::debug!(
+            "block-author-start; parent_hash={}; parent_number={}",
+            HashDisplay(&self.sync.best_block_hash()),
             parent_number,
-            error = tracing::field::Empty,
         );
-        let _enter = span.enter();
 
         // We would like to create a span for authoring the new block, but the trace id depends on
         // the block hash, which is only known at the end.
@@ -698,11 +690,6 @@ impl SyncBackground {
                         // successful, and the only thing remaining to do is sign the block
                         // header. Signing is done through `self.keystore`.
 
-                        // A child span is used in order to measure the time it takes to sign
-                        // the block.
-                        let span = tracing::debug_span!("block-authoring-signing");
-                        let _enter = span.enter();
-
                         // TODO: correct key namespace
                         let data_to_sign = seal.to_sign();
                         let sign_future = self.keystore.sign(
@@ -719,8 +706,7 @@ impl SyncBackground {
                                 // removed from the keystore in parallel of the block authoring
                                 // process, or the key is maybe no longer accessible because of
                                 // another issue.
-                                tracing::warn!(%error, "signing-error");
-                                span.record("error", &tracing::field::display(error));
+                                log::warn!("block-author-signing-error; error={}", error);
                                 self.block_authoring = None;
                                 return;
                             }
@@ -734,9 +720,8 @@ impl SyncBackground {
                         // after and failing again repeatedly, we switch the block authoring to
                         // the same state as if it had successfully generated a block.
                         self.block_authoring = Some((author::build::Builder::Idle, Vec::new()));
-                        tracing::warn!(%error, "block-author-error");
                         // TODO: log the runtime logs
-                        span.record("error", &tracing::field::display(error));
+                        log::warn!("block-author-error; error={}", error);
                         return;
                     }
 
@@ -750,7 +735,7 @@ impl SyncBackground {
                     author::build::BuilderAuthoring::ApplyExtrinsicResult { result, resume } => {
                         if let Err(error) = result {
                             // TODO: include transaction bytes or something?
-                            tracing::warn!(%error, "block-author-transaction-inclusion-error");
+                            log::warn!("block-author-transaction-inclusion-error; error={}", error);
                         }
 
                         // TODO: actually implement including transactions in the blocks
@@ -808,11 +793,11 @@ impl SyncBackground {
 
         // Block has now finished being generated.
         let new_block_hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-        tracing::info!(
-            hash = %HashDisplay(&new_block_hash),
-            body_len = %block.body.len(),
-            runtime_logs = ?block.logs,
-            "block-generated"
+        log::info!(
+            "block-generated; hash={}, body_len={}, runtime_logs={:?}",
+            HashDisplay(&new_block_hash),
+            block.body.len(),
+            block.logs
         );
         let _jaeger_span = self
             .jaeger_service
@@ -826,7 +811,10 @@ impl SyncBackground {
         match authoring_end.elapsed() {
             Ok(now_minus_end) if now_minus_end < Duration::from_millis(500) => {}
             _ => {
-                tracing::warn!(hash = %HashDisplay(&new_block_hash), "block-generation-too-long");
+                log::warn!(
+                    "block-generation-too-long; hash={}",
+                    HashDisplay(&new_block_hash)
+                );
             }
         }
 
@@ -918,7 +906,7 @@ impl SyncBackground {
                 all::DesiredRequest::BlocksRequest { .. }
                     if source_id == self.block_author_sync_source =>
                 {
-                    tracing::debug!("queue-locally-authored-block-for-import");
+                    log::debug!("queue-locally-authored-block-for-import");
 
                     let (_, block_hash, scale_encoded_header, scale_encoded_extrinsics) =
                         self.authored_block.take().unwrap();
@@ -1030,13 +1018,6 @@ impl SyncBackground {
                     let height_to_verify = verify.height();
                     let scale_encoded_header_to_verify = verify.scale_encoded_header().to_owned(); // TODO: copy :-/
 
-                    let span = tracing::debug_span!(
-                        "block-verification",
-                        hash_to_verify = %HashDisplay(&hash_to_verify), height = %height_to_verify,
-                        outcome = tracing::field::Empty, is_new_best = tracing::field::Empty,
-                        error = tracing::field::Empty,
-                    );
-                    let _enter = span.enter();
                     let _jaeger_span = self.jaeger_service.block_body_verify_span(&hash_to_verify);
 
                     let mut verify = verify.start(unix_time, ());
@@ -1050,14 +1031,13 @@ impl SyncBackground {
                             } => {
                                 // Print a separate warning because it is important for the user
                                 // to be aware of the verification failure.
-                                // `%error` is last because it's quite big.
-                                tracing::warn!(
-                                    parent: &span, hash = %HashDisplay(&hash_to_verify),
-                                    height = %height_to_verify, %error,
-                                    "failed-block-verification"
+                                // `error` is last because it's quite big.
+                                log::warn!(
+                                    "failed-block-verification; hash={}; height={}; error={}",
+                                    HashDisplay(&hash_to_verify),
+                                    height_to_verify,
+                                    error
                                 );
-                                span.record("outcome", &"failure");
-                                span.record("error", &tracing::field::display(error));
                                 self.sync = sync_out;
                                 break;
                             }
@@ -1066,8 +1046,10 @@ impl SyncBackground {
                                 sync: sync_out,
                                 ..
                             } => {
-                                span.record("outcome", &"success");
-                                span.record("is_new_best", &is_new_best);
+                                log::debug!(
+                                    "block-verification-success; hash={}; height={}; is_new_best={:?}",
+                                    HashDisplay(&hash_to_verify), height_to_verify, is_new_best
+                                );
 
                                 // Processing has made a step forward.
 
@@ -1192,13 +1174,6 @@ impl SyncBackground {
                 }
 
                 all::ProcessOne::VerifyFinalityProof(verify) => {
-                    let span = tracing::debug_span!(
-                        "finality-proof-verification",
-                        outcome = tracing::field::Empty,
-                        error = tracing::field::Empty,
-                    );
-                    let _enter = span.enter();
-
                     match verify.perform(rand::random()) {
                         (
                             sync_out,
@@ -1207,7 +1182,7 @@ impl SyncBackground {
                                 updates_best_block,
                             },
                         ) => {
-                            span.record("outcome", &"success");
+                            log::debug!("finality-proof-verification; outcome=success");
                             self.sync = sync_out;
 
                             if updates_best_block {
@@ -1266,24 +1241,22 @@ impl SyncBackground {
                             continue;
                         }
                         (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitPending) => {
-                            span.record("outcome", &"pending");
+                            log::debug!("finality-proof-verification; outcome=pending");
                             self.sync = sync_out;
                             continue;
                         }
                         (sync_out, all::FinalityProofVerifyOutcome::AlreadyFinalized) => {
-                            span.record("outcome", &"already-finalized");
+                            log::debug!("finality-proof-verification; outcome=already-finalized");
                             self.sync = sync_out;
                             continue;
                         }
                         (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitError(error)) => {
-                            span.record("outcome", &"failure");
-                            span.record("error", &tracing::field::display(error));
+                            log::warn!("finality-proof-verification-failure; error={}", error);
                             self.sync = sync_out;
                             continue;
                         }
                         (sync_out, all::FinalityProofVerifyOutcome::JustificationError(error)) => {
-                            span.record("outcome", &"failure");
-                            span.record("error", &tracing::field::display(error));
+                            log::warn!("finality-proof-verification-failure; error={}", error);
                             self.sync = sync_out;
                             continue;
                         }
@@ -1294,19 +1267,17 @@ impl SyncBackground {
                     let hash_to_verify = verify.hash();
                     let height_to_verify = verify.height();
 
-                    let span = tracing::debug_span!(
-                        "header-verification",
-                        hash_to_verify = %HashDisplay(&hash_to_verify), height = %height_to_verify,
-                        outcome = tracing::field::Empty, error = tracing::field::Empty,
-                    );
-                    let _enter = span.enter();
                     let _jaeger_span = self
                         .jaeger_service
                         .block_header_verify_span(&hash_to_verify);
 
                     match verify.perform(unix_time, ()) {
                         all::HeaderVerifyOutcome::Success { sync: sync_out, .. } => {
-                            span.record("outcome", &"success");
+                            log::debug!(
+                                "header-verification; hash={}; height={}; outcome=success",
+                                HashDisplay(&hash_to_verify),
+                                height_to_verify
+                            );
                             self.sync = sync_out;
                             continue;
                         }
@@ -1315,8 +1286,10 @@ impl SyncBackground {
                             error,
                             ..
                         } => {
-                            span.record("outcome", &"failure");
-                            span.record("error", &tracing::field::display(error));
+                            log::debug!(
+                            "header-verification; hash={}; height={}; outcome=failure; error={}",
+                            HashDisplay(&hash_to_verify), height_to_verify, error
+                        );
                             self.sync = sync_out;
                             continue;
                         }

@@ -2407,6 +2407,7 @@ dependencies = [
  "futures-timer",
  "hashbrown 0.13.2",
  "hex",
+ "log",
  "mick-jaeger",
  "rand",
  "smoldot",

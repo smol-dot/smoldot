@@ -28,6 +28,7 @@ futures = { version = "0.3.26", default-features = false, features = ["std", "th
 futures-timer = "3.0"
 hashbrown = { version = "0.13.2", default-features = false }
 hex = { version = "0.4.3", default-features = false }
+log = { version = "0.4.17", default-features = false }
 mick-jaeger = "0.1.8"
 rand = "0.8.5"
 smoldot = { version = "0.5.0", path = "../lib", default-features = false, features = ["database-sqlite", "std"] }

@@ -30,7 +30,6 @@ use smoldot::{
     },
 };
 use std::{borrow::Cow, fs, io, iter, path::PathBuf, sync::Arc, thread, time::Duration};
-use tracing::Instrument as _;
 
 mod consensus_service;
 mod database_thread;
@@ -89,16 +88,16 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         }
     }
 
-    tracing::info!("smoldot full node");
-    tracing::info!("Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.");
-    tracing::info!("Copyright (C) 2023  Pierre Krieger.");
-    tracing::info!("This program comes with ABSOLUTELY NO WARRANTY.");
-    tracing::info!(
+    log::info!("smoldot full node");
+    log::info!("Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.");
+    log::info!("Copyright (C) 2023  Pierre Krieger.");
+    log::info!("This program comes with ABSOLUTELY NO WARRANTY.");
+    log::info!(
         "This is free software, and you are welcome to redistribute it under certain conditions."
     );
 
     // This warning message should be removed if/when the full node becomes mature.
-    tracing::warn!(
+    log::warn!(
         "Please note that this full node is experimental. It is not feature complete and is \
         known to panic often. Please report any panic you might encounter to \
         <https://github.com/smol-dot/smoldot/issues>."
@@ -173,7 +172,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     } else if let Some(base) = directories::ProjectDirs::from("io", "smoldot", "smoldot") {
         Some(base.data_dir().to_owned())
     } else {
-        tracing::warn!(
+        log::warn!(
             "Failed to fetch $HOME directory. Falling back to storing everything in memory, \
                 meaning that everything will be lost when the node stops. If this is intended, \
                 please make this explicit by passing the `--tmp` flag instead."
@@ -411,7 +410,6 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
             tasks_executor: &mut |task| threads_pool.spawn_ok(task),
             jaeger_service: jaeger_service.clone(),
         })
-        .instrument(tracing::debug_span!("network-service-init"))
         .await
         .unwrap();
 
@@ -443,7 +441,6 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         jaeger_service: jaeger_service.clone(),
         slot_duration_author_ratio: 43691_u16,
     })
-    .instrument(tracing::debug_span!("consensus-service-init"))
     .await;
 
     let relay_chain_consensus_service = if let Some(relay_chain_database) = relay_chain_database {
@@ -477,7 +474,6 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 jaeger_service, // TODO: consider passing a different jaeger service with a different service name
                 slot_duration_author_ratio: 43691_u16,
             })
-            .instrument(tracing::debug_span!("relay-chain-consensus-service-init"))
             .await,
         )
     } else {
@@ -522,11 +518,13 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         })
     };*/
 
-    tracing::info!(
-        %local_peer_id, database_is_new = %!database_existed,
-        finalized_block_hash = %HashDisplay(&database_finalized_block_hash),
-        finalized_block_number = %database_finalized_block_number,
-        "successful-initialization"
+    log::info!(
+        "successful-initialization; local_peer_id={}; database_is_new={:?}; \
+        finalized_block_hash={}; finalized_block_number={}",
+        local_peer_id,
+        !database_existed,
+        HashDisplay(&database_finalized_block_hash),
+        database_finalized_block_number,
     );
 
     // Starting from here, a SIGINT (or equivalent) handler is setup. If the user does Ctrl+C,
@@ -686,7 +684,6 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 /// Panics if the database can't be open. This function is expected to be called from the `main`
 /// function.
 ///
-#[tracing::instrument(level = "trace", skip(chain_spec, show_progress))]
 async fn open_database(
     chain_spec: &chain_spec::ChainSpec,
     genesis_chain_information: chain::chain_information::ChainInformationRef<'_>,
@@ -740,7 +737,6 @@ async fn open_database(
 /// in the background while showing a small progress bar to the user.
 ///
 /// If `path` is `None`, the database is opened in memory.
-#[tracing::instrument(level = "trace", skip(show_progress))]
 async fn background_open_database(
     path: Option<PathBuf>,
     block_number_bytes: usize,
