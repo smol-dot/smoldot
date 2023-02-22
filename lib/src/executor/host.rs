@@ -472,6 +472,15 @@ impl HostVmPrototype {
             }
         };
 
+        // While the allocator has reserved memory, it might have reserved more memory than its
+        // current size.
+        if let Some(to_grow) = ((data_ptr + data_len_u32).saturating_sub(1) / (64 * 1024) + 1)
+            .checked_sub(u32::from(vm.memory_size()))
+        {
+            // If the memory can't be grown, it indicates a bug in the allocator.
+            vm.grow_memory(HeapPages::from(to_grow)).unwrap();
+        }
+
         // Writing the input data into the VM.
         let mut data_ptr_iter = data_ptr;
         for data in data {

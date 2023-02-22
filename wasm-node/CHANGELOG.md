@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## Fixed
+
+- Fix panic when the input data of a Wasm function call is larger than a Wasm page. ([#218](https://github.com/smol-dot/smoldot/pull/218))
+
 ## 0.7.12 - 2022-02-22
 
 ### Changed
