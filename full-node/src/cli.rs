@@ -36,7 +36,7 @@ use smoldot::{
         PeerId,
     },
 };
-use std::{net::SocketAddr, path::PathBuf, str::FromStr};
+use std::{net::SocketAddr, path::PathBuf};
 
 // Note: the doc-comments applied to this struct and its field are visible when the binary is
 // started with `--help`.
