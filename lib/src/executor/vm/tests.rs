@@ -643,6 +643,42 @@ fn memory_grow_detects_limit_within_host_function() {
     }
 }
 
+#[test]
+fn globals_reinitialized_after_reset() {
+    let module_bytes = wat::parse_str(
+        r#"
+        (module
+            (import "env" "memory" (memory $mem 8 16))
+            (global $myglob (export "myglob") (mut i32) (i32.const 5))
+            (func (export "hello")
+                global.get $myglob
+                i32.const 1
+                i32.add
+                global.set $myglob)
+        )
+        "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+
+        let mut prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
+        assert_eq!(prototype.global_value("myglob").unwrap(), 5);
+
+        let mut vm = prototype.prepare().start("hello", &[]).unwrap();
+        assert!(matches!(
+            vm.run(None),
+            Ok(super::ExecOutcome::Finished {
+                return_value: Ok(None),
+            })
+        ));
+
+        let mut prototype = vm.into_prototype();
+        assert_eq!(prototype.global_value("myglob").unwrap(), 5);
+    }
+}
+
 // TODO: test for memory reads and writes, including within host functions
 
 // TODO: test that the memory gets reinitialized when reusing the prototype
