@@ -18,6 +18,7 @@
 // TODO: needs documentation
 
 use alloc::{borrow::Cow, vec::Vec};
+use base64::Engine as _;
 use core::{
     fmt, iter,
     str::{self, FromStr},
@@ -284,13 +285,14 @@ impl<'a> ProtocolRef<'a> {
                 let s = iter.next().ok_or(ParseError::UnexpectedEof)?;
                 // See <https://github.com/multiformats/multibase#multibase-table>
                 let base64_flavor = match s.as_bytes().first() {
-                    Some(b'm') => base64::STANDARD_NO_PAD,
-                    Some(b'M') => base64::STANDARD,
-                    Some(b'u') => base64::URL_SAFE_NO_PAD,
-                    Some(b'U') => base64::URL_SAFE,
+                    Some(b'm') => base64::engine::general_purpose::STANDARD_NO_PAD,
+                    Some(b'M') => base64::engine::general_purpose::STANDARD,
+                    Some(b'u') => base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                    Some(b'U') => base64::engine::general_purpose::URL_SAFE,
                     _ => return Err(ParseError::InvalidMultibase),
                 };
-                let decoded = base64::decode_config(&s[1..], base64_flavor)
+                let decoded = base64_flavor
+                    .decode(&s[1..])
                     .map_err(|_| ParseError::InvalidBase64)?;
                 if let Err(err) = multihash::MultihashRef::from_bytes(&decoded) {
                     return Err(ParseError::InvalidMultihash(err));
@@ -389,7 +391,7 @@ impl<'a> fmt::Display for ProtocolRef<'a> {
                 write!(
                     f,
                     "/certhash/u{}",
-                    base64::encode_config(multihash, base64::URL_SAFE_NO_PAD)
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(multihash)
                 )
             }
         }
