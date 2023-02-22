@@ -794,7 +794,7 @@ impl SyncBackground {
         // Block has now finished being generated.
         let new_block_hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
         log::info!(
-            "block-generated; hash={}, body_len={}, runtime_logs={:?}",
+            "block-generated; hash={}; body_len={}; runtime_logs={:?}",
             HashDisplay(&new_block_hash),
             block.body.len(),
             block.logs
