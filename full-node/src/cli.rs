@@ -69,7 +69,7 @@ pub struct CliOptionsRun {
     pub output: Output,
     /// Log filter. Example: `foo=trace`
     #[arg(long)]
-    pub log: Vec<LogDirective>,
+    pub log: Vec<String>,
     /// Coloring: auto, always, never
     #[arg(long, default_value = "auto")]
     pub color: ColorChoice,
@@ -179,23 +179,6 @@ fn parse_json_rpc_address(string: &str) -> Result<JsonRpcAddress, String> {
     }
 
     Err("Failed to parse JSON-RPC server address".into())
-}
-
-#[derive(Debug)]
-pub struct LogDirective(pub tracing_subscriber::filter::Directive);
-
-impl Clone for LogDirective {
-    fn clone(&self) -> Self {
-        LogDirective(self.0.to_string().parse().unwrap())
-    }
-}
-
-impl FromStr for LogDirective {
-    type Err = <tracing_subscriber::filter::Directive as FromStr>::Err;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(LogDirective(s.parse()?))
-    }
 }
 
 #[derive(Debug, Clone)]

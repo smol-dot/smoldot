@@ -54,38 +54,25 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
     // Setup the logging system of the binary.
     if !matches!(cli_output, cli::Output::None) {
-        let mut env_filter = tracing_subscriber::filter::EnvFilter::new("DEBUG");
+        let mut builder = env_logger::Builder::new();
         if matches!(cli_output, cli::Output::Informant) {
-            env_filter = env_filter.add_directive(tracing::Level::INFO.into()); // TODO: display infos/warnings in a nicer way ; in particular, immediately put the informant on top of warnings
+            // TODO: display infos/warnings in a nicer way ; in particular, immediately put the informant on top of warnings
+            builder.filter_level(log::LevelFilter::Info);
         } else {
-            for filter in cli_options.log {
-                env_filter = env_filter.add_directive(filter.0);
+            builder.filter_level(log::LevelFilter::Debug);
+            for filter in &cli_options.log {
+                builder.parse_filters(filter);
             }
         }
 
-        let builder = tracing_subscriber::fmt()
-            .with_timer(tracing_subscriber::fmt::time::ChronoUtc::rfc3339())
-            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::ENTER)
-            .with_env_filter(env_filter)
-            .with_writer(io::stdout);
+        // TODO: handle if matches!(cli_output, cli::Output::LogsJson) {
 
-        // Because calling `builder.json()` changes the type of `builder`, we do it at the end
-        // and call `init()` at the same time.
-        //
-        // This registers a global process-wide subscriber.
-        // While this is poor programming practices and we would prefer using a crate that doesn't
-        // rely on global variables, the `tracing` crate is currently one of the best logging
-        // crates in the Rust ecosystem at the time of writing of this comment.
-        if matches!(cli_output, cli::Output::LogsJson) {
-            builder.json().init();
-        } else {
-            builder
-                .with_ansi(match cli_options.color {
-                    cli::ColorChoice::Always => true,
-                    cli::ColorChoice::Never => false,
-                })
-                .init();
-        }
+        builder.write_style(match cli_options.color {
+            cli::ColorChoice::Always => env_logger::WriteStyle::Always,
+            cli::ColorChoice::Never => env_logger::WriteStyle::Never,
+        });
+
+        builder.init();
     }
 
     log::info!("smoldot full node");
