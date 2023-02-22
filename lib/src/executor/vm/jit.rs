@@ -356,17 +356,6 @@ impl JitPrototype {
     }
 }
 
-// TODO: revisit this
-// The fields related to `wasmtime` do not implement `Send` because they use `std::rc::Rc`. `Rc`
-// does not implement `Send` because incrementing/decrementing the reference counter from
-// multiple threads simultaneously would be racy. It is however perfectly sound to move all the
-// instances of `Rc`s at once between threads, which is what we're doing here.
-//
-// This importantly means that we should never return a `Rc` (even by reference) across the API
-// boundary.
-// TODO: really annoying to have to use unsafe code
-unsafe impl Send for JitPrototype {}
-
 impl fmt::Debug for JitPrototype {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("JitPrototype").finish()
@@ -602,8 +591,8 @@ enum JitInner {
         Pin<
             Box<
                 dyn future::Future<
-                    Output = (wasmtime::Store<()>, Result<Option<WasmValue>, String>),
-                >,
+                        Output = (wasmtime::Store<()>, Result<Option<WasmValue>, String>),
+                    > + Send,
             >,
         >,
     ),
@@ -958,9 +947,6 @@ impl Jit {
         JitPrototype::from_base_components(self.base_components).unwrap()
     }
 }
-
-// TODO: figure out and explain why wasmtime isn't Send
-unsafe impl Send for Jit {}
 
 impl fmt::Debug for Jit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
