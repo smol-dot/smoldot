@@ -2338,6 +2338,8 @@ dependencies = [
  "log",
  "mick-jaeger",
  "rand",
+ "serde",
+ "serde_json",
  "smoldot",
  "terminal_size",
 ]

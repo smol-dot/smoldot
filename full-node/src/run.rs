@@ -29,7 +29,14 @@ use smoldot::{
         peer_id::{self, PeerId},
     },
 };
-use std::{borrow::Cow, fs, io, iter, path::PathBuf, sync::Arc, thread, time::Duration};
+use std::{
+    borrow::Cow,
+    fs, io, iter,
+    path::PathBuf,
+    sync::Arc,
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 mod consensus_service;
 mod database_thread;
@@ -65,12 +72,46 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
             }
         }
 
-        // TODO: handle if matches!(cli_output, cli::Output::LogsJson) {
+        if matches!(cli_output, cli::Output::LogsJson) {
+            builder.write_style(env_logger::WriteStyle::Never);
+            builder.format(|mut formatter, record| {
+                // TODO: consider using the "kv" feature of he "logs" crate and output individual fields
+                #[derive(serde::Serialize)]
+                struct Record<'a> {
+                    timestamp: u128,
+                    target: &'a str,
+                    level: &'static str,
+                    message: String,
+                }
 
-        builder.write_style(match cli_options.color {
-            cli::ColorChoice::Always => env_logger::WriteStyle::Always,
-            cli::ColorChoice::Never => env_logger::WriteStyle::Never,
-        });
+                serde_json::to_writer(
+                    &mut formatter,
+                    &Record {
+                        timestamp: SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0),
+                        target: record.target(),
+                        level: match record.level() {
+                            log::Level::Trace => "trace",
+                            log::Level::Debug => "debug",
+                            log::Level::Info => "info",
+                            log::Level::Warn => "warn",
+                            log::Level::Error => "error",
+                        },
+                        message: format!("{}", record.args()),
+                    },
+                )
+                .map_err(|err| io::Error::new(std::io::ErrorKind::Other, err.to_string()))?;
+                io::Write::write_all(formatter, b"\n")?;
+                Ok(())
+            });
+        } else {
+            builder.write_style(match cli_options.color {
+                cli::ColorChoice::Always => env_logger::WriteStyle::Always,
+                cli::ColorChoice::Never => env_logger::WriteStyle::Never,
+            });
+        }
 
         builder.init();
     }
