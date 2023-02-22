@@ -140,30 +140,39 @@ impl InterpreterPrototype {
             }
         }
 
+        Self::from_components(module.inner.clone(), store, linker)
+    }
+
+    fn from_components(
+        module: Arc<wasmi::Module>,
+        mut store: wasmi::Store<()>,
+        linker: wasmi::Linker<()>,
+    ) -> Result<Self, NewErr> {
         let instance = linker
-            .instantiate(&mut store, &module.inner)
+            .instantiate(&mut store, &*module)
             .map_err(|err| NewErr::Other(err.to_string()))?
             .ensure_no_start(&mut store)
             .map_err(|_| NewErr::StartFunctionNotSupported)?;
 
-        let memory = if let Some(import_memory) = import_memory {
-            if instance.get_memory(&store, "memory").is_some() {
-                return Err(NewErr::TwoMemories);
-            }
+        let memory =
+            if let Some(wasmi::Extern::Memory(import_memory)) = linker.resolve("env", "memory") {
+                if instance.get_memory(&store, "memory").is_some() {
+                    return Err(NewErr::TwoMemories);
+                }
 
-            import_memory
-        } else if let Some(mem) = instance.get_memory(&store, "memory") {
-            // TODO: we don't detect NewErr::MemoryIsntMemory
-            mem.clone()
-        } else {
-            return Err(NewErr::NoMemory);
-        };
+                import_memory
+            } else if let Some(mem) = instance.get_memory(&store, "memory") {
+                // TODO: we don't detect NewErr::MemoryIsntMemory
+                mem.clone()
+            } else {
+                return Err(NewErr::NoMemory);
+            };
 
         Ok(InterpreterPrototype {
             store,
             instance,
             linker,
-            module: module.inner.clone(),
+            module,
             memory,
         })
     }
@@ -561,25 +570,12 @@ impl Interpreter {
     }
 
     /// See [`super::VirtualMachine::into_prototype`].
-    pub fn into_prototype(mut self) -> InterpreterPrototype {
+    pub fn into_prototype(self) -> InterpreterPrototype {
         // TODO: zero the memory
 
         // Because we have successfully instantiated the module in the past, there's no reason
         // why instantiating again could fail now and not before.
-        let instance = self
-            .linker
-            .instantiate(&mut self.store, &self.module)
-            .unwrap()
-            .ensure_no_start(&mut self.store)
-            .unwrap();
-
-        InterpreterPrototype {
-            store: self.store,
-            instance,
-            linker: self.linker,
-            module: self.module,
-            memory: self.memory,
-        }
+        InterpreterPrototype::from_components(self.module, self.store, self.linker).unwrap()
     }
 }
 
