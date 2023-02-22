@@ -66,6 +66,13 @@ impl Module {
 pub struct JitPrototype {
     store: wasmtime::Store<()>,
 
+    /// List of imports to provide when instantiating the module.
+    imports: Vec<wasmtime::Extern>,
+    /// Index within `imports` where the imported memory is, if any.
+    imports_memory_index: Option<usize>,
+
+    module: wasmtime::Module,
+
     /// Instantiated Wasm VM.
     instance: wasmtime::Instance,
 
@@ -87,7 +94,7 @@ impl JitPrototype {
     ) -> Result<Self, NewErr> {
         let mut store = wasmtime::Store::new(module.inner.engine(), ());
 
-        let mut imported_memory = None;
+        let mut imports_memory_index = None;
         let shared = Arc::new(Mutex::new(Shared::ExecutingStart));
 
         // Building the list of symbols that the Wasm VM is able to use.
@@ -233,18 +240,34 @@ impl JitPrototype {
 
                         // Considering that the memory can only be "env":"memory", and that each
                         // import has a unique name, this block can't be reached more than once.
-                        debug_assert!(imported_memory.is_none());
-                        imported_memory = Some(
-                            wasmtime::Memory::new(&mut store, m)
-                                .map_err(|_| NewErr::CouldntAllocateMemory)?,
-                        );
-                        imports.push(wasmtime::Extern::Memory(*imported_memory.as_ref().unwrap()));
+                        debug_assert!(imports_memory_index.is_none());
+
+                        imports_memory_index = Some(imports.len());
+                        let mem = wasmtime::Memory::new(&mut store, m)
+                            .map_err(|_| NewErr::CouldntAllocateMemory)?;
+                        imports.push(wasmtime::Extern::Memory(mem));
                     }
                 };
             }
             imports
         };
 
+        JitPrototype::from_components(
+            module.inner.clone(),
+            store,
+            imports,
+            imports_memory_index,
+            shared,
+        )
+    }
+
+    fn from_components(
+        module: wasmtime::Module,
+        mut store: wasmtime::Store<()>,
+        imports: Vec<wasmtime::Extern>,
+        imports_memory_index: Option<usize>,
+        shared: Arc<Mutex<Shared>>,
+    ) -> Result<Self, NewErr> {
         // Calling `wasmtime::Instance::new` executes the `start` function of the module, if any.
         // If this `start` function calls into one of the imports, then the import will detect
         // that the shared state is `ExecutingStart` and return an error.
@@ -255,7 +278,7 @@ impl JitPrototype {
         // If the `start` function doesn't call any import, then it will go undetected and no
         // error will be returned.
         // TODO: detect `start` anyway, for consistency with other backends
-        let instance = wasmtime::Instance::new_async(&mut store, &module.inner, &imports)
+        let instance = wasmtime::Instance::new_async(&mut store, &module, &imports)
             .now_or_never()
             .ok_or(NewErr::StartFunctionNotSupported)? // TODO: hacky error value, as the error could also be different
             .map_err(|err| NewErr::Other(err.to_string()))?;
@@ -273,10 +296,10 @@ impl JitPrototype {
             None
         };
 
-        let memory = match (exported_memory, imported_memory) {
+        let memory = match (exported_memory, imports_memory_index) {
             (Some(_), Some(_)) => return Err(NewErr::TwoMemories),
             (Some(m), None) => m,
-            (None, Some(m)) => m,
+            (None, Some(idx)) => imports[idx].clone().into_memory().unwrap(),
             (None, None) => return Err(NewErr::NoMemory),
         };
 
@@ -284,6 +307,9 @@ impl JitPrototype {
 
         Ok(JitPrototype {
             store,
+            imports,
+            imports_memory_index,
+            module,
             instance,
             shared,
             memory,
@@ -343,6 +369,8 @@ pub struct Prepare {
 impl Prepare {
     /// See [`super::Prepare::into_prototype`].
     pub fn into_prototype(self) -> JitPrototype {
+        // Note that we don't recreate the instance because the API doesn't give the possibility to
+        // modify the globals while in the "prepare" phase.
         self.inner
     }
 
@@ -444,7 +472,9 @@ impl Prepare {
                 function_to_call,
                 params: params.iter().map(|v| (*v).into()).collect::<Vec<_>>(),
             },
-            instance: self.inner.instance,
+            module: self.inner.module,
+            imports: self.inner.imports,
+            imports_memory_index: self.inner.imports_memory_index,
             shared: self.inner.shared,
             memory: self.inner.memory,
             memory_type: self.inner.memory_type,
@@ -537,8 +567,12 @@ enum Shared {
 pub struct Jit {
     inner: JitInner,
 
-    /// Instantiated Wasm VM.
-    instance: wasmtime::Instance,
+    /// List of imports to provide when instantiating the module.
+    imports: Vec<wasmtime::Extern>,
+    /// Index within `imports` where the imported memory is, if any.
+    imports_memory_index: Option<usize>,
+
+    module: wasmtime::Module,
 
     /// Shared between the "outside" and the external functions. See [`Shared`].
     shared: Arc<Mutex<Shared>>,
@@ -962,13 +996,16 @@ impl Jit {
             }
         }*/
 
-        JitPrototype {
+        // Because this module has been instantiated before with this instance, there's no reason
+        // for this call to fail.
+        JitPrototype::from_components(
+            self.module,
             store,
-            instance: self.instance,
-            shared: self.shared,
-            memory: self.memory,
-            memory_type: self.memory_type,
-        }
+            self.imports,
+            self.imports_memory_index,
+            self.shared,
+        )
+        .unwrap()
     }
 }
 
