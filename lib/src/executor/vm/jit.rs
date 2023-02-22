@@ -64,6 +64,9 @@ impl Module {
 
 /// See [`super::VirtualMachinePrototype`].
 pub struct JitPrototype {
+    /// Base components that can be used to recreate a prototype later if desired.
+    base_components: BaseComponents,
+
     store: wasmtime::Store<()>,
 
     /// Instantiated Wasm VM.
@@ -79,19 +82,22 @@ pub struct JitPrototype {
     memory_type: wasmtime::MemoryType,
 }
 
+struct BaseComponents {
+    module: wasmtime::Module,
+
+    /// For each import of the module, either `None` if not a function, or `Some` containing the
+    /// `usize` of that function.
+    resolved_imports: Vec<Option<usize>>,
+}
+
 impl JitPrototype {
     /// See [`super::VirtualMachinePrototype::new`].
     pub fn new(
         module: &Module,
         mut symbols: impl FnMut(&str, &str, &Signature) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
-        let mut store = wasmtime::Store::new(module.inner.engine(), ());
-
-        let mut imported_memory = None;
-        let shared = Arc::new(Mutex::new(Shared::ExecutingStart));
-
-        // Building the list of symbols that the Wasm VM is able to use.
-        let imports = {
+        // Building the list of imports that the Wasm VM is able to use.
+        let resolved_imports = {
             let mut imports = Vec::with_capacity(module.inner.imports().len());
             for import in module.inner.imports() {
                 match import.ty() {
@@ -114,6 +120,42 @@ impl JitPrototype {
                                 }
                             };
 
+                        imports.push(Some(function_index));
+                    }
+                    wasmtime::ExternType::Global(_) | wasmtime::ExternType::Table(_) => {
+                        return Err(NewErr::ImportTypeNotSupported);
+                    }
+                    wasmtime::ExternType::Memory(_) => {
+                        imports.push(None);
+                    }
+                };
+            }
+            imports
+        };
+
+        Self::from_base_components(BaseComponents {
+            module: module.inner.clone(),
+            resolved_imports,
+        })
+    }
+
+    fn from_base_components(base_components: BaseComponents) -> Result<Self, NewErr> {
+        let mut store = wasmtime::Store::new(base_components.module.engine(), ());
+
+        let mut imported_memory = None;
+        let shared = Arc::new(Mutex::new(Shared::ExecutingStart));
+
+        // Building the list of symbols that the Wasm VM is able to use.
+        let imports = {
+            let mut imports = Vec::with_capacity(base_components.module.imports().len());
+            for (module_import, resolved_function) in base_components
+                .module
+                .imports()
+                .zip(base_components.resolved_imports.iter())
+            {
+                match module_import.ty() {
+                    wasmtime::ExternType::Func(func_type) => {
+                        let function_index = resolved_function.unwrap();
                         let shared = shared.clone();
 
                         // Obtain `expected_return_ty`. We know that the type is supported due to
@@ -212,11 +254,6 @@ impl JitPrototype {
                                             *shared_lock = Shared::OutsideFunctionCall { memory };
                                             Poll::Ready(Ok(()))
                                         }
-                                        Shared::AbortRequired => {
-                                            // The actual error doesn't matter, as this is only
-                                            // in order to communicate back with our "frontend".
-                                            Poll::Ready(Err(anyhow::Error::msg("abort required")))
-                                        }
                                         _ => unreachable!(),
                                     }
                                 }))
@@ -224,10 +261,10 @@ impl JitPrototype {
                         )));
                     }
                     wasmtime::ExternType::Global(_) | wasmtime::ExternType::Table(_) => {
-                        return Err(NewErr::ImportTypeNotSupported);
+                        unreachable!() // Should have been checked earlier.
                     }
                     wasmtime::ExternType::Memory(m) => {
-                        if import.module() != "env" || import.name() != "memory" {
+                        if module_import.module() != "env" || module_import.name() != "memory" {
                             return Err(NewErr::MemoryNotNamedMemory);
                         }
 
@@ -255,7 +292,7 @@ impl JitPrototype {
         // If the `start` function doesn't call any import, then it will go undetected and no
         // error will be returned.
         // TODO: detect `start` anyway, for consistency with other backends
-        let instance = wasmtime::Instance::new_async(&mut store, &module.inner, &imports)
+        let instance = wasmtime::Instance::new_async(&mut store, &base_components.module, &imports)
             .now_or_never()
             .ok_or(NewErr::StartFunctionNotSupported)? // TODO: hacky error value, as the error could also be different
             .map_err(|err| NewErr::Other(err.to_string()))?;
@@ -283,6 +320,7 @@ impl JitPrototype {
         let memory_type = memory.ty(&store);
 
         Ok(JitPrototype {
+            base_components,
             store,
             instance,
             shared,
@@ -343,7 +381,8 @@ pub struct Prepare {
 impl Prepare {
     /// See [`super::Prepare::into_prototype`].
     pub fn into_prototype(self) -> JitPrototype {
-        self.inner
+        // Since the creation has succeeded before, there's no reason why it would fail now.
+        JitPrototype::from_base_components(self.inner.base_components).unwrap()
     }
 
     /// See [`super::Prepare::memory_size`].
@@ -439,12 +478,12 @@ impl Prepare {
         // before being in the context of a function handler.
 
         Ok(Jit {
+            base_components: self.inner.base_components,
             inner: JitInner::NotStarted {
                 store: self.inner.store,
                 function_to_call,
                 params: params.iter().map(|v| (*v).into()).collect::<Vec<_>>(),
             },
-            instance: self.inner.instance,
             shared: self.inner.shared,
             memory: self.inner.memory,
             memory_type: self.inner.memory_type,
@@ -525,7 +564,6 @@ enum Shared {
         memory: wasmtime::Memory,
         additional: u64,
     },
-    AbortRequired,
     Return {
         /// Value to return to the Wasm code.
         return_value: Option<WasmValue>,
@@ -535,10 +573,10 @@ enum Shared {
 
 /// See [`super::VirtualMachine`].
 pub struct Jit {
-    inner: JitInner,
+    /// Base components that can be used to recreate a prototype later if desired.
+    base_components: BaseComponents,
 
-    /// Instantiated Wasm VM.
-    instance: wasmtime::Instance,
+    inner: JitInner,
 
     /// Shared between the "outside" and the external functions. See [`Shared`].
     shared: Arc<Mutex<Shared>>,
@@ -916,59 +954,8 @@ impl Jit {
 
     /// See [`super::VirtualMachine::into_prototype`].
     pub fn into_prototype(self) -> JitPrototype {
-        let store = match self.inner {
-            JitInner::NotStarted { store, .. } | JitInner::Done(store) => store,
-            JitInner::Poisoned => unreachable!(),
-            JitInner::Executing(mut function_call) => {
-                // The call is still in progress, and we need to abort it. Switch `Shared` to
-                // `AbortRequired`, then resume execution so that the function traps and returns
-                // the store.
-                let mut shared_lock = self.shared.try_lock().unwrap();
-                match mem::replace(&mut *shared_lock, Shared::Poisoned) {
-                    Shared::WithinFunctionCall {
-                        in_interrupted_waker,
-                        ..
-                    } => {
-                        if let Some(waker) = in_interrupted_waker {
-                            waker.wake();
-                        }
-
-                        *shared_lock = Shared::AbortRequired;
-                    }
-                    _ => unreachable!(),
-                }
-                drop(shared_lock);
-
-                match future::Future::poll(
-                    function_call.as_mut(),
-                    &mut Context::from_waker(task::noop_waker_ref()),
-                ) {
-                    Poll::Ready((store, Err(_))) => store,
-                    _ => unreachable!(),
-                }
-            }
-        };
-
-        // TODO: necessary?
-        /*// Zero-ing the memory.
-        if let Some(memory) = &self.memory {
-            // Soundness: the documentation of wasmtime precisely explains what is safe or not.
-            // Basically, we are safe as long as we are sure that we don't potentially grow the
-            // buffer (which would invalidate the buffer pointer).
-            unsafe {
-                for byte in memory.data_mut() {
-                    *byte = 0;
-                }
-            }
-        }*/
-
-        JitPrototype {
-            store,
-            instance: self.instance,
-            shared: self.shared,
-            memory: self.memory,
-            memory_type: self.memory_type,
-        }
+        // Since the creation has succeeded before, there's no reason why it would fail now.
+        JitPrototype::from_base_components(self.base_components).unwrap()
     }
 }
 
