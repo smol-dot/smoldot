@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.12 - 2022-02-22
+
 ### Changed
 
 - The memory of the Wasm virtual machine is now properly zeroed between runs. ([#211](https://github.com/smol-dot/smoldot/pull/211))
