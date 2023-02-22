@@ -4,6 +4,7 @@
 
 ### Changed
 
+- The memory of the Wasm virtual machine is now properly zeroed between runs. ([#211](https://github.com/smol-dot/smoldot/pull/211))
 - The Wasm virtual machine no longer tries to grab a table symbol named `__indirect_function_table`. This removes support for an old Substrate feature that no longer exists. ([#181](https://github.com/smol-dot/smoldot/pull/181))
 - The signature of host functions called by the Wasm runtime is now checked when the Wasm code is compiled rather than when the functions are called. ([#183](https://github.com/smol-dot/smoldot/pull/183))
 - When a Wasm function is being called, the parameters of the function are now allocated using the same allocator as used during the execution (`ext_allocator_malloc_version_1` and `ext_allocator_free_version_1`) rather than being written at a specific location in memory. This is consistent with what Substrate is doing, and makes it legal for a Wasm runtime to call `ext_allocator_free_version_1` on the input data if desired. ([#188](https://github.com/smol-dot/smoldot/pull/188))

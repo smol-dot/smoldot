@@ -679,6 +679,73 @@ fn globals_reinitialized_after_reset() {
     }
 }
 
-// TODO: test for memory reads and writes, including within host functions
+#[test]
+fn memory_zeroed_after_reset() {
+    let module_bytes = wat::parse_str(
+        r#"
+        (module
+            (import "env" "memory" (memory $mem 1024 4096))
+            (func (export "hello"))
+        )
+        "#,
+    )
+    .unwrap();
 
-// TODO: test that the memory gets reinitialized when reusing the prototype
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+        let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
+
+        let mut vm = prototype.prepare();
+        vm.write_memory(11, &[5, 6]).unwrap();
+
+        let mut vm = vm.start("hello", &[]).unwrap();
+        assert_eq!(vm.read_memory(12, 1).unwrap().as_ref()[0], 6);
+        vm.write_memory(12, &[7]).unwrap();
+        assert_eq!(vm.read_memory(12, 1).unwrap().as_ref()[0], 7);
+
+        assert!(matches!(
+            vm.run(None),
+            Ok(super::ExecOutcome::Finished {
+                return_value: Ok(None),
+            })
+        ));
+
+        assert_eq!(vm.read_memory(11, 2).unwrap().as_ref(), &[5, 7]);
+
+        let prototype = vm.into_prototype();
+        let vm = prototype.prepare();
+        assert_eq!(vm.read_memory(11, 2).unwrap().as_ref(), &[0, 0]);
+        assert_eq!(vm.read_memory(12, 1).unwrap().as_ref(), &[0]);
+
+        let vm = vm.start("hello", &[]).unwrap();
+        assert_eq!(vm.read_memory(11, 2).unwrap().as_ref(), &[0, 0]);
+        assert_eq!(vm.read_memory(12, 1).unwrap().as_ref(), &[0]);
+    }
+}
+
+#[test]
+fn memory_zeroed_after_prepare() {
+    let module_bytes = wat::parse_str(
+        r#"
+        (module
+            (import "env" "memory" (memory $mem 1024 4096))
+            (func (export "hello"))
+        )
+        "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let module = super::Module::new(&module_bytes, exec_hint).unwrap();
+        let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
+
+        let mut vm = prototype.prepare();
+        assert_eq!(vm.read_memory(11, 2).unwrap().as_ref(), &[0, 0]);
+        vm.write_memory(11, &[5, 6]).unwrap();
+
+        let vm = vm.into_prototype().prepare();
+        assert_eq!(vm.read_memory(11, 2).unwrap().as_ref(), &[0, 0]);
+    }
+}
+
+// TODO: test for memory reads and writes, including within host functions
