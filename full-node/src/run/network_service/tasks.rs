@@ -37,7 +37,6 @@ use std::{
 };
 
 /// Asynchronous task managing a specific connection, including the dialing process.
-#[tracing::instrument(level = "trace", skip(start_connect, inner, connection_to_coordinator))]
 pub(super) async fn opening_connection_task(
     start_connect: service::StartConnect<Instant>,
     inner: Arc<Inner>,
@@ -46,16 +45,12 @@ pub(super) async fn opening_connection_task(
         service::ConnectionToCoordinator,
     )>,
 ) {
-    let span = tracing::debug_span!("start-connect", ?start_connect.id, %start_connect.multiaddr);
-    let _enter = span.enter();
-
     // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d`) into
     // a `Future<dyn Output = Result<TcpStream, ...>>`.
     let socket = match multiaddr_to_socket(&start_connect.multiaddr) {
         Ok(socket) => socket,
         Err(_) => {
-            tracing::debug!(%start_connect.multiaddr, "not-tcp");
-            drop(_enter);
+            log::debug!("not-tcp; address={}", start_connect.multiaddr);
 
             let mut guarded = inner.guarded.lock().await;
             guarded.num_pending_out_attempts -= 1;
@@ -67,7 +62,6 @@ pub(super) async fn opening_connection_task(
             return;
         }
     };
-    drop(_enter);
 
     // Finishing ongoing connection process.
     let socket = {
@@ -137,16 +131,6 @@ pub(super) async fn opening_connection_task(
 }
 
 /// Asynchronous task managing a specific connection.
-#[tracing::instrument(
-    level = "trace",
-    skip(
-        socket,
-        inner,
-        connection_task,
-        coordinator_to_connection,
-        connection_to_coordinator
-    )
-)]
 pub(super) async fn established_connection_task(
     socket: impl AsyncRead + AsyncWrite + Unpin,
     inner: Arc<Inner>,
@@ -182,7 +166,7 @@ pub(super) async fn established_connection_task(
             let (read_buffer, write_buffer) = match socket.buffers() {
                 Ok(b) => b,
                 Err(error) => {
-                    tracing::debug!(%error, "connection-error");
+                    log::debug!("connection-error; error={}", error);
                     connection_task.reset();
                     socket_container = None;
                     continue;
@@ -206,12 +190,13 @@ pub(super) async fn established_connection_task(
                 || read_write.written_bytes != 0
                 || read_write.outgoing_buffer.is_none()
             {
-                tracing::event!(
-                    tracing::Level::TRACE,
-                    read = read_write.read_bytes,
-                    written = read_write.written_bytes,
-                    "wake-up" = ?read_write.wake_up_after,  // TODO: ugly display
-                    "write-close" = read_write.outgoing_buffer.is_none(),
+                // TODO: ugly display for wake-up
+                log::trace!(
+                    "connection-activity; read={}; written={}; wake_up={:?}; write_close={:?}",
+                    read_write.read_bytes,
+                    read_write.written_bytes,
+                    read_write.wake_up_after,
+                    read_write.outgoing_buffer.is_none(),
                 );
             }
 

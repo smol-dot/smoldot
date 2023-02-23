@@ -18,7 +18,6 @@
 use futures::{channel::oneshot, prelude::*};
 use smoldot::json_rpc::{self, methods, websocket_server};
 use std::{io, net::SocketAddr};
-use tracing::Instrument as _;
 
 /// Configuration for a [`JsonRpcService`].
 pub struct Config<'a> {
@@ -65,12 +64,7 @@ impl JsonRpcService {
             client_still_alive: client_still_alive.fuse(),
         };
 
-        (config.tasks_executor)(
-            async move { background.run().await }
-                .instrument(tracing::trace_span!(parent: None, "json-rpc-server"))
-                .boxed(),
-        );
-
+        (config.tasks_executor)(async move { background.run().await }.boxed());
         Ok(JsonRpcService { _server_keep_alive })
     }
 }
@@ -106,14 +100,14 @@ impl JsonRpcBackground {
 
             let (connection_id, message) = match event {
                 websocket_server::Event::ConnectionOpen { address, .. } => {
-                    tracing::debug!(%address, "incoming-connection");
+                    log::debug!("incoming-connection; address={}", address);
                     self.server.accept(address);
                     continue;
                 }
                 websocket_server::Event::ConnectionError {
                     user_data: address, ..
                 } => {
-                    tracing::debug!(%address, "connection-closed");
+                    log::debug!("connection-closed; address={}", address);
                     continue;
                 }
                 websocket_server::Event::TextFrame {
@@ -126,13 +120,13 @@ impl JsonRpcBackground {
             let (request_id, _method) = match methods::parse_json_call(&message) {
                 Ok(v) => v,
                 Err(error) => {
-                    tracing::debug!(%error, %message, "bad-request");
+                    log::debug!("bad-request; error={:?}; message={:?}", error, message);
                     self.server.close(connection_id);
                     continue;
                 }
             };
 
-            tracing::debug!(%request_id, method = ?_method, "request");
+            log::debug!("request; request_id={:?}; method={:?}", request_id, _method);
 
             self.server.queue_send(
                 connection_id,
