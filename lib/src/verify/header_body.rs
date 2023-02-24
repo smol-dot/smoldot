@@ -480,7 +480,7 @@ impl VerifyInner {
                             .diff_get(&b":heappages"[..]),
                     ) {
                         (None, None) => {}
-                        (Some(None), _) => {
+                        (Some((None, ())), _) => {
                             return Verify::Finished(Err((
                                 Error::CodeKeyErased,
                                 success.virtual_machine.into_prototype(),
@@ -492,11 +492,11 @@ impl VerifyInner {
                                 success.virtual_machine.into_prototype(),
                             )))
                         }
-                        (Some(Some(_code)), heap_pages) => {
+                        (Some((Some(_code), ())), heap_pages) => {
                             let parent_runtime = success.virtual_machine.into_prototype();
 
                             let heap_pages = match heap_pages {
-                                Some(heap_pages) => {
+                                Some((heap_pages, ())) => {
                                     match executor::storage_heap_pages_to_value(heap_pages) {
                                         Ok(hp) => hp,
                                         Err(err) => {
@@ -676,6 +676,7 @@ impl RuntimeCompilation {
             .storage_top_trie_changes
             .diff_get(&b":code"[..])
             .unwrap()
+            .0
             .unwrap();
 
         let new_runtime = match host::HostVmPrototype::new(host::Config {

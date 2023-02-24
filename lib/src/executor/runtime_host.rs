@@ -276,7 +276,7 @@ impl StorageGet {
                         append_to_storage_value(&mut value, req.value().as_ref());
                         self.inner
                             .top_trie_changes
-                            .diff_insert(key.as_ref().to_vec(), value);
+                            .diff_insert(key.as_ref().to_vec(), value, ());
                     }
                     _ => unreachable!(),
                 }
@@ -383,7 +383,11 @@ impl PrefixKeys {
                         .unwrap()
                         .storage_value_update(&key, false);
 
-                    let previous_value = self.inner.top_trie_changes.diff_insert_erase(key.clone());
+                    let previous_value = self
+                        .inner
+                        .top_trie_changes
+                        .diff_insert_erase(key.clone(), ())
+                        .map(|(v, _)| v);
 
                     if let Some(top_trie_transaction_revert) =
                         self.inner.top_trie_transaction_revert.last_mut()
@@ -407,12 +411,12 @@ impl PrefixKeys {
                             self.inner
                                 .top_trie_changes
                                 .diff_get(v.as_ref())
-                                .map_or(true, |v| v.is_some())
+                                .map_or(true, |(v, _)| v.is_some())
                         })
                         .map(|v| v.as_ref().to_vec())
                         .collect::<HashSet<_, fnv::FnvBuildHasher>>();
                     // TODO: slow to iterate over everything?
-                    for (key, value) in self.inner.top_trie_changes.diff_iter_unordered() {
+                    for (key, value, ()) in self.inner.top_trie_changes.diff_iter_unordered() {
                         if value.is_none() {
                             continue;
                         }
@@ -674,7 +678,7 @@ impl Inner {
                         self.top_trie_changes.diff_get(key.as_ref())
                     };
 
-                    if let Some(overlay) = search {
+                    if let Some((overlay, _)) = search {
                         self.vm = req.resume_full_value(overlay);
                     } else {
                         self.vm = req.into();
@@ -692,10 +696,11 @@ impl Inner {
 
                         let previous_value = if let Some(value) = req.value() {
                             self.top_trie_changes
-                                .diff_insert(key.as_ref(), value.as_ref())
+                                .diff_insert(key.as_ref(), value.as_ref(), ())
                         } else {
-                            self.top_trie_changes.diff_insert_erase(key.as_ref())
-                        };
+                            self.top_trie_changes.diff_insert_erase(key.as_ref(), ())
+                        }
+                        .map(|(v, ())| v);
 
                         if let Some(top_trie_transaction_revert) =
                             self.top_trie_transaction_revert.last_mut()
@@ -727,13 +732,15 @@ impl Inner {
                         .unwrap()
                         .storage_value_update(key.as_ref(), true);
 
-                    let current_value = self.top_trie_changes.diff_get(key.as_ref());
+                    let current_value =
+                        self.top_trie_changes.diff_get(key.as_ref()).map(|(v, _)| v);
                     if let Some(current_value) = current_value {
                         let mut current_value = current_value.unwrap_or_default().to_vec();
                         append_to_storage_value(&mut current_value, req.value().as_ref());
                         let previous_value = self
                             .top_trie_changes
-                            .diff_insert(key.as_ref().to_vec(), current_value);
+                            .diff_insert(key.as_ref().to_vec(), current_value, ())
+                            .map(|(v, _)| v);
                         if let Some(top_trie_transaction_revert) =
                             self.top_trie_transaction_revert.last_mut()
                         {
@@ -794,7 +801,7 @@ impl Inner {
                         calculate_root::RootMerkleValueCalculation::StorageValue(value_request) => {
                             self.vm = req.into();
                             // TODO: allocating a Vec, meh
-                            if let Some(overlay) = self
+                            if let Some((overlay, ())) = self
                                 .top_trie_changes
                                 .diff_get(&value_request.key().collect::<Vec<_>>())
                             {
@@ -833,11 +840,14 @@ impl Inner {
 
                 host::HostVm::ExternalOffchainStorageSet(req) => {
                     if let Some(value) = req.value() {
-                        self.offchain_storage_changes
-                            .diff_insert(req.key().as_ref().to_vec(), value.as_ref().to_vec());
+                        self.offchain_storage_changes.diff_insert(
+                            req.key().as_ref().to_vec(),
+                            value.as_ref().to_vec(),
+                            (),
+                        );
                     } else {
                         self.offchain_storage_changes
-                            .diff_insert_erase(req.key().as_ref().to_vec());
+                            .diff_insert_erase(req.key().as_ref().to_vec(), ());
                     }
 
                     self.vm = req.resume();
@@ -890,9 +900,9 @@ impl Inner {
                         for (key, value) in last {
                             if let Some(value) = value {
                                 if let Some(value) = value {
-                                    let _ = self.top_trie_changes.diff_insert(key, value);
+                                    let _ = self.top_trie_changes.diff_insert(key, value, ());
                                 } else {
-                                    let _ = self.top_trie_changes.diff_insert_erase(key);
+                                    let _ = self.top_trie_changes.diff_insert_erase(key, ());
                                 }
                             } else {
                                 let _ = self.top_trie_changes.diff_remove(&key);
