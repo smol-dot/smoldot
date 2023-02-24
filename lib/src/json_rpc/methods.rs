@@ -503,6 +503,7 @@ define_methods! {
     author_extrinsicUpdate(subscription: Cow<'a, str>, result: TransactionStatus) -> (),
     chain_finalizedHead(subscription: Cow<'a, str>, result: Header) -> (),
     chain_newHead(subscription: Cow<'a, str>, result: Header) -> (),
+    chain_allHead(subscription: Cow<'a, str>, result: Header) -> (),
     state_runtimeVersion(subscription: Cow<'a, str>, result: Option<RuntimeVersion<'a>>) -> (), // TODO: the Option is a custom addition
     state_storage(subscription: Cow<'a, str>, result: StorageChangeSet) -> (),
 

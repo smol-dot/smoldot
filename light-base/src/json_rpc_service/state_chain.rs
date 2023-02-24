@@ -490,7 +490,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                     .requests_subscriptions
                                     .try_push_notification(
                                         &state_machine_subscription,
-                                        methods::ServerToClient::chain_newHead {
+                                        methods::ServerToClient::chain_allHead {
                                             subscription: (&subscription_id).into(),
                                             result: header,
                                         }
