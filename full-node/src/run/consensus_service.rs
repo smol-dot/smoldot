@@ -38,7 +38,7 @@ use smoldot::{
     informant::HashDisplay,
     libp2p,
     network::{self, protocol::BlockData},
-    sync::all,
+    sync::all::{self, TrieEntryVersion},
 };
 use std::{
     collections::BTreeMap,
@@ -329,7 +329,7 @@ struct SyncBackground {
     // While reading the storage from the database is an option, doing so considerably slows down
     /// the verification, and also makes it impossible to insert blocks in the database in
     /// parallel of this verification.
-    finalized_block_storage: BTreeMap<Vec<u8>, Vec<u8>>,
+    finalized_block_storage: BTreeMap<Vec<u8>, (Vec<u8>, TrieEntryVersion)>,
 
     sync_state: Arc<Mutex<SyncState>>,
 
@@ -1212,7 +1212,7 @@ impl SyncBackground {
 
                             // TODO: maybe write in a separate task? but then we can't access the finalized storage immediately after?
                             for block in &finalized_blocks {
-                                for (key, value) in block
+                                for (key, value, ()) in block
                                     .full
                                     .as_ref()
                                     .unwrap()
@@ -1220,8 +1220,13 @@ impl SyncBackground {
                                     .diff_iter_unordered()
                                 {
                                     if let Some(value) = value {
-                                        self.finalized_block_storage
-                                            .insert(key.to_owned(), value.to_owned());
+                                        self.finalized_block_storage.insert(
+                                            key.to_owned(),
+                                            (
+                                                value.to_owned(),
+                                                block.full.as_ref().unwrap().state_trie_version,
+                                            ),
+                                        );
                                     } else {
                                         let _was_there = self.finalized_block_storage.remove(key);
                                         // TODO: if a block inserts a new value, then removes it in the next block, the key will remain in `finalized_block_storage`; either solve this or document this
