@@ -25,6 +25,8 @@ use crate::{
 use alloc::{borrow::ToOwned as _, vec::Vec};
 use core::{iter, num::NonZeroU64};
 
+pub use runtime_host::TrieEntryVersion;
+
 /// Configuration for a transaction validation process.
 pub struct Config<'a, TTx> {
     /// Runtime used to get the validate the transaction. Must be built using the Wasm code found
@@ -570,13 +572,17 @@ impl StorageGet {
     }
 
     /// Injects the corresponding storage value.
-    pub fn inject_value(self, value: Option<impl Iterator<Item = impl AsRef<[u8]>>>) -> Query {
+    pub fn inject_value(
+        self,
+        value: Option<impl Iterator<Item = impl AsRef<[u8]>>>,
+        storage_trie_node_version: TrieEntryVersion,
+    ) -> Query {
         match self.0 {
             StorageGetInner::Stage1(inner, stage) => {
-                Query::from_step1(inner.inject_value(value), stage)
+                Query::from_step1(inner.inject_value(value, storage_trie_node_version), stage)
             }
             StorageGetInner::Stage2(inner, stage) => {
-                Query::from_step2(inner.inject_value(value), stage)
+                Query::from_step2(inner.inject_value(value, storage_trie_node_version), stage)
             }
         }
     }

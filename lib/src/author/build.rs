@@ -28,6 +28,8 @@ use crate::{
 use alloc::vec::Vec;
 use core::{num::NonZeroU64, time::Duration};
 
+pub use runtime::TrieEntryVersion;
+
 /// Configuration for a block generation.
 pub struct Config<'a, TLocAuth> {
     /// Consensus-specific configuration.
@@ -311,8 +313,10 @@ impl StorageGet {
     pub fn inject_value(
         self,
         value: Option<impl Iterator<Item = impl AsRef<[u8]>>>,
+        storage_trie_node_version: TrieEntryVersion,
     ) -> BuilderAuthoring {
-        self.1.with_runtime_inner(self.0.inject_value(value))
+        self.1
+            .with_runtime_inner(self.0.inject_value(value, storage_trie_node_version))
     }
 }
 

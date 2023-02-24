@@ -36,6 +36,8 @@ use super::{
 use alloc::boxed::Box;
 use core::cmp::Ordering;
 
+pub use verify::header_body::TrieEntryVersion;
+
 impl<T> NonFinalizedTree<T> {
     /// Verifies the given block.
     ///
@@ -600,6 +602,7 @@ impl<T> VerifyContext<T> {
                     parent_runtime: success.parent_runtime,
                     new_runtime: success.new_runtime,
                     storage_top_trie_changes: success.storage_top_trie_changes,
+                    state_trie_version: success.state_trie_version,
                     offchain_storage_changes: success.offchain_storage_changes,
                     top_trie_root_calculation_cache: success.top_trie_root_calculation_cache,
                     insert: BodyInsert {
@@ -845,6 +848,10 @@ pub enum BodyVerifyStep2<T> {
         new_runtime: Option<host::HostVmPrototype>,
         /// List of changes to the storage top trie that the block performs.
         storage_top_trie_changes: storage_diff::StorageDiff,
+        /// State trie version indicated by the runtime. All the storage changes indicated by
+        /// [`BodyVerifyStep2::Finished::storage_top_trie_changes`] should store this version
+        /// alongside with them.
+        state_trie_version: TrieEntryVersion,
         /// List of changes to the off-chain storage that this block performs.
         offchain_storage_changes: storage_diff::StorageDiff,
         /// Cache of calculation for the storage trie of the best block.
@@ -941,8 +948,9 @@ impl<T> StorageGet<T> {
     pub fn inject_value(
         self,
         value: Option<impl Iterator<Item = impl AsRef<[u8]>>>,
+        storage_trie_node_version: TrieEntryVersion,
     ) -> BodyVerifyStep2<T> {
-        let inner = self.inner.inject_value(value);
+        let inner = self.inner.inject_value(value, storage_trie_node_version);
         self.context.with_body_verify(inner)
     }
 }
