@@ -66,6 +66,8 @@ use core::{
 };
 use hashbrown::HashMap;
 
+pub use blocks_tree::TrieEntryVersion;
+
 mod verification_queue;
 
 /// Configuration for the [`OptimisticSync`].
@@ -157,7 +159,8 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
     /// Changes in the storage of the best block compared to the finalized block.
     /// The `BTreeMap`'s keys are storage keys, and its values are new values or `None` if the
     /// value has been erased from the storage.
-    best_to_finalized_storage_diff: storage_diff::StorageDiff,
+    /// Each entry is associated with the state version of the runtime at the time of the write.
+    best_to_finalized_storage_diff: storage_diff::StorageDiff<TrieEntryVersion>,
 
     /// Compiled runtime code of the best block. `None` if it is the same as
     /// [`OptimisticSyncInner::finalized_runtime`].
@@ -1054,6 +1057,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
 
                 Inner::Step2(blocks_tree::BodyVerifyStep2::Finished {
                     storage_top_trie_changes,
+                    state_trie_version,
                     offchain_storage_changes,
                     top_trie_root_calculation_cache,
                     parent_runtime,
@@ -1094,7 +1098,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     shared
                         .inner
                         .best_to_finalized_storage_diff
-                        .merge(&storage_top_trie_changes);
+                        .merge_map(&storage_top_trie_changes, |()| state_trie_version);
 
                     let chain = {
                         let header = insert.header().into();
@@ -1135,10 +1139,11 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                         .inner
                         .best_to_finalized_storage_diff
                         .diff_get(req.key().as_ref());
-                    if let Some(value) = value {
-                        inner = Inner::Step2(
-                            req.inject_value(value.as_ref().map(|v| iter::once(&v[..]))),
-                        );
+                    if let Some((value, storage_trie_node_version)) = value {
+                        inner = Inner::Step2(req.inject_value(
+                            value.as_ref().map(|v| iter::once(&v[..])),
+                            *storage_trie_node_version,
+                        ));
                         continue 'verif_steps;
                     }
 
@@ -1422,8 +1427,14 @@ impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
     }
 
     /// Injects the corresponding storage value.
-    pub fn inject_value(self, value: Option<&[u8]>) -> BlockVerification<TRq, TSrc, TBl> {
-        let inner = self.inner.inject_value(value.map(iter::once));
+    pub fn inject_value(
+        self,
+        value: Option<&[u8]>,
+        storage_trie_node_version: TrieEntryVersion,
+    ) -> BlockVerification<TRq, TSrc, TBl> {
+        let inner = self
+            .inner
+            .inject_value(value.map(iter::once), storage_trie_node_version);
         BlockVerification::from(Inner::Step2(inner), self.shared)
     }
 }
