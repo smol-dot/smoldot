@@ -288,10 +288,18 @@ impl<T> StorageDiff<T> {
     where
         T: Clone,
     {
+        self.merge_map(other, |v| v.clone())
+    }
+
+    /// Applies the given diff on top of the current one.
+    ///
+    /// Each user data in the other diff is first passed through the map.
+    pub fn merge_map<U>(&mut self, other: &StorageDiff<U>, map: impl FnMut(&U) -> T) {
         // TODO: provide an alternative method that consumes `other` as well?
-        for (key, value) in &other.hashmap {
-            self.hashmap.insert(key.clone(), value.clone());
-            self.btree.insert(key.clone(), value.0.is_some());
+        for (key, (value, user_data)) in &other.hashmap {
+            self.hashmap
+                .insert(key.clone(), (value.clone(), map(user_data)));
+            self.btree.insert(key.clone(), value.is_some());
         }
     }
 }
