@@ -46,6 +46,7 @@ use core::{
     time::Duration,
 };
 
+pub use optimistic::TrieEntryVersion;
 pub use warp_sync::{FragmentError as WarpSyncFragmentError, WarpSyncFragment};
 
 /// Configuration for the [`AllSync`].
@@ -2603,8 +2604,12 @@ impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
     }
 
     /// Injects the corresponding storage value.
-    pub fn inject_value(self, value: Option<&[u8]>) -> BlockVerification<TRq, TSrc, TBl> {
-        let inner = self.inner.inject_value(value);
+    pub fn inject_value(
+        self,
+        value: Option<&[u8]>,
+        storage_trie_node_version: TrieEntryVersion,
+    ) -> BlockVerification<TRq, TSrc, TBl> {
+        let inner = self.inner.inject_value(value, storage_trie_node_version);
         BlockVerification::from_inner(inner, self.shared, self.user_data)
     }
 }
