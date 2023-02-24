@@ -1222,7 +1222,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 };
 
             let finalized_storage_code = match decoded_downloaded_runtime.storage_value(b":code") {
-                Some(Some(code)) => code,
+                Some(Some((code, _))) => code,
                 Some(None) => {
                     self.inner.phase = Phase::DownloadFragments {
                         previous_verifier_values: Some((
@@ -1248,7 +1248,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
 
             let finalized_storage_heappages =
                 match decoded_downloaded_runtime.storage_value(b":heappages") {
-                    Some(val) => val,
+                    Some(val) => val.map(|(v, _)| v),
                     None => {
                         self.inner.phase = Phase::DownloadFragments {
                             previous_verifier_values: Some((
@@ -1446,7 +1446,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     chain_information::build::InProgress::StorageGet(get) => {
                         let proof = calls.get(&get.call_in_progress()).unwrap();
                         let value = match proof.storage_value(get.key().as_ref()) {
-                            Some(v) => v,
+                            Some(v) => v.map(|(v, _)| v),
                             None => {
                                 self.inner.phase = Phase::DownloadFragments {
                                     previous_verifier_values: Some((
