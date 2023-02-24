@@ -294,7 +294,7 @@ impl<T> StorageDiff<T> {
     /// Applies the given diff on top of the current one.
     ///
     /// Each user data in the other diff is first passed through the map.
-    pub fn merge_map<U>(&mut self, other: &StorageDiff<U>, map: impl FnMut(&U) -> T) {
+    pub fn merge_map<U>(&mut self, other: &StorageDiff<U>, mut map: impl FnMut(&U) -> T) {
         // TODO: provide an alternative method that consumes `other` as well?
         for (key, (value, user_data)) in &other.hashmap {
             self.hashmap
