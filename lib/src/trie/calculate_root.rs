@@ -501,7 +501,7 @@ mod tests {
                 }
                 super::RootMerkleValueCalculation::StorageValue(value) => {
                     let key = value.key().collect::<Vec<u8>>();
-                    calculation = value.inject(trie.get(&key).map(|v| (v, TrieEntryVersion::V1)));
+                    calculation = value.inject(trie.get(&key).map(|v| (v, version)));
                 }
             }
         }
