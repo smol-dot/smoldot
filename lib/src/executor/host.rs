@@ -1231,17 +1231,36 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_storage_root_version_2 => {
-                let state_version = expect_state_version!(0);
-                match state_version {
-                    trie::TrieEntryVersion::V0 => {
-                        HostVm::ExternalStorageRoot(ExternalStorageRoot {
-                            inner: self.inner,
-                            calling: id,
-                            child_trie_ptr_size: None,
-                        })
-                    }
-                    trie::TrieEntryVersion::V1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
+                // The `ext_storage_root_version_2` host function gets passed as parameter the
+                // state version of the runtime. This is in fact completely unnecessary as the
+                // same information is found in the runtime specification, and this parameter
+                // should be considered as a historical accident. We verify that the version
+                // provided as parameter is the same as the one in the specification.
+                let version_param = u8::from(expect_state_version!(0));
+                let version_spec = self
+                    .inner
+                    .runtime_version
+                    .as_ref()
+                    .unwrap()
+                    .decode()
+                    .state_version
+                    .unwrap_or(0);
+
+                if version_param != version_spec {
+                    return HostVm::Error {
+                        error: Error::StateVersionMismatch {
+                            parameter: version_param,
+                            specification: version_spec,
+                        },
+                        prototype: self.inner.into_prototype(),
+                    };
                 }
+
+                HostVm::ExternalStorageRoot(ExternalStorageRoot {
+                    inner: self.inner,
+                    calling: id,
+                    child_trie_ptr_size: None,
+                })
             }
             HostFunction::ext_storage_changes_root_version_1 => {
                 // The changes trie is an obsolete attempt at having a second trie containing, for
@@ -2482,6 +2501,20 @@ impl ExternalStorageSet {
         } else {
             None
         }
+    }
+
+    /// Returns the state trie version indicated by the runtime.
+    ///
+    /// This information should be stored alongside with the storage value and is necessary in
+    /// order to properly build the trie and thus the trie root node hash.
+    pub fn state_trie_version(&self) -> u8 {
+        self.inner
+            .runtime_version
+            .as_ref()
+            .unwrap()
+            .decode()
+            .state_version
+            .unwrap_or(0)
     }
 
     /// Resumes execution after having set the value.
@@ -3822,6 +3855,20 @@ pub enum Error {
     FreeError {
         /// Pointer that was expected to be freed.
         pointer: u32,
+    },
+    /// Mismatch between the state trie version provided as parameter and the state trie version
+    /// found in the runtime specification.
+    #[display(
+        fmt = "Mismatch between the state trie version provided as parameter ({}) and the state \
+        trie version found in the runtime specification ({}).",
+        parameter,
+        specification
+    )]
+    StateVersionMismatch {
+        /// The version passed as parameter.
+        parameter: u8,
+        /// The version in the specification.
+        specification: u8,
     },
     /// The host function isn't implemented.
     // TODO: this variant should eventually disappear as all functions are implemented

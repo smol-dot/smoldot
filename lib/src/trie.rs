@@ -117,6 +117,15 @@ pub enum TrieEntryVersion {
     V1,
 }
 
+impl From<TrieEntryVersion> for u8 {
+    fn from(v: TrieEntryVersion) -> u8 {
+        match v {
+            TrieEntryVersion::V0 => 0,
+            TrieEntryVersion::V1 => 1,
+        }
+    }
+}
+
 /// Returns the Merkle value of the root of an empty trie.
 pub fn empty_trie_merkle_value() -> [u8; 32] {
     let mut calculation = calculate_root::root_merkle_value(None);
