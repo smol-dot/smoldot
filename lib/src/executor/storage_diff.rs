@@ -296,7 +296,10 @@ impl<T> StorageDiff<T> {
     }
 }
 
-impl fmt::Debug for StorageDiff {
+impl<T> fmt::Debug for StorageDiff<T>
+where
+    T: fmt::Debug,
+{
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // Delegate to `self.inner`
         fmt::Debug::fmt(&self.hashmap, f)
@@ -305,15 +308,30 @@ impl fmt::Debug for StorageDiff {
 
 // We implement `PartialEq` manually, because deriving it would mean that both the hash map and
 // the tree are compared.
-impl cmp::PartialEq for StorageDiff {
-    fn eq(&self, other: &Self) -> bool {
-        self.hashmap == other.hashmap
+impl<T, U> cmp::PartialEq<StorageDiff<U>> for StorageDiff<T>
+where
+    T: cmp::PartialEq<U>,
+{
+    fn eq(&self, other: &StorageDiff<U>) -> bool {
+        // As of the writing of this code, HashMap<K, T> doesn't implement
+        // PartialEq<HashMap<K, U>> where T: PartialEq<U>, so we have to implement it manually. The
+        // way this is implemented matches what the underlying implementation of HashMap does.
+        if self.hashmap.len() != other.hashmap.len() {
+            return false;
+        }
+
+        self.hashmap.iter().all(|(key, (v1, u1))| {
+            other
+                .hashmap
+                .get(key)
+                .map_or(false, |(v2, u2)| *v1 == *v2 && *u1 == *u2)
+        })
     }
 }
 
-impl cmp::Eq for StorageDiff {}
+impl<T> cmp::Eq for StorageDiff<T> where T: cmp::Eq {}
 
-impl Default for StorageDiff {
+impl<T> Default for StorageDiff<T> {
     fn default() -> Self {
         StorageDiff::empty()
     }
