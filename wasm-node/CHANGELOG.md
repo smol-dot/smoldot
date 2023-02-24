@@ -5,6 +5,7 @@
 ## Fixed
 
 - Fix panic when the input data of a Wasm function call is larger than a Wasm page. ([#218](https://github.com/smol-dot/smoldot/pull/218))
+- Subscriptions to the `chain_subscribeAllHeads` JSON-RPC function now generate notifications named `chain_allHead`, like in Substrate. They were erroneously named `chain_newHead`. ([#227](https://github.com/smol-dot/smoldot/pull/227))
 
 ## 0.7.12 - 2022-02-22
 
