@@ -47,6 +47,8 @@ use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
 use core::fmt;
 use hashbrown::{hash_map::Entry, HashMap, HashSet};
 
+pub use trie::TrieEntryVersion;
+
 /// Configuration for [`run`].
 pub struct Config<'a, TParams> {
     /// Virtual machine to be run.
@@ -76,12 +78,20 @@ pub struct Config<'a, TParams> {
 pub fn run(
     config: Config<impl Iterator<Item = impl AsRef<[u8]>> + Clone>,
 ) -> Result<RuntimeHostVm, (host::StartErr, host::HostVmPrototype)> {
+    let state_trie_version = config
+        .virtual_machine
+        .runtime_version()
+        .decode()
+        .state_version
+        .unwrap_or(TrieEntryVersion::V0);
+
     Ok(Inner {
         vm: config
             .virtual_machine
             .run_vectored(config.function_to_call, config.parameter)?
             .into(),
         top_trie_changes: config.storage_top_trie_changes,
+        state_trie_version,
         top_trie_transaction_revert: Vec::new(),
         offchain_storage_changes: config.offchain_storage_changes,
         top_trie_root_calculation_cache: Some(
@@ -101,6 +111,9 @@ pub struct Success {
     pub virtual_machine: SuccessVirtualMachine,
     /// List of changes to the storage top trie that the block performs.
     pub storage_top_trie_changes: storage_diff::StorageDiff,
+    /// State trie version indicated by the runtime. All the storage changes indicated by
+    /// [`Success::storage_top_trie_changes`] should store this version alongside with them.
+    pub state_trie_version: TrieEntryVersion,
     /// List of changes to the off-chain storage that this block performs.
     pub offchain_storage_changes: storage_diff::StorageDiff,
     /// Cache used for calculating the top trie root.
@@ -240,6 +253,7 @@ impl StorageGet {
     pub fn inject_value(
         mut self,
         value: Option<impl Iterator<Item = impl AsRef<[u8]>>>,
+        storage_trie_node_version: TrieEntryVersion,
     ) -> RuntimeHostVm {
         // TODO: update the implementation to not require the folding here
         let value = value.map(|i| {
@@ -273,9 +287,8 @@ impl StorageGet {
                 if let calculate_root::RootMerkleValueCalculation::StorageValue(value_request) =
                     self.inner.root_calculation.take().unwrap()
                 {
-                    // TODO: we only support V0 for now, see https://github.com/paritytech/smoldot/issues/1967
                     self.inner.root_calculation =
-                        Some(value_request.inject(trie::TrieEntryVersion::V0, value));
+                        Some(value_request.inject(storage_trie_node_version, value));
                 } else {
                     // We only create a `StorageGet` if the state is `StorageValue`.
                     panic!()
@@ -599,6 +612,10 @@ struct Inner {
     top_trie_transaction_revert:
         Vec<HashMap<Vec<u8>, Option<Option<Vec<u8>>>, fnv::FnvBuildHasher>>,
 
+    /// State trie version indicated by the runtime. All the storage changes that are performed
+    /// use this version.
+    state_trie_version: TrieEntryVersion,
+
     /// Pending changes to the off-chain storage that this execution performs.
     offchain_storage_changes: storage_diff::StorageDiff,
 
@@ -634,6 +651,7 @@ impl Inner {
                     return RuntimeHostVm::Finished(Ok(Success {
                         virtual_machine: SuccessVirtualMachine(finished),
                         storage_top_trie_changes: self.top_trie_changes,
+                        state_trie_version: self.state_trie_version,
                         offchain_storage_changes: self.offchain_storage_changes,
                         top_trie_root_calculation_cache: self
                             .top_trie_root_calculation_cache
@@ -782,7 +800,7 @@ impl Inner {
                             {
                                 // TODO: we only support V0 for now, see https://github.com/paritytech/smoldot/issues/1967
                                 self.root_calculation =
-                                    Some(value_request.inject(trie::TrieEntryVersion::V0, overlay));
+                                    Some(value_request.inject(TrieEntryVersion::V0, overlay));
                             } else {
                                 self.root_calculation =
                                     Some(calculate_root::RootMerkleValueCalculation::StorageValue(
