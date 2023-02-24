@@ -269,6 +269,10 @@ pub struct BlockFull {
     /// Changes to the storage made by this block compared to its parent.
     pub storage_top_trie_changes: storage_diff::StorageDiff,
 
+    /// State trie version indicated by the runtime. All the storage changes indicated by
+    /// [`BlockFull::storage_top_trie_changes`] should store this version alongside with them.
+    pub state_trie_version: TrieEntryVersion,
+
     /// List of changes to the off-chain storage that this block performs.
     pub offchain_storage_changes: storage_diff::StorageDiff,
 }
@@ -1110,6 +1114,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                                 body: mem::take(&mut shared.block_body),
                                 storage_top_trie_changes,
                                 offchain_storage_changes,
+                                state_trie_version,
                             }),
                         })
                     };
