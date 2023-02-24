@@ -243,8 +243,10 @@ impl<TPlat: Platform> Background<TPlat> {
                                                         .to_json_call_object_parameters(None);
                                                 }
                                             };
-                                            runtime_call =
-                                                get.inject_value(storage_value.map(iter::once));
+                                            runtime_call = get.inject_value(
+                                                storage_value
+                                                    .map(|(val, vers)| (iter::once(val), vers)),
+                                            );
                                         }
                                         runtime_host::RuntimeHostVm::NextKey(nk) => {
                                             // TODO: implement somehow

@@ -1650,7 +1650,7 @@ impl<TPlat: Platform> Background<TPlat> {
                             break Err(RuntimeCallError::Call(err));
                         }
                     };
-                    runtime_call = get.inject_value(storage_value.map(iter::once));
+                    runtime_call = get.inject_value(storage_value.map(|(v, _)| iter::once(v)));
                 }
                 read_only_runtime_host::RuntimeHostVm::NextKey(nk) => {
                     // TODO:
