@@ -603,13 +603,9 @@ impl StorageGet {
     /// Injects the corresponding storage value.
     pub fn inject_value(
         self,
-        value: Option<impl Iterator<Item = impl AsRef<[u8]>>>,
-        storage_trie_node_version: TrieEntryVersion,
+        value: Option<(impl Iterator<Item = impl AsRef<[u8]>>, TrieEntryVersion)>,
     ) -> BlockBuild {
-        BlockBuild::from_inner(
-            self.0.inject_value(value, storage_trie_node_version),
-            self.1,
-        )
+        BlockBuild::from_inner(self.0.inject_value(value), self.1)
     }
 }
 

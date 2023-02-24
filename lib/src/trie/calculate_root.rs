@@ -303,8 +303,7 @@ impl CalcInner {
                         let merkle_value = node_value::calculate_merkle_value(node_value::Config {
                             ty: node_value::NodeTy::Root { key: iter::empty() },
                             children: (0..16).map(|_| None),
-                            stored_value: None::<Vec<u8>>,
-                            version: TrieEntryVersion::V1, // Version makes no difference for empty tries.
+                            stored_value: None::<(Vec<u8>, _)>,
                         });
 
                         return RootMerkleValueCalculation::Finished {
@@ -383,8 +382,7 @@ impl CalcInner {
                             .child_user_data(Nibble::try_from(child_idx).unwrap())
                             .map(|child| child.merkle_value.as_ref().unwrap())
                     }),
-                    stored_value: None::<Vec<u8>>,
-                    version: TrieEntryVersion::V1, // Version has no influence on the output if `stored_value` is `None`.
+                    stored_value: None::<(Vec<u8>, _)>,
                 });
 
                 current.user_data().merkle_value = Some(merkle_value);
@@ -451,8 +449,7 @@ impl StorageValue {
     /// Indicates the storage value and advances the calculation.
     pub fn inject(
         mut self,
-        version: TrieEntryVersion,
-        stored_value: Option<impl AsRef<[u8]>>,
+        stored_value: Option<(impl AsRef<[u8]>, TrieEntryVersion)>,
     ) -> RootMerkleValueCalculation {
         assert!(stored_value.is_some());
 
@@ -478,7 +475,6 @@ impl StorageValue {
                     .map(|child| child.merkle_value.as_ref().unwrap())
             }),
             stored_value,
-            version,
         });
 
         current.user_data().merkle_value = Some(merkle_value);
@@ -505,7 +501,7 @@ mod tests {
                 }
                 super::RootMerkleValueCalculation::StorageValue(value) => {
                     let key = value.key().collect::<Vec<u8>>();
-                    calculation = value.inject(version, trie.get(&key));
+                    calculation = value.inject(trie.get(&key).map(|v| (v, TrieEntryVersion::V1)));
                 }
             }
         }
@@ -642,7 +638,8 @@ mod tests {
                         }
                         super::RootMerkleValueCalculation::StorageValue(value) => {
                             let key = value.key().collect::<Vec<u8>>();
-                            calculation = value.inject(TrieEntryVersion::V1, trie.get(&key));
+                            calculation =
+                                value.inject(trie.get(&key).map(|v| (v, TrieEntryVersion::V1)));
                         }
                     }
                 }
@@ -689,7 +686,8 @@ mod tests {
                         }
                         super::RootMerkleValueCalculation::StorageValue(value) => {
                             let key = value.key().collect::<Vec<u8>>();
-                            calculation = value.inject(TrieEntryVersion::V1, trie.get(&key));
+                            calculation =
+                                value.inject(trie.get(&key).map(|v| (v, TrieEntryVersion::V1)));
                         }
                     }
                 }

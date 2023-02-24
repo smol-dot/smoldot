@@ -1140,10 +1140,13 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                         .best_to_finalized_storage_diff
                         .diff_get(req.key().as_ref());
                     if let Some((value, storage_trie_node_version)) = value {
-                        inner = Inner::Step2(req.inject_value(
-                            value.as_ref().map(|v| iter::once(&v[..])),
-                            *storage_trie_node_version,
-                        ));
+                        inner = Inner::Step2(
+                            req.inject_value(
+                                value
+                                    .as_ref()
+                                    .map(|v| (iter::once(&v[..]), *storage_trie_node_version)),
+                            ),
+                        );
                         continue 'verif_steps;
                     }
 
@@ -1429,12 +1432,11 @@ impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
     /// Injects the corresponding storage value.
     pub fn inject_value(
         self,
-        value: Option<&[u8]>,
-        storage_trie_node_version: TrieEntryVersion,
+        value: Option<(&[u8], TrieEntryVersion)>,
     ) -> BlockVerification<TRq, TSrc, TBl> {
-        let inner = self
-            .inner
-            .inject_value(value.map(iter::once), storage_trie_node_version);
+        let inner = self.inner.inject_value(
+            value.map(|(v, storage_trie_node_version)| (iter::once(v), storage_trie_node_version)),
+        );
         BlockVerification::from(Inner::Step2(inner), self.shared)
     }
 }

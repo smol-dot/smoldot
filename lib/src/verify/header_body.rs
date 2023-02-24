@@ -582,11 +582,10 @@ impl StorageGet {
     /// Injects the corresponding storage value.
     pub fn inject_value(
         self,
-        value: Option<impl Iterator<Item = impl AsRef<[u8]>>>,
-        storage_trie_node_version: TrieEntryVersion,
+        value: Option<(impl Iterator<Item = impl AsRef<[u8]>>, TrieEntryVersion)>,
     ) -> Verify {
         VerifyInner {
-            inner: self.inner.inject_value(value, storage_trie_node_version),
+            inner: self.inner.inject_value(value),
             execution_not_started: self.execution_not_started,
             consensus_success: self.consensus_success,
         }

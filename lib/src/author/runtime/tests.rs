@@ -62,7 +62,7 @@ fn block_building_works() {
                     .iter()
                     .find(|(k, _)| *k == get.key().as_ref())
                     .map(|(_, v)| iter::once(v));
-                builder = get.inject_value(value, super::TrieEntryVersion::V0);
+                builder = get.inject_value(value.map(|v| (v, super::TrieEntryVersion::V0)));
             }
             super::BlockBuild::NextKey(_) => unimplemented!(), // Not needed for this test.
             super::BlockBuild::PrefixKeys(prefix) => {

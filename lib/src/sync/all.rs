@@ -2606,10 +2606,9 @@ impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
     /// Injects the corresponding storage value.
     pub fn inject_value(
         self,
-        value: Option<&[u8]>,
-        storage_trie_node_version: TrieEntryVersion,
+        value: Option<(&[u8], TrieEntryVersion)>,
     ) -> BlockVerification<TRq, TSrc, TBl> {
-        let inner = self.inner.inject_value(value, storage_trie_node_version);
+        let inner = self.inner.inject_value(value);
         BlockVerification::from_inner(inner, self.shared, self.user_data)
     }
 }

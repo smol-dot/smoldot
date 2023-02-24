@@ -137,9 +137,7 @@ pub fn empty_trie_merkle_value() -> [u8; 32] {
                 calculation = keys.inject(iter::empty::<iter::Empty<u8>>());
             }
             calculate_root::RootMerkleValueCalculation::StorageValue(val) => {
-                // Note that the version has no influence whatsoever on the output of the
-                // calculation. The version passed here is a dummy value.
-                calculation = val.inject(TrieEntryVersion::V1, None::<&[u8]>);
+                calculation = val.inject(None::<(&[u8], _)>);
             }
         }
     }
@@ -169,7 +167,7 @@ pub fn trie_root(
                     .iter()
                     .find(|(k, _)| k.as_ref().iter().copied().eq(value.key()))
                     .map(|(_, v)| v);
-                calculation = value.inject(version, result);
+                calculation = value.inject(result.map(move |v| (v, version)));
             }
         }
     }
@@ -205,7 +203,7 @@ pub fn ordered_root(version: TrieEntryVersion, entries: &[impl AsRef<[u8]>]) -> 
                     .collect::<arrayvec::ArrayVec<u8, USIZE_COMPACT_BYTES>>();
                 let (_, key) =
                     util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(&key).unwrap();
-                calculation = value.inject(version, entries.get(key));
+                calculation = value.inject(entries.get(key).map(move |v| (v, version)));
             }
         }
     }

@@ -143,7 +143,7 @@ impl ChainSpec {
                                 ) => {
                                     let key: alloc::vec::Vec<u8> = val.key().collect();
                                     let value = genesis_storage.value(&key[..]);
-                                    calculation = val.inject(state_version, value);
+                                    calculation = val.inject(value.map(move |v| (v, state_version)));
                                 }
                             }
                             }

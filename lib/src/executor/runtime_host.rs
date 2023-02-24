@@ -252,27 +252,27 @@ impl StorageGet {
     /// Injects the corresponding storage value.
     pub fn inject_value(
         mut self,
-        value: Option<impl Iterator<Item = impl AsRef<[u8]>>>,
-        storage_trie_node_version: TrieEntryVersion,
+        value: Option<(impl Iterator<Item = impl AsRef<[u8]>>, TrieEntryVersion)>,
     ) -> RuntimeHostVm {
         // TODO: update the implementation to not require the folding here
-        let value = value.map(|i| {
-            i.fold(Vec::new(), |mut a, b| {
+        let value = value.map(|(value, version)| {
+            let value = value.fold(Vec::new(), |mut a, b| {
                 a.extend_from_slice(b.as_ref());
                 a
-            })
+            });
+            (value, version)
         });
 
         match self.inner.vm {
             host::HostVm::ExternalStorageGet(req) => {
                 // TODO: should actually report the offset and max_size in the API
-                self.inner.vm = req.resume_full_value(value.as_ref().map(|v| &v[..]));
+                self.inner.vm = req.resume_full_value(value.as_ref().map(|(v, _)| &v[..]));
             }
             host::HostVm::ExternalStorageAppend(req) => {
                 match req.key() {
                     host::StorageKey::MainTrie { key } => {
                         // TODO: could be less overhead?
-                        let mut value = value.unwrap_or_default();
+                        let mut value = value.map(|(v, _)| v).unwrap_or_default();
                         append_to_storage_value(&mut value, req.value().as_ref());
                         self.inner
                             .top_trie_changes
@@ -287,8 +287,7 @@ impl StorageGet {
                 if let calculate_root::RootMerkleValueCalculation::StorageValue(value_request) =
                     self.inner.root_calculation.take().unwrap()
                 {
-                    self.inner.root_calculation =
-                        Some(value_request.inject(storage_trie_node_version, value));
+                    self.inner.root_calculation = Some(value_request.inject(value));
                 } else {
                     // We only create a `StorageGet` if the state is `StorageValue`.
                     panic!()
@@ -805,9 +804,10 @@ impl Inner {
                                 .top_trie_changes
                                 .diff_get(&value_request.key().collect::<Vec<_>>())
                             {
-                                // TODO: we only support V0 for now, see https://github.com/paritytech/smoldot/issues/1967
-                                self.root_calculation =
-                                    Some(value_request.inject(TrieEntryVersion::V0, overlay));
+                                self.root_calculation = Some(
+                                    value_request
+                                        .inject(overlay.map(|v| (v, self.state_trie_version))),
+                                );
                             } else {
                                 self.root_calculation =
                                     Some(calculate_root::RootMerkleValueCalculation::StorageValue(
