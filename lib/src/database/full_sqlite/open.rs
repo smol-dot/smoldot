@@ -141,7 +141,8 @@ Storage at the highest block that is considered finalized.
 */
 CREATE TABLE IF NOT EXISTS finalized_storage_top_trie(
     key BLOB NOT NULL PRIMARY KEY,
-    value BLOB NOT NULL
+    value BLOB NOT NULL,
+    trie_entry_version INTEGER NOT NULL
 );
 
 /*
@@ -155,8 +156,11 @@ CREATE TABLE IF NOT EXISTS non_finalized_changes(
     -- `value` is NULL if the block removes the key from the storage, and NON-NULL if it inserts
     -- or replaces the value at the key.
     value BLOB,
+    -- Same NULL-ness remark as for `value`
+    trie_entry_version INTEGER,
     UNIQUE(hash, key),
     CHECK(length(hash) == 32),
+    CHECK((trie_entry_version IS NULL AND value IS NULL) OR (trie_entry_version IS NOT NULL AND value IS NOT NULL)),
     FOREIGN KEY (hash) REFERENCES blocks(hash) ON UPDATE CASCADE ON DELETE CASCADE
 );
 
@@ -267,12 +271,13 @@ impl DatabaseEmpty {
     /// order to turn it into an actual database.
     ///
     /// Must also pass the body, justification, and state of the storage of the finalized block.
+    // TODO strong typing for finalized_block_storage_top_trie_entries
     pub fn initialize<'a>(
         self,
         chain_information: impl Into<chain_information::ChainInformationRef<'a>>,
         finalized_block_body: impl ExactSizeIterator<Item = &'a [u8]>,
         finalized_block_justification: Option<Vec<u8>>,
-        finalized_block_storage_top_trie_entries: impl Iterator<Item = (&'a [u8], &'a [u8])> + Clone,
+        finalized_block_storage_top_trie_entries: impl Iterator<Item = (&'a [u8], &'a [u8], u8)> + Clone,
     ) -> Result<SqliteFullDatabase, AccessError> {
         let chain_information = chain_information.into();
 
@@ -291,10 +296,16 @@ impl DatabaseEmpty {
         {
             let mut statement = self
                 .database
-                .prepare("INSERT INTO finalized_storage_top_trie(key, value) VALUES(?, ?)")
+                .prepare("INSERT INTO finalized_storage_top_trie(key, value, trie_entry_version) VALUES(?, ?, ?)")
                 .unwrap();
-            for (key, value) in finalized_block_storage_top_trie_entries {
-                statement = statement.bind(1, key).unwrap().bind(2, value).unwrap();
+            for (key, value, trie_entry_version) in finalized_block_storage_top_trie_entries {
+                statement = statement
+                    .bind(1, key)
+                    .unwrap()
+                    .bind(2, value)
+                    .unwrap()
+                    .bind(3, i64::from(trie_entry_version))
+                    .unwrap();
                 statement.next().unwrap();
                 statement = statement.reset().unwrap();
             }

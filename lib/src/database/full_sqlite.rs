@@ -317,6 +317,7 @@ impl SqliteFullDatabase {
         body: impl ExactSizeIterator<Item = impl AsRef<[u8]>>,
         storage_top_trie_changes: impl Iterator<Item = (impl AsRef<[u8]>, Option<impl AsRef<[u8]>>)>
             + Clone,
+        trie_entries_version: u8,
     ) -> Result<(), InsertError> {
         // Calculate the hash of the new best block.
         let block_hash = header::hash_from_scale_encoded_header(scale_encoded_header);
@@ -375,13 +376,15 @@ impl SqliteFullDatabase {
 
         // Insert the storage changes.
         let mut statement = connection
-            .prepare("INSERT INTO non_finalized_changes(hash, key, value) VALUES (?, ?, ?)")
+            .prepare("INSERT INTO non_finalized_changes(hash, key, value, trie_entry_version) VALUES (?, ?, ?, ?)")
             .unwrap();
         for (key, value) in storage_top_trie_changes {
             statement = statement
                 .bind(1, &block_hash[..])
                 .unwrap()
                 .bind(2, key.as_ref())
+                .unwrap()
+                .bind(3, i64::from(trie_entries_version))
                 .unwrap();
             if let Some(value) = value {
                 statement = statement.bind(3, value.as_ref()).unwrap();
@@ -547,8 +550,8 @@ impl SqliteFullDatabase {
 
             let mut statement = connection
                 .prepare(
-                    "INSERT OR REPLACE INTO finalized_storage_top_trie(key, value)
-                SELECT key, value
+                    "INSERT OR REPLACE INTO finalized_storage_top_trie(key, value, trie_entry_version)
+                SELECT key, value, trie_entry_version
                 FROM non_finalized_changes 
                 WHERE non_finalized_changes.hash = ? AND non_finalized_changes.value IS NOT NULL",
                 )
