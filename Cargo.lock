@@ -2792,9 +2792,9 @@ dependencies = [
 
 [[package]]
 name = "wasmi"
-version = "0.26.1"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35653e9f82eacc22583f303fa34f4c2d4efdee6521e70b46b6ca4c68c0e432d8"
+checksum = "fd3fdd2e118c188a4d070df4f7690295243f79f88a5425caf805fc7053c6547c"
 dependencies = [
  "spin",
  "wasmi_arena",
