@@ -1332,7 +1332,9 @@ async fn database_blocks(
                         .as_ref()
                         .unwrap()
                         .storage_top_trie_changes
-                        .diff_iter_unordered(),
+                        .diff_iter_unordered()
+                        .map(|(k, v, ())| (k, v)),
+                    u8::from(block.full.as_ref().unwrap().state_trie_version),
                 );
 
                 match result {

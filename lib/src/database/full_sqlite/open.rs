@@ -277,7 +277,8 @@ impl DatabaseEmpty {
         chain_information: impl Into<chain_information::ChainInformationRef<'a>>,
         finalized_block_body: impl ExactSizeIterator<Item = &'a [u8]>,
         finalized_block_justification: Option<Vec<u8>>,
-        finalized_block_storage_top_trie_entries: impl Iterator<Item = (&'a [u8], &'a [u8], u8)> + Clone,
+        finalized_block_storage_top_trie_entries: impl Iterator<Item = (&'a [u8], &'a [u8])> + Clone,
+        finalized_block_state_version: u8,
     ) -> Result<SqliteFullDatabase, AccessError> {
         let chain_information = chain_information.into();
 
@@ -298,13 +299,13 @@ impl DatabaseEmpty {
                 .database
                 .prepare("INSERT INTO finalized_storage_top_trie(key, value, trie_entry_version) VALUES(?, ?, ?)")
                 .unwrap();
-            for (key, value, trie_entry_version) in finalized_block_storage_top_trie_entries {
+            for (key, value) in finalized_block_storage_top_trie_entries {
                 statement = statement
                     .bind(1, key)
                     .unwrap()
                     .bind(2, value)
                     .unwrap()
-                    .bind(3, i64::from(trie_entry_version))
+                    .bind(3, i64::from(finalized_block_state_version))
                     .unwrap();
                 statement.next().unwrap();
                 statement = statement.reset().unwrap();

@@ -21,7 +21,7 @@ use futures::{channel::oneshot, prelude::*};
 use smoldot::{
     chain, chain_spec,
     database::full_sqlite,
-    header,
+    executor, header,
     identity::keystore,
     informant::HashDisplay,
     libp2p::{
@@ -742,6 +742,27 @@ async fn open_database(
 
         // The database doesn't exist or is empty.
         full_sqlite::DatabaseOpen::Empty(empty) => {
+            let genesis_storage = chain_spec.genesis_storage().into_genesis_items().unwrap(); // TODO: return error instead
+
+            // In order to determine the state_version of the genesis block, we need to compile
+            // the runtime.
+            // TODO: return errors instead of panicking
+            let state_version = executor::host::HostVmPrototype::new(executor::host::Config {
+                module: genesis_storage.value(b":code").unwrap(),
+                heap_pages: executor::storage_heap_pages_to_value(
+                    genesis_storage.value(b":heappages"),
+                )
+                .unwrap(),
+                exec_hint: executor::vm::ExecHint::Oneshot,
+                allow_unresolved_imports: true,
+            })
+            .unwrap()
+            .runtime_version()
+            .decode()
+            .state_version
+            .map(|v| u8::from(v))
+            .unwrap_or(0);
+
             // The finalized block is the genesis block. As such, it has an empty body and
             // no justification.
             let database = empty
@@ -749,11 +770,8 @@ async fn open_database(
                     genesis_chain_information,
                     iter::empty(),
                     None,
-                    chain_spec
-                        .genesis_storage()
-                        .into_genesis_items()
-                        .unwrap() // TODO: return error instead
-                        .iter(),
+                    genesis_storage.iter(),
+                    state_version,
                 )
                 .unwrap();
             (database, false)
