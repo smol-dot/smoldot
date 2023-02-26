@@ -55,7 +55,8 @@
 //!
 //! In the situation where we want to know the storage value associated to a node, but we only
 //! know the Merkle value of the root of the trie, it is possible to ask a third-party for the
-//! unhashed Merkle values of the desired node and all its ancestors.
+//! unhashed Merkle values of the desired node and all its ancestors. This is called a Merkle
+//! proof.
 //!
 //! After having verified that the third-party has provided correct values, and that they match
 //! the expected root node Merkle value known locally, we can extract the storage value from the
@@ -83,6 +84,21 @@
 //! its ancestors. As such, the time spent calculating the Merkle value of the root node of a trie
 //! mostly depends on the number of modifications that are performed on it, and only a bit on the
 //! size of the trie.
+//!
+//! ## Trie entry version
+//!
+//! In the Substrate/Polkadot trie, each trie node that contains a value also has a version
+//! associated to it.
+//!
+//! This version changes the way the hash of the node is calculated and how the Merkle proof is
+//! generated. Version 1 leads to more succint Merkle proofs, which is important when these proofs
+//! are sent over the Internet.
+//!
+//! Note that most of the time all the entries of the trie have the same version. However, it is
+//! possible for the trie to be in a hybdrid state where some entries have a certain version and
+//! other entries a different version. For this reason, most of the trie-related APIs require you
+//! to provide a trie entry version alongside with the value.
+//!
 
 use crate::util;
 
