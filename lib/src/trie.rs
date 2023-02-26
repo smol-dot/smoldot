@@ -91,11 +91,11 @@
 //! associated to it.
 //!
 //! This version changes the way the hash of the node is calculated and how the Merkle proof is
-//! generated. Version 1 leads to more succint Merkle proofs, which is important when these proofs
+//! generated. Version 1 leads to more succinct Merkle proofs, which is important when these proofs
 //! are sent over the Internet.
 //!
 //! Note that most of the time all the entries of the trie have the same version. However, it is
-//! possible for the trie to be in a hybdrid state where some entries have a certain version and
+//! possible for the trie to be in a hybrid state where some entries have a certain version and
 //! other entries a different version. For this reason, most of the trie-related APIs require you
 //! to provide a trie entry version alongside with the value.
 //!
