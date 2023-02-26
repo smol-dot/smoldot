@@ -1558,15 +1558,37 @@ impl ReadyToRun {
             }
             HostFunction::ext_default_child_storage_root_version_2 => {
                 let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
-                let state_version = expect_state_version!(1);
-                match state_version {
-                    TrieEntryVersion::V0 => HostVm::ExternalStorageRoot(ExternalStorageRoot {
-                        inner: self.inner,
-                        calling: id,
-                        child_trie_ptr_size: Some((child_trie_ptr, child_trie_size)),
-                    }),
-                    TrieEntryVersion::V1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
+
+                // The `ext_default_child_storage_root_version_2` host function gets passed as
+                // parameter the state version of the runtime. This is in fact completely
+                // unnecessary as the same information is found in the runtime specification, and
+                // this parameter should be considered as a historical accident. We verify that the
+                // version provided as parameter is the same as the one in the specification.
+                let version_param = expect_state_version!(1);
+                let version_spec = self
+                    .inner
+                    .runtime_version
+                    .as_ref()
+                    .unwrap()
+                    .decode()
+                    .state_version
+                    .unwrap_or(TrieEntryVersion::V0);
+
+                if version_param != version_spec {
+                    return HostVm::Error {
+                        error: Error::StateVersionMismatch {
+                            parameter: version_param,
+                            specification: version_spec,
+                        },
+                        prototype: self.inner.into_prototype(),
+                    };
                 }
+
+                HostVm::ExternalStorageRoot(ExternalStorageRoot {
+                    inner: self.inner,
+                    calling: id,
+                    child_trie_ptr_size: Some((child_trie_ptr, child_trie_size)),
+                })
             }
             HostFunction::ext_crypto_ed25519_public_keys_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ed25519_generate_version_1 => host_fn_not_implemented!(),
