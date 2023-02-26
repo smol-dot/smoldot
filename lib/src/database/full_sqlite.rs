@@ -383,14 +383,16 @@ impl SqliteFullDatabase {
                 .bind(1, &block_hash[..])
                 .unwrap()
                 .bind(2, key.as_ref())
-                .unwrap()
-                .bind(3, i64::from(trie_entries_version))
                 .unwrap();
             if let Some(value) = value {
-                statement = statement.bind(3, value.as_ref()).unwrap();
+                statement = statement
+                    .bind(3, value.as_ref())
+                    .unwrap()
+                    .bind(4, i64::from(trie_entries_version))
+                    .unwrap();
             } else {
                 // Binds NULL.
-                statement = statement.bind(3, ()).unwrap();
+                statement = statement.bind(3, ()).unwrap().bind(4, ()).unwrap();
             }
             statement.next().unwrap();
             statement = statement.reset().unwrap();
