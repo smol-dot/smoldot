@@ -949,6 +949,7 @@ pub enum CorruptedError {
     ConsensusAlgorithmMix,
     /// The information about a Babe epoch found in the database has failed to decode.
     InvalidBabeEpochInformation,
+    /// The version information about a storage entry has failed to decode.
     InvalidTrieEntryVersion,
     #[display(fmt = "Internal error: {}", _0)]
     Internal(InternalError),

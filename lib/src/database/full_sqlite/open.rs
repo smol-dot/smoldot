@@ -271,7 +271,6 @@ impl DatabaseEmpty {
     /// order to turn it into an actual database.
     ///
     /// Must also pass the body, justification, and state of the storage of the finalized block.
-    // TODO strong typing for finalized_block_storage_top_trie_entries
     pub fn initialize<'a>(
         self,
         chain_information: impl Into<chain_information::ChainInformationRef<'a>>,
