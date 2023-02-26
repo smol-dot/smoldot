@@ -128,7 +128,14 @@ impl ConsensusService {
             best_block_number,
             finalized_block_storage,
             finalized_chain_information,
-        ): (_, _, _, _, BTreeMap<Vec<u8>, Vec<u8>>, _) = config
+        ): (
+            _,
+            _,
+            _,
+            _,
+            BTreeMap<Vec<u8>, (Vec<u8>, TrieEntryVersion)>,
+            _,
+        ) = config
             .database
             .with_database({
                 let block_number_bytes = config.block_number_bytes;
@@ -153,9 +160,17 @@ impl ConsensusService {
                     )
                     .unwrap()
                     .number;
-                    let finalized_block_storage = database
+                    let finalized_block_storage: Vec<(Vec<u8>, Vec<u8>, u8)> = database
                         .finalized_block_storage_top_trie(&finalized_block_hash)
                         .unwrap();
+                    // TODO: we copy all entries; it could be more optimal to have a custom implementation of FromIterator that directly does the conversion?
+                    let finalized_block_storage = finalized_block_storage
+                        .into_iter()
+                        .map(|(k, val, vers)| {
+                            let vers = TrieEntryVersion::try_from(vers).unwrap(); // TODO: don't unwrap
+                            (k, (val, vers))
+                        })
+                        .collect();
                     let finalized_chain_information = database
                         .to_chain_information(&finalized_block_hash)
                         .unwrap();
@@ -223,11 +238,11 @@ impl ConsensusService {
                         // Builds the runtime of the finalized block.
                         // Assumed to always be valid, otherwise the block wouldn't have been saved in the
                         // database, hence the large number of unwraps here.
-                        let module = finalized_block_storage.get(&b":code"[..]).unwrap();
+                        let (module, _) = finalized_block_storage.get(&b":code"[..]).unwrap();
                         let heap_pages = executor::storage_heap_pages_to_value(
                             finalized_block_storage
                                 .get(&b":heappages"[..])
-                                .map(|v| &v[..]),
+                                .map(|(v, _)| &v[..]),
                         )
                         .unwrap();
                         executor::host::HostVmPrototype::new(executor::host::Config {
@@ -754,10 +769,11 @@ impl SyncBackground {
                             best_block_storage_access.get(key.as_ref(), || {
                                 self.finalized_block_storage
                                     .get(key.as_ref())
-                                    .map(|v| &v[..])
+                                    .map(|(val, vers)| (&val[..], *vers))
                             })
                         };
-                        block_authoring = get.inject_value(value.map(iter::once));
+                        block_authoring =
+                            get.inject_value(value.map(|(val, vers)| (iter::once(val), vers)));
                         continue;
                     }
                     author::build::BuilderAuthoring::NextKey(_) => {
@@ -1137,7 +1153,7 @@ impl SyncBackground {
                                 let value = self
                                     .finalized_block_storage
                                     .get(req.key().as_ref())
-                                    .map(|v| &v[..]);
+                                    .map(|(val, vers)| (&val[..], *vers));
                                 verify = req.inject_value(value);
                             }
                             all::BlockVerification::FinalizedStorageNextKey(req) => {

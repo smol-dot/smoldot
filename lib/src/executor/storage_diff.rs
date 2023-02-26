@@ -167,17 +167,6 @@ impl<T> StorageDiff<T> {
         self.hashmap.into_iter().map(|(k, (v, ud))| (k, v, ud))
     }
 
-    /// Returns the storage value at the given key. `None` if this key doesn't have any value.
-    pub fn storage_get<'a, 'b>(
-        &'a self,
-        key: &'b [u8],
-        or_parent: impl FnOnce() -> Option<&'a [u8]>,
-    ) -> Option<&'a [u8]> {
-        self.hashmap
-            .get(key)
-            .map_or_else(or_parent, |(opt, _)| opt.as_ref().map(|v| &v[..]))
-    }
-
     /// Returns the storage key that immediately follows the provided `key`. Must be passed the
     /// storage key that immediately follows the provided `key` according to the base storage this
     /// diff is based upon.

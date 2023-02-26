@@ -808,12 +808,18 @@ impl<'a, TRq, TSrc, TBl> BlockStorage<'a, TRq, TSrc, TBl> {
     pub fn get<'val: 'a>(
         &'val self, // TODO: unclear lifetime
         key: &[u8],
-        or_finalized: impl FnOnce() -> Option<&'val [u8]>,
-    ) -> Option<&'val [u8]> {
-        self.inner
+        or_finalized: impl FnOnce() -> Option<(&'val [u8], TrieEntryVersion)>,
+    ) -> Option<(&'val [u8], TrieEntryVersion)> {
+        match self
+            .inner
             .inner
             .best_to_finalized_storage_diff
-            .storage_get(key, or_finalized)
+            .diff_get(key)
+        {
+            Some((None, _)) => None,
+            Some((Some(val), vers)) => Some((val, *vers)),
+            None => or_finalized(),
+        }
     }
 
     pub fn prefix_keys_ordered<'k: 'a>(

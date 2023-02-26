@@ -117,6 +117,18 @@ pub enum TrieEntryVersion {
     V1,
 }
 
+impl TryFrom<u8> for TrieEntryVersion {
+    type Error = (); // TODO: better error?
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(TrieEntryVersion::V0),
+            1 => Ok(TrieEntryVersion::V1),
+            _ => Err(()),
+        }
+    }
+}
+
 impl From<TrieEntryVersion> for u8 {
     fn from(v: TrieEntryVersion) -> u8 {
         match v {
