@@ -54,8 +54,7 @@
 //!             .cloned(),
 //!         },
 //!         children: children.iter().map(|opt| opt.as_ref()),
-//!         stored_value: Some(b"hello world"),
-//!         version: TrieEntryVersion::V1,
+//!         stored_value: Some((b"hello world", TrieEntryVersion::V1)),
 //!     })
 //! };
 //!
