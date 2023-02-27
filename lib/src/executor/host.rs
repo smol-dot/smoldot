@@ -1835,7 +1835,15 @@ impl ReadyToRun {
                 self.inner
                     .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out))
             }
-            HostFunction::ext_hashing_keccak_512_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_hashing_keccak_512_version_1 => {
+                let mut keccak = tiny_keccak::Keccak::v512();
+                keccak.update(expect_pointer_size!(0).as_ref());
+                let mut out = [0u8; 64];
+                keccak.finalize(&mut out);
+
+                self.inner
+                    .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out))
+            }
             HostFunction::ext_hashing_sha2_256_version_1 => {
                 let mut hasher = sha2::Sha256::new();
                 hasher.update(expect_pointer_size!(0));

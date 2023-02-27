@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## Added
+
+- Add support for the `ext_hashing_keccak_512_version_1` host function. ([#231](https://github.com/smol-dot/smoldot/pull/231))
+
 ## Fixed
 
 - Fix panic when the input data of a Wasm function call is larger than a Wasm page. ([#218](https://github.com/smol-dot/smoldot/pull/218))
