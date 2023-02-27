@@ -269,6 +269,110 @@ fn input_provided_correctly() {
 }
 
 #[test]
+fn large_input_provided_correctly() {
+    /* Source code:
+
+        #[no_mangle]
+        extern "C" fn test(_param_ptr: i32, _param_sz: i32) -> i64 {
+            let inparam: &[u8] = unsafe {
+                core::slice::from_raw_parts(
+                    u32::from_ne_bytes(_param_ptr.to_ne_bytes()) as usize as *const u8,
+                    u32::from_ne_bytes(_param_sz.to_ne_bytes()) as usize,
+                )
+            };
+
+            if inparam.len() != 395718 {
+                core::arch::wasm32::unreachable()
+            }
+
+            for byte in inparam {
+                if *byte != 0x7a {
+                    core::arch::wasm32::unreachable()
+                }
+            }
+
+            0
+        }
+    */
+    let module_bytes = with_core_version_custom_sections(
+        wat::parse_str(
+            r#"(module
+                (type (;0;) (func (param i32 i32) (result i64)))
+                (func (;0;) (type 0) (param i32 i32) (result i64)
+                  (local i32)
+                  block  ;; label = @1
+                    block  ;; label = @2
+                      local.get 1
+                      i32.const 395718
+                      i32.ne
+                      br_if 0 (;@2;)
+                      i32.const 0
+                      local.set 1
+                      loop  ;; label = @3
+                        local.get 1
+                        i32.const 395718
+                        i32.eq
+                        br_if 2 (;@1;)
+                        local.get 0
+                        local.get 1
+                        i32.add
+                        local.set 2
+                        local.get 1
+                        i32.const 1
+                        i32.add
+                        local.set 1
+                        local.get 2
+                        i32.load8_u
+                        i32.const 122
+                        i32.eq
+                        br_if 0 (;@3;)
+                      end
+                    end
+                    unreachable
+                    unreachable
+                  end
+                  i64.const 0)
+                (table (;0;) 1 1 funcref)
+                (memory (;0;) 16)
+                (global (;0;) (mut i32) (i32.const 1048576))
+                (global (;1;) i32 (i32.const 1048576))
+                (global (;2;) i32 (i32.const 1048576))
+                (export "memory" (memory 0))
+                (export "test" (func 0))
+                (export "__data_end" (global 1))
+                (export "__heap_base" (global 2))
+            )
+    "#,
+        )
+        .unwrap(),
+    );
+
+    let input_data = (0..395718).map(|_| 0x7a).collect::<Vec<_>>();
+
+    for exec_hint in ExecHint::available_engines() {
+        let proto = HostVmPrototype::new(Config {
+            allow_unresolved_imports: false,
+            exec_hint,
+            heap_pages: HeapPages::new(1024),
+            module: &module_bytes,
+        })
+        .unwrap();
+
+        let mut vm = HostVm::from(proto.run("test", &input_data).unwrap());
+        loop {
+            match vm {
+                HostVm::ReadyToRun(r) => vm = r.run(),
+                HostVm::Finished(v) => {
+                    assert_eq!(v.value().as_ref(), b"");
+                    break;
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+#[test]
 fn return_value_works() {
     /* Source code:
 
