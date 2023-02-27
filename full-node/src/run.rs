@@ -21,7 +21,7 @@ use futures::{channel::oneshot, prelude::*};
 use smoldot::{
     chain, chain_spec,
     database::full_sqlite,
-    header,
+    executor, header,
     identity::keystore,
     informant::HashDisplay,
     libp2p::{
@@ -29,8 +29,14 @@ use smoldot::{
         peer_id::{self, PeerId},
     },
 };
-use std::{borrow::Cow, fs, io, iter, path::PathBuf, sync::Arc, thread, time::Duration};
-use tracing::Instrument as _;
+use std::{
+    borrow::Cow,
+    fs, io, iter,
+    path::PathBuf,
+    sync::Arc,
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 mod consensus_service;
 mod database_thread;
@@ -55,50 +61,71 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
     // Setup the logging system of the binary.
     if !matches!(cli_output, cli::Output::None) {
-        let mut env_filter = tracing_subscriber::filter::EnvFilter::new("DEBUG");
+        let mut builder = env_logger::Builder::new();
         if matches!(cli_output, cli::Output::Informant) {
-            env_filter = env_filter.add_directive(tracing::Level::INFO.into()); // TODO: display infos/warnings in a nicer way ; in particular, immediately put the informant on top of warnings
+            // TODO: display infos/warnings in a nicer way ; in particular, immediately put the informant on top of warnings
+            builder.filter_level(log::LevelFilter::Info);
         } else {
-            for filter in cli_options.log {
-                env_filter = env_filter.add_directive(filter.0);
+            builder.filter_level(log::LevelFilter::Debug);
+            for filter in &cli_options.log {
+                builder.parse_filters(filter);
             }
         }
 
-        let builder = tracing_subscriber::fmt()
-            .with_timer(tracing_subscriber::fmt::time::ChronoUtc::rfc3339())
-            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::ENTER)
-            .with_env_filter(env_filter)
-            .with_writer(io::stdout);
-
-        // Because calling `builder.json()` changes the type of `builder`, we do it at the end
-        // and call `init()` at the same time.
-        //
-        // This registers a global process-wide subscriber.
-        // While this is poor programming practices and we would prefer using a crate that doesn't
-        // rely on global variables, the `tracing` crate is currently one of the best logging
-        // crates in the Rust ecosystem at the time of writing of this comment.
         if matches!(cli_output, cli::Output::LogsJson) {
-            builder.json().init();
+            builder.write_style(env_logger::WriteStyle::Never);
+            builder.format(|mut formatter, record| {
+                // TODO: consider using the "kv" feature of he "logs" crate and output individual fields
+                #[derive(serde::Serialize)]
+                struct Record<'a> {
+                    timestamp: u128,
+                    target: &'a str,
+                    level: &'static str,
+                    message: String,
+                }
+
+                serde_json::to_writer(
+                    &mut formatter,
+                    &Record {
+                        timestamp: SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0),
+                        target: record.target(),
+                        level: match record.level() {
+                            log::Level::Trace => "trace",
+                            log::Level::Debug => "debug",
+                            log::Level::Info => "info",
+                            log::Level::Warn => "warn",
+                            log::Level::Error => "error",
+                        },
+                        message: format!("{}", record.args()),
+                    },
+                )
+                .map_err(|err| io::Error::new(std::io::ErrorKind::Other, err.to_string()))?;
+                io::Write::write_all(formatter, b"\n")?;
+                Ok(())
+            });
         } else {
-            builder
-                .with_ansi(match cli_options.color {
-                    cli::ColorChoice::Always => true,
-                    cli::ColorChoice::Never => false,
-                })
-                .init();
+            builder.write_style(match cli_options.color {
+                cli::ColorChoice::Always => env_logger::WriteStyle::Always,
+                cli::ColorChoice::Never => env_logger::WriteStyle::Never,
+            });
         }
+
+        builder.init();
     }
 
-    tracing::info!("smoldot full node");
-    tracing::info!("Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.");
-    tracing::info!("Copyright (C) 2023  Pierre Krieger.");
-    tracing::info!("This program comes with ABSOLUTELY NO WARRANTY.");
-    tracing::info!(
+    log::info!("smoldot full node");
+    log::info!("Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.");
+    log::info!("Copyright (C) 2023  Pierre Krieger.");
+    log::info!("This program comes with ABSOLUTELY NO WARRANTY.");
+    log::info!(
         "This is free software, and you are welcome to redistribute it under certain conditions."
     );
 
     // This warning message should be removed if/when the full node becomes mature.
-    tracing::warn!(
+    log::warn!(
         "Please note that this full node is experimental. It is not feature complete and is \
         known to panic often. Please report any panic you might encounter to \
         <https://github.com/smol-dot/smoldot/issues>."
@@ -173,7 +200,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     } else if let Some(base) = directories::ProjectDirs::from("io", "smoldot", "smoldot") {
         Some(base.data_dir().to_owned())
     } else {
-        tracing::warn!(
+        log::warn!(
             "Failed to fetch $HOME directory. Falling back to storing everything in memory, \
                 meaning that everything will be lost when the node stops. If this is intended, \
                 please make this explicit by passing the `--tmp` flag instead."
@@ -411,7 +438,6 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
             tasks_executor: &mut |task| threads_pool.spawn_ok(task),
             jaeger_service: jaeger_service.clone(),
         })
-        .instrument(tracing::debug_span!("network-service-init"))
         .await
         .unwrap();
 
@@ -443,7 +469,6 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         jaeger_service: jaeger_service.clone(),
         slot_duration_author_ratio: 43691_u16,
     })
-    .instrument(tracing::debug_span!("consensus-service-init"))
     .await;
 
     let relay_chain_consensus_service = if let Some(relay_chain_database) = relay_chain_database {
@@ -477,7 +502,6 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 jaeger_service, // TODO: consider passing a different jaeger service with a different service name
                 slot_duration_author_ratio: 43691_u16,
             })
-            .instrument(tracing::debug_span!("relay-chain-consensus-service-init"))
             .await,
         )
     } else {
@@ -522,11 +546,13 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         })
     };*/
 
-    tracing::info!(
-        %local_peer_id, database_is_new = %!database_existed,
-        finalized_block_hash = %HashDisplay(&database_finalized_block_hash),
-        finalized_block_number = %database_finalized_block_number,
-        "successful-initialization"
+    log::info!(
+        "successful-initialization; local_peer_id={}; database_is_new={:?}; \
+        finalized_block_hash={}; finalized_block_number={}",
+        local_peer_id,
+        !database_existed,
+        HashDisplay(&database_finalized_block_hash),
+        database_finalized_block_number,
     );
 
     // Starting from here, a SIGINT (or equivalent) handler is setup. If the user does Ctrl+C,
@@ -686,7 +712,6 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 /// Panics if the database can't be open. This function is expected to be called from the `main`
 /// function.
 ///
-#[tracing::instrument(level = "trace", skip(chain_spec, show_progress))]
 async fn open_database(
     chain_spec: &chain_spec::ChainSpec,
     genesis_chain_information: chain::chain_information::ChainInformationRef<'_>,
@@ -717,6 +742,27 @@ async fn open_database(
 
         // The database doesn't exist or is empty.
         full_sqlite::DatabaseOpen::Empty(empty) => {
+            let genesis_storage = chain_spec.genesis_storage().into_genesis_items().unwrap(); // TODO: return error instead
+
+            // In order to determine the state_version of the genesis block, we need to compile
+            // the runtime.
+            // TODO: return errors instead of panicking
+            let state_version = executor::host::HostVmPrototype::new(executor::host::Config {
+                module: genesis_storage.value(b":code").unwrap(),
+                heap_pages: executor::storage_heap_pages_to_value(
+                    genesis_storage.value(b":heappages"),
+                )
+                .unwrap(),
+                exec_hint: executor::vm::ExecHint::Oneshot,
+                allow_unresolved_imports: true,
+            })
+            .unwrap()
+            .runtime_version()
+            .decode()
+            .state_version
+            .map(|v| u8::from(v))
+            .unwrap_or(0);
+
             // The finalized block is the genesis block. As such, it has an empty body and
             // no justification.
             let database = empty
@@ -724,11 +770,8 @@ async fn open_database(
                     genesis_chain_information,
                     iter::empty(),
                     None,
-                    chain_spec
-                        .genesis_storage()
-                        .into_genesis_items()
-                        .unwrap() // TODO: return error instead
-                        .iter(),
+                    genesis_storage.iter(),
+                    state_version,
                 )
                 .unwrap();
             (database, false)
@@ -740,7 +783,6 @@ async fn open_database(
 /// in the background while showing a small progress bar to the user.
 ///
 /// If `path` is `None`, the database is opened in memory.
-#[tracing::instrument(level = "trace", skip(show_progress))]
 async fn background_open_database(
     path: Option<PathBuf>,
     block_number_bytes: usize,

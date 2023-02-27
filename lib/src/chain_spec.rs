@@ -116,12 +116,11 @@ impl ChainSpec {
         let mut chain_information_build = build::ChainInformationBuild::new(build::Config {
             finalized_block_header: build::ConfigFinalizedBlockHeader::Genesis {
                 state_trie_root_hash: {
-                    let state_version = match vm_prototype.runtime_version().decode().state_version
-                    {
-                        Some(0) | None => trie::TrieEntryVersion::V0,
-                        Some(1) => trie::TrieEntryVersion::V1,
-                        Some(_) => return Err(FromGenesisStorageError::UnknownStateVersion),
-                    };
+                    let state_version = vm_prototype
+                        .runtime_version()
+                        .decode()
+                        .state_version
+                        .unwrap_or(trie::TrieEntryVersion::V0);
 
                     match self.genesis_storage() {
                         GenesisStorage::TrieRootHash(hash) => *hash,
@@ -144,7 +143,7 @@ impl ChainSpec {
                                 ) => {
                                     let key: alloc::vec::Vec<u8> = val.key().collect();
                                     let value = genesis_storage.value(&key[..]);
-                                    calculation = val.inject(state_version, value);
+                                    calculation = val.inject(value.map(move |v| (v, state_version)));
                                 }
                             }
                             }
@@ -496,8 +495,6 @@ pub enum FromGenesisStorageError {
     /// Error when initializing the virtual machine.
     #[display(fmt = "Error when initializing the virtual machine: {}", _0)]
     VmInitialization(executor::host::NewErr),
-    /// State version in runtime specification is not supported.
-    UnknownStateVersion,
     /// Chain specification doesn't contain the list of storage items.
     UnknownStorageItems,
 }

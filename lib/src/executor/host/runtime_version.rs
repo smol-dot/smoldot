@@ -25,6 +25,8 @@ use crate::executor::host;
 use alloc::vec::Vec;
 use core::{fmt, ops, str};
 
+pub use super::TrieEntryVersion;
+
 /// Tries to find the custom section containing the runtime version and checks its validity.
 pub fn find_embedded_runtime_version(
     binary_wasm_module: &[u8],
@@ -203,7 +205,7 @@ pub struct CoreVersionRef<'a> {
     /// didn't provide this field, in which case it will contain `None`.
     ///
     /// `None` should be interpreted the same way as `Some(0)`.
-    pub state_version: Option<u8>,
+    pub state_version: Option<TrieEntryVersion>,
 }
 
 impl<'a> CoreVersionRef<'a> {
@@ -242,7 +244,7 @@ impl<'a> CoreVersionRef<'a> {
 
         // TODO: it's not supposed to be allowed to have a CoreVersionRef with a state_version but no transaction_version; the CoreVersionRef struct lets you do that because it was initially designed only for decoding
         if let Some(state_version) = self.state_version {
-            out.extend(state_version.to_le_bytes());
+            out.extend(u8::from(state_version).to_le_bytes());
         }
 
         out
@@ -411,7 +413,12 @@ fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
                     nom::combinator::map(nom::combinator::eof, |_| None),
                 )),
                 nom::branch::alt((
-                    nom::combinator::map(nom::number::complete::u8, Some),
+                    nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| {
+                        Some(TrieEntryVersion::V0)
+                    }),
+                    nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| {
+                        Some(TrieEntryVersion::V1)
+                    }),
                     nom::combinator::map(nom::combinator::eof, |_| None),
                 )),
             )),

@@ -27,6 +27,8 @@ use crate::{
 use alloc::{string::String, vec::Vec};
 use core::{iter, num::NonZeroU64, time::Duration};
 
+pub use runtime_host::TrieEntryVersion;
+
 /// Configuration for a block verification.
 pub struct Config<'a, TBody> {
     /// Runtime used to check the new block. Must be built using the `:code` of the parent
@@ -114,6 +116,10 @@ pub struct Success {
 
     /// List of changes to the storage top trie that the block performs.
     pub storage_top_trie_changes: storage_diff::StorageDiff,
+
+    /// State trie version indicated by the runtime. All the storage changes indicated by
+    /// [`Success::storage_top_trie_changes`] should store this version alongside with them.
+    pub state_trie_version: TrieEntryVersion,
 
     /// List of changes to the off-chain storage that this block performs.
     pub offchain_storage_changes: storage_diff::StorageDiff,
@@ -474,7 +480,7 @@ impl VerifyInner {
                             .diff_get(&b":heappages"[..]),
                     ) {
                         (None, None) => {}
-                        (Some(None), _) => {
+                        (Some((None, ())), _) => {
                             return Verify::Finished(Err((
                                 Error::CodeKeyErased,
                                 success.virtual_machine.into_prototype(),
@@ -486,11 +492,11 @@ impl VerifyInner {
                                 success.virtual_machine.into_prototype(),
                             )))
                         }
-                        (Some(Some(_code)), heap_pages) => {
+                        (Some((Some(_code), ())), heap_pages) => {
                             let parent_runtime = success.virtual_machine.into_prototype();
 
                             let heap_pages = match heap_pages {
-                                Some(heap_pages) => {
+                                Some((heap_pages, ())) => {
                                     match executor::storage_heap_pages_to_value(heap_pages) {
                                         Ok(hp) => hp,
                                         Err(err) => {
@@ -511,6 +517,7 @@ impl VerifyInner {
                                 logs: success.logs,
                                 offchain_storage_changes: success.offchain_storage_changes,
                                 storage_top_trie_changes: success.storage_top_trie_changes,
+                                state_trie_version: success.state_trie_version,
                                 top_trie_root_calculation_cache: success
                                     .top_trie_root_calculation_cache,
                             });
@@ -522,6 +529,7 @@ impl VerifyInner {
                         new_runtime: None,
                         consensus: self.consensus_success,
                         storage_top_trie_changes: success.storage_top_trie_changes,
+                        state_trie_version: success.state_trie_version,
                         offchain_storage_changes: success.offchain_storage_changes,
                         top_trie_root_calculation_cache: success.top_trie_root_calculation_cache,
                         logs: success.logs,
@@ -572,7 +580,10 @@ impl StorageGet {
     }
 
     /// Injects the corresponding storage value.
-    pub fn inject_value(self, value: Option<impl Iterator<Item = impl AsRef<[u8]>>>) -> Verify {
+    pub fn inject_value(
+        self,
+        value: Option<(impl Iterator<Item = impl AsRef<[u8]>>, TrieEntryVersion)>,
+    ) -> Verify {
         VerifyInner {
             inner: self.inner.inject_value(value),
             execution_not_started: self.execution_not_started,
@@ -647,6 +658,7 @@ impl StorageNextKey {
 pub struct RuntimeCompilation {
     parent_runtime: host::HostVmPrototype,
     storage_top_trie_changes: storage_diff::StorageDiff,
+    state_trie_version: TrieEntryVersion,
     offchain_storage_changes: storage_diff::StorageDiff,
     top_trie_root_calculation_cache: calculate_root::CalculationCache,
     logs: String,
@@ -663,6 +675,7 @@ impl RuntimeCompilation {
             .storage_top_trie_changes
             .diff_get(&b":code"[..])
             .unwrap()
+            .0
             .unwrap();
 
         let new_runtime = match host::HostVmPrototype::new(host::Config {
@@ -685,6 +698,7 @@ impl RuntimeCompilation {
             new_runtime: Some(new_runtime),
             consensus: self.consensus_success,
             storage_top_trie_changes: self.storage_top_trie_changes,
+            state_trie_version: self.state_trie_version,
             offchain_storage_changes: self.offchain_storage_changes,
             top_trie_root_calculation_cache: self.top_trie_root_calculation_cache,
             logs: self.logs,

@@ -2,11 +2,27 @@
 
 ## Unreleased
 
+## Added
+
+- Add support for the `ext_hashing_keccak_512_version_1` host function. ([#231](https://github.com/smol-dot/smoldot/pull/231))
+
+## Fixed
+
+- Fix panic when the input data of a Wasm function call is larger than a Wasm page. ([#218](https://github.com/smol-dot/smoldot/pull/218))
+- Subscriptions to the `chain_subscribeAllHeads` JSON-RPC function now generate notifications named `chain_allHead`, like in Substrate. They were erroneously named `chain_newHead`. ([#227](https://github.com/smol-dot/smoldot/pull/227))
+
+## 0.7.12 - 2022-02-22
+
 ### Changed
 
 - The Wasm virtual machine no longer tries to grab a table symbol named `__indirect_function_table`. This removes support for an old Substrate feature that no longer exists. ([#181](https://github.com/smol-dot/smoldot/pull/181))
 - The signature of host functions called by the Wasm runtime is now checked when the Wasm code is compiled rather than when the functions are called. ([#183](https://github.com/smol-dot/smoldot/pull/183))
 - When a Wasm function is being called, the parameters of the function are now allocated using the same allocator as used during the execution (`ext_allocator_malloc_version_1` and `ext_allocator_free_version_1`) rather than being written at a specific location in memory. This is consistent with what Substrate is doing, and makes it legal for a Wasm runtime to call `ext_allocator_free_version_1` on the input data if desired. ([#188](https://github.com/smol-dot/smoldot/pull/188))
+
+### Fixed
+
+- The memory of the Wasm virtual machine is now properly zeroed between runs. This should fix a rare `MemoryAccessOutOfBounds` error occasionally appearing. ([#211](https://github.com/smol-dot/smoldot/pull/211))
+- Fix the Wasm virtual machine not working properly if it exports its memory rather than import it. ([#207](https://github.com/smol-dot/smoldot/pull/207))
 
 ## 0.7.11 - 2022-02-13
 

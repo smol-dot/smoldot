@@ -490,7 +490,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                     .requests_subscriptions
                                     .try_push_notification(
                                         &state_machine_subscription,
-                                        methods::ServerToClient::chain_newHead {
+                                        methods::ServerToClient::chain_allHead {
                                             subscription: (&subscription_id).into(),
                                             result: header,
                                         }
@@ -1186,7 +1186,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     spec_version: u64::from(runtime_spec.spec_version),
                     impl_version: u64::from(runtime_spec.impl_version),
                     transaction_version: runtime_spec.transaction_version.map(u64::from),
-                    state_version: runtime_spec.state_version.map(u64::from),
+                    state_version: runtime_spec.state_version.map(u8::from).map(u64::from),
                     apis: runtime_spec
                         .apis
                         .map(|api| (methods::HexString(api.name_hash.to_vec()), api.version))
@@ -1373,7 +1373,10 @@ impl<TPlat: Platform> Background<TPlat> {
                                 transaction_version: runtime_spec
                                     .transaction_version
                                     .map(u64::from),
-                                state_version: runtime_spec.state_version.map(u64::from),
+                                state_version: runtime_spec
+                                    .state_version
+                                    .map(u8::from)
+                                    .map(u64::from),
                                 apis: runtime_spec
                                     .apis
                                     .map(|api| {

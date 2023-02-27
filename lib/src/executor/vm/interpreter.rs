@@ -49,14 +49,11 @@ impl Module {
 
 /// See [`super::VirtualMachinePrototype`].
 pub struct InterpreterPrototype {
+    /// Base components that can be used to recreate a prototype later if desired.
+    base_components: BaseComponents,
+
     // TODO: doc
     store: wasmi::Store<()>,
-
-    /// Original module.
-    module: Arc<wasmi::Module>,
-
-    /// Linker used to create instances.
-    linker: wasmi::Linker<()>,
 
     /// An instance of the module.
     instance: wasmi::Instance,
@@ -65,17 +62,21 @@ pub struct InterpreterPrototype {
     memory: wasmi::Memory,
 }
 
+struct BaseComponents {
+    module: Arc<wasmi::Module>,
+
+    /// For each import of the module, either `None` if not a function, or `Some` containing the
+    /// `usize` of that function.
+    resolved_imports: Vec<Option<usize>>,
+}
+
 impl InterpreterPrototype {
     /// See [`super::VirtualMachinePrototype::new`].
     pub fn new(
         module: &Module,
         mut symbols: impl FnMut(&str, &str, &Signature) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
-        let mut store = wasmi::Store::new(module.inner.engine(), ());
-
-        let mut linker = wasmi::Linker::new();
-        let mut import_memory = None;
-
+        let mut resolved_imports = Vec::with_capacity(module.inner.imports().len());
         for import in module.inner.imports() {
             match import.ty() {
                 wasmi::ExternType::Func(func_type) => {
@@ -97,6 +98,36 @@ impl InterpreterPrototype {
                             }
                         };
 
+                    resolved_imports.push(Some(function_index));
+                }
+                wasmi::ExternType::Memory(_) => resolved_imports.push(None),
+                wasmi::ExternType::Global(_) | wasmi::ExternType::Table(_) => {
+                    return Err(NewErr::ImportTypeNotSupported)
+                }
+            }
+        }
+
+        Self::from_base_components(BaseComponents {
+            module: module.inner.clone(),
+            resolved_imports,
+        })
+    }
+
+    fn from_base_components(base_components: BaseComponents) -> Result<Self, NewErr> {
+        let mut store = wasmi::Store::new(base_components.module.engine(), ());
+
+        let mut linker = wasmi::Linker::<()>::new();
+        let mut import_memory = None;
+
+        for (module_import, resolved_function) in base_components
+            .module
+            .imports()
+            .zip(base_components.resolved_imports.iter())
+        {
+            match module_import.ty() {
+                wasmi::ExternType::Func(func_type) => {
+                    let function_index = resolved_function.unwrap();
+
                     let func = wasmi::Func::new(
                         &mut store,
                         func_type.clone(),
@@ -113,10 +144,12 @@ impl InterpreterPrototype {
 
                     // `define` returns an error in case of duplicate definition. Since we
                     // enumerate over the imports, this can't happen.
-                    linker.define(import.module(), import.name(), func).unwrap();
+                    linker
+                        .define(module_import.module(), module_import.name(), func)
+                        .unwrap();
                 }
                 wasmi::ExternType::Memory(memory_type) => {
-                    if import.module() != "env" || import.name() != "memory" {
+                    if module_import.module() != "env" || module_import.name() != "memory" {
                         return Err(NewErr::MemoryNotNamedMemory);
                     }
 
@@ -131,39 +164,39 @@ impl InterpreterPrototype {
                     // `define` returns an error in case of duplicate definition. Since we
                     // enumerate over the imports, this can't happen.
                     linker
-                        .define(import.module(), import.name(), memory)
+                        .define(module_import.module(), module_import.name(), memory)
                         .unwrap();
                 }
                 wasmi::ExternType::Global(_) | wasmi::ExternType::Table(_) => {
-                    return Err(NewErr::ImportTypeNotSupported)
+                    unreachable!()
                 }
             }
         }
 
         let instance = linker
-            .instantiate(&mut store, &module.inner)
+            .instantiate(&mut store, &*base_components.module)
             .map_err(|err| NewErr::Other(err.to_string()))?
             .ensure_no_start(&mut store)
             .map_err(|_| NewErr::StartFunctionNotSupported)?;
 
-        let memory = if let Some(import_memory) = import_memory {
-            if instance.get_memory(&store, "memory").is_some() {
-                return Err(NewErr::TwoMemories);
-            }
+        let memory =
+            if let Some(wasmi::Extern::Memory(import_memory)) = linker.resolve("env", "memory") {
+                if instance.get_memory(&store, "memory").is_some() {
+                    return Err(NewErr::TwoMemories);
+                }
 
-            import_memory
-        } else if let Some(mem) = instance.get_memory(&store, "memory") {
-            // TODO: we don't detect NewErr::MemoryIsntMemory
-            mem.clone()
-        } else {
-            return Err(NewErr::NoMemory);
-        };
+                import_memory
+            } else if let Some(mem) = instance.get_memory(&store, "memory") {
+                // TODO: we don't detect NewErr::MemoryIsntMemory
+                mem.clone()
+            } else {
+                return Err(NewErr::NoMemory);
+            };
 
         Ok(InterpreterPrototype {
+            base_components,
             store,
             instance,
-            linker,
-            module: module.inner.clone(),
             memory,
         })
     }
@@ -213,7 +246,8 @@ pub struct Prepare {
 impl Prepare {
     /// See [`super::Prepare::into_prototype`].
     pub fn into_prototype(self) -> InterpreterPrototype {
-        self.inner
+        // Since creation has succeeded in the past, there is no reason for it to fail now.
+        InterpreterPrototype::from_base_components(self.inner.base_components).unwrap()
     }
 
     /// See [`super::Prepare::memory_size`].
@@ -344,10 +378,9 @@ impl Prepare {
         };
 
         Ok(Interpreter {
+            base_components: self.inner.base_components,
             store: self.inner.store,
-            module: self.inner.module,
             memory: self.inner.memory,
-            linker: self.inner.linker,
             dummy_output_value: dummy_output_value,
             execution: Some(Execution::NotStarted(
                 func_to_call,
@@ -384,17 +417,14 @@ impl wasmi::core::HostError for InterruptedTrap {}
 
 /// See [`super::VirtualMachine`].
 pub struct Interpreter {
+    /// Base components that can be used to recreate a prototype later if desired.
+    base_components: BaseComponents,
+
     // TODO: doc
     store: wasmi::Store<()>,
 
-    /// Original module.
-    module: Arc<wasmi::Module>,
-
     /// Memory of the module instantiation.
     memory: wasmi::Memory,
-
-    /// Linker used to create instances.
-    linker: wasmi::Linker<()>,
 
     /// Execution context of this virtual machine. This notably holds the program counter, state
     /// of the stack, and so on.
@@ -561,25 +591,9 @@ impl Interpreter {
     }
 
     /// See [`super::VirtualMachine::into_prototype`].
-    pub fn into_prototype(mut self) -> InterpreterPrototype {
-        // TODO: zero the memory
-
-        // Because we have successfully instantiated the module in the past, there's no reason
-        // why instantiating again could fail now and not before.
-        let instance = self
-            .linker
-            .instantiate(&mut self.store, &self.module)
-            .unwrap()
-            .ensure_no_start(&mut self.store)
-            .unwrap();
-
-        InterpreterPrototype {
-            store: self.store,
-            instance,
-            linker: self.linker,
-            module: self.module,
-            memory: self.memory,
-        }
+    pub fn into_prototype(self) -> InterpreterPrototype {
+        // Since creation has succeeded in the past, there is no reason for it to fail now.
+        InterpreterPrototype::from_base_components(self.base_components).unwrap()
     }
 }
 

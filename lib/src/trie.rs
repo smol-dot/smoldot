@@ -55,7 +55,8 @@
 //!
 //! In the situation where we want to know the storage value associated to a node, but we only
 //! know the Merkle value of the root of the trie, it is possible to ask a third-party for the
-//! unhashed Merkle values of the desired node and all its ancestors.
+//! unhashed Merkle values of the desired node and all its ancestors. This is called a Merkle
+//! proof.
 //!
 //! After having verified that the third-party has provided correct values, and that they match
 //! the expected root node Merkle value known locally, we can extract the storage value from the
@@ -83,6 +84,21 @@
 //! its ancestors. As such, the time spent calculating the Merkle value of the root node of a trie
 //! mostly depends on the number of modifications that are performed on it, and only a bit on the
 //! size of the trie.
+//!
+//! ## Trie entry version
+//!
+//! In the Substrate/Polkadot trie, each trie node that contains a value also has a version
+//! associated to it.
+//!
+//! This version changes the way the hash of the node is calculated and how the Merkle proof is
+//! generated. Version 1 leads to more succinct Merkle proofs, which is important when these proofs
+//! are sent over the Internet.
+//!
+//! Note that most of the time all the entries of the trie have the same version. However, it is
+//! possible for the trie to be in a hybrid state where some entries have a certain version and
+//! other entries a different version. For this reason, most of the trie-related APIs require you
+//! to provide a trie entry version alongside with the value.
+//!
 
 use crate::util;
 
@@ -117,6 +133,27 @@ pub enum TrieEntryVersion {
     V1,
 }
 
+impl TryFrom<u8> for TrieEntryVersion {
+    type Error = (); // TODO: better error?
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(TrieEntryVersion::V0),
+            1 => Ok(TrieEntryVersion::V1),
+            _ => Err(()),
+        }
+    }
+}
+
+impl From<TrieEntryVersion> for u8 {
+    fn from(v: TrieEntryVersion) -> u8 {
+        match v {
+            TrieEntryVersion::V0 => 0,
+            TrieEntryVersion::V1 => 1,
+        }
+    }
+}
+
 /// Returns the Merkle value of the root of an empty trie.
 pub fn empty_trie_merkle_value() -> [u8; 32] {
     let mut calculation = calculate_root::root_merkle_value(None);
@@ -128,9 +165,7 @@ pub fn empty_trie_merkle_value() -> [u8; 32] {
                 calculation = keys.inject(iter::empty::<iter::Empty<u8>>());
             }
             calculate_root::RootMerkleValueCalculation::StorageValue(val) => {
-                // Note that the version has no influence whatsoever on the output of the
-                // calculation. The version passed here is a dummy value.
-                calculation = val.inject(TrieEntryVersion::V1, None::<&[u8]>);
+                calculation = val.inject(None::<(&[u8], _)>);
             }
         }
     }
@@ -160,7 +195,7 @@ pub fn trie_root(
                     .iter()
                     .find(|(k, _)| k.as_ref().iter().copied().eq(value.key()))
                     .map(|(_, v)| v);
-                calculation = value.inject(version, result);
+                calculation = value.inject(result.map(move |v| (v, version)));
             }
         }
     }
@@ -196,7 +231,7 @@ pub fn ordered_root(version: TrieEntryVersion, entries: &[impl AsRef<[u8]>]) -> 
                     .collect::<arrayvec::ArrayVec<u8, USIZE_COMPACT_BYTES>>();
                 let (_, key) =
                     util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(&key).unwrap();
-                calculation = value.inject(version, entries.get(key));
+                calculation = value.inject(entries.get(key).map(move |v| (v, version)));
             }
         }
     }

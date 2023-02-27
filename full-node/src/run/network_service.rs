@@ -57,7 +57,6 @@ use std::{
     thread,
     time::Instant,
 };
-use tracing::Instrument as _;
 
 mod tasks;
 
@@ -309,9 +308,7 @@ impl NetworkService {
         // Spawn the main task dedicated to processing the network.
         (config.tasks_executor)(Box::pin({
             let future = background_task(inner.clone(), senders);
-            let (abortable, abort_handle) = future::abortable(
-                future.instrument(tracing::trace_span!(parent: None, "network-background")),
-            );
+            let (abortable, abort_handle) = future::abortable(future);
             abort_handles.push(abort_handle);
             abortable.map(|_| ())
         }));
@@ -338,9 +335,7 @@ impl NetworkService {
                     }
                 };
 
-                let (abortable, abort_handle) = future::abortable(
-                    future.instrument(tracing::trace_span!(parent: None, "kademlia-discovery")),
-                );
+                let (abortable, abort_handle) = future::abortable(future);
                 abort_handles.push(abort_handle);
                 abortable.map(|_| ())
             }));
@@ -417,7 +412,7 @@ impl NetworkService {
                         .into_iter()
                         .collect::<Multiaddr>();
 
-                        tracing::debug!(%multiaddr, "incoming-connection");
+                        log::debug!("incoming-connection; multiaddr={}", multiaddr);
 
                         let task = {
                             let mut guarded = inner.guarded.lock().await;
@@ -443,17 +438,11 @@ impl NetworkService {
 
                         // Ignore errors, as it is possible for the destination task to have been
                         // aborted already.
-                        let _ = conn_tasks_tx.send(
-                            task.instrument(
-                                tracing::trace_span!(parent: None, "connection", address = %multiaddr),
-                            ).boxed()
-                        ).await;
+                        let _ = conn_tasks_tx.send(task.boxed()).await;
                     }
                 };
 
-                let (abortable, abort_handle) = future::abortable(future.instrument(
-                    tracing::trace_span!(parent: None, "listener", address = %listen_address),
-                ));
+                let (abortable, abort_handle) = future::abortable(future);
                 abort_handles.push(abort_handle);
                 abortable.map(|_| ())
             }))
@@ -475,9 +464,7 @@ impl NetworkService {
                 }
             };
 
-            let (abortable, abort_handle) = future::abortable(
-                future.instrument(tracing::trace_span!(parent: None, "connections-executor")),
-            );
+            let (abortable, abort_handle) = future::abortable(future);
             abort_handles.push(abort_handle);
             abortable.map(|_| ())
         }));
@@ -571,25 +558,24 @@ impl NetworkService {
     /// Sends a blocks request to the given peer.
     // TODO: more docs
     // TODO: proper error type
-    #[tracing::instrument(level = "trace", skip(self))]
     pub async fn blocks_request(
         self: Arc<Self>,
         target: PeerId, // TODO: by value?
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
     ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
-        tracing::debug!(
-            peer_id = %target, %chain_index,
-            start = %match &config.start {
+        log::debug!(
+            "blocks-request-start; perr_id={}; chain_index={}; start={}; desired_count={}; direction={}",
+            target, chain_index,
+            match &config.start {
                 protocol::BlocksRequestConfigStart::Hash(h) => either::Left(HashDisplay(h)),
                 protocol::BlocksRequestConfigStart::Number(n) => either::Right(n),
             },
-            desired_count = config.desired_count,
-            direction = match config.direction {
+            config.desired_count,
+            match config.direction {
                 protocol::BlocksRequestDirection::Ascending => "ascending",
                 protocol::BlocksRequestDirection::Descending => "descending",
             },
-            "blocks-request-start"
         );
 
         // Setup a guard that will print a log message in case it is dropped silently.
@@ -597,11 +583,10 @@ impl NetworkService {
         struct LogIfCancel(PeerId, usize);
         impl Drop for LogIfCancel {
             fn drop(&mut self) {
-                tracing::debug!(
-                    peer_id = %self.0,
-                    chain_index = %self.1,
-                    outcome = "cancelled",
-                    "blocks-request-ended"
+                log::debug!(
+                    "blocks-request-ended; peer_id={}; chain_index={}; outcome=cancelled",
+                    self.0,
+                    self.1
                 );
             }
         }
@@ -652,19 +637,17 @@ impl NetworkService {
         mem::forget(_log_if_cancel);
         match &result {
             Ok(success) => {
-                tracing::debug!(
-                    peer_id = %target, %chain_index,
-                    outcome = "success",
-                    response_blocks = success.len(),
-                    "blocks-request-ended"
+                log::debug!(
+                    "blocks-request-ended; peer_id={}; chain_index={}; outcome=success; response_blocks={}",
+                    target, chain_index, success.len()
                 );
             }
             Err(err) => {
-                tracing::debug!(
-                    peer_id = %target, %chain_index,
-                    outcome = "failure",
-                    error = %err,
-                    "blocks-request-ended"
+                log::debug!(
+                    "blocks-request-ended; peer_id={}; chain_index={}; outcome=failure; error={}",
+                    target,
+                    chain_index,
+                    err
                 );
             }
         }
@@ -753,13 +736,13 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
 
             match inner_event {
                 service::Event::Connected(peer_id) => {
-                    tracing::debug!(%peer_id, "connected");
+                    log::debug!("connected; peer_id={}", peer_id);
                 }
                 service::Event::Disconnected {
                     peer_id,
                     chain_indices,
                 } => {
-                    tracing::debug!(%peer_id, "disconnected");
+                    log::debug!("disconnected; peer_id={}", peer_id);
                     if !chain_indices.is_empty() {
                         debug_assert_eq!(chain_indices.len(), 1); // TODO: not implemented
                         break Event::Disconnected {
@@ -790,12 +773,9 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                                         .hash(guarded.network.block_number_bytes(chain_index)),
                                 );
 
-                            tracing::debug!(
-                                %chain_index, %peer_id,
-                                hash = %HashDisplay(&header_hash),
-                                number = decoded_header.number,
-                                is_best = ?decoded.is_best,
-                                "block-announce"
+                            log::debug!(
+                                "block-announce; peer_id={}; chain_index={}; hash={}; number={}; is_best={:?}",
+                                peer_id, chain_index, HashDisplay(&header_hash), decoded_header.number, decoded.is_best
                             );
 
                             break Event::BlockAnnounce {
@@ -806,12 +786,9 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                             };
                         }
                         Err(error) => {
-                            tracing::warn!(
-                                %chain_index, %peer_id,
-                                hash = %HashDisplay(&header_hash),
-                                is_best = ?decoded.is_best,
-                                %error,
-                                "block-announce-bad-header"
+                            log::warn!(
+                                "block-announce-bad-header; peer_id={}; chain_index={}; hash={}; is_best={:?}; error={}",
+                                peer_id, chain_index, HashDisplay(&header_hash), decoded.is_best, error
                             );
 
                             guarded.unassign_slot_and_ban(chain_index, peer_id);
@@ -826,11 +803,12 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                     best_hash,
                     ..
                 } => {
-                    tracing::debug!(
-                        %peer_id,
-                        %best_number,
-                        best_hash = %HashDisplay(&best_hash),
-                        "chain-connected"
+                    log::debug!(
+                        "chain-connected; peer_id={}; chain_index={}; best_number={}; best_hash={}",
+                        peer_id,
+                        chain_index,
+                        best_number,
+                        HashDisplay(&best_hash),
                     );
                     break Event::Connected {
                         peer_id,
@@ -844,7 +822,11 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                     chain_index,
                     ..
                 } => {
-                    tracing::debug!(%peer_id, "chain-disconnected");
+                    log::debug!(
+                        "chain-disconnected; peer_id={}; chain_index={}",
+                        peer_id,
+                        chain_index
+                    );
 
                     guarded.unassign_slot_and_ban(chain_index, peer_id.clone());
                     inner.wake_up_main_background_task.notify(1);
@@ -860,9 +842,11 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                     error,
                     ..
                 } => {
-                    tracing::debug!(
-                        %peer_id, %error,
-                        "chain-connect-attempt-failed"
+                    log::debug!(
+                        "chain-connect-attempt-failed; peer_id={}; chain_index={}; error={}",
+                        peer_id,
+                        chain_index,
+                        error
                     );
 
                     guarded.unassign_slot_and_ban(chain_index, peer_id);
@@ -899,7 +883,7 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                         .unwrap();
                     match result {
                         Ok(nodes) => {
-                            tracing::debug!(discovered = ?nodes, "discovered");
+                            log::debug!("discovered; nodes={:?}", nodes);
                             for (peer_id, addrs) in nodes {
                                 guarded.network.discover(
                                     &Instant::now(),
@@ -910,7 +894,7 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                             }
                         }
                         Err(error) => {
-                            tracing::debug!(%error, "discovery-error");
+                            log::debug!("discovery-error; error={}", error);
                         }
                     }
                 }
@@ -918,7 +902,7 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                     peer_id,
                     request_id,
                 } => {
-                    tracing::debug!(%peer_id, "identify-request");
+                    log::debug!("identify-request; peer_id={}", peer_id);
                     guarded.network.respond_identify(request_id, "smoldot");
                 }
                 service::Event::BlocksRequestIn {
@@ -927,7 +911,11 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                     config,
                     request_id,
                 } => {
-                    tracing::debug!(%peer_id, "incoming-blocks-request");
+                    log::debug!(
+                        "incoming-blocks-request; peer_id={}; chain_index={}",
+                        peer_id,
+                        chain_index
+                    );
                     let mut _jaeger_span = inner.jaeger_service.incoming_block_request_span(
                         &inner.local_peer_id,
                         &peer_id,
@@ -953,7 +941,7 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                         match response {
                             Ok(b) => Some(b),
                             Err(error) => {
-                                tracing::warn!(%error, "incoming-blocks-request-error");
+                                log::warn!("incoming-blocks-request-error; error={}", error);
                                 None
                             }
                         },
@@ -964,19 +952,15 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                     peer_id,
                     message,
                 } => {
-                    tracing::debug!(
-                        %chain_index, %peer_id,
-                        target_hash = %HashDisplay(message.decode().message.target_hash),
-                        "grandpa-commit-message"
+                    log::debug!(
+                        "grandpa-commit-message; peer_id={}; chain_index={}; target_hash={}",
+                        peer_id,
+                        chain_index,
+                        HashDisplay(message.decode().message.target_hash),
                     );
                 }
                 service::Event::ProtocolError { peer_id, error } => {
-                    tracing::warn!(
-                        %peer_id,
-                        %error,
-                        "protocol-error"
-                    );
-
+                    log::warn!("protocol-error; peer_id={}; error={}", peer_id, error);
                     for chain_index in 0..guarded.network.num_chains() {
                         guarded.unassign_slot_and_ban(chain_index, peer_id.clone());
                     }
@@ -1033,7 +1017,11 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                 .cloned();
 
             let Some(peer_to_assign) = peer_to_assign else { break };
-            tracing::debug!(peer_id = %peer_to_assign, %chain_index, "slot-assigned");
+            log::debug!(
+                "slot-assigned; peer_id={}; chain_index={}",
+                peer_to_assign,
+                chain_index
+            );
             guarded.network.assign_out_slot(chain_index, peer_to_assign);
         }
     }

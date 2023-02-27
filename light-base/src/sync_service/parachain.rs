@@ -1149,7 +1149,7 @@ async fn parahead<TPlat: Platform>(
             read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
                 let storage_value = runtime_call_lock.storage_entry(get.key().as_ref());
                 let storage_value = match storage_value {
-                    Ok(v) => v,
+                    Ok(v) => v.map(|(v, _)| v),
                     Err(err) => {
                         runtime_call_lock.unlock(
                             read_only_runtime_host::RuntimeHostVm::StorageGet(get).into_prototype(),

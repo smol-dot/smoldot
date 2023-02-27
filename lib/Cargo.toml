@@ -36,8 +36,8 @@ std = [
 # not, or if things are sketchy, please leave a comment next to it.
 arrayvec = { version = "0.7.2", default-features = false }
 atomic = { version = "0.5.1", default-features = false }
-base64 = { version = "0.13.1", default-features = false, features = ["alloc"] }
-bip39 = { version = "1.0.1", default-features = false }
+base64 = { version = "0.21.0", default-features = false, features = ["alloc"] }
+bip39 = { version = "1.1.0", default-features = false }
 blake2-rfc = { version = "0.2.18", default-features = false }
 bs58 = { version = "0.4.0", default-features = false, features = ["alloc"] }
 crossbeam-queue = { version = "0.3.8", default-features = false, features = ["alloc"] }
@@ -68,12 +68,12 @@ serde = { version = "1.0.152", default-features = false, features = ["alloc", "d
 serde_json = { version = "1.0.93", default-features = false, features = ["alloc", "raw_value"] }
 sha2 = { version = "0.10.6", default-features = false }
 siphasher = { version = "0.3.10", default-features = false }
-slab = { version = "0.4.7", default-features = false }
+slab = { version = "0.4.8", default-features = false }
 smallvec = { version = "1.10.0", default-features = false }
 snow = { version = "0.9.1", default-features = false, features = ["default-resolver"] }
 tiny-keccak = { version = "2.0", features = ["keccak"] }
 twox-hash = { version = "1.6.3", default-features = false }
-wasmi = { version = "0.26.1", default-features = false }
+wasmi = { version = "0.27.0", default-features = false }
 
 # `database-sqlite` feature
 sqlite = { version = "0.27.3", optional = true, default-features = false, features = ["linkage"] }
@@ -98,7 +98,7 @@ wasmtime = { version = "3.0.0", default-features = false, features = ["async", "
 async-std = "1.12.0"
 criterion = "0.4.0"
 tempfile = "3.3.0"
-wat = "1.0.59"
+wat = "1.0.60"
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]

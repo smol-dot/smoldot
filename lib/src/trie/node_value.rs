@@ -54,8 +54,7 @@
 //!             .cloned(),
 //!         },
 //!         children: children.iter().map(|opt| opt.as_ref()),
-//!         stored_value: Some(b"hello world"),
-//!         version: TrieEntryVersion::V1,
+//!         stored_value: Some((b"hello world", TrieEntryVersion::V1)),
 //!     })
 //! };
 //!
@@ -86,13 +85,10 @@ pub struct Config<TChIter, TPKey, TVal> {
     pub children: TChIter,
 
     /// Value of the node in the storage.
-    pub stored_value: Option<TVal>,
-
-    /// Version to use for the encoding.
     ///
-    /// Some input will lead to the same output no matter the version, but some other input will
-    /// produce a different output.
-    pub version: TrieEntryVersion,
+    /// If `Some`, also contains the version to use for the encoding. Some input will lead to the
+    /// same output no matter the version, but some other input will produce a different output.
+    pub stored_value: Option<(TVal, TrieEntryVersion)>,
 }
 
 /// Type of node whose node value is to be calculated.
@@ -137,10 +133,9 @@ where
 
     let has_children = config.children.clone().any(|c| c.is_some());
 
-    let stored_value_to_be_hashed = config
-        .stored_value
-        .as_ref()
-        .map(|value| matches!(config.version, TrieEntryVersion::V1) && value.as_ref().len() >= 33);
+    let stored_value_to_be_hashed = config.stored_value.as_ref().map(|(value, version)| {
+        matches!(version, TrieEntryVersion::V1) && value.as_ref().len() >= 33
+    });
 
     // This value will be used as the sink for all the components of the merkle value.
     let mut merkle_value_sink = if matches!(config.ty, NodeTy::Root { .. }) {
@@ -215,7 +210,7 @@ where
     // We take a shortcut and end the calculation now.
     if !has_children {
         if let Some(hash_stored_value) = stored_value_to_be_hashed {
-            let stored_value = config.stored_value.unwrap();
+            let stored_value = config.stored_value.unwrap().0;
 
             if hash_stored_value {
                 merkle_value_sink.update(
@@ -247,7 +242,7 @@ where
 
     // Add our own stored value.
     if let Some(hash_stored_value) = stored_value_to_be_hashed {
-        let stored_value = config.stored_value.unwrap();
+        let stored_value = config.stored_value.unwrap().0;
 
         if hash_stored_value {
             merkle_value_sink
@@ -386,8 +381,7 @@ mod tests {
         let obtained = super::calculate_merkle_value(super::Config {
             ty: super::NodeTy::Root { key: iter::empty() },
             children: (0..16).map(|_| None),
-            stored_value: None::<Vec<u8>>,
-            version: TrieEntryVersion::V0,
+            stored_value: None::<(Vec<u8>, _)>,
         });
 
         assert_eq!(
@@ -406,8 +400,7 @@ mod tests {
                 partial_key: iter::empty(),
             },
             children: (0..16).map(|_| None),
-            stored_value: None::<Vec<u8>>,
-            version: TrieEntryVersion::V0,
+            stored_value: None::<(Vec<u8>, _)>,
         });
 
         assert_eq!(obtained.as_ref(), &[0u8]);
@@ -442,8 +435,7 @@ mod tests {
                 .cloned(),
             },
             children: children.iter().map(|opt| opt.as_ref()),
-            stored_value: Some(b"hello world"),
-            version: TrieEntryVersion::V0,
+            stored_value: Some((b"hello world", TrieEntryVersion::V0)),
         });
 
         assert_eq!(
@@ -463,8 +455,7 @@ mod tests {
                 partial_key: iter::empty(),
             },
             children: iter::empty(),
-            stored_value: None::<Vec<u8>>,
-            version: TrieEntryVersion::V0,
+            stored_value: None::<(Vec<u8>, _)>,
         });
     }
 }
