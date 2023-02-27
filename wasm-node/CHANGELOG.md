@@ -4,7 +4,7 @@
 
 ## Added
 
-- Add support for the `ext_hashing_keccak_512_version_1` host function.
+- Add support for the `ext_hashing_keccak_512_version_1` host function. ([#231](https://github.com/smol-dot/smoldot/pull/231))
 
 ## Fixed
 
