@@ -119,7 +119,7 @@ impl PrefixScan {
 
                 if matches!(
                     info.storage_value,
-                    proof_decode::StorageValue::Known(_)
+                    proof_decode::StorageValue::Known { .. }
                         | proof_decode::StorageValue::HashKnownValueMissing(_)
                 ) {
                     // Trie nodes with a value are always aligned to "bytes-keys". In other words,

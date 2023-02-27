@@ -1206,7 +1206,8 @@ async fn validate_transaction<TPlat: Platform>(
                         ));
                     }
                 };
-                validation_in_progress = get.inject_value(storage_value.map(iter::once));
+                validation_in_progress =
+                    get.inject_value(storage_value.map(|(val, vers)| (iter::once(val), vers)));
             }
             validate::Query::NextKey(nk) => {
                 // TODO:

@@ -83,7 +83,7 @@ use smoldot::{
     executor, header,
     informant::{BytesDisplay, HashDisplay},
     network::protocol,
-    trie::{self, proof_decode},
+    trie::{self, proof_decode, TrieEntryVersion},
 };
 
 /// Configuration for a runtime service.
@@ -850,7 +850,10 @@ impl<'a> RuntimeCallLock<'a> {
     /// Returns an error if the key couldn't be found in the proof, meaning that the proof is
     /// invalid.
     // TODO: if proof is invalid, we should give the option to fetch another call proof
-    pub fn storage_entry(&self, requested_key: &[u8]) -> Result<Option<&[u8]>, RuntimeCallError> {
+    pub fn storage_entry(
+        &self,
+        requested_key: &[u8],
+    ) -> Result<Option<(&[u8], TrieEntryVersion)>, RuntimeCallError> {
         let call_proof = match &self.call_proof {
             Ok(p) => p,
             Err(err) => return Err(err.clone()),
@@ -889,7 +892,7 @@ impl<'a> RuntimeCallLock<'a> {
 
             if matches!(
                 node_info.storage_value,
-                proof_decode::StorageValue::Known(_)
+                proof_decode::StorageValue::Known { .. }
                     | proof_decode::StorageValue::HashKnownValueMissing(_)
             ) {
                 assert_eq!(key.len() % 2, 0);

@@ -38,7 +38,7 @@
 //! Once decoded, one can examine the content of the proof, in other words the list of storage
 //! items and values.
 
-use super::{nibble, proof_node_codec};
+use super::{nibble, proof_node_codec, TrieEntryVersion};
 
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 use core::{fmt, mem, ops};
@@ -438,9 +438,15 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
         self.entries.iter().map(
             |(key, (storage_value_inner, node_value_range, children_bitmap))| {
                 let storage_value = match storage_value_inner {
-                    StorageValueInner::Known { offset, len, .. } => {
-                        StorageValue::Known(&self.proof.as_ref()[*offset..][..*len])
-                    }
+                    StorageValueInner::Known {
+                        offset,
+                        len,
+                        is_inline,
+                        ..
+                    } => StorageValue::Known {
+                        value: &self.proof.as_ref()[*offset..][..*len],
+                        inline: *is_inline,
+                    },
                     StorageValueInner::None => StorageValue::None,
                     StorageValueInner::HashKnownValueMissing { offset } => {
                         StorageValue::HashKnownValueMissing(
@@ -518,9 +524,15 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                     // Found exact match. Returning.
                     return Some(TrieNodeInfo {
                         storage_value: match storage_value {
-                            StorageValueInner::Known { offset, len, .. } => {
-                                StorageValue::Known(&self.proof.as_ref()[*offset..][..*len])
-                            }
+                            StorageValueInner::Known {
+                                offset,
+                                len,
+                                is_inline,
+                                ..
+                            } => StorageValue::Known {
+                                value: &self.proof.as_ref()[*offset..][..*len],
+                                inline: *is_inline,
+                            },
                             StorageValueInner::None => StorageValue::None,
                             StorageValueInner::HashKnownValueMissing { offset } => {
                                 StorageValue::HashKnownValueMissing(
@@ -616,12 +628,19 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// > **Note**: This function is a convenient wrapper around
     /// >           [`DecodedTrieProof::trie_node_info`].
     // TODO: return a Result instead of Option?
-    pub fn storage_value(&'_ self, key: &[u8]) -> Option<Option<&'_ [u8]>> {
+    pub fn storage_value(&'_ self, key: &[u8]) -> Option<Option<(&'_ [u8], TrieEntryVersion)>> {
         // Annoyingly we have to create a `Vec` for the key, but the API of BTreeMap gives us
         // no other choice.
         let key = nibble::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>();
         match self.trie_node_info(&key)?.storage_value {
-            StorageValue::Known(v) => Some(Some(v)),
+            StorageValue::Known { value, inline } => Some(Some((
+                value,
+                if inline {
+                    TrieEntryVersion::V0
+                } else {
+                    TrieEntryVersion::V1
+                },
+            ))),
             StorageValue::HashKnownValueMissing(_) => None,
             StorageValue::None => Some(None),
         }
@@ -633,8 +652,14 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
 /// Storage value of the node.
 #[derive(Copy, Clone)]
 pub enum StorageValue<'a> {
-    /// The storage value was found in the proof. Contains the value.
-    Known(&'a [u8]),
+    /// The storage value was found in the proof.
+    Known {
+        /// The storage value.
+        value: &'a [u8],
+        /// `true` if the storage value was inline in the node. This indicates "version 0" of the
+        /// state version, while `false` indicates "version 1".
+        inline: bool,
+    },
     /// The hash of the storage value was found, but the un-hashed value wasn't in the proof. This
     /// indicates an incomplete proof.
     HashKnownValueMissing(&'a [u8; 32]),
@@ -645,16 +670,22 @@ pub enum StorageValue<'a> {
 impl<'a> fmt::Debug for StorageValue<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StorageValue::Known(v) if v.len() <= 48 => {
-                write!(f, "0x{}", hex::encode(v))
-            }
-            StorageValue::Known(v) => {
+            StorageValue::Known { value, inline } if value.len() <= 48 => {
                 write!(
                     f,
-                    "0x{}…{} ({} bytes)",
-                    hex::encode(&v[0..4]),
-                    hex::encode(&v[v.len() - 4..]),
-                    v.len(),
+                    "0x{}{}",
+                    hex::encode(value),
+                    if *inline { " (inline)" } else { "" }
+                )
+            }
+            StorageValue::Known { value, inline } => {
+                write!(
+                    f,
+                    "0x{}…{} ({} bytes{})",
+                    hex::encode(&value[0..4]),
+                    hex::encode(&value[value.len() - 4..]),
+                    value.len(),
+                    if *inline { ", inline" } else { "" }
                 )
             }
             StorageValue::HashKnownValueMissing(hash) => {
@@ -896,8 +927,8 @@ mod tests {
         let obtained = decoded.storage_value(&requested_key).unwrap();
 
         assert_eq!(
-            obtained,
-            Some(&hex::decode("0d1456fdda7b8ec7f9e5c794cd83194f0593e4ea").unwrap()[..])
+            obtained.unwrap().0,
+            &hex::decode("0d1456fdda7b8ec7f9e5c794cd83194f0593e4ea").unwrap()[..]
         );
     }
 
@@ -949,7 +980,7 @@ mod tests {
                 .unwrap();
         let obtained = decoded.storage_value(&requested_key).unwrap();
 
-        assert_eq!(obtained, Some(&[80, 82, 127, 41, 119, 1, 0, 0][..]));
+        assert_eq!(obtained.unwrap().0, &[80, 82, 127, 41, 119, 1, 0, 0][..]);
     }
 
     #[test]

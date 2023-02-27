@@ -66,6 +66,8 @@ use core::{
 };
 use hashbrown::HashMap;
 
+pub use blocks_tree::TrieEntryVersion;
+
 mod verification_queue;
 
 /// Configuration for the [`OptimisticSync`].
@@ -157,7 +159,8 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
     /// Changes in the storage of the best block compared to the finalized block.
     /// The `BTreeMap`'s keys are storage keys, and its values are new values or `None` if the
     /// value has been erased from the storage.
-    best_to_finalized_storage_diff: storage_diff::StorageDiff,
+    /// Each entry is associated with the state version of the runtime at the time of the write.
+    best_to_finalized_storage_diff: storage_diff::StorageDiff<TrieEntryVersion>,
 
     /// Compiled runtime code of the best block. `None` if it is the same as
     /// [`OptimisticSyncInner::finalized_runtime`].
@@ -265,6 +268,10 @@ pub struct BlockFull {
 
     /// Changes to the storage made by this block compared to its parent.
     pub storage_top_trie_changes: storage_diff::StorageDiff,
+
+    /// State trie version indicated by the runtime. All the storage changes indicated by
+    /// [`BlockFull::storage_top_trie_changes`] should store this version alongside with them.
+    pub state_trie_version: TrieEntryVersion,
 
     /// List of changes to the off-chain storage that this block performs.
     pub offchain_storage_changes: storage_diff::StorageDiff,
@@ -801,12 +808,18 @@ impl<'a, TRq, TSrc, TBl> BlockStorage<'a, TRq, TSrc, TBl> {
     pub fn get<'val: 'a>(
         &'val self, // TODO: unclear lifetime
         key: &[u8],
-        or_finalized: impl FnOnce() -> Option<&'val [u8]>,
-    ) -> Option<&'val [u8]> {
-        self.inner
+        or_finalized: impl FnOnce() -> Option<(&'val [u8], TrieEntryVersion)>,
+    ) -> Option<(&'val [u8], TrieEntryVersion)> {
+        match self
+            .inner
             .inner
             .best_to_finalized_storage_diff
-            .storage_get(key, or_finalized)
+            .diff_get(key)
+        {
+            Some((None, _)) => None,
+            Some((Some(val), vers)) => Some((val, *vers)),
+            None => or_finalized(),
+        }
     }
 
     pub fn prefix_keys_ordered<'k: 'a>(
@@ -1054,6 +1067,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
 
                 Inner::Step2(blocks_tree::BodyVerifyStep2::Finished {
                     storage_top_trie_changes,
+                    state_trie_version,
                     offchain_storage_changes,
                     top_trie_root_calculation_cache,
                     parent_runtime,
@@ -1094,7 +1108,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     shared
                         .inner
                         .best_to_finalized_storage_diff
-                        .merge(&storage_top_trie_changes);
+                        .merge_map(&storage_top_trie_changes, |()| state_trie_version);
 
                     let chain = {
                         let header = insert.header().into();
@@ -1106,6 +1120,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                                 body: mem::take(&mut shared.block_body),
                                 storage_top_trie_changes,
                                 offchain_storage_changes,
+                                state_trie_version,
                             }),
                         })
                     };
@@ -1135,9 +1150,13 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                         .inner
                         .best_to_finalized_storage_diff
                         .diff_get(req.key().as_ref());
-                    if let Some(value) = value {
+                    if let Some((value, storage_trie_node_version)) = value {
                         inner = Inner::Step2(
-                            req.inject_value(value.as_ref().map(|v| iter::once(&v[..]))),
+                            req.inject_value(
+                                value
+                                    .as_ref()
+                                    .map(|v| (iter::once(&v[..]), *storage_trie_node_version)),
+                            ),
                         );
                         continue 'verif_steps;
                     }
@@ -1422,8 +1441,13 @@ impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
     }
 
     /// Injects the corresponding storage value.
-    pub fn inject_value(self, value: Option<&[u8]>) -> BlockVerification<TRq, TSrc, TBl> {
-        let inner = self.inner.inject_value(value.map(iter::once));
+    pub fn inject_value(
+        self,
+        value: Option<(&[u8], TrieEntryVersion)>,
+    ) -> BlockVerification<TRq, TSrc, TBl> {
+        let inner = self.inner.inject_value(
+            value.map(|(v, storage_trie_node_version)| (iter::once(v), storage_trie_node_version)),
+        );
         BlockVerification::from(Inner::Step2(inner), self.shared)
     }
 }

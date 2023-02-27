@@ -207,6 +207,7 @@ use tiny_keccak::Hasher as _;
 pub mod runtime_version;
 
 pub use runtime_version::{CoreVersion, CoreVersionError, CoreVersionRef};
+pub use trie::TrieEntryVersion;
 pub use vm::HeapPages;
 pub use zstd::Error as ModuleFormatError;
 
@@ -931,8 +932,8 @@ impl ReadyToRun {
         macro_rules! expect_state_version {
             ($num:expr) => {{
                 match &params[$num] {
-                    vm::WasmValue::I32(0) => trie::TrieEntryVersion::V0,
-                    vm::WasmValue::I32(1) => trie::TrieEntryVersion::V1,
+                    vm::WasmValue::I32(0) => TrieEntryVersion::V0,
+                    vm::WasmValue::I32(1) => TrieEntryVersion::V1,
                     vm::WasmValue::I32(_) => {
                         return HostVm::Error {
                             error: Error::ParamDecodeError,
@@ -1231,17 +1232,36 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_storage_root_version_2 => {
-                let state_version = expect_state_version!(0);
-                match state_version {
-                    trie::TrieEntryVersion::V0 => {
-                        HostVm::ExternalStorageRoot(ExternalStorageRoot {
-                            inner: self.inner,
-                            calling: id,
-                            child_trie_ptr_size: None,
-                        })
-                    }
-                    trie::TrieEntryVersion::V1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
+                // The `ext_storage_root_version_2` host function gets passed as parameter the
+                // state version of the runtime. This is in fact completely unnecessary as the
+                // same information is found in the runtime specification, and this parameter
+                // should be considered as a historical accident. We verify that the version
+                // provided as parameter is the same as the one in the specification.
+                let version_param = expect_state_version!(0);
+                let version_spec = self
+                    .inner
+                    .runtime_version
+                    .as_ref()
+                    .unwrap()
+                    .decode()
+                    .state_version
+                    .unwrap_or(TrieEntryVersion::V0);
+
+                if version_param != version_spec {
+                    return HostVm::Error {
+                        error: Error::StateVersionMismatch {
+                            parameter: version_param,
+                            specification: version_spec,
+                        },
+                        prototype: self.inner.into_prototype(),
+                    };
                 }
+
+                HostVm::ExternalStorageRoot(ExternalStorageRoot {
+                    inner: self.inner,
+                    calling: id,
+                    child_trie_ptr_size: None,
+                })
             }
             HostFunction::ext_storage_changes_root_version_1 => {
                 // The changes trie is an obsolete attempt at having a second trie containing, for
@@ -1538,17 +1558,37 @@ impl ReadyToRun {
             }
             HostFunction::ext_default_child_storage_root_version_2 => {
                 let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
-                let state_version = expect_state_version!(1);
-                match state_version {
-                    trie::TrieEntryVersion::V0 => {
-                        HostVm::ExternalStorageRoot(ExternalStorageRoot {
-                            inner: self.inner,
-                            calling: id,
-                            child_trie_ptr_size: Some((child_trie_ptr, child_trie_size)),
-                        })
-                    }
-                    trie::TrieEntryVersion::V1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
+
+                // The `ext_default_child_storage_root_version_2` host function gets passed as
+                // parameter the state version of the runtime. This is in fact completely
+                // unnecessary as the same information is found in the runtime specification, and
+                // this parameter should be considered as a historical accident. We verify that the
+                // version provided as parameter is the same as the one in the specification.
+                let version_param = expect_state_version!(1);
+                let version_spec = self
+                    .inner
+                    .runtime_version
+                    .as_ref()
+                    .unwrap()
+                    .decode()
+                    .state_version
+                    .unwrap_or(TrieEntryVersion::V0);
+
+                if version_param != version_spec {
+                    return HostVm::Error {
+                        error: Error::StateVersionMismatch {
+                            parameter: version_param,
+                            specification: version_spec,
+                        },
+                        prototype: self.inner.into_prototype(),
+                    };
                 }
+
+                HostVm::ExternalStorageRoot(ExternalStorageRoot {
+                    inner: self.inner,
+                    calling: id,
+                    child_trie_ptr_size: Some((child_trie_ptr, child_trie_size)),
+                })
             }
             HostFunction::ext_crypto_ed25519_public_keys_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ed25519_generate_version_1 => host_fn_not_implemented!(),
@@ -1928,7 +1968,7 @@ impl ReadyToRun {
                     if matches!(host_fn, HostFunction::ext_trie_blake2_256_root_version_2) {
                         expect_state_version!(1)
                     } else {
-                        trie::TrieEntryVersion::V0
+                        TrieEntryVersion::V0
                     };
 
                 let result = {
@@ -1979,7 +2019,7 @@ impl ReadyToRun {
                 ) {
                     expect_state_version!(1)
                 } else {
-                    trie::TrieEntryVersion::V0
+                    TrieEntryVersion::V0
                 };
 
                 let result = {
@@ -2482,6 +2522,20 @@ impl ExternalStorageSet {
         } else {
             None
         }
+    }
+
+    /// Returns the state trie version indicated by the runtime.
+    ///
+    /// This information should be stored alongside with the storage value and is necessary in
+    /// order to properly build the trie and thus the trie root node hash.
+    pub fn state_trie_version(&self) -> TrieEntryVersion {
+        self.inner
+            .runtime_version
+            .as_ref()
+            .unwrap()
+            .decode()
+            .state_version
+            .unwrap_or(TrieEntryVersion::V0)
     }
 
     /// Resumes execution after having set the value.
@@ -3822,6 +3876,20 @@ pub enum Error {
     FreeError {
         /// Pointer that was expected to be freed.
         pointer: u32,
+    },
+    /// Mismatch between the state trie version provided as parameter and the state trie version
+    /// found in the runtime specification.
+    #[display(
+        fmt = "Mismatch between the state trie version provided as parameter ({:?}) and the state \
+        trie version found in the runtime specification ({:?}).",
+        parameter,
+        specification
+    )]
+    StateVersionMismatch {
+        /// The version passed as parameter.
+        parameter: TrieEntryVersion,
+        /// The version in the specification.
+        specification: TrieEntryVersion,
     },
     /// The host function isn't implemented.
     // TODO: this variant should eventually disappear as all functions are implemented

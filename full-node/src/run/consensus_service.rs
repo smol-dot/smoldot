@@ -38,7 +38,7 @@ use smoldot::{
     informant::HashDisplay,
     libp2p,
     network::{self, protocol::BlockData},
-    sync::all,
+    sync::all::{self, TrieEntryVersion},
 };
 use std::{
     collections::BTreeMap,
@@ -128,7 +128,14 @@ impl ConsensusService {
             best_block_number,
             finalized_block_storage,
             finalized_chain_information,
-        ): (_, _, _, _, BTreeMap<Vec<u8>, Vec<u8>>, _) = config
+        ): (
+            _,
+            _,
+            _,
+            _,
+            BTreeMap<Vec<u8>, (Vec<u8>, TrieEntryVersion)>,
+            _,
+        ) = config
             .database
             .with_database({
                 let block_number_bytes = config.block_number_bytes;
@@ -153,9 +160,17 @@ impl ConsensusService {
                     )
                     .unwrap()
                     .number;
-                    let finalized_block_storage = database
+                    let finalized_block_storage: Vec<(Vec<u8>, Vec<u8>, u8)> = database
                         .finalized_block_storage_top_trie(&finalized_block_hash)
                         .unwrap();
+                    // TODO: we copy all entries; it could be more optimal to have a custom implementation of FromIterator that directly does the conversion?
+                    let finalized_block_storage = finalized_block_storage
+                        .into_iter()
+                        .map(|(k, val, vers)| {
+                            let vers = TrieEntryVersion::try_from(vers).unwrap(); // TODO: don't unwrap
+                            (k, (val, vers))
+                        })
+                        .collect();
                     let finalized_chain_information = database
                         .to_chain_information(&finalized_block_hash)
                         .unwrap();
@@ -223,11 +238,11 @@ impl ConsensusService {
                         // Builds the runtime of the finalized block.
                         // Assumed to always be valid, otherwise the block wouldn't have been saved in the
                         // database, hence the large number of unwraps here.
-                        let module = finalized_block_storage.get(&b":code"[..]).unwrap();
+                        let (module, _) = finalized_block_storage.get(&b":code"[..]).unwrap();
                         let heap_pages = executor::storage_heap_pages_to_value(
                             finalized_block_storage
                                 .get(&b":heappages"[..])
-                                .map(|v| &v[..]),
+                                .map(|(v, _)| &v[..]),
                         )
                         .unwrap();
                         executor::host::HostVmPrototype::new(executor::host::Config {
@@ -329,7 +344,7 @@ struct SyncBackground {
     // While reading the storage from the database is an option, doing so considerably slows down
     /// the verification, and also makes it impossible to insert blocks in the database in
     /// parallel of this verification.
-    finalized_block_storage: BTreeMap<Vec<u8>, Vec<u8>>,
+    finalized_block_storage: BTreeMap<Vec<u8>, (Vec<u8>, TrieEntryVersion)>,
 
     sync_state: Arc<Mutex<SyncState>>,
 
@@ -754,10 +769,11 @@ impl SyncBackground {
                             best_block_storage_access.get(key.as_ref(), || {
                                 self.finalized_block_storage
                                     .get(key.as_ref())
-                                    .map(|v| &v[..])
+                                    .map(|(val, vers)| (&val[..], *vers))
                             })
                         };
-                        block_authoring = get.inject_value(value.map(iter::once));
+                        block_authoring =
+                            get.inject_value(value.map(|(val, vers)| (iter::once(val), vers)));
                         continue;
                     }
                     author::build::BuilderAuthoring::NextKey(_) => {
@@ -1137,7 +1153,7 @@ impl SyncBackground {
                                 let value = self
                                     .finalized_block_storage
                                     .get(req.key().as_ref())
-                                    .map(|v| &v[..]);
+                                    .map(|(val, vers)| (&val[..], *vers));
                                 verify = req.inject_value(value);
                             }
                             all::BlockVerification::FinalizedStorageNextKey(req) => {
@@ -1212,7 +1228,7 @@ impl SyncBackground {
 
                             // TODO: maybe write in a separate task? but then we can't access the finalized storage immediately after?
                             for block in &finalized_blocks {
-                                for (key, value) in block
+                                for (key, value, ()) in block
                                     .full
                                     .as_ref()
                                     .unwrap()
@@ -1220,8 +1236,13 @@ impl SyncBackground {
                                     .diff_iter_unordered()
                                 {
                                     if let Some(value) = value {
-                                        self.finalized_block_storage
-                                            .insert(key.to_owned(), value.to_owned());
+                                        self.finalized_block_storage.insert(
+                                            key.to_owned(),
+                                            (
+                                                value.to_owned(),
+                                                block.full.as_ref().unwrap().state_trie_version,
+                                            ),
+                                        );
                                     } else {
                                         let _was_there = self.finalized_block_storage.remove(key);
                                         // TODO: if a block inserts a new value, then removes it in the next block, the key will remain in `finalized_block_storage`; either solve this or document this
@@ -1327,7 +1348,9 @@ async fn database_blocks(
                         .as_ref()
                         .unwrap()
                         .storage_top_trie_changes
-                        .diff_iter_unordered(),
+                        .diff_iter_unordered()
+                        .map(|(k, v, ())| (k, v)),
+                    u8::from(block.full.as_ref().unwrap().state_trie_version),
                 );
 
                 match result {

@@ -58,6 +58,8 @@ use crate::{
 use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
 use core::{iter, mem};
 
+pub use runtime_host::TrieEntryVersion;
+
 /// Configuration for a block generation.
 pub struct Config<'a> {
     /// Number of bytes used to encode block numbers in the header.
@@ -110,6 +112,9 @@ pub struct Success {
     pub parent_runtime: host::HostVmPrototype,
     /// List of changes to the storage top trie that the block performs.
     pub storage_top_trie_changes: storage_diff::StorageDiff,
+    /// State trie version indicated by the runtime. All the storage changes indicated by
+    /// [`Success::storage_top_trie_changes`] should store this version alongside with them.
+    pub state_trie_version: TrieEntryVersion,
     /// List of changes to the off-chain storage that this block performs.
     pub offchain_storage_changes: storage_diff::StorageDiff,
     /// Cache used for calculating the top trie root of the new block.
@@ -428,6 +433,7 @@ impl BlockBuild {
                         body: shared.block_body,
                         parent_runtime: success.virtual_machine.into_prototype(),
                         storage_top_trie_changes: success.storage_top_trie_changes,
+                        state_trie_version: success.state_trie_version,
                         offchain_storage_changes: success.offchain_storage_changes,
                         top_trie_root_calculation_cache: success.top_trie_root_calculation_cache,
                         logs: shared.logs,
@@ -595,7 +601,10 @@ impl StorageGet {
     }
 
     /// Injects the corresponding storage value.
-    pub fn inject_value(self, value: Option<impl Iterator<Item = impl AsRef<[u8]>>>) -> BlockBuild {
+    pub fn inject_value(
+        self,
+        value: Option<(impl Iterator<Item = impl AsRef<[u8]>>, TrieEntryVersion)>,
+    ) -> BlockBuild {
         BlockBuild::from_inner(self.0.inject_value(value), self.1)
     }
 }

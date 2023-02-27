@@ -317,6 +317,7 @@ impl SqliteFullDatabase {
         body: impl ExactSizeIterator<Item = impl AsRef<[u8]>>,
         storage_top_trie_changes: impl Iterator<Item = (impl AsRef<[u8]>, Option<impl AsRef<[u8]>>)>
             + Clone,
+        trie_entries_version: u8,
     ) -> Result<(), InsertError> {
         // Calculate the hash of the new best block.
         let block_hash = header::hash_from_scale_encoded_header(scale_encoded_header);
@@ -375,7 +376,7 @@ impl SqliteFullDatabase {
 
         // Insert the storage changes.
         let mut statement = connection
-            .prepare("INSERT INTO non_finalized_changes(hash, key, value) VALUES (?, ?, ?)")
+            .prepare("INSERT INTO non_finalized_changes(hash, key, value, trie_entry_version) VALUES (?, ?, ?, ?)")
             .unwrap();
         for (key, value) in storage_top_trie_changes {
             statement = statement
@@ -384,10 +385,14 @@ impl SqliteFullDatabase {
                 .bind(2, key.as_ref())
                 .unwrap();
             if let Some(value) = value {
-                statement = statement.bind(3, value.as_ref()).unwrap();
+                statement = statement
+                    .bind(3, value.as_ref())
+                    .unwrap()
+                    .bind(4, i64::from(trie_entries_version))
+                    .unwrap();
             } else {
                 // Binds NULL.
-                statement = statement.bind(3, ()).unwrap();
+                statement = statement.bind(3, ()).unwrap().bind(4, ()).unwrap();
             }
             statement.next().unwrap();
             statement = statement.reset().unwrap();
@@ -547,8 +552,8 @@ impl SqliteFullDatabase {
 
             let mut statement = connection
                 .prepare(
-                    "INSERT OR REPLACE INTO finalized_storage_top_trie(key, value)
-                SELECT key, value
+                    "INSERT OR REPLACE INTO finalized_storage_top_trie(key, value, trie_entry_version)
+                SELECT key, value, trie_entry_version
                 FROM non_finalized_changes 
                 WHERE non_finalized_changes.hash = ? AND non_finalized_changes.value IS NOT NULL",
                 )
@@ -672,8 +677,8 @@ impl SqliteFullDatabase {
     /// [`FinalizedAccessError::Obsolete`] error is returned.
     ///
     /// The return value must implement the `FromIterator` trait, being passed an iterator that
-    /// produces tuples of keys and values.
-    pub fn finalized_block_storage_top_trie<T: FromIterator<(Vec<u8>, Vec<u8>)>>(
+    /// produces tuples of keys, values, and trie entry version.
+    pub fn finalized_block_storage_top_trie<T: FromIterator<(Vec<u8>, Vec<u8>, u8)>>(
         &self,
         finalized_block_hash: &[u8; 32],
     ) -> Result<T, FinalizedAccessError> {
@@ -684,7 +689,7 @@ impl SqliteFullDatabase {
         }
 
         let mut statement = connection
-            .prepare(r#"SELECT key, value FROM finalized_storage_top_trie"#)
+            .prepare(r#"SELECT key, value, trie_entry_version FROM finalized_storage_top_trie"#)
             .map_err(InternalError)
             .map_err(CorruptedError::Internal)
             .map_err(AccessError::Corrupted)
@@ -697,14 +702,24 @@ impl SqliteFullDatabase {
 
             let key = statement.read::<Vec<u8>>(0).unwrap();
             let value = statement.read::<Vec<u8>>(1).unwrap();
-            Some((key, value))
+            let trie_entry_version = match u8::try_from(statement.read::<i64>(2).unwrap())
+                .map_err(|_| CorruptedError::InvalidTrieEntryVersion)
+                .map_err(AccessError::Corrupted)
+                .map_err(FinalizedAccessError::Access)
+            {
+                Ok(n) => n,
+                Err(err) => return Some(Err(err)),
+            };
+
+            Some(Ok((key, value, trie_entry_version)))
         })
-        .collect();
+        .collect::<Result<T, _>>()?;
 
         Ok(out)
     }
 
-    /// Returns the value associated to a key in the storage of the finalized block.
+    /// Returns the value associated to a key in the storage of the finalized block, and the trie
+    /// entry version.
     ///
     /// In order to avoid race conditions, the known finalized block hash must be passed as
     /// parameter. If the finalized block in the database doesn't match the hash passed as
@@ -714,7 +729,7 @@ impl SqliteFullDatabase {
         &self,
         finalized_block_hash: &[u8; 32],
         key: &[u8],
-    ) -> Result<Option<Vec<u8>>, FinalizedAccessError> {
+    ) -> Result<Option<(Vec<u8>, u8)>, FinalizedAccessError> {
         let connection = self.database.lock();
 
         if finalized_hash(&connection)? != *finalized_block_hash {
@@ -722,7 +737,9 @@ impl SqliteFullDatabase {
         }
 
         let mut statement = connection
-            .prepare(r#"SELECT value FROM finalized_storage_top_trie WHERE key = ?"#)
+            .prepare(
+                r#"SELECT value, trie_entry_version FROM finalized_storage_top_trie WHERE key = ?"#,
+            )
             .map_err(InternalError)
             .map_err(CorruptedError::Internal)
             .map_err(AccessError::Corrupted)
@@ -740,7 +757,13 @@ impl SqliteFullDatabase {
             .map_err(CorruptedError::Internal)
             .map_err(AccessError::Corrupted)
             .map_err(FinalizedAccessError::Access)?;
-        Ok(Some(value))
+
+        let trie_entry_version = u8::try_from(statement.read::<i64>(1).unwrap())
+            .map_err(|_| CorruptedError::InvalidTrieEntryVersion)
+            .map_err(AccessError::Corrupted)
+            .map_err(FinalizedAccessError::Access)?;
+
+        Ok(Some((value, trie_entry_version)))
     }
 
     /// Returns the key in the storage of the finalized block that immediately follows the key
@@ -926,6 +949,8 @@ pub enum CorruptedError {
     ConsensusAlgorithmMix,
     /// The information about a Babe epoch found in the database has failed to decode.
     InvalidBabeEpochInformation,
+    /// The version information about a storage entry has failed to decode.
+    InvalidTrieEntryVersion,
     #[display(fmt = "Internal error: {}", _0)]
     Internal(InternalError),
 }

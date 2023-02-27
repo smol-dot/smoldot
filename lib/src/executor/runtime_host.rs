@@ -47,6 +47,8 @@ use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
 use core::fmt;
 use hashbrown::{hash_map::Entry, HashMap, HashSet};
 
+pub use trie::TrieEntryVersion;
+
 /// Configuration for [`run`].
 pub struct Config<'a, TParams> {
     /// Virtual machine to be run.
@@ -76,12 +78,20 @@ pub struct Config<'a, TParams> {
 pub fn run(
     config: Config<impl Iterator<Item = impl AsRef<[u8]>> + Clone>,
 ) -> Result<RuntimeHostVm, (host::StartErr, host::HostVmPrototype)> {
+    let state_trie_version = config
+        .virtual_machine
+        .runtime_version()
+        .decode()
+        .state_version
+        .unwrap_or(TrieEntryVersion::V0);
+
     Ok(Inner {
         vm: config
             .virtual_machine
             .run_vectored(config.function_to_call, config.parameter)?
             .into(),
         top_trie_changes: config.storage_top_trie_changes,
+        state_trie_version,
         top_trie_transaction_revert: Vec::new(),
         offchain_storage_changes: config.offchain_storage_changes,
         top_trie_root_calculation_cache: Some(
@@ -101,6 +111,9 @@ pub struct Success {
     pub virtual_machine: SuccessVirtualMachine,
     /// List of changes to the storage top trie that the block performs.
     pub storage_top_trie_changes: storage_diff::StorageDiff,
+    /// State trie version indicated by the runtime. All the storage changes indicated by
+    /// [`Success::storage_top_trie_changes`] should store this version alongside with them.
+    pub state_trie_version: TrieEntryVersion,
     /// List of changes to the off-chain storage that this block performs.
     pub offchain_storage_changes: storage_diff::StorageDiff,
     /// Cache used for calculating the top trie root.
@@ -239,30 +252,31 @@ impl StorageGet {
     /// Injects the corresponding storage value.
     pub fn inject_value(
         mut self,
-        value: Option<impl Iterator<Item = impl AsRef<[u8]>>>,
+        value: Option<(impl Iterator<Item = impl AsRef<[u8]>>, TrieEntryVersion)>,
     ) -> RuntimeHostVm {
         // TODO: update the implementation to not require the folding here
-        let value = value.map(|i| {
-            i.fold(Vec::new(), |mut a, b| {
+        let value = value.map(|(value, version)| {
+            let value = value.fold(Vec::new(), |mut a, b| {
                 a.extend_from_slice(b.as_ref());
                 a
-            })
+            });
+            (value, version)
         });
 
         match self.inner.vm {
             host::HostVm::ExternalStorageGet(req) => {
                 // TODO: should actually report the offset and max_size in the API
-                self.inner.vm = req.resume_full_value(value.as_ref().map(|v| &v[..]));
+                self.inner.vm = req.resume_full_value(value.as_ref().map(|(v, _)| &v[..]));
             }
             host::HostVm::ExternalStorageAppend(req) => {
                 match req.key() {
                     host::StorageKey::MainTrie { key } => {
                         // TODO: could be less overhead?
-                        let mut value = value.unwrap_or_default();
+                        let mut value = value.map(|(v, _)| v).unwrap_or_default();
                         append_to_storage_value(&mut value, req.value().as_ref());
                         self.inner
                             .top_trie_changes
-                            .diff_insert(key.as_ref().to_vec(), value);
+                            .diff_insert(key.as_ref().to_vec(), value, ());
                     }
                     _ => unreachable!(),
                 }
@@ -273,9 +287,7 @@ impl StorageGet {
                 if let calculate_root::RootMerkleValueCalculation::StorageValue(value_request) =
                     self.inner.root_calculation.take().unwrap()
                 {
-                    // TODO: we only support V0 for now, see https://github.com/paritytech/smoldot/issues/1967
-                    self.inner.root_calculation =
-                        Some(value_request.inject(trie::TrieEntryVersion::V0, value));
+                    self.inner.root_calculation = Some(value_request.inject(value));
                 } else {
                     // We only create a `StorageGet` if the state is `StorageValue`.
                     panic!()
@@ -370,7 +382,11 @@ impl PrefixKeys {
                         .unwrap()
                         .storage_value_update(&key, false);
 
-                    let previous_value = self.inner.top_trie_changes.diff_insert_erase(key.clone());
+                    let previous_value = self
+                        .inner
+                        .top_trie_changes
+                        .diff_insert_erase(key.clone(), ())
+                        .map(|(v, _)| v);
 
                     if let Some(top_trie_transaction_revert) =
                         self.inner.top_trie_transaction_revert.last_mut()
@@ -394,12 +410,12 @@ impl PrefixKeys {
                             self.inner
                                 .top_trie_changes
                                 .diff_get(v.as_ref())
-                                .map_or(true, |v| v.is_some())
+                                .map_or(true, |(v, _)| v.is_some())
                         })
                         .map(|v| v.as_ref().to_vec())
                         .collect::<HashSet<_, fnv::FnvBuildHasher>>();
                     // TODO: slow to iterate over everything?
-                    for (key, value) in self.inner.top_trie_changes.diff_iter_unordered() {
+                    for (key, value, ()) in self.inner.top_trie_changes.diff_iter_unordered() {
                         if value.is_none() {
                             continue;
                         }
@@ -599,6 +615,10 @@ struct Inner {
     top_trie_transaction_revert:
         Vec<HashMap<Vec<u8>, Option<Option<Vec<u8>>>, fnv::FnvBuildHasher>>,
 
+    /// State trie version indicated by the runtime. All the storage changes that are performed
+    /// use this version.
+    state_trie_version: TrieEntryVersion,
+
     /// Pending changes to the off-chain storage that this execution performs.
     offchain_storage_changes: storage_diff::StorageDiff,
 
@@ -634,6 +654,7 @@ impl Inner {
                     return RuntimeHostVm::Finished(Ok(Success {
                         virtual_machine: SuccessVirtualMachine(finished),
                         storage_top_trie_changes: self.top_trie_changes,
+                        state_trie_version: self.state_trie_version,
                         offchain_storage_changes: self.offchain_storage_changes,
                         top_trie_root_calculation_cache: self
                             .top_trie_root_calculation_cache
@@ -656,7 +677,7 @@ impl Inner {
                         self.top_trie_changes.diff_get(key.as_ref())
                     };
 
-                    if let Some(overlay) = search {
+                    if let Some((overlay, _)) = search {
                         self.vm = req.resume_full_value(overlay);
                     } else {
                         self.vm = req.into();
@@ -674,10 +695,11 @@ impl Inner {
 
                         let previous_value = if let Some(value) = req.value() {
                             self.top_trie_changes
-                                .diff_insert(key.as_ref(), value.as_ref())
+                                .diff_insert(key.as_ref(), value.as_ref(), ())
                         } else {
-                            self.top_trie_changes.diff_insert_erase(key.as_ref())
-                        };
+                            self.top_trie_changes.diff_insert_erase(key.as_ref(), ())
+                        }
+                        .map(|(v, ())| v);
 
                         if let Some(top_trie_transaction_revert) =
                             self.top_trie_transaction_revert.last_mut()
@@ -709,13 +731,15 @@ impl Inner {
                         .unwrap()
                         .storage_value_update(key.as_ref(), true);
 
-                    let current_value = self.top_trie_changes.diff_get(key.as_ref());
+                    let current_value =
+                        self.top_trie_changes.diff_get(key.as_ref()).map(|(v, _)| v);
                     if let Some(current_value) = current_value {
                         let mut current_value = current_value.unwrap_or_default().to_vec();
                         append_to_storage_value(&mut current_value, req.value().as_ref());
                         let previous_value = self
                             .top_trie_changes
-                            .diff_insert(key.as_ref().to_vec(), current_value);
+                            .diff_insert(key.as_ref().to_vec(), current_value, ())
+                            .map(|(v, _)| v);
                         if let Some(top_trie_transaction_revert) =
                             self.top_trie_transaction_revert.last_mut()
                         {
@@ -776,13 +800,14 @@ impl Inner {
                         calculate_root::RootMerkleValueCalculation::StorageValue(value_request) => {
                             self.vm = req.into();
                             // TODO: allocating a Vec, meh
-                            if let Some(overlay) = self
+                            if let Some((overlay, ())) = self
                                 .top_trie_changes
                                 .diff_get(&value_request.key().collect::<Vec<_>>())
                             {
-                                // TODO: we only support V0 for now, see https://github.com/paritytech/smoldot/issues/1967
-                                self.root_calculation =
-                                    Some(value_request.inject(trie::TrieEntryVersion::V0, overlay));
+                                self.root_calculation = Some(
+                                    value_request
+                                        .inject(overlay.map(|v| (v, self.state_trie_version))),
+                                );
                             } else {
                                 self.root_calculation =
                                     Some(calculate_root::RootMerkleValueCalculation::StorageValue(
@@ -815,11 +840,14 @@ impl Inner {
 
                 host::HostVm::ExternalOffchainStorageSet(req) => {
                     if let Some(value) = req.value() {
-                        self.offchain_storage_changes
-                            .diff_insert(req.key().as_ref().to_vec(), value.as_ref().to_vec());
+                        self.offchain_storage_changes.diff_insert(
+                            req.key().as_ref().to_vec(),
+                            value.as_ref().to_vec(),
+                            (),
+                        );
                     } else {
                         self.offchain_storage_changes
-                            .diff_insert_erase(req.key().as_ref().to_vec());
+                            .diff_insert_erase(req.key().as_ref().to_vec(), ());
                     }
 
                     self.vm = req.resume();
@@ -872,9 +900,9 @@ impl Inner {
                         for (key, value) in last {
                             if let Some(value) = value {
                                 if let Some(value) = value {
-                                    let _ = self.top_trie_changes.diff_insert(key, value);
+                                    let _ = self.top_trie_changes.diff_insert(key, value, ());
                                 } else {
-                                    let _ = self.top_trie_changes.diff_insert_erase(key);
+                                    let _ = self.top_trie_changes.diff_insert_erase(key, ());
                                 }
                             } else {
                                 let _ = self.top_trie_changes.diff_remove(&key);
