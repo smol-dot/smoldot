@@ -61,7 +61,6 @@ extern "C" fn test(_param_ptr: i32, _param_sz: i32) -> i64 {
 
 */
 
-
 #[test]
 fn ext_hashing_keccak_256_version_1() {
     let module_bytes = with_core_version_custom_sections(
