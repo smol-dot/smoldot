@@ -929,11 +929,15 @@ where
 
         // Before returning the event, we check whether there is any desired outbound substream
         // to open.
+        // Note: we can't use a `while let` due to borrow checker errors.
         loop {
-            // Note: we can't use a `while let` due to borrow checker errors.
+            // Query the list of substreams that need to be opened.
+            // When a substream is refused by the remote, we make sure to not mark as "not desired"
+            // unless that substream really is supposed to be open. For this reason, substreams
+            // that have been tried in the past are also included in the list.
             let (peer_id, notifications_protocol_index) = match self
                 .inner
-                .unfulfilled_desired_outbound_substream(false)
+                .unfulfilled_desired_outbound_substream(true)
                 .next()
             {
                 Some((peer_id, idx)) => (peer_id.clone(), idx),

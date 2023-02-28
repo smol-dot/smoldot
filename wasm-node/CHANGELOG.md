@@ -6,6 +6,10 @@
 
 - Add support for the `ext_hashing_keccak_512_version_1` host function. ([#231](https://github.com/smol-dot/smoldot/pull/231))
 
+## Changed
+
+- When a full node refuses an outbound transactions or GrandPa substream even though a block announces substream has been established, smoldot now tries to reopen the failed substream. This bypasses a Substrate issue. ()
+
 ## Fixed
 
 - Fix panic when the input data of a Wasm function call is larger than a Wasm page. ([#218](https://github.com/smol-dot/smoldot/pull/218))
