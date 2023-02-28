@@ -177,16 +177,14 @@ impl Frontend {
         }
 
         // Logging the request before it is queued.
-        if log::log_enabled!(log::Level::Debug) {
-            log::debug!(
-                target: &self.log_target,
-                "PendingRequestsQueue <= {}",
-                crate::util::truncate_str_iter(
-                    json_rpc_request.chars().filter(|c| !c.is_control()),
-                    100,
-                ).collect::<String>()
-            );
-        }
+        log::debug!(
+            target: &self.log_target,
+            "PendingRequestsQueue <= {}",
+            crate::util::truncated_str(
+                json_rpc_request.chars().filter(|c| !c.is_control()),
+                100,
+            )
+        );
 
         match self
             .requests_subscriptions
@@ -217,16 +215,14 @@ impl Frontend {
             .next_response(&self.client_id)
             .await;
 
-        if log::log_enabled!(log::Level::Debug) {
-            log::debug!(
-                target: &self.log_target,
-                "JSON-RPC <= {}",
-                crate::util::truncate_str_iter(
-                    message.chars().filter(|c| !c.is_control()),
-                    100,
-                ).collect::<String>()
-            );
-        }
+        log::debug!(
+            target: &self.log_target,
+            "JSON-RPC <= {}",
+            crate::util::truncated_str(
+                message.chars().filter(|c| !c.is_control()),
+                100,
+            )
+        );
 
         message
     }
@@ -702,11 +698,12 @@ impl<TPlat: Platform> Background<TPlat> {
     async fn handle_request(self: &Arc<Self>) {
         let (json_rpc_request, state_machine_request_id) =
             self.requests_subscriptions.next_request().await;
-        log::debug!(target: &self.log_target, "PendingRequestsQueue => {}", 
-            crate::util::truncate_str_iter(
+        log::debug!(target: &self.log_target, "PendingRequestsQueue => {}",
+            crate::util::truncated_str(
                 json_rpc_request.chars().filter(|c| !c.is_control()),
                 100,
-            ).collect::<String>());
+            )
+        );
 
         // Check whether the JSON-RPC request is correct, and bail out if it isn't.
         let (request_id, call) = match methods::parse_json_call(&json_rpc_request) {
