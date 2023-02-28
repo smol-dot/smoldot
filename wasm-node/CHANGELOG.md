@@ -8,7 +8,7 @@
 
 ## Changed
 
-- When a full node refuses an outbound transactions or GrandPa substream even though a block announces substream has been established, smoldot now tries to reopen the failed substream. This bypasses a Substrate issue. ()
+- When a full node refuses an outbound transactions or GrandPa substream even though a block announces substream has been established, smoldot now tries to reopen the failed substream. This bypasses a Substrate issue. ([#240](https://github.com/smol-dot/smoldot/pull/240))
 
 ## Fixed
 
