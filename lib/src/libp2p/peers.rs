@@ -1403,7 +1403,13 @@ where
     ) -> impl Iterator<Item = (&'_ PeerId, usize)> + '_ {
         self.unfulfilled_desired_outbound_substreams
             .iter()
-            .filter(move |((_, _), already_tried)| **already_tried == include_already_tried)
+            .filter(
+                move |((_, _), already_tried)| match (**already_tried, include_already_tried) {
+                    (false, _) => true,
+                    (true, true) => true,
+                    (true, false) => false,
+                },
+            )
             .map(|((peer_index, notifications_protocol_index), _)| {
                 (
                     &self.peers[*peer_index].peer_id,

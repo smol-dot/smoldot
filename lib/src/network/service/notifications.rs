@@ -275,6 +275,11 @@ where
             }
 
             // Other protocol.
+            // These substreams are supposed to be openable but have been refused for some reason.
+            // As of the writing of this comment, a Substrate issue causes it to refuse
+            // transactions and GrandPa substreams if they are opened too quickly after the block
+            // announces substream.
+            // Do nothing, as the opening will be attempted again in the future.
             Err(_) => None,
 
             // Unrecognized protocol.
