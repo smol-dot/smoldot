@@ -51,7 +51,7 @@ for (const file of chainSpecsFiles) {
 }
 
 const client = smoldot.start({
-    maxLogLevel: 4,  // Can be increased for more verbosity
+    maxLogLevel: 3,  // Can be increased for more verbosity
     forbidTcp: false,
     forbidWs: false,
     forbidNonLocalWs: false,
