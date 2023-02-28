@@ -768,17 +768,9 @@ impl ReadyToRun {
             ($num:expr) => {{
                 let val = match &params[$num] {
                     vm::WasmValue::I64(v) => u64::from_ne_bytes(v.to_ne_bytes()),
-                    v => {
-                        return HostVm::Error {
-                            error: Error::WrongParamTy {
-                                function: host_fn.name(),
-                                param_num: $num,
-                                expected: vm::ValueType::I64,
-                                actual: v.ty(),
-                            },
-                            prototype: self.inner.into_prototype(),
-                        }
-                    }
+                    // The signatures are checked at initialization and the Wasm VM ensures that
+                    // the proper parameter types are provided.
+                    _ => unreachable!(),
                 };
 
                 let len = u32::try_from(val >> 32).unwrap();
@@ -807,17 +799,9 @@ impl ReadyToRun {
             ($num:expr) => {{
                 let val = match &params[$num] {
                     vm::WasmValue::I64(v) => u64::from_ne_bytes(v.to_ne_bytes()),
-                    v => {
-                        return HostVm::Error {
-                            error: Error::WrongParamTy {
-                                function: host_fn.name(),
-                                param_num: $num,
-                                expected: vm::ValueType::I64,
-                                actual: v.ty(),
-                            },
-                            prototype: self.inner.into_prototype(),
-                        };
-                    }
+                    // The signatures are checked at initialization and the Wasm VM ensures that
+                    // the proper parameter types are provided.
+                    _ => unreachable!(),
                 };
 
                 let len = u32::try_from(val >> 32).unwrap();
@@ -843,17 +827,9 @@ impl ReadyToRun {
             ($num:expr, $size:expr) => {{
                 let ptr = match params[$num] {
                     vm::WasmValue::I32(v) => u32::from_ne_bytes(v.to_ne_bytes()),
-                    v => {
-                        return HostVm::Error {
-                            error: Error::WrongParamTy {
-                                function: host_fn.name(),
-                                param_num: $num,
-                                expected: vm::ValueType::I32,
-                                actual: v.ty(),
-                            },
-                            prototype: self.inner.into_prototype(),
-                        }
-                    }
+                    // The signatures are checked at initialization and the Wasm VM ensures that
+                    // the proper parameter types are provided.
+                    _ => unreachable!(),
                 };
 
                 let result = self.inner.vm.read_memory(ptr, $size);
@@ -879,17 +855,9 @@ impl ReadyToRun {
             ($num:expr, $size:expr) => {{
                 let ptr = match params[$num] {
                     vm::WasmValue::I32(v) => u32::from_ne_bytes(v.to_ne_bytes()),
-                    v => {
-                        return HostVm::Error {
-                            error: Error::WrongParamTy {
-                                function: host_fn.name(),
-                                param_num: $num,
-                                expected: vm::ValueType::I32,
-                                actual: v.ty(),
-                            },
-                            prototype: self.inner.into_prototype(),
-                        }
-                    }
+                    // The signatures are checked at initialization and the Wasm VM ensures that
+                    // the proper parameter types are provided.
+                    _ => unreachable!(),
                 };
 
                 if u32::saturating_add($size, ptr)
@@ -914,17 +882,9 @@ impl ReadyToRun {
             ($num:expr) => {{
                 match &params[$num] {
                     vm::WasmValue::I32(v) => u32::from_ne_bytes(v.to_ne_bytes()),
-                    v => {
-                        return HostVm::Error {
-                            error: Error::WrongParamTy {
-                                function: host_fn.name(),
-                                param_num: $num,
-                                expected: vm::ValueType::I32,
-                                actual: v.ty(),
-                            },
-                            prototype: self.inner.into_prototype(),
-                        }
-                    }
+                    // The signatures are checked at initialization and the Wasm VM ensures that
+                    // the proper parameter types are provided.
+                    _ => unreachable!(),
                 }
             }};
         }
@@ -940,17 +900,9 @@ impl ReadyToRun {
                             prototype: self.inner.into_prototype(),
                         }
                     }
-                    v => {
-                        return HostVm::Error {
-                            error: Error::WrongParamTy {
-                                function: host_fn.name(),
-                                param_num: $num,
-                                expected: vm::ValueType::I32,
-                                actual: v.ty(),
-                            },
-                            prototype: self.inner.into_prototype(),
-                        }
-                    }
+                    // The signatures are checked at initialization and the Wasm VM ensures that
+                    // the proper parameter types are provided.
+                    _ => unreachable!(),
                 }
             }};
         }
@@ -2075,17 +2027,9 @@ impl ReadyToRun {
             HostFunction::ext_misc_print_num_version_1 => {
                 let num = match params[0] {
                     vm::WasmValue::I64(v) => u64::from_ne_bytes(v.to_ne_bytes()),
-                    v => {
-                        return HostVm::Error {
-                            error: Error::WrongParamTy {
-                                function: host_fn.name(),
-                                param_num: 0,
-                                expected: vm::ValueType::I64,
-                                actual: v.ty(),
-                            },
-                            prototype: self.inner.into_prototype(),
-                        }
-                    }
+                    // The signatures are checked at initialization and the Wasm VM ensures that
+                    // the proper parameter types are provided.
+                    _ => unreachable!(),
                 };
 
                 HostVm::LogEmit(LogEmit {
@@ -3800,24 +3744,6 @@ pub enum Error {
     },
     /// Failed to decode a SCALE-encoded parameter.
     ParamDecodeError,
-    /// The type of one of the parameters is wrong.
-    #[display(
-        fmt = "Type mismatch in parameter of index {}: {}, expected = {:?}, actual = {:?}",
-        param_num,
-        function,
-        expected,
-        actual
-    )]
-    WrongParamTy {
-        /// Name of the function being called where a type mismatch happens.
-        function: &'static str,
-        /// Index of the invalid parameter. The first parameter has index 0.
-        param_num: usize,
-        /// Type of the value that was expected.
-        expected: vm::ValueType,
-        /// Type of the value that got passed.
-        actual: vm::ValueType,
-    },
     /// One parameter is expected to point to a buffer, but the pointer is out
     /// of range of the memory of the Wasm VM.
     #[display(
