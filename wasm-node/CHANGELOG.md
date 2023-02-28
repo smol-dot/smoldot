@@ -12,6 +12,7 @@
 
 ## Fixed
 
+- Fix the signatures of the `ext_default_child_storage_read_version_1` and `ext_default_child_storage_root_version_2` host functions. This would lead to a warning about these function being unresolved. ([#244](https://github.com/smol-dot/smoldot/pull/244))
 - Fix panic when the input data of a Wasm function call is larger than a Wasm page. ([#218](https://github.com/smol-dot/smoldot/pull/218))
 - Subscriptions to the `chain_subscribeAllHeads` JSON-RPC function now generate notifications named `chain_allHead`, like in Substrate. They were erroneously named `chain_newHead`. ([#227](https://github.com/smol-dot/smoldot/pull/227))
 
