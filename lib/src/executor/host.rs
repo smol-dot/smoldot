@@ -4092,7 +4092,7 @@ impl HostFunction {
                 crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I64)
             }
             HostFunction::ext_default_child_storage_read_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I64)
+                crate::signature!((vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I64)
             }
             HostFunction::ext_default_child_storage_storage_kill_version_1 => {
                 crate::signature!((vm::ValueType::I64) => ())
@@ -4125,7 +4125,7 @@ impl HostFunction {
                 crate::signature!((vm::ValueType::I64) => vm::ValueType::I64)
             }
             HostFunction::ext_default_child_storage_root_version_2 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
+                crate::signature!((vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I64)
             }
             HostFunction::ext_crypto_ed25519_public_keys_version_1 => {
                 crate::signature!((vm::ValueType::I32) => vm::ValueType::I64)
