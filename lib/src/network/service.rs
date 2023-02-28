@@ -932,7 +932,7 @@ where
         // Note: we can't use a `while let` due to borrow checker errors.
         loop {
             // Query the list of substreams that need to be opened.
-            // When a substream is refused by the remote, we make sure to not mark as "not desired"
+            // When a substream is refused by the remote, we make sure to mark it as "not desired"
             // unless that substream really is supposed to be open. For this reason, substreams
             // that have been tried in the past are also included in the list.
             let (peer_id, notifications_protocol_index) = match self
