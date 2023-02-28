@@ -161,6 +161,10 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             inner: Deno.connect({
                 hostname: tcpParsed[2],
                 port: parseInt(tcpParsed[3]!, 10),
+            }).catch((error) => {
+                socket.destroyed = true;
+                config.onConnectionReset(error.toString());
+                return null!;
             })
         };
 
@@ -224,7 +228,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             } else {
                 // TCP
                 connection.socket.destroyed = true;
-                connection.socket.inner.then((connec) => connec.close());
+                connection.socket.inner.then((connec) => connec?.close());
             }
         },
 
