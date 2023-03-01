@@ -1222,6 +1222,17 @@ pub enum Event {
         announce: EncodedBlockAnnounce,
     },
 
+    /// Received a  GrandPa neighor packet from the network. This constains an update to the
+    /// finality state of the given peer.
+    GrandpaNeighborPacket {
+        /// Identity of the sender of the message.
+        peer_id: PeerId,
+        /// Index of the chain the message relates to.
+        chain_index: usize,
+        /// State of the remote.
+        state: GrandpaState,
+    },
+
     /// Received a GrandPa commit message from the network.
     GrandpaCommitMessage {
         /// Identity of the sender of the message.

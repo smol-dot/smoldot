@@ -599,19 +599,31 @@ where
                     }
                 };
 
-            // Commit messages are the only type of message that is important for
-            // light clients. Anything else is presently ignored.
-            if let protocol::GrandpaNotificationRef::Commit(_) = decoded_notif {
-                Some(Event::GrandpaCommitMessage {
+            match decoded_notif {
+                protocol::GrandpaNotificationRef::Commit(_) => Some(Event::GrandpaCommitMessage {
                     chain_index,
                     peer_id,
                     message: EncodedGrandpaCommitMessage {
                         message: notification,
                         block_number_bytes,
                     },
-                })
-            } else {
-                None
+                }),
+                protocol::GrandpaNotificationRef::Neighbor(n) => {
+                    Some(Event::GrandpaNeighborPacket {
+                        chain_index,
+                        peer_id,
+                        state: GrandpaState {
+                            round_number: n.round_number,
+                            set_id: n.set_id,
+                            commit_finalized_height: n.commit_finalized_height,
+                        },
+                    })
+                }
+                _ => {
+                    // Any other type of message is currently ignored. Support for them could be
+                    // added in the future.
+                    None
+                }
             }
         } else {
             // Unrecognized notifications protocol.
