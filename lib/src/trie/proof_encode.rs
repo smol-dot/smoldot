@@ -337,8 +337,13 @@ impl ProofBuilder {
                 }
 
                 // Re-encode the node value after its updates, and store it.
-                let updated_node_value =
-                    proof_node_codec::encode(decoded_node_value).fold(Vec::new(), |mut a, b| {
+                // `encode` can return an error only if there's no children and no storage value.
+                // Because we are guaranteed that the node was valid when we decoded it, and that
+                // we only ever add a storage value or add children, we are sure that encoding
+                // can't reach this situation.
+                let updated_node_value = proof_node_codec::encode(decoded_node_value)
+                    .unwrap()
+                    .fold(Vec::new(), |mut a, b| {
                         a.extend_from_slice(b.as_ref());
                         a
                     });
@@ -585,7 +590,8 @@ mod tests {
                     } else {
                         proof_node_codec::StorageValue::None
                     },
-                });
+                })
+                .unwrap();
 
                 proof_builder.set_node_value(&key, &node_value, None);
             }
