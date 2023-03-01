@@ -1242,7 +1242,8 @@ async fn update_round<TPlat: Platform>(
                 } => {
                     log::debug!(
                         target: "network",
-                        "Connection(?, {}) => GrandpaCommitMessage(target_block_hash={})",
+                        "Connection({}, {}) => GrandpaCommitMessage(target_block_hash={})",
+                        peer_id,
                         &shared.log_chain_names[chain_index],
                         HashDisplay(message.decode().message.target_hash),
                     );
