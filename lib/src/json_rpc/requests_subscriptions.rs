@@ -119,6 +119,8 @@ use core::{
 };
 use futures::lock::Mutex;
 
+mod tests;
+
 #[derive(Clone)]
 pub struct ClientId(u64, Weak<ClientInner>);
 
@@ -251,7 +253,9 @@ impl RequestsSubscriptions {
     }
 
     fn add_client_inner(&self, clients: &mut Clients) -> Result<ClientId, AddClientError> {
-        if clients.list.len() == self.max_clients.load(Ordering::Relaxed) {
+        // `clients.list.len()` can realistically be superior to `max_clients` since `max_clients`
+        // can be updated at runtime by the API user.
+        if clients.list.len() >= self.max_clients.load(Ordering::Relaxed) {
             return Err(AddClientError::LimitReached);
         }
 
