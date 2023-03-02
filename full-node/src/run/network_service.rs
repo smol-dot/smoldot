@@ -947,6 +947,20 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                         },
                     );
                 }
+                service::Event::GrandpaNeighborPacket {
+                    chain_index,
+                    peer_id,
+                    state,
+                } => {
+                    log::debug!(
+                        "grandpa-neighbor-packet; peer_id={}; chain_index={}; round_number={}; set_id={}; commit_finalized_height={}",
+                        peer_id,
+                        chain_index,
+                        state.round_number,
+                        state.set_id,
+                        state.commit_finalized_height,
+                    );
+                }
                 service::Event::GrandpaCommitMessage {
                     chain_index,
                     peer_id,

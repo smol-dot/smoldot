@@ -1235,6 +1235,21 @@ async fn update_round<TPlat: Platform>(
                     // All incoming requests are immediately answered.
                     unreachable!()
                 }
+                service::Event::GrandpaNeighborPacket {
+                    chain_index,
+                    peer_id,
+                    state,
+                } => {
+                    log::debug!(
+                        target: "network",
+                        "Connection({}, {}) => GrandpaNeighborPacket(round_number={}, set_id={}, commit_finalized_height={})",
+                        peer_id,
+                        &shared.log_chain_names[chain_index],
+                        state.round_number,
+                        state.set_id,
+                        state.commit_finalized_height,
+                    );
+                }
                 service::Event::GrandpaCommitMessage {
                     chain_index,
                     peer_id,
