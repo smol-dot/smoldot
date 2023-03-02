@@ -1677,7 +1677,7 @@ impl ReadyToRun {
                             sig[64] - 27
                         } else {
                             sig[64]
-                        } as u8);
+                        });
 
                         if let Ok(v) = v {
                             let pubkey = libsecp256k1::recover(
@@ -1726,7 +1726,7 @@ impl ReadyToRun {
                             sig[64] - 27
                         } else {
                             sig[64]
-                        } as u8);
+                        });
 
                         if let Ok(v) = v {
                             let pubkey = libsecp256k1::recover(
@@ -3108,7 +3108,7 @@ impl SignatureVerification {
                 }
             }
             SignatureVerificationAlgorithm::Sr25519V1 => {
-                schnorrkel::PublicKey::from_bytes(&self.public_key().as_ref()).map_or(false, |pk| {
+                schnorrkel::PublicKey::from_bytes(self.public_key().as_ref()).map_or(false, |pk| {
                     pk.verify_simple_preaudit_deprecated(
                         b"substrate",
                         self.message().as_ref(),
@@ -3118,7 +3118,7 @@ impl SignatureVerification {
                 })
             }
             SignatureVerificationAlgorithm::Sr25519V2 => {
-                schnorrkel::PublicKey::from_bytes(&self.public_key().as_ref()).map_or(false, |pk| {
+                schnorrkel::PublicKey::from_bytes(self.public_key().as_ref()).map_or(false, |pk| {
                     pk.verify_simple(
                         b"substrate",
                         self.message().as_ref(),
@@ -3366,11 +3366,11 @@ impl LogEmit {
 impl fmt::Display for LogEmit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.log_entry {
-            LogEmitInner::Num(num) => write!(f, "{}", num),
+            LogEmitInner::Num(num) => write!(f, "{num}"),
             LogEmitInner::Utf8 { str_ptr, str_size } => {
                 let str = self.inner.vm.read_memory(str_ptr, str_size).unwrap();
                 let str = str::from_utf8(str.as_ref()).unwrap();
-                write!(f, "{}", str)
+                write!(f, "{str}")
             }
             LogEmitInner::Hex {
                 data_ptr,
@@ -3391,7 +3391,7 @@ impl fmt::Display for LogEmit {
                     .unwrap();
                 let str = str::from_utf8(str.as_ref()).unwrap();
                 // TODO: don't just ignore the target and log level? better log representation? more control?
-                write!(f, "{}", str)
+                write!(f, "{str}")
             }
         }
     }
@@ -3682,16 +3682,16 @@ impl Inner {
 #[derive(Debug, derive_more::From, derive_more::Display, Clone)]
 pub enum NewErr {
     /// Error in the format of the runtime code.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     BadFormat(ModuleFormatError),
     /// Error while compiling the WebAssembly code.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     InvalidWasm(vm::ModuleError),
     /// Error while initializing the virtual machine.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     VirtualMachine(vm::NewErr),
     /// Error while calling `Core_version` to determine the runtime version.
-    #[display(fmt = "Error while calling Core_version: {}", _0)]
+    #[display(fmt = "Error while calling Core_version: {_0}")]
     CoreVersion(CoreVersionError),
     /// Couldn't find the `__heap_base` symbol in the Wasm code.
     HeapBaseNotFound,
@@ -3704,7 +3704,7 @@ pub enum NewErr {
 #[derive(Debug, Clone, derive_more::From, derive_more::Display)]
 pub enum StartErr {
     /// Error while starting the virtual machine.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     VirtualMachine(vm::StartErr),
     /// The size of the input data is too large.
     DataSizeOverflow,
@@ -3714,10 +3714,10 @@ pub enum StartErr {
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum Error {
     /// Error in the Wasm code execution.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Trap(vm::Trap),
     /// A non-`i64` value has been returned by the Wasm entry point.
-    #[display(fmt = "A non-I64 value has been returned: {:?}", actual)]
+    #[display(fmt = "A non-I64 value has been returned: {actual:?}")]
     BadReturnValue {
         /// Type that has actually gotten returned. `None` for "void".
         actual: Option<vm::ValueType>,
@@ -3735,7 +3735,7 @@ pub enum Error {
     /// Called a function that is unknown to the host.
     ///
     /// > **Note**: Can only happen if `allow_unresolved_imports` was `true`.
-    #[display(fmt = "Called unresolved function `{}`:`{}`", module_name, function)]
+    #[display(fmt = "Called unresolved function `{module_name}`:`{function}`")]
     UnresolvedFunctionCalled {
         /// Name of the function that was unresolved.
         function: String,
@@ -3747,11 +3747,8 @@ pub enum Error {
     /// One parameter is expected to point to a buffer, but the pointer is out
     /// of range of the memory of the Wasm VM.
     #[display(
-        fmt = "Bad pointer for parameter of index {} of {}: 0x{:x}, len = 0x{:x}",
-        param_num,
-        function,
-        pointer,
-        length
+        fmt = "Bad pointer for parameter of index {param_num} of {function}: 0x{pointer:x}, \
+        len = 0x{length:x}"
     )]
     ParamOutOfRange {
         /// Name of the function being called where a type mismatch happens.
@@ -3768,12 +3765,7 @@ pub enum Error {
     },
     /// One parameter is expected to point to a UTF-8 string, but the buffer
     /// isn't valid UTF-8.
-    #[display(
-        fmt = "UTF-8 error for parameter of index {} of {}: {}",
-        param_num,
-        function,
-        error
-    )]
+    #[display(fmt = "UTF-8 error for parameter of index {param_num} of {function}: {error}")]
     Utf8Error {
         /// Name of the function being called where a type mismatch happens.
         function: &'static str,
@@ -3791,11 +3783,7 @@ pub enum Error {
     #[display(fmt = "Execution returned with a pending storage transaction")]
     FinishedWithPendingTransaction,
     /// Error when allocating memory for a return type.
-    #[display(
-        fmt = "Out of memory allocating 0x{:x} bytes during {}",
-        requested_size,
-        function
-    )]
+    #[display(fmt = "Out of memory allocating 0x{requested_size:x} bytes during {function}")]
     OutOfMemory {
         /// Name of the function being called.
         function: &'static str,
@@ -3803,10 +3791,7 @@ pub enum Error {
         requested_size: u32,
     },
     /// Called `ext_allocator_free_version_1` with an invalid pointer.
-    #[display(
-        fmt = "Bad pointer passed to ext_allocator_free_version_1: 0x{:x}",
-        pointer
-    )]
+    #[display(fmt = "Bad pointer passed to ext_allocator_free_version_1: 0x{pointer:x}")]
     FreeError {
         /// Pointer that was expected to be freed.
         pointer: u32,
@@ -3814,10 +3799,8 @@ pub enum Error {
     /// Mismatch between the state trie version provided as parameter and the state trie version
     /// found in the runtime specification.
     #[display(
-        fmt = "Mismatch between the state trie version provided as parameter ({:?}) and the state \
-        trie version found in the runtime specification ({:?}).",
-        parameter,
-        specification
+        fmt = "Mismatch between the state trie version provided as parameter ({parameter:?}) and \
+        the state trie version found in the runtime specification ({specification:?})."
     )]
     StateVersionMismatch {
         /// The version passed as parameter.
@@ -3827,7 +3810,7 @@ pub enum Error {
     },
     /// The host function isn't implemented.
     // TODO: this variant should eventually disappear as all functions are implemented
-    #[display(fmt = "Host function not implemented: {}", function)]
+    #[display(fmt = "Host function not implemented: {function}")]
     HostFunctionNotImplemented {
         /// Name of the function being called.
         function: &'static str,

@@ -275,10 +275,7 @@ pub enum FramedError {
     /// this number.
     NonMinimalLengthPrefix,
     /// Maximum length of the frame has been exceeded.
-    #[display(
-        fmt = "Maximum length of the frame ({}) has been exceeded",
-        max_allowed
-    )]
+    #[display(fmt = "Maximum length of the frame ({max_allowed}) has been exceeded")]
     MaxLengthExceeded {
         /// Maximum number of bytes allowed.
         max_allowed: usize,

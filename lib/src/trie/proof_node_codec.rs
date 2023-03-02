@@ -110,7 +110,7 @@ pub fn encode(
     let children_nodes = decoded
         .children
         .into_iter()
-        .filter_map(|c| c)
+        .flatten()
         .flat_map(|child_value| {
             let size = crate::util::encode_scale_compact_usize(child_value.len());
             [either::Left(size), either::Right(child_value)].into_iter()

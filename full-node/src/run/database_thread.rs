@@ -32,8 +32,10 @@ use std::thread;
 ///
 /// Use the `From` trait implementation to build a [`DatabaseThread`].
 pub struct DatabaseThread {
-    sender: Mutex<mpsc::Sender<Box<dyn FnOnce(&SqliteFullDatabase) + Send>>>,
+    sender: Mutex<mpsc::Sender<Exec>>,
 }
+
+type Exec = Box<dyn FnOnce(&SqliteFullDatabase) + Send>;
 
 impl DatabaseThread {
     /// Sends a closure to the database thread, executes it, then returns the value that the

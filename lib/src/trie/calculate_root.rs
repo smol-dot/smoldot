@@ -567,22 +567,23 @@ mod tests {
         trie.insert([0x48, 0x19].to_vec(), [0xfe].to_vec());
         trie.insert([0x13, 0x14].to_vec(), [0xff].to_vec());
 
-        let mut ex = vec![];
-        ex.push(0x80); // branch, no value (0b_10..) no nibble
-        ex.push(0x12); // slots 1 & 4 are taken from 0-7
-        ex.push(0x00); // no slots from 8-15
-        ex.push(0x05 << 2); // first slot: LEAF, 5 bytes long.
-        ex.push(0x43); // leaf 0x40 with 3 nibbles
-        ex.push(0x03); // first nibble
-        ex.push(0x14); // second & third nibble
-        ex.push(0x01 << 2); // 1 byte data
-        ex.push(0xff); // value data
-        ex.push(0x05 << 2); // second slot: LEAF, 5 bytes long.
-        ex.push(0x43); // leaf with 3 nibbles
-        ex.push(0x08); // first nibble
-        ex.push(0x19); // second & third nibble
-        ex.push(0x01 << 2); // 1 byte data
-        ex.push(0xfe); // value data
+        let ex = vec![
+            0x80,      // branch, no value (0b_10..) no nibble
+            0x12,      // slots 1 & 4 are taken from 0-7
+            0x00,      // no slots from 8-15
+            0x05 << 2, // first slot: LEAF, 5 bytes long.
+            0x43,      // leaf 0x40 with 3 nibbles
+            0x03,      // first nibble
+            0x14,      // second & third nibble
+            0x01 << 2, // 1 byte data
+            0xff,      // value data
+            0x05 << 2, // second slot: LEAF, 5 bytes long.
+            0x43,      // leaf with 3 nibbles
+            0x08,      // first nibble
+            0x19,      // second & third nibble
+            0x01 << 2, // 1 byte data
+            0xfe,      // value data
+        ];
 
         let expected = blake2_rfc::blake2b::blake2b(32, &[], &ex);
         assert_eq!(

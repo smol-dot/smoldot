@@ -389,12 +389,8 @@ impl<TUd> TrieStructure<TUd> {
                 // The trie is empty, or the key of the root node of the trie doesn't start with
                 // the requested prefix, or the key of the root node of the trie starts with the
                 // requested prefix.
-                let root_index = if let Some(i) = self.root_index {
-                    i
-                } else {
-                    // Trie is empty. Nothing to do.
-                    return None;
-                };
+                // If the trie is empty. then there is nothing to do and we return `None`.
+                let root_index = self.root_index?;
 
                 // Compare root key with the prefix.
                 if !self.nodes[root_index]

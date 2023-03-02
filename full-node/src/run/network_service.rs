@@ -668,13 +668,10 @@ impl Drop for NetworkService {
 #[derive(Debug, derive_more::Display)]
 pub enum InitError {
     /// I/O error when initializing a listener.
-    #[display(fmt = "I/O error when creating listener for {}: {}", _0, _1)]
+    #[display(fmt = "I/O error when creating listener for {_0}: {_1}")]
     ListenerIo(Multiaddr, io::Error),
     /// A listening address passed through the configuration isn't valid.
-    #[display(
-        fmt = "A listening address passed through the configuration isn't valid: {}",
-        _0
-    )]
+    #[display(fmt = "A listening address passed through the configuration isn't valid: {_0}")]
     BadListenMultiaddr(Multiaddr),
 }
 
@@ -684,7 +681,7 @@ pub enum BlocksRequestError {
     /// No established connection with the target.
     NoConnection,
     /// Error during the request.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Request(service::BlocksRequestError),
 }
 
@@ -694,7 +691,7 @@ pub enum QueueNotificationError {
     /// No established connection with the target.
     NoConnection,
     /// Error during the queuing.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Queue(peers::QueueNotificationError),
 }
 
@@ -758,7 +755,7 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                 } => {
                     let decoded = announce.decode();
                     let header_hash =
-                        header::hash_from_scale_encoded_header(&decoded.scale_encoded_header);
+                        header::hash_from_scale_encoded_header(decoded.scale_encoded_header);
                     match header::decode(
                         decoded.scale_encoded_header,
                         guarded.network.block_number_bytes(chain_index),
@@ -1022,12 +1019,11 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
             let peer_to_assign = guarded
                 .network
                 .slots_to_assign(chain_index)
-                .filter(|peer_id| {
+                .find(|peer_id| {
                     !guarded
                         .slots_assign_backoff
                         .contains_key(&((**peer_id).clone(), chain_index)) // TODO: spurious cloning
                 })
-                .next()
                 .cloned();
 
             let Some(peer_to_assign) = peer_to_assign else { break };

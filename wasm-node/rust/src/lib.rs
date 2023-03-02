@@ -92,9 +92,7 @@ impl Add<Duration> for Instant {
 
     fn add(self, other: Duration) -> Instant {
         let new_val = self.inner + other.as_millis() as f64;
-        Instant {
-            inner: new_val as f64,
-        }
+        Instant { inner: new_val }
     }
 }
 
@@ -103,9 +101,7 @@ impl Sub<Duration> for Instant {
 
     fn sub(self, other: Duration) -> Instant {
         let new_val = self.inner - other.as_millis() as f64;
-        Instant {
-            inner: new_val as f64,
-        }
+        Instant { inner: new_val }
     }
 }
 

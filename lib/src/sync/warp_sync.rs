@@ -122,13 +122,13 @@ pub enum Error {
     #[display(fmt = "The chain doesn't include any storage item at `:code`")]
     MissingCode,
     /// The storage item at `:heappages` is in an incorrect format.
-    #[display(fmt = "Invalid heap pages value: {}", _0)]
+    #[display(fmt = "Invalid heap pages value: {_0}")]
     InvalidHeapPages(executor::InvalidHeapPagesError),
     /// Error building the runtime of the chain.
-    #[display(fmt = "Error building the runtime: {}", _0)]
+    #[display(fmt = "Error building the runtime: {_0}")]
     RuntimeBuild(executor::host::NewErr),
     /// Error building the chain information.
-    #[display(fmt = "Error building the chain information: {}", _0)]
+    #[display(fmt = "Error building the chain information: {_0}")]
     ChainInformationBuild(chain_information::build::Error),
     /// Failed to verify Merkle proof.
     // TODO: this is a non-fatal error contrary to all the other errors in this enum

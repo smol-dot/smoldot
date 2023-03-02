@@ -193,7 +193,7 @@ fn parse_bootnode(string: &str) -> Result<Bootnode, String> {
         return Err("Bootnode address must end with /p2p/...".into())
     };
     let peer_id = PeerId::from_bytes(peer_id.to_vec())
-        .map_err(|(err, _)| format!("Failed to parse PeerId in bootnode: {}", err))?;
+        .map_err(|(err, _)| format!("Failed to parse PeerId in bootnode: {err}"))?;
     address.pop();
     Ok(Bootnode { address, peer_id })
 }

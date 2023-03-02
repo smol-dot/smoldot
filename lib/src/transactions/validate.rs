@@ -186,18 +186,18 @@ pub enum UnknownTransaction {
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum Error {
     /// Error while decoding the block header against which to make the call.
-    #[display(fmt = "Failed to decode block header: {}", _0)]
+    #[display(fmt = "Failed to decode block header: {_0}")]
     InvalidHeader(header::Error),
     /// Transaction validation API version unrecognized.
     UnknownApiVersion,
     /// Error while starting the Wasm virtual machine.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     WasmStart(host::StartErr),
     /// Error while running the Wasm virtual machine.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     WasmVmReadWrite(runtime_host::ErrorDetail),
     /// Error while running the Wasm virtual machine.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     WasmVmReadOnly(runtime_host::ErrorDetail),
     /// Error while decoding the output of the runtime.
     OutputDecodeError(DecodeError),
@@ -215,10 +215,10 @@ pub struct DecodeError();
 #[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
 pub enum TransactionValidityError {
     /// The transaction is invalid.
-    #[display(fmt = "Invalid transaction: {}", _0)]
+    #[display(fmt = "Invalid transaction: {_0}")]
     Invalid(InvalidTransaction),
     /// Transaction validity can't be determined.
-    #[display(fmt = "Transaction validity couldn't be determined: {}", _0)]
+    #[display(fmt = "Transaction validity couldn't be determined: {_0}")]
     Unknown(UnknownTransaction),
 }
 

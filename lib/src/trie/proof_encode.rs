@@ -104,10 +104,7 @@ impl ProofBuilder {
         // first things first.
         let decoded_node_value = match proof_node_codec::decode(node_value) {
             Ok(d) => d,
-            Err(err) => panic!(
-                "failed to decode node value: {:?}; value: {:?}",
-                err, node_value
-            ),
+            Err(err) => panic!("failed to decode node value: {err:?}; value: {node_value:?}"),
         };
 
         // Check consistency between `node_value` and `unhashed_storage_value` and determine
@@ -121,7 +118,7 @@ impl ProofBuilder {
                 assert_eq!(in_node_value, user_provided);
                 None
             }
-            (proof_node_codec::StorageValue::Hashed(_), Some(ref value)) => Some(value.to_vec()),
+            (proof_node_codec::StorageValue::Hashed(_), Some(value)) => Some(value.to_vec()),
             (proof_node_codec::StorageValue::None, Some(_)) => panic!(),
             (_, None) => None,
         };
@@ -324,7 +321,7 @@ impl ProofBuilder {
                 );
                 if let Some(storage_value_hash) = storage_value_hash.as_ref() {
                     decoded_node_value.storage_value =
-                        proof_node_codec::StorageValue::Hashed(&storage_value_hash);
+                        proof_node_codec::StorageValue::Hashed(storage_value_hash);
                 }
 
                 // Update the children.
@@ -439,8 +436,14 @@ impl ProofBuilder {
     }
 }
 
+impl Default for ProofBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn blake2_hash(data: &[u8]) -> [u8; 32] {
-    *&<[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], data).as_bytes()).unwrap()
+    <[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], data).as_bytes()).unwrap()
 }
 
 #[cfg(test)]

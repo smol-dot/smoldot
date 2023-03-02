@@ -82,24 +82,24 @@ impl Platform for AsyncStdTcpWebSocket {
         Box::pin(async move {
             let addr = multiaddr.parse::<Multiaddr>().map_err(|_| ConnectError {
                 is_bad_addr: true,
-                message: format!("Failed to parse address"),
+                message: "Failed to parse address".to_string(),
             })?;
 
             let mut iter = addr.iter().fuse();
             let proto1 = iter.next().ok_or(ConnectError {
                 is_bad_addr: true,
-                message: format!("Unknown protocols combination"),
+                message: "Unknown protocols combination".to_string(),
             })?;
             let proto2 = iter.next().ok_or(ConnectError {
                 is_bad_addr: true,
-                message: format!("Unknown protocols combination"),
+                message: "Unknown protocols combination".to_string(),
             })?;
             let proto3 = iter.next();
 
             if iter.next().is_some() {
                 return Err(ConnectError {
                     is_bad_addr: true,
-                    message: format!("Unknown protocols combination"),
+                    message: "Unknown protocols combination".to_string(),
                 });
             }
 
@@ -142,7 +142,7 @@ impl Platform for AsyncStdTcpWebSocket {
                 _ => {
                     return Err(ConnectError {
                         is_bad_addr: true,
-                        message: format!("Unknown protocols combination"),
+                        message: "Unknown protocols combination".to_string(),
                     })
                 }
             };
@@ -167,7 +167,7 @@ impl Platform for AsyncStdTcpWebSocket {
                     })
                     .await
                     .map_err(|err| ConnectError {
-                        message: format!("Failed to negotiate WebSocket: {}", err),
+                        message: format!("Failed to negotiate WebSocket: {err}"),
                         is_bad_addr: false,
                     })?,
                 ),
@@ -175,7 +175,7 @@ impl Platform for AsyncStdTcpWebSocket {
                 (Err(err), _) => {
                     return Err(ConnectError {
                         is_bad_addr: false,
-                        message: format!("Failed to reach peer: {}", err),
+                        message: format!("Failed to reach peer: {err}"),
                     })
                 }
             };
@@ -249,12 +249,8 @@ impl Platform for AsyncStdTcpWebSocket {
                     }
                 }
 
-                loop {
-                    if let Poll::Ready(()) = Pin::new(&mut write_queue_pushed_listener).poll(cx) {
-                        write_queue_pushed_listener = shared.write_queue_pushed.listen();
-                    } else {
-                        break;
-                    }
+                while let Poll::Ready(()) = Pin::new(&mut write_queue_pushed_listener).poll(cx) {
+                    write_queue_pushed_listener = shared.write_queue_pushed.listen();
                 }
 
                 Poll::Pending

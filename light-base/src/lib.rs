@@ -341,10 +341,10 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
         config: AddChainConfig<'_, TChain, impl Iterator<Item = ChainId>>,
     ) -> Result<AddChainSuccess, String> {
         // Decode the chain specification.
-        let chain_spec = match chain_spec::ChainSpec::from_json_bytes(&config.specification) {
+        let chain_spec = match chain_spec::ChainSpec::from_json_bytes(config.specification) {
             Ok(cs) => cs,
             Err(err) => {
-                return Err(format!("Failed to decode chain specification: {}", err));
+                return Err(format!("Failed to decode chain specification: {err}"));
             }
         };
 
@@ -461,17 +461,11 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                 }
 
                 (Err(err), _, _) => {
-                    return Err(format!(
-                        "Failed to build genesis chain information: {}",
-                        err
-                    ));
+                    return Err(format!("Failed to build genesis chain information: {err}"));
                 }
 
                 (_, Some(Err(err)), _) => {
-                    return Err(format!(
-                        "Invalid checkpoint in chain specification: {}",
-                        err
-                    ));
+                    return Err(format!("Invalid checkpoint in chain specification: {err}"));
                 }
 
                 (Ok(genesis_ci), Some(Ok(checkpoint)), _) => {
@@ -620,7 +614,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
 
             loop {
                 let attempt = if let Some(suffix) = suffix {
-                    format!("{}-{}", base, suffix)
+                    format!("{base}-{suffix}")
                 } else {
                     base.clone()
                 };
@@ -710,7 +704,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                                 log_name,
                                 chain_name,
                                 HashDisplay(&genesis_block_hash),
-                                hex::encode(&genesis_block_state_root),
+                                hex::encode(genesis_block_state_root),
                                 running_chain.network_identity,
                                 relay_chain_log_name,
                                 relay_chain_para_id.unwrap(),
@@ -724,7 +718,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                                 log_name,
                                 chain_name,
                                 HashDisplay(&genesis_block_hash),
-                                hex::encode(&genesis_block_state_root),
+                                hex::encode(genesis_block_state_root),
                                 running_chain.network_identity,
                                 HashDisplay(&starting_block_hash),
                                 starting_block_number

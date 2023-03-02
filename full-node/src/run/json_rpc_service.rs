@@ -73,7 +73,7 @@ impl JsonRpcService {
 #[derive(Debug, derive_more::Display)]
 pub enum InitError {
     /// Failed to listen on the server address.
-    #[display(fmt = "Failed to listen on TCP address {}: {}", bind_address, error)]
+    #[display(fmt = "Failed to listen on TCP address {bind_address}: {error}")]
     ListenError {
         /// Address that was attempted.
         bind_address: SocketAddr,

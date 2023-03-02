@@ -303,7 +303,7 @@ impl<'a> ExactSizeIterator for VotesAncestriesIter<'a> {}
 
 /// Potential error when decoding a justification.
 #[derive(Debug, derive_more::Display)]
-#[display(fmt = "Justification parsing error: {:?}", _0)]
+#[display(fmt = "Justification parsing error: {_0:?}")]
 pub struct Error(nom::error::ErrorKind);
 
 /// `Nom` combinator that parses a justification.

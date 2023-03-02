@@ -67,9 +67,9 @@ pub(super) fn protocols<'a>(
         iter::once(peers::ConfigRequestResponse {
             name: match &chain.fork_id {
                 Some(fork_id) => {
-                    format!("/{}/{}/sync/2", hex::encode(&chain.genesis_hash), fork_id)
+                    format!("/{}/{}/sync/2", hex::encode(chain.genesis_hash), fork_id)
                 }
-                None => format!("/{}/sync/2", hex::encode(&chain.genesis_hash)),
+                None => format!("/{}/sync/2", hex::encode(chain.genesis_hash)),
             },
             inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 1024 },
             max_response_size: 16 * 1024 * 1024,
@@ -78,9 +78,9 @@ pub(super) fn protocols<'a>(
         .chain(iter::once(peers::ConfigRequestResponse {
             name: match &chain.fork_id {
                 Some(fork_id) => {
-                    format!("/{}/{}/light/2", hex::encode(&chain.genesis_hash), fork_id)
+                    format!("/{}/{}/light/2", hex::encode(chain.genesis_hash), fork_id)
                 }
-                None => format!("/{}/light/2", hex::encode(&chain.genesis_hash)),
+                None => format!("/{}/light/2", hex::encode(chain.genesis_hash)),
             },
             inbound_config: peers::ConfigRequestResponseIn::Payload {
                 max_size: 1024 * 512,
@@ -92,9 +92,9 @@ pub(super) fn protocols<'a>(
         .chain(iter::once(peers::ConfigRequestResponse {
             name: match &chain.fork_id {
                 Some(fork_id) => {
-                    format!("/{}/{}/kad", hex::encode(&chain.genesis_hash), fork_id)
+                    format!("/{}/{}/kad", hex::encode(chain.genesis_hash), fork_id)
                 }
-                None => format!("/{}/kad", hex::encode(&chain.genesis_hash)),
+                None => format!("/{}/kad", hex::encode(chain.genesis_hash)),
             },
             inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 1024 },
             max_response_size: 1024 * 1024,
@@ -104,13 +104,9 @@ pub(super) fn protocols<'a>(
         .chain(iter::once(peers::ConfigRequestResponse {
             name: match &chain.fork_id {
                 Some(fork_id) => {
-                    format!(
-                        "/{}/{}/sync/warp",
-                        hex::encode(&chain.genesis_hash),
-                        fork_id
-                    )
+                    format!("/{}/{}/sync/warp", hex::encode(chain.genesis_hash), fork_id)
                 }
-                None => format!("/{}/sync/warp", hex::encode(&chain.genesis_hash)),
+                None => format!("/{}/sync/warp", hex::encode(chain.genesis_hash)),
             },
             inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 32 },
             max_response_size: 16 * 1024 * 1024,
@@ -120,9 +116,9 @@ pub(super) fn protocols<'a>(
         .chain(iter::once(peers::ConfigRequestResponse {
             name: match &chain.fork_id {
                 Some(fork_id) => {
-                    format!("/{}/{}/state/2", hex::encode(&chain.genesis_hash), fork_id)
+                    format!("/{}/{}/state/2", hex::encode(chain.genesis_hash), fork_id)
                 }
-                None => format!("/{}/state/2", hex::encode(&chain.genesis_hash)),
+                None => format!("/{}/state/2", hex::encode(chain.genesis_hash)),
             },
             inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 1024 },
             // The sender tries to cap the response to 2MiB. However, if one storage item
@@ -308,7 +304,7 @@ where
                     request_id,
                 }
             } else {
-                let _ = self.inner.respond_in_request(request_id, Err(()));
+                self.inner.respond_in_request(request_id, Err(()));
                 Event::ProtocolError {
                     peer_id,
                     error: ProtocolError::BadIdentifyRequest,
@@ -342,7 +338,7 @@ where
                     }
                 }
                 Err(error) => {
-                    let _ = self.inner.respond_in_request(request_id, Err(()));
+                    self.inner.respond_in_request(request_id, Err(()));
                     Event::ProtocolError {
                         peer_id,
                         error: ProtocolError::BadBlocksRequest(error),
@@ -636,7 +632,7 @@ where
                                 );
 
                                 for connection_id in
-                                    self.inner.established_peer_connections(&e.key())
+                                    self.inner.established_peer_connections(e.key())
                                 {
                                     let state = self.inner.connection_state(connection_id);
                                     debug_assert!(state.established);
@@ -654,7 +650,7 @@ where
                                 }
 
                                 for connection_id in
-                                    self.inner.handshaking_peer_connections(&e.key())
+                                    self.inner.handshaking_peer_connections(e.key())
                                 {
                                     let state = self.inner.connection_state(connection_id);
                                     debug_assert!(!state.established);
@@ -860,7 +856,7 @@ where
             })
         };
 
-        let _ = self.inner.respond_in_request(request_id, Ok(response));
+        self.inner.respond_in_request(request_id, Ok(response));
     }
 
     /// Queue the response to send back.
@@ -892,7 +888,7 @@ where
             Err(())
         };
 
-        let _ = self.inner.respond_in_request(request_id, response);
+        self.inner.respond_in_request(request_id, response);
     }
 }
 
@@ -1005,7 +1001,7 @@ pub enum DiscoveryError {
     /// Not currently connected to any other node.
     NoPeer,
     /// Error during the request.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     FindNode(KademliaFindNodeError),
 }
 
@@ -1013,10 +1009,10 @@ pub enum DiscoveryError {
 #[derive(Debug, derive_more::Display)]
 pub enum KademliaFindNodeError {
     /// Error during the request.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     RequestFailed(peers::RequestError),
     /// Failed to decode the response.
-    #[display(fmt = "Response decoding error: {}", _0)]
+    #[display(fmt = "Response decoding error: {_0}")]
     DecodeError(protocol::DecodeFindNodeResponseError),
 }
 
@@ -1024,10 +1020,10 @@ pub enum KademliaFindNodeError {
 #[derive(Debug, derive_more::Display)]
 pub enum BlocksRequestError {
     /// Error while waiting for the response from the peer.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Request(peers::RequestError),
     /// Error while decoding the response returned by the peer.
-    #[display(fmt = "Response decoding error: {}", _0)]
+    #[display(fmt = "Response decoding error: {_0}")]
     Decode(protocol::DecodeBlockResponseError),
     /// Block request doesn't request headers, and as such its validity cannot be verified.
     NotVerifiable,
@@ -1036,7 +1032,7 @@ pub enum BlocksRequestError {
     /// Start of the response doesn't correspond to the requested start.
     InvalidStart,
     /// Error at a specific index in the response.
-    #[display(fmt = "Error in response at offset {}: {}", index, error)]
+    #[display(fmt = "Error in response at offset {index}: {error}")]
     Entry {
         /// Index in the response where the problem happened.
         index: usize,
@@ -1068,9 +1064,9 @@ pub enum BlocksRequestResponseEntryError {
 /// Error returned by [`ChainNetwork::start_storage_proof_request`].
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum StorageProofRequestError {
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Request(peers::RequestError),
-    #[display(fmt = "Response decoding error: {}", _0)]
+    #[display(fmt = "Response decoding error: {_0}")]
     Decode(protocol::DecodeStorageCallProofResponseError),
     /// The remote is incapable of answering this specific request.
     RemoteCouldntAnswer,
@@ -1079,9 +1075,9 @@ pub enum StorageProofRequestError {
 /// Error returned by [`ChainNetwork::start_call_proof_request`].
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum CallProofRequestError {
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Request(peers::RequestError),
-    #[display(fmt = "Response decoding error: {}", _0)]
+    #[display(fmt = "Response decoding error: {_0}")]
     Decode(protocol::DecodeStorageCallProofResponseError),
     /// The remote is incapable of answering this specific request.
     RemoteCouldntAnswer,
@@ -1102,18 +1098,18 @@ impl CallProofRequestError {
 /// Error returned by [`ChainNetwork::start_grandpa_warp_sync_request`].
 #[derive(Debug, derive_more::Display)]
 pub enum GrandpaWarpSyncRequestError {
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Request(peers::RequestError),
-    #[display(fmt = "Response decoding error: {}", _0)]
+    #[display(fmt = "Response decoding error: {_0}")]
     Decode(protocol::DecodeGrandpaWarpSyncResponseError),
 }
 
 /// Error returned by [`ChainNetwork::start_state_request`].
 #[derive(Debug, derive_more::Display)]
 pub enum StateRequestError {
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Request(peers::RequestError),
-    #[display(fmt = "Response decoding error: {}", _0)]
+    #[display(fmt = "Response decoding error: {_0}")]
     Decode(protocol::DecodeStateResponseError),
 }
 
@@ -1167,7 +1163,7 @@ fn check_blocks_response(
         // all blocks have a justification in the first place.
 
         if block.header.as_ref().map_or(false, |h| {
-            header::hash_from_scale_encoded_header(&h) != block.hash
+            header::hash_from_scale_encoded_header(h) != block.hash
         }) {
             return Err(BlocksRequestError::Entry {
                 index: block_index,
