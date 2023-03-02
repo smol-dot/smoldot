@@ -31,7 +31,7 @@ use core::{cmp, fmt, iter, slice};
 /// This encoding is independent of the trie version.
 pub fn encode(
     decoded: Decoded<'_, impl ExactSizeIterator<Item = nibble::Nibble> + Clone>,
-) -> impl Iterator<Item = impl AsRef<[u8]> + '_ + Clone> + Clone + '_ {
+) -> Result<impl Iterator<Item = impl AsRef<[u8]> + '_ + Clone> + Clone + '_, EncodeError> {
     // The return value is composed of three parts:
     // - Before the storage value.
     // - The storage value (which can be empty).
@@ -52,8 +52,13 @@ pub fn encode(
                 (true, StorageValue::Unhashed(_)) => (0b11, 6),
                 (false, StorageValue::Hashed(_)) => (0b001, 5),
                 (true, StorageValue::Hashed(_)) => (0b0001, 4),
-                // TODO: it's invalid to have a non-empty partial key in that situation; this isn't problematic in practice
-                (false, StorageValue::None) => (0, 6),
+                (false, StorageValue::None) => {
+                    if decoded.partial_key.len() != 0 {
+                        return Err(EncodeError::PartialKeyButNoChildrenNoStorageValue);
+                    } else {
+                        (0, 6)
+                    }
+                }
             };
 
         let max_representable_in_first_byte = (1 << pk_len_first_byte_bits) - 1;
@@ -112,10 +117,17 @@ pub fn encode(
         });
 
     // The return value is the combination of these components.
-    iter::once(either::Left(before_storage_value))
+    Ok(iter::once(either::Left(before_storage_value))
         .chain(iter::once(either::Right(storage_value)))
         .map(either::Left)
-        .chain(children_nodes.map(either::Right))
+        .chain(children_nodes.map(either::Right)))
+}
+
+/// Error potentially returned by [`encode`].
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum EncodeError {
+    /// Nodes that have no children nor storage value are invalid unless they are the root node.
+    PartialKeyButNoChildrenNoStorageValue,
 }
 
 /// Encodes the components of a node value into the node value itself.
@@ -124,7 +136,7 @@ pub fn encode(
 /// details.
 pub fn encode_to_vec(
     decoded: Decoded<'_, impl ExactSizeIterator<Item = nibble::Nibble> + Clone>,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, EncodeError> {
     let capacity = decoded.partial_key.len() / 2
         + match decoded.storage_value {
             StorageValue::Hashed(_) => 32,
@@ -134,7 +146,7 @@ pub fn encode_to_vec(
         + 16 * 32
         + 32; // The last `+ 32` is an arbitrary margin, for length prefixes and the header.
 
-    let result = encode(decoded).fold(Vec::with_capacity(capacity), |mut a, b| {
+    let result = encode(decoded)?.fold(Vec::with_capacity(capacity), |mut a, b| {
         a.extend_from_slice(b.as_ref());
         a
     });
@@ -142,7 +154,7 @@ pub fn encode_to_vec(
     // Check that `capacity` was calculated correctly and that no re-allocation has happened.
     debug_assert_eq!(result.capacity(), capacity);
 
-    result
+    Ok(result)
 }
 
 /// Decodes a node value found in a proof into its components.
@@ -462,10 +474,12 @@ mod tests {
         let decoded = super::decode(encoded_bytes).unwrap();
 
         assert_eq!(
-            super::encode(decoded.clone()).fold(Vec::new(), |mut a, b| {
-                a.extend_from_slice(b.as_ref());
-                a
-            }),
+            super::encode(decoded.clone())
+                .unwrap()
+                .fold(Vec::new(), |mut a, b| {
+                    a.extend_from_slice(b.as_ref());
+                    a
+                }),
             encoded_bytes
         );
         assert_eq!(
@@ -500,6 +514,27 @@ mod tests {
             )
         );
 
-        assert_eq!(super::encode_to_vec(decoded), encoded_bytes);
+        assert_eq!(super::encode_to_vec(decoded).unwrap(), encoded_bytes);
+    }
+
+    #[test]
+    fn no_children_no_storage_value() {
+        assert!(matches!(
+            super::encode(super::Decoded {
+                children: [None; 16],
+                storage_value: super::StorageValue::None,
+                partial_key: core::iter::empty()
+            }),
+            Ok(_)
+        ));
+
+        assert!(matches!(
+            super::encode(super::Decoded {
+                children: [None; 16],
+                storage_value: super::StorageValue::None,
+                partial_key: core::iter::once(nibble::Nibble::try_from(2).unwrap())
+            }),
+            Err(super::EncodeError::PartialKeyButNoChildrenNoStorageValue)
+        ));
     }
 }
