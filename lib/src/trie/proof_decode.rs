@@ -704,7 +704,7 @@ pub enum Error {
     /// Trie root wasn't found in the proof.
     TrieRootNotFound,
     /// One of the node values in the proof has an invalid format.
-    #[display(fmt = "A node of the proof has an invalid format: {}", _0)]
+    #[display(fmt = "A node of the proof has an invalid format: {_0}")]
     InvalidNodeValue(proof_node_codec::Error),
     /// One of the entries of the proof is disconnected from the root node.
     UnusedProofEntry,

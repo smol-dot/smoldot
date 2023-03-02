@@ -127,10 +127,10 @@ pub struct Success {
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
     /// Error while executing the Wasm virtual machine.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     WasmVm(runtime_host::Error),
     /// Error while initializing the Wasm virtual machine.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     VmInit(host::StartErr, host::HostVmPrototype),
     /// Overflow when incrementing block height.
     BlockHeightOverflow,
@@ -693,10 +693,10 @@ fn parse_apply_extrinsic_output(
 #[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
 pub enum TransactionValidityError {
     /// The transaction is invalid.
-    #[display(fmt = "Transaction is invalid: {}", _0)]
+    #[display(fmt = "Transaction is invalid: {_0}")]
     Invalid(InvalidTransaction),
     /// Transaction validity can't be determined.
-    #[display(fmt = "Transaction validity couldn't be determined: {}", _0)]
+    #[display(fmt = "Transaction validity couldn't be determined: {_0}")]
     Unknown(UnknownTransaction),
 }
 

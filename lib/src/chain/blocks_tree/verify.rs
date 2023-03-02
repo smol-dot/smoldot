@@ -517,11 +517,8 @@ impl<T> VerifyContext<T> {
                 }) {
                     match grandpa_digest_item {
                         header::GrandpaConsensusLogRef::ScheduledChange(change) => {
-                            let trigger_block_height = self
-                                .header
-                                .number
-                                .checked_add(u64::from(change.delay))
-                                .unwrap();
+                            let trigger_block_height =
+                                self.header.number.checked_add(change.delay).unwrap();
 
                             // It is forbidden to schedule a change while a change is already
                             // scheduled, otherwise the block is invalid. This is verified during
@@ -887,7 +884,7 @@ pub enum BodyVerifyStep2<T> {
 #[derive(Debug, derive_more::Display)]
 pub enum BodyVerifyError {
     /// Error during the consensus-related check.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Consensus(verify::header_body::Error),
     /// Block can't be verified as it uses an unknown consensus engine.
     UnknownConsensusEngine,
@@ -1190,7 +1187,7 @@ impl<'c, T> Drop for HeaderInsert<'c, T> {
 #[derive(Debug, derive_more::Display)]
 pub enum HeaderVerifyError {
     /// Error while decoding the header.
-    #[display(fmt = "Error while decoding the header: {}", _0)]
+    #[display(fmt = "Error while decoding the header: {_0}")]
     InvalidHeader(header::Error),
     /// Block can't be verified as it uses an unknown consensus engine.
     UnknownConsensusEngine,
@@ -1203,7 +1200,7 @@ pub enum HeaderVerifyError {
         parent_hash: [u8; 32],
     },
     /// The block verification has failed. The block is invalid and should be thrown away.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     VerificationFailed(verify::header_only::Error),
 }
 

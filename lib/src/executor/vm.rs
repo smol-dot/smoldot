@@ -785,7 +785,7 @@ pub enum ExecOutcome {
 
 /// Opaque error that happened during execution, such as an `unreachable` instruction.
 #[derive(Debug, derive_more::Display, Clone)]
-#[display(fmt = "{}", _0)]
+#[display(fmt = "{_0}")]
 pub struct Trap(String);
 
 /// Error that can happen when initializing a [`VirtualMachinePrototype`].
@@ -820,7 +820,7 @@ pub enum NewErr {
     /// Other error. This error is unfortunately necessary due to the underlying implementation
     /// returning an opaque error without explaining what can error.
     // TODO: remove as too imprecise?
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Other(String),
 }
 
@@ -848,7 +848,7 @@ pub enum StartErr {
 
 /// Opaque error indicating an error while parsing or compiling the WebAssembly code.
 #[derive(Debug, derive_more::Display, Clone)]
-#[display(fmt = "{}", _0)]
+#[display(fmt = "{_0}")]
 pub struct ModuleError(String);
 
 /// Error while reading memory.

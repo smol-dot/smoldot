@@ -388,7 +388,7 @@ pub enum HandleRpcError {
         json_rpc_request: String,
     },
     /// The request isn't a valid JSON-RPC request.
-    #[display(fmt = "The request isn't a valid JSON-RPC request: {}", _0)]
+    #[display(fmt = "The request isn't a valid JSON-RPC request: {_0}")]
     MalformedJsonRpc(json_rpc::parse::ParseError),
 }
 
@@ -1670,10 +1670,10 @@ impl<TPlat: Platform> Background<TPlat> {
 #[derive(Debug, derive_more::Display)]
 enum StorageQueryError {
     /// Error while finding the storage root hash of the requested block.
-    #[display(fmt = "Failed to obtain block state trie root: {}", _0)]
+    #[display(fmt = "Failed to obtain block state trie root: {_0}")]
     FindStorageRootHashError(StateTrieRootHashError),
     /// Error while retrieving the storage item from other nodes.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     StorageRetrieval(sync_service::StorageQueryError),
 }
 
@@ -1681,7 +1681,7 @@ enum StorageQueryError {
 #[derive(Debug, derive_more::Display, Clone)]
 enum RuntimeCallError {
     /// Error while finding the storage root hash of the requested block.
-    #[display(fmt = "Failed to obtain block state trie root: {}", _0)]
+    #[display(fmt = "Failed to obtain block state trie root: {_0}")]
     FindStorageRootHashError(StateTrieRootHashError),
     Call(runtime_service::RuntimeCallError),
     StartError(host::StartErr),

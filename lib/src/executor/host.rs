@@ -3682,16 +3682,16 @@ impl Inner {
 #[derive(Debug, derive_more::From, derive_more::Display, Clone)]
 pub enum NewErr {
     /// Error in the format of the runtime code.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     BadFormat(ModuleFormatError),
     /// Error while compiling the WebAssembly code.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     InvalidWasm(vm::ModuleError),
     /// Error while initializing the virtual machine.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     VirtualMachine(vm::NewErr),
     /// Error while calling `Core_version` to determine the runtime version.
-    #[display(fmt = "Error while calling Core_version: {}", _0)]
+    #[display(fmt = "Error while calling Core_version: {_0}")]
     CoreVersion(CoreVersionError),
     /// Couldn't find the `__heap_base` symbol in the Wasm code.
     HeapBaseNotFound,
@@ -3704,7 +3704,7 @@ pub enum NewErr {
 #[derive(Debug, Clone, derive_more::From, derive_more::Display)]
 pub enum StartErr {
     /// Error while starting the virtual machine.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     VirtualMachine(vm::StartErr),
     /// The size of the input data is too large.
     DataSizeOverflow,
@@ -3714,7 +3714,7 @@ pub enum StartErr {
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum Error {
     /// Error in the Wasm code execution.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Trap(vm::Trap),
     /// A non-`i64` value has been returned by the Wasm entry point.
     #[display(fmt = "A non-I64 value has been returned: {:?}", actual)]

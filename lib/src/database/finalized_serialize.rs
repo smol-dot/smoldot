@@ -97,15 +97,15 @@ pub fn decode_chain(
 
 /// Opaque error indicating a corruption in the data stored in the local storage.
 #[derive(Debug, derive_more::Display)]
-#[display(fmt = "{}", _0)]
+#[display(fmt = "{_0}")]
 pub struct CorruptedError(CorruptedErrorInner);
 
 #[derive(Debug, derive_more::Display)]
 enum CorruptedErrorInner {
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Serde(serde_json::Error),
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Deserialize(defs::DeserializeError),
-    #[display(fmt = "Invalid chain information: {}", _0)]
+    #[display(fmt = "Invalid chain information: {_0}")]
     InvalidChain(chain_information::ValidityError),
 }

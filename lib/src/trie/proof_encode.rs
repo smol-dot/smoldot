@@ -440,7 +440,7 @@ impl ProofBuilder {
 }
 
 fn blake2_hash(data: &[u8]) -> [u8; 32] {
-    *&<[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], data).as_bytes()).unwrap()
+    <[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], data).as_bytes()).unwrap()
 }
 
 #[cfg(test)]

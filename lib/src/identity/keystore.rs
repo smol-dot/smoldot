@@ -608,18 +608,18 @@ pub enum SignError {
 #[derive(Debug, derive_more::Display)]
 pub enum KeyLoadError {
     /// Error reported by the operating system.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Io(io::Error),
     /// Content of the file is invalid. Contains a human-readable error message as a string.
     /// Because the format of the content of the file is an implementation detail, no detail is
     /// provided.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     BadFormat(String),
 }
 
 #[derive(Debug, derive_more::Display)]
 pub enum SignVrfError {
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Sign(SignError),
     WrongKeyAlgorithm,
 }

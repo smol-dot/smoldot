@@ -648,10 +648,10 @@ impl fmt::Display for StorageQueryError {
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum StorageQueryErrorDetail {
     /// Error during the network request.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Network(network_service::StorageProofRequestError),
     /// Error verifying the proof.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     ProofVerification(proof_decode::Error),
     /// Proof is missing one or more desired storage items.
     MissingProofEntry,

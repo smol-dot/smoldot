@@ -430,7 +430,7 @@ where
                         self.0
                             .blocks
                             .iter_unordered()
-                            .map(|(_, v)| (format!("0x{}", hex::encode(&v.hash)), &v.user_data)),
+                            .map(|(_, v)| (format!("0x{}", hex::encode(v.hash)), &v.user_data)),
                     )
                     .finish()
             }
@@ -442,7 +442,7 @@ where
                 "finalized_block_hash",
                 &format!(
                     "0x{}",
-                    hex::encode(&inner.finalized_block_header.hash(inner.block_number_bytes))
+                    hex::encode(inner.finalized_block_header.hash(inner.block_number_bytes))
                 ),
             )
             .field("non_finalized_blocks", &Blocks(inner))

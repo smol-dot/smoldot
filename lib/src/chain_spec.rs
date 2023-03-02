@@ -487,13 +487,13 @@ pub enum FromGenesisStorageError {
     /// Runtime couldn't be found in the storage.
     RuntimeNotFound,
     /// Error while building the chain information.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     BuildChainInformation(build::Error),
     /// Failed to decode heap pages from the storage.
-    #[display(fmt = "Failed to decode heap pages from the storage: {}", _0)]
+    #[display(fmt = "Failed to decode heap pages from the storage: {_0}")]
     HeapPagesDecode(executor::InvalidHeapPagesError),
     /// Error when initializing the virtual machine.
-    #[display(fmt = "Error when initializing the virtual machine: {}", _0)]
+    #[display(fmt = "Error when initializing the virtual machine: {_0}")]
     VmInitialization(executor::host::NewErr),
     /// Chain specification doesn't contain the list of storage items.
     UnknownStorageItems,

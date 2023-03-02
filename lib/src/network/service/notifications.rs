@@ -775,7 +775,7 @@ where
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum NotificationsOutErr {
     /// Error in the underlying protocol.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Substream(peers::NotificationsOutErr),
     /// Mismatch between the genesis hash of the remote and the local genesis hash.
     #[display(fmt = "Mismatch between the genesis hash of the remote and the local genesis hash")]

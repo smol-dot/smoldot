@@ -684,7 +684,7 @@ pub enum BlocksRequestError {
     /// No established connection with the target.
     NoConnection,
     /// Error during the request.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Request(service::BlocksRequestError),
 }
 
@@ -694,7 +694,7 @@ pub enum QueueNotificationError {
     /// No established connection with the target.
     NoConnection,
     /// Error during the queuing.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Queue(peers::QueueNotificationError),
 }
 

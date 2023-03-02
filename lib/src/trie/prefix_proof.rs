@@ -185,7 +185,7 @@ pub enum ResumeOutcome {
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum Error {
     /// The proof has an invalid format.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     InvalidProof(proof_decode::Error),
     /// One or more entries in the proof are missing.
     MissingProofEntry,

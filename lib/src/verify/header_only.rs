@@ -147,10 +147,10 @@ pub enum Error {
     /// Block header contains items that don't match the finality engine of the chain.
     FinalityEngineMismatch,
     /// Failed to verify the authenticity of the block with the AURA algorithm.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     AuraVerification(aura::VerifyError),
     /// Failed to verify the authenticity of the block with the BABE algorithm.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     BabeVerification(babe::VerifyError),
     /// Block schedules a Grandpa authorities change while another change is still in progress.
     GrandpaChangesOverlap,

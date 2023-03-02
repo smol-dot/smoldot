@@ -381,7 +381,7 @@ impl Prepare {
             base_components: self.inner.base_components,
             store: self.inner.store,
             memory: self.inner.memory,
-            dummy_output_value: dummy_output_value,
+            dummy_output_value,
             execution: Some(Execution::NotStarted(
                 func_to_call,
                 params
