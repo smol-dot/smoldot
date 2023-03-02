@@ -1222,7 +1222,7 @@ pub enum Event {
         announce: EncodedBlockAnnounce,
     },
 
-    /// Received a  GrandPa neighor packet from the network. This constains an update to the
+    /// Received a  GrandPa neighbor packet from the network. This contains an update to the
     /// finality state of the given peer.
     GrandpaNeighborPacket {
         /// Identity of the sender of the message.
