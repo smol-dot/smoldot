@@ -170,7 +170,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
         self.requests_subscriptions
             .respond(
-                &state_machine_request_id,
+                state_machine_request_id,
                 if is_legacy {
                     methods::Response::author_submitAndWatchExtrinsic((&subscription_id).into())
                         .to_json_response(request_id)

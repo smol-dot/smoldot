@@ -406,7 +406,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                                         .ancestors(relay_block.id)
                                         .find_map(|idx| {
                                             let hash = header::hash_from_scale_encoded_header(
-                                                &runtime_subscription
+                                                runtime_subscription
                                                     .async_tree
                                                     .block_async_user_data(idx)
                                                     .unwrap()
@@ -548,10 +548,10 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                 let local_id = *self.sync_sources_map.get(&peer_id).unwrap();
                 let decoded = announce.decode();
                 if let Ok(decoded_header) =
-                    header::decode(&decoded.scale_encoded_header, self.block_number_bytes)
+                    header::decode(decoded.scale_encoded_header, self.block_number_bytes)
                 {
                     let decoded_header_hash =
-                        header::hash_from_scale_encoded_header(&decoded.scale_encoded_header);
+                        header::hash_from_scale_encoded_header(decoded.scale_encoded_header);
                     self.sync_sources.add_known_block(
                         local_id,
                         decoded_header.number,
@@ -919,7 +919,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                     }
 
                     let parent_hash = header::hash_from_scale_encoded_header(
-                        &runtime_subscription
+                        runtime_subscription
                             .async_tree
                             .parent(block_index)
                             .map(|idx| {

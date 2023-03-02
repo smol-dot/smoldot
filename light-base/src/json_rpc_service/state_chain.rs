@@ -1031,7 +1031,7 @@ impl<TPlat: Platform> Background<TPlat> {
         let hash = match hash {
             Some(h) => h.0,
             None => header::hash_from_scale_encoded_header(
-                &sub_utils::subscribe_best(&self.runtime_service).await.0,
+                sub_utils::subscribe_best(&self.runtime_service).await.0,
             ),
         };
 
@@ -1042,12 +1042,12 @@ impl<TPlat: Platform> Background<TPlat> {
             Err(err) => {
                 self.requests_subscriptions
                     .respond(
-                        &state_machine_request_id,
+                        state_machine_request_id,
                         json_rpc::parse::build_error_response(
                             request_id,
                             json_rpc::parse::ErrorResponse::ServerError(
                                 -32000,
-                                &format!("Failed to fetch block information: {}", err),
+                                &format!("Failed to fetch block information: {err}"),
                             ),
                             None,
                         ),
@@ -1090,7 +1090,7 @@ impl<TPlat: Platform> Background<TPlat> {
         };
 
         self.requests_subscriptions
-            .respond(&state_machine_request_id, response)
+            .respond(state_machine_request_id, response)
             .await;
     }
 
@@ -1105,7 +1105,7 @@ impl<TPlat: Platform> Background<TPlat> {
             hash.0
         } else {
             header::hash_from_scale_encoded_header(
-                &sub_utils::subscribe_best(&self.runtime_service).await.0,
+                sub_utils::subscribe_best(&self.runtime_service).await.0,
             )
         };
 
@@ -1134,7 +1134,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 request_id,
                 json_rpc::parse::ErrorResponse::ServerError(
                     -32000,
-                    &format!("Failed to decode metadata from runtime"),
+                    "Failed to decode metadata from runtime",
                 ),
                 None,
             ),
@@ -1168,7 +1168,7 @@ impl<TPlat: Platform> Background<TPlat> {
         let block_hash = match block_hash {
             Some(h) => *h,
             None => header::hash_from_scale_encoded_header(
-                &sub_utils::subscribe_best(&self.runtime_service).await.0,
+                sub_utils::subscribe_best(&self.runtime_service).await.0,
             ),
         };
 
@@ -1207,7 +1207,7 @@ impl<TPlat: Platform> Background<TPlat> {
         };
 
         self.requests_subscriptions
-            .respond(&state_machine_request_id, response)
+            .respond(state_machine_request_id, response)
             .await;
     }
 
@@ -1223,7 +1223,7 @@ impl<TPlat: Platform> Background<TPlat> {
             .as_ref()
             .map(|h| h.0)
             .unwrap_or(header::hash_from_scale_encoded_header(
-                &sub_utils::subscribe_best(&self.runtime_service).await.0,
+                sub_utils::subscribe_best(&self.runtime_service).await.0,
             ));
 
         let fut = self.storage_query(
@@ -1235,10 +1235,8 @@ impl<TPlat: Platform> Background<TPlat> {
         );
         let response = fut.await;
         let response = match response.map(|mut r| r.pop().unwrap()) {
-            Ok(Some(value)) => {
-                methods::Response::state_getStorage(methods::HexString(value.to_owned())) // TODO: overhead
-                    .to_json_response(request_id)
-            }
+            Ok(Some(value)) => methods::Response::state_getStorage(methods::HexString(value))
+                .to_json_response(request_id),
             Ok(None) => json_rpc::parse::build_success_response(request_id, "null"),
             Err(error) => json_rpc::parse::build_error_response(
                 request_id,
@@ -1305,14 +1303,14 @@ impl<TPlat: Platform> Background<TPlat> {
     ) {
         let state_machine_subscription = match self
             .requests_subscriptions
-            .start_subscription(&state_machine_request_id, 1)
+            .start_subscription(state_machine_request_id, 1)
             .await
         {
             Ok(v) => v,
             Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
                 self.requests_subscriptions
                     .respond(
-                        &state_machine_request_id,
+                        state_machine_request_id,
                         json_rpc::parse::build_error_response(
                             request_id,
                             json_rpc::parse::ErrorResponse::ServerError(
@@ -1344,7 +1342,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
         self.requests_subscriptions
             .respond(
-                &state_machine_request_id,
+                state_machine_request_id,
                 methods::Response::state_subscribeRuntimeVersion((&subscription_id).into())
                     .to_json_response(request_id),
             )
@@ -1556,7 +1554,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
         self.requests_subscriptions
             .respond(
-                &state_machine_request_id,
+                state_machine_request_id,
                 methods::Response::state_subscribeStorage((&subscription_id).into())
                     .to_json_response(request_id),
             )
@@ -1627,7 +1625,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                         let value = values.pop().unwrap();
                                         match &mut known_values[key_index] {
                                             Some(v) if *v == value => {}
-                                            v @ _ => {
+                                            v => {
                                                 *v = Some(value.clone());
                                                 out.changes.push((
                                                     key.clone(),
