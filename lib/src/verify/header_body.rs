@@ -166,10 +166,7 @@ pub enum Error {
     #[display(fmt = "{_0}")]
     WasmVm(runtime_host::ErrorDetail),
     /// Runtime has returned some errors when verifying inherents.
-    #[display(
-        fmt = "Runtime has returned some errors when verifying inherents: {:?}",
-        errors
-    )]
+    #[display(fmt = "Runtime has returned some errors when verifying inherents: {errors:?}")]
     CheckInherentsError {
         /// List of errors produced by the runtime.
         ///
@@ -187,10 +184,7 @@ pub enum Error {
     /// Block header contains items relevant to multiple consensus engines at the same time.
     MultipleConsensusEngines,
     /// Block header contains an unrecognized consensus engine.
-    #[display(
-        fmt = "Block header contains an unrecognized consensus engine: {:?}",
-        engine
-    )]
+    #[display(fmt = "Block header contains an unrecognized consensus engine: {engine:?}")]
     UnknownConsensusEngine { engine: [u8; 4] },
     /// Failed to verify the authenticity of the block with the AURA algorithm.
     #[display(fmt = "{_0}")]

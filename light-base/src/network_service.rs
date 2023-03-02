@@ -650,11 +650,11 @@ impl<TPlat: Platform> NetworkService<TPlat> {
     ///
     /// See also [`NetworkService::call_proof_request`].
     // TODO: more docs
-    pub async fn call_proof_request<'a>(
+    pub async fn call_proof_request(
         self: Arc<Self>,
         chain_index: usize,
         target: PeerId, // TODO: takes by value because of futures longevity issue
-        config: protocol::CallProofRequestConfig<'a, impl Iterator<Item = impl AsRef<[u8]>>>,
+        config: protocol::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>>>,
         timeout: Duration,
     ) -> Result<EncodedMerkleProof, CallProofRequestError> {
         let rx = {
@@ -777,7 +777,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
 
         let result = guarded
             .network
-            .send_block_announce(&target, chain_index, scale_encoded_header, is_best)
+            .send_block_announce(target, chain_index, scale_encoded_header, is_best)
             .map_err(QueueNotificationError::Queue);
 
         self.shared.wake_up_main_background_task.notify(1);
@@ -1024,7 +1024,7 @@ async fn update_round<TPlat: Platform>(
                         "Connection({}, {}) => BlockAnnounce(best_hash={}, is_best={})",
                         peer_id,
                         &shared.log_chain_names[chain_index],
-                        HashDisplay(&header::hash_from_scale_encoded_header(&announce.decode().scale_encoded_header)),
+                        HashDisplay(&header::hash_from_scale_encoded_header(announce.decode().scale_encoded_header)),
                         announce.decode().is_best
                     );
                     break Event::BlockAnnounce {
@@ -1308,12 +1308,11 @@ async fn update_round<TPlat: Platform>(
             let peer_id = guarded
                 .network
                 .slots_to_assign(chain_index)
-                .filter(|peer_id| {
+                .find(|peer_id| {
                     !guarded
                         .slots_assign_backoff
                         .contains_key(&((**peer_id).clone(), chain_index)) // TODO: spurious cloning
                 })
-                .next()
                 .cloned();
 
             let Some(peer_id) = peer_id else { break };

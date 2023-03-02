@@ -56,7 +56,7 @@ impl<TPlat: Platform> Background<TPlat> {
         account: methods::AccountId,
     ) {
         let block_hash = header::hash_from_scale_encoded_header(
-            &sub_utils::subscribe_best(&self.runtime_service).await.0,
+            sub_utils::subscribe_best(&self.runtime_service).await.0,
         );
 
         let result = self
@@ -97,7 +97,7 @@ impl<TPlat: Platform> Background<TPlat> {
         };
 
         self.requests_subscriptions
-            .respond(&state_machine_request_id, response)
+            .respond(state_machine_request_id, response)
             .await;
     }
 
@@ -112,7 +112,7 @@ impl<TPlat: Platform> Background<TPlat> {
         let hash = match hash {
             Some(h) => h.0,
             None => header::hash_from_scale_encoded_header(
-                &sub_utils::subscribe_best(&self.runtime_service).await.0,
+                sub_utils::subscribe_best(&self.runtime_service).await.0,
             ),
         };
 
@@ -199,7 +199,7 @@ impl<TPlat: Platform> Background<TPlat> {
         };
 
         self.requests_subscriptions
-            .respond(&state_machine_request_id, response)
+            .respond(state_machine_request_id, response)
             .await;
     }
 
@@ -219,7 +219,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 .to_json_response(request_id),
                 None => {
                     let best_block = header::hash_from_scale_encoded_header(
-                        &sub_utils::subscribe_best(&self.runtime_service).await.0,
+                        sub_utils::subscribe_best(&self.runtime_service).await.0,
                     );
                     methods::Response::chain_getBlockHash(methods::HashHexString(best_block))
                         .to_json_response(request_id)
@@ -250,7 +250,7 @@ impl<TPlat: Platform> Background<TPlat> {
         let hash = match hash {
             Some(h) => h.0,
             None => header::hash_from_scale_encoded_header(
-                &sub_utils::subscribe_best(&self.runtime_service).await.0,
+                sub_utils::subscribe_best(&self.runtime_service).await.0,
             ),
         };
 
@@ -344,7 +344,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         request_id,
                         json_rpc::parse::ErrorResponse::ServerError(
                             -32000,
-                            &format!("Failed to decode header: {}", error),
+                            &format!("Failed to decode header: {error}"),
                         ),
                         None,
                     ),
@@ -409,7 +409,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
         self.requests_subscriptions
             .respond(
-                &state_machine_request_id,
+                state_machine_request_id,
                 methods::Response::chain_subscribeAllHeads((&subscription_id).into())
                     .to_json_response(request_id),
             )
@@ -566,7 +566,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
         self.requests_subscriptions
             .respond(
-                &state_machine_request_id,
+                state_machine_request_id,
                 methods::Response::chain_subscribeFinalizedHeads((&subscription_id).into())
                     .to_json_response(request_id),
             )
@@ -674,7 +674,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
         self.requests_subscriptions
             .respond(
-                &state_machine_request_id,
+                state_machine_request_id,
                 methods::Response::chain_subscribeNewHeads((&subscription_id).into())
                     .to_json_response(request_id),
             )
@@ -853,7 +853,7 @@ impl<TPlat: Platform> Background<TPlat> {
         let block_hash = match block_hash {
             Some(h) => *h,
             None => header::hash_from_scale_encoded_header(
-                &sub_utils::subscribe_best(&self.runtime_service).await.0,
+                sub_utils::subscribe_best(&self.runtime_service).await.0,
             ),
         };
 
@@ -880,7 +880,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     request_id,
                     json_rpc::parse::ErrorResponse::ServerError(
                         -32000,
-                        &format!("Failed to decode runtime output: {}", error),
+                        &format!("Failed to decode runtime output: {error}"),
                     ),
                     None,
                 ),
@@ -918,7 +918,7 @@ impl<TPlat: Platform> Background<TPlat> {
             hash.0
         } else {
             header::hash_from_scale_encoded_header(
-                &sub_utils::subscribe_best(&self.runtime_service).await.0,
+                sub_utils::subscribe_best(&self.runtime_service).await.0,
             )
         };
 
@@ -960,7 +960,7 @@ impl<TPlat: Platform> Background<TPlat> {
         let hash = match hash {
             Some(h) => h.0,
             None => header::hash_from_scale_encoded_header(
-                &sub_utils::subscribe_best(&self.runtime_service).await.0,
+                sub_utils::subscribe_best(&self.runtime_service).await.0,
             ),
         };
 
@@ -971,12 +971,12 @@ impl<TPlat: Platform> Background<TPlat> {
             Err(err) => {
                 self.requests_subscriptions
                     .respond(
-                        &state_machine_request_id,
+                        state_machine_request_id,
                         json_rpc::parse::build_error_response(
                             request_id,
                             json_rpc::parse::ErrorResponse::ServerError(
                                 -32000,
-                                &format!("Failed to fetch block information: {}", err),
+                                &format!("Failed to fetch block information: {err}"),
                             ),
                             None,
                         ),

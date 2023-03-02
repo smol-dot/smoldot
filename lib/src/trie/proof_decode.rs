@@ -63,7 +63,7 @@ pub struct Config<'a, I> {
 ///
 /// Returns an error if the proof is invalid, or if the proof contains entries that are
 /// disconnected from the root node of the trie.
-pub fn decode_and_verify_proof<'a, T>(config: Config<'a, T>) -> Result<DecodedTrieProof<T>, Error>
+pub fn decode_and_verify_proof<T>(config: Config<T>) -> Result<DecodedTrieProof<T>, Error>
 where
     T: AsRef<[u8]>,
 {
@@ -106,7 +106,7 @@ where
                     )
                     .unwrap();
 
-                    let proof_entry_offset = if proof_entry.len() == 0 {
+                    let proof_entry_offset = if proof_entry.is_empty() {
                         0
                     } else {
                         proof_entry.as_ptr() as usize - proof_as_ref.as_ptr() as usize
@@ -560,7 +560,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                     } else if let Some((descendant, _)) = self
                         .entries
                         .range::<[nibble::Nibble], _>((
-                            ops::Bound::Included(&key[..]),
+                            ops::Bound::Included(key),
                             ops::Bound::Unbounded,
                         ))
                         .next()

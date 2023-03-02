@@ -209,7 +209,6 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// warp syncing.
     ///
     /// See [`SubscribeAll`] for information about the return value.
-    #[must_use]
     pub async fn subscribe_all(
         &self,
         subscription_name: &'static str,
@@ -406,7 +405,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                     // Cold path.
                     if let Some((sub_name, _, _)) = all_blocks_subscriptions.get(&subscription_id.0)
                     {
-                        panic!("block already unpinned for {} subscription", sub_name);
+                        panic!("block already unpinned for {sub_name} subscription");
                     } else {
                         return;
                     }
@@ -463,7 +462,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                         if let Some((sub_name, _, _)) =
                             all_blocks_subscriptions.get(&subscription_id.0)
                         {
-                            panic!("block already unpinned for subscription {}", sub_name);
+                            panic!("block already unpinned for subscription {sub_name}");
                         } else {
                             return Err(PinnedBlockRuntimeLockError::ObsoleteSubscription);
                         }
@@ -493,17 +492,17 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     ///
     /// Panics if the provided [`PinnedRuntimeId`] is stale or invalid.
     ///
-    pub async fn pinned_runtime_lock<'a>(
-        &'a self,
+    pub async fn pinned_runtime_lock(
+        &self,
         pinned_runtime_id: PinnedRuntimeId,
         block_hash: [u8; 32],
         block_number: u64,
         block_state_trie_root_hash: [u8; 32],
-    ) -> RuntimeLock<'a, TPlat> {
+    ) -> RuntimeLock<TPlat> {
         RuntimeLock {
             service: self,
             hash: block_hash,
-            runtime: pinned_runtime_id.0.clone(),
+            runtime: pinned_runtime_id.0,
             block_number,
             block_state_root_hash: block_state_trie_root_hash,
         }

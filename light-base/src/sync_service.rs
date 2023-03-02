@@ -431,7 +431,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
                     let decoded = outcome.decode();
                     let decoded = proof_decode::decode_and_verify_proof(proof_decode::Config {
                         proof: decoded,
-                        trie_root_hash: &storage_trie_root,
+                        trie_root_hash: storage_trie_root,
                     })
                     .map_err(StorageQueryErrorDetail::ProofVerification)?;
 
@@ -637,7 +637,7 @@ impl fmt::Display for StorageQueryError {
         } else {
             write!(f, "Storage query errors:")?;
             for err in &self.errors {
-                write!(f, "\n- {}", err)?;
+                write!(f, "\n- {err}")?;
             }
             Ok(())
         }
@@ -680,7 +680,7 @@ impl fmt::Display for CallProofQueryError {
         } else {
             write!(f, "Call proof query errors:")?;
             for err in &self.errors {
-                write!(f, "\n- {}", err)?;
+                write!(f, "\n- {err}")?;
             }
             Ok(())
         }

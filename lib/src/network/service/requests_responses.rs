@@ -632,7 +632,7 @@ where
                                 );
 
                                 for connection_id in
-                                    self.inner.established_peer_connections(&e.key())
+                                    self.inner.established_peer_connections(e.key())
                                 {
                                     let state = self.inner.connection_state(connection_id);
                                     debug_assert!(state.established);
@@ -650,7 +650,7 @@ where
                                 }
 
                                 for connection_id in
-                                    self.inner.handshaking_peer_connections(&e.key())
+                                    self.inner.handshaking_peer_connections(e.key())
                                 {
                                     let state = self.inner.connection_state(connection_id);
                                     debug_assert!(!state.established);
@@ -856,7 +856,7 @@ where
             })
         };
 
-        let _ = self.inner.respond_in_request(request_id, Ok(response));
+        self.inner.respond_in_request(request_id, Ok(response));
     }
 
     /// Queue the response to send back.
@@ -888,7 +888,7 @@ where
             Err(())
         };
 
-        let _ = self.inner.respond_in_request(request_id, response);
+        self.inner.respond_in_request(request_id, response);
     }
 }
 
@@ -1032,7 +1032,7 @@ pub enum BlocksRequestError {
     /// Start of the response doesn't correspond to the requested start.
     InvalidStart,
     /// Error at a specific index in the response.
-    #[display(fmt = "Error in response at offset {}: {}", index, error)]
+    #[display(fmt = "Error in response at offset {index}: {error}")]
     Entry {
         /// Index in the response where the problem happened.
         index: usize,
@@ -1163,7 +1163,7 @@ fn check_blocks_response(
         // all blocks have a justification in the first place.
 
         if block.header.as_ref().map_or(false, |h| {
-            header::hash_from_scale_encoded_header(&h) != block.hash
+            header::hash_from_scale_encoded_header(h) != block.hash
         }) {
             return Err(BlocksRequestError::Entry {
                 index: block_index,

@@ -137,10 +137,7 @@ pub enum Error {
     /// Hash of the parent block doesn't match the hash in the header to verify.
     BadParentHash,
     /// Block header contains an unrecognized consensus engine.
-    #[display(
-        fmt = "Block header contains an unrecognized consensus engine: {:?}",
-        engine
-    )]
+    #[display(fmt = "Block header contains an unrecognized consensus engine: {engine:?}")]
     UnknownConsensusEngine { engine: [u8; 4] },
     /// Block header contains items relevant to multiple consensus engines at the same time.
     MultipleConsensusEngines,

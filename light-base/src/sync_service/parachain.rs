@@ -392,7 +392,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                                 };
 
                                 let parablock_hash =
-                                    header::hash_from_scale_encoded_header(&parablock);
+                                    header::hash_from_scale_encoded_header(parablock);
 
                                 if let Some((_, entry)) =
                                     list.iter_mut().find(|(h, _)| *h == parablock_hash)
@@ -422,7 +422,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                                         .or_else(|| {
                                             let finalized_parahash =
                                                 header::hash_from_scale_encoded_header(
-                                                    &finalized_parahead,
+                                                    finalized_parahead,
                                                 );
                                             if finalized_parahash != parablock_hash {
                                                 Some(finalized_parahash)
@@ -824,7 +824,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                             .async_tree
                             .best_block_index()
                             .map(|(_, b)| b.as_ref().unwrap())
-                            .unwrap_or(&finalized_parahead),
+                            .unwrap_or(finalized_parahead),
                     );
 
                     if runtime_subscription.reported_best_parahead_hash.as_ref() != Some(&parahash)
@@ -1193,10 +1193,7 @@ enum ParaheadError {
     #[display(fmt = "Error while performing call request over the network: {_0}")]
     Call(runtime_service::RuntimeCallError),
     /// Error while starting virtual machine to verify call proof.
-    #[display(
-        fmt = "Error while starting virtual machine to verify call proof: {}",
-        _0
-    )]
+    #[display(fmt = "Error while starting virtual machine to verify call proof: {_0}")]
     StartError(host::StartErr),
     /// Error during the execution of the virtual machine to verify call proof.
     #[display(fmt = "Error during the call proof verification: {_0}")]

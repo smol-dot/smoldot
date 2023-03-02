@@ -93,12 +93,7 @@ impl PrefixScan {
             let mut next = Vec::with_capacity(non_terminal_queries.len() * 2);
 
             debug_assert!(!non_terminal_queries.is_empty());
-            loop {
-                let query = match non_terminal_queries.pop() {
-                    Some(q) => q,
-                    None => break,
-                };
-
+            while let Some(query) = non_terminal_queries.pop() {
                 let info = match decoded_proof.trie_node_info(&query) {
                     Some(info) => info,
                     None if !is_first_iteration => {

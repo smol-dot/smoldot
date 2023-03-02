@@ -404,15 +404,14 @@ impl HandleRpcError {
         };
 
         match json_rpc::parse::parse_call(&json_rpc_request) {
-            Ok(call) => match call.id_json {
-                Some(id) => Some(json_rpc::parse::build_error_response(
-                    id,
-                    json_rpc::parse::ErrorResponse::ServerError(-32000, "Too busy"),
-                    None,
-                )),
-                None => None,
-            },
-            Err(_) => None,
+            Ok(json_rpc::parse::Call {
+                id_json: Some(id), ..
+            }) => Some(json_rpc::parse::build_error_response(
+                id,
+                json_rpc::parse::ErrorResponse::ServerError(-32000, "Too busy"),
+                None,
+            )),
+            Ok(json_rpc::parse::Call { id_json: None, .. }) | Err(_) => None,
         }
     }
 }
@@ -848,12 +847,8 @@ impl<TPlat: Platform> Background<TPlat> {
                 .await
             }
             methods::MethodCall::author_unwatchExtrinsic { subscription } => {
-                self.author_unwatch_extrinsic(
-                    request_id,
-                    &state_machine_request_id,
-                    &*subscription,
-                )
-                .await;
+                self.author_unwatch_extrinsic(request_id, &state_machine_request_id, &subscription)
+                    .await;
             }
             methods::MethodCall::chain_getBlock { hash } => {
                 self.chain_get_block(request_id, &state_machine_request_id, hash)
@@ -974,7 +969,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.state_unsubscribe_runtime_version(
                     request_id,
                     &state_machine_request_id,
-                    &*subscription,
+                    &subscription,
                 )
                 .await;
             }
@@ -986,7 +981,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.state_unsubscribe_storage(
                     request_id,
                     &state_machine_request_id,
-                    &*subscription,
+                    &subscription,
                 )
                 .await;
             }
@@ -1047,7 +1042,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_unstable_stop_body(
                     request_id,
                     &state_machine_request_id,
-                    &*subscription,
+                    &subscription,
                 )
                 .await;
             }
@@ -1059,7 +1054,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_unstable_body(
                     request_id,
                     &state_machine_request_id,
-                    &*follow_subscription,
+                    &follow_subscription,
                     hash,
                     network_config,
                 )
@@ -1075,9 +1070,9 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_call(
                     request_id,
                     &state_machine_request_id,
-                    &*follow_subscription,
+                    &follow_subscription,
                     hash,
-                    &*function,
+                    &function,
                     call_parameters,
                     network_config,
                 )
@@ -1087,7 +1082,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_unstable_stop_call(
                     request_id,
                     &state_machine_request_id,
-                    &*subscription,
+                    &subscription,
                 )
                 .await;
             }
@@ -1095,7 +1090,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_unstable_stop_storage(
                     request_id,
                     &state_machine_request_id,
-                    &*subscription,
+                    &subscription,
                 )
                 .await;
             }
@@ -1109,7 +1104,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_storage(
                     request_id,
                     &state_machine_request_id,
-                    &*follow_subscription,
+                    &follow_subscription,
                     hash,
                     key,
                     child_key,
@@ -1132,7 +1127,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_unstable_header(
                     request_id,
                     &state_machine_request_id,
-                    &*follow_subscription,
+                    &follow_subscription,
                     hash,
                 )
                 .await;
@@ -1144,7 +1139,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_unstable_unpin(
                     request_id,
                     &state_machine_request_id,
-                    &*follow_subscription,
+                    &follow_subscription,
                     hash,
                 )
                 .await;
@@ -1155,7 +1150,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_unstable_unfollow(
                     request_id,
                     &state_machine_request_id,
-                    &*follow_subscription,
+                    &follow_subscription,
                 )
                 .await;
             }
@@ -1180,7 +1175,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::sudo_unstable_p2pDiscover { multiaddr } => {
-                self.sudo_unstable_p2p_discover(request_id, &state_machine_request_id, &*multiaddr)
+                self.sudo_unstable_p2p_discover(request_id, &state_machine_request_id, &multiaddr)
                     .await;
             }
             methods::MethodCall::sudo_unstable_version {} => {
@@ -1200,7 +1195,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.transaction_unstable_unwatch(
                     request_id,
                     &state_machine_request_id,
-                    &*subscription,
+                    &subscription,
                 )
                 .await;
             }
@@ -1402,7 +1397,7 @@ impl<TPlat: Platform> Background<TPlat> {
         max_parallel: NonZeroU32,
     ) -> Result<Vec<Option<Vec<u8>>>, StorageQueryError> {
         let (state_trie_root_hash, block_number) = self
-            .state_trie_root_hash(&hash)
+            .state_trie_root_hash(hash)
             .await
             .map_err(StorageQueryError::FindStorageRootHashError)?;
 
@@ -1438,7 +1433,7 @@ impl<TPlat: Platform> Background<TPlat> {
             // The runtime service has the block pinned, meaning that we can ask the runtime
             // service to perform the call.
             self.runtime_service
-                .pinned_block_runtime_lock(cache_lock.subscription_id.clone().unwrap(), block_hash)
+                .pinned_block_runtime_lock(cache_lock.subscription_id.unwrap(), block_hash)
                 .await
                 .ok()
         } else {

@@ -423,8 +423,7 @@ async fn background_task<TPlat: Platform>(
                 let to_start_validate = worker
                     .pending_transactions
                     .unvalidated_transactions()
-                    .filter(|(_, tx)| tx.validation_in_progress.is_none())
-                    .next()
+                    .find(|(_, tx)| tx.validation_in_progress.is_none())
                     .map(|(tx_id, ..)| tx_id);
                 let to_start_validate = match to_start_validate {
                     Some(tx_id) => tx_id,
