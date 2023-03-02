@@ -20,7 +20,10 @@
 use super::*;
 use crate::finality::{grandpa, justification};
 
-use core::{cmp::Ordering, iter};
+use core::{
+    cmp::{self, Ordering},
+    iter,
+};
 
 impl<T> NonFinalizedTree<T> {
     /// Returns a list of blocks (by their height and hash) that need to be finalized before any
@@ -168,13 +171,15 @@ impl<T> NonFinalizedTreeInner<T> {
                 finalized_scheduled_change,
                 finalized_triggered_authorities,
             } => {
-                if target_number == self.finalized_block_header.number {
-                    if *target_hash == self.finalized_block_hash {
-                        return Err(FinalityVerifyError::EqualToFinalized);
+                match target_number.cmp(&self.finalized_block_header.number) {
+                    cmp::Ordering::Equal if *target_hash == self.finalized_block_hash => {
+                        return Err(FinalityVerifyError::EqualToFinalized)
                     }
-                    return Err(FinalityVerifyError::EqualFinalizedHeightButInequalHash);
-                } else if target_number < self.finalized_block_header.number {
-                    return Err(FinalityVerifyError::BelowFinalized);
+                    cmp::Ordering::Equal => {
+                        return Err(FinalityVerifyError::EqualFinalizedHeightButInequalHash)
+                    }
+                    cmp::Ordering::Less => return Err(FinalityVerifyError::BelowFinalized),
+                    _ => {}
                 }
 
                 // Find in the list of non-finalized blocks the one targeted by the justification.

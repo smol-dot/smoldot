@@ -134,7 +134,7 @@ impl<'a> serde::Deserialize<'a> for HexString {
         let string = String::deserialize(deserializer)?;
 
         if let Some(hex) = string.strip_prefix("0x") {
-            let bytes = hex::decode(&hex).map_err(serde::de::Error::custom)?;
+            let bytes = hex::decode(hex).map_err(serde::de::Error::custom)?;
             return Ok(HexString(bytes));
         }
 

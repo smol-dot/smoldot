@@ -66,11 +66,11 @@ pub(super) fn protocols<'a>(
                     Some(fork_id) => {
                         format!(
                             "/{}/{}/block-announces/1",
-                            hex::encode(&chain.genesis_hash),
+                            hex::encode(chain.genesis_hash),
                             fork_id
                         )
                     }
-                    None => format!("/{}/block-announces/1", hex::encode(&chain.genesis_hash)),
+                    None => format!("/{}/block-announces/1", hex::encode(chain.genesis_hash)),
                 },
                 max_handshake_size: 1024 * 1024, // TODO: arbitrary
                 max_notification_size: 1024 * 1024,
@@ -80,11 +80,11 @@ pub(super) fn protocols<'a>(
                     Some(fork_id) => {
                         format!(
                             "/{}/{}/transactions/1",
-                            hex::encode(&chain.genesis_hash),
+                            hex::encode(chain.genesis_hash),
                             fork_id
                         )
                     }
-                    None => format!("/{}/transactions/1", hex::encode(&chain.genesis_hash)),
+                    None => format!("/{}/transactions/1", hex::encode(chain.genesis_hash)),
                 },
                 max_handshake_size: 4,
                 max_notification_size: 16 * 1024 * 1024,
@@ -97,13 +97,9 @@ pub(super) fn protocols<'a>(
                 iter::once(peers::NotificationProtocolConfig {
                     protocol_name: match &chain.fork_id {
                         Some(fork_id) => {
-                            format!(
-                                "/{}/{}/grandpa/1",
-                                hex::encode(&chain.genesis_hash),
-                                fork_id
-                            )
+                            format!("/{}/{}/grandpa/1", hex::encode(chain.genesis_hash), fork_id)
                         }
-                        None => format!("/{}/grandpa/1", hex::encode(&chain.genesis_hash)),
+                        None => format!("/{}/grandpa/1", hex::encode(chain.genesis_hash)),
                     },
                     max_handshake_size: 4,
                     max_notification_size: 1024 * 1024,
@@ -190,7 +186,7 @@ where
                         .entry(&peer_id)
                         .into_occupied()
                     {
-                        entry.set_state(&now, kademlia::kbuckets::PeerState::Connected);
+                        entry.set_state(now, kademlia::kbuckets::PeerState::Connected);
                     }
 
                     if self.chains[chain_index].in_peers.contains(&peer_id) {
@@ -254,7 +250,7 @@ where
                 let _ = self.inner.queue_notification(
                     &peer_id,
                     notifications_protocol_index,
-                    notification.clone(),
+                    notification,
                 );
 
                 None
@@ -331,7 +327,7 @@ where
                         // Note that the state might have already be `Disconnected`, which
                         // can happen for example in case of a problem in the handshake
                         // sent back by the remote.
-                        entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
+                        entry.set_state(now, kademlia::kbuckets::PeerState::Disconnected);
                     }
 
                     unassigned_slot_ty
@@ -571,8 +567,7 @@ where
             let chain_index = notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
             // Don't report events about nodes we don't have an outbound substream with.
-            // TODO: cloning of peer_id :(
-            if !self.open_chains.contains(&(peer_id.clone(), chain_index)) {
+            if !self.open_chains.contains(&(peer_id, chain_index)) {
                 return None;
             }
 
@@ -673,8 +668,7 @@ where
         });
 
         // Now sending out.
-        let _ = self
-            .inner
+        self.inner
             .broadcast_notification(chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2, packet);
 
         // Update the locally-stored state, but only after the notification has been broadcasted.

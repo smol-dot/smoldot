@@ -141,11 +141,7 @@ pub enum Error {
     /// Error while parsing output of `BlockBuilder_apply_extrinsic`.
     BadApplyExtrinsicOutput,
     /// Applying an inherent extrinsic has returned a [`DispatchError`].
-    #[display(
-        fmt = "Error while applying inherent extrinsic: {}\nExtrinsic: {:?}",
-        error,
-        extrinsic
-    )]
+    #[display(fmt = "Error while applying inherent extrinsic: {error}\nExtrinsic: {extrinsic:?}")]
     InherentExtrinsicDispatchError {
         /// Extrinsic that triggered the problem.
         extrinsic: Vec<u8>,
@@ -153,11 +149,7 @@ pub enum Error {
         error: DispatchError,
     },
     /// Applying an inherent extrinsic has returned a [`TransactionValidityError`].
-    #[display(
-        fmt = "Error while applying inherent extrinsic: {}\nExtrinsic: {:?}",
-        error,
-        extrinsic
-    )]
+    #[display(fmt = "Error while applying inherent extrinsic: {error}\nExtrinsic: {extrinsic:?}")]
     InherentExtrinsicTransactionValidityError {
         /// Extrinsic that triggered the problem.
         extrinsic: Vec<u8>,
@@ -729,7 +721,7 @@ pub enum InvalidTransaction {
     /// left in the current block.
     ExhaustsResources,
     /// Any other custom invalid validity that is not covered by this enum.
-    #[display(fmt = "Other reason (code: {})", _0)]
+    #[display(fmt = "Other reason (code: {_0})")]
     Custom(u8),
     /// An extrinsic with a Mandatory dispatch resulted in Error. This is indicative of either a
     /// malicious validator or a buggy `provide_inherent`. In any case, it can result in dangerously
@@ -748,7 +740,7 @@ pub enum UnknownTransaction {
     /// No validator found for the given unsigned transaction.
     NoUnsignedValidator,
     /// Any other custom unknown validity that is not covered by this enum.
-    #[display(fmt = "Other reason (code: {})", _0)]
+    #[display(fmt = "Other reason (code: {_0})")]
     Custom(u8),
 }
 
@@ -760,7 +752,7 @@ pub enum DispatchError {
     /// A bad origin.
     BadOrigin,
     /// A custom error in a module.
-    #[display(fmt = "Error in module #{}, error number #{}", index, error)]
+    #[display(fmt = "Error in module #{index}, error number #{error}")]
     Module {
         /// Module index, matching the metadata module index.
         index: u8,

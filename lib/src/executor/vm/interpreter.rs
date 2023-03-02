@@ -159,7 +159,7 @@ impl InterpreterPrototype {
 
                     let memory = wasmi::Memory::new(&mut store, *memory_type)
                         .map_err(|_| NewErr::CouldntAllocateMemory)?;
-                    import_memory = Some(memory.clone());
+                    import_memory = Some(memory);
 
                     // `define` returns an error in case of duplicate definition. Since we
                     // enumerate over the imports, this can't happen.
@@ -174,7 +174,7 @@ impl InterpreterPrototype {
         }
 
         let instance = linker
-            .instantiate(&mut store, &*base_components.module)
+            .instantiate(&mut store, &base_components.module)
             .map_err(|err| NewErr::Other(err.to_string()))?
             .ensure_no_start(&mut store)
             .map_err(|_| NewErr::StartFunctionNotSupported)?;
@@ -188,7 +188,7 @@ impl InterpreterPrototype {
                 import_memory
             } else if let Some(mem) = instance.get_memory(&store, "memory") {
                 // TODO: we don't detect NewErr::MemoryIsntMemory
-                mem.clone()
+                mem
             } else {
                 return Err(NewErr::NoMemory);
             };
@@ -364,17 +364,13 @@ impl Prepare {
             // We don't support more than one return value. This is enforced by verifying the
             // function signature above.
             debug_assert!(list.len() <= 1);
-            if let Some(item) = list.first() {
-                Some(match *item {
-                    wasmi::core::ValueType::I32 => wasmi::Value::I32(0),
-                    wasmi::core::ValueType::I64 => wasmi::Value::I64(0),
-                    wasmi::core::ValueType::F32 => wasmi::Value::F32(0.0f32.into()),
-                    wasmi::core::ValueType::F64 => wasmi::Value::F64(0.0.into()),
-                    _ => unreachable!(),
-                })
-            } else {
-                None
-            }
+            list.first().map(|item| match *item {
+                wasmi::core::ValueType::I32 => wasmi::Value::I32(0),
+                wasmi::core::ValueType::I64 => wasmi::Value::I64(0),
+                wasmi::core::ValueType::F32 => wasmi::Value::F32(0.0f32.into()),
+                wasmi::core::ValueType::F64 => wasmi::Value::F64(0.0.into()),
+                _ => unreachable!(),
+            })
         };
 
         Ok(Interpreter {
@@ -470,11 +466,11 @@ impl Interpreter {
                     // We don't support functions with more than one result type. This should have
                     // been checked at initialization.
                     debug_assert!(func_type.results().len() <= 1);
-                    if let Some(r) = func_type.results().iter().next() {
-                        Some(ValueType::try_from(*r).unwrap())
-                    } else {
-                        None
-                    }
+                    func_type
+                        .results()
+                        .iter()
+                        .next()
+                        .map(|r| ValueType::try_from(*r).unwrap())
                 };
                 let obtained = value.as_ref().map(|v| v.ty());
                 if expected != obtained {

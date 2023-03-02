@@ -67,9 +67,9 @@ pub(super) fn protocols<'a>(
         iter::once(peers::ConfigRequestResponse {
             name: match &chain.fork_id {
                 Some(fork_id) => {
-                    format!("/{}/{}/sync/2", hex::encode(&chain.genesis_hash), fork_id)
+                    format!("/{}/{}/sync/2", hex::encode(chain.genesis_hash), fork_id)
                 }
-                None => format!("/{}/sync/2", hex::encode(&chain.genesis_hash)),
+                None => format!("/{}/sync/2", hex::encode(chain.genesis_hash)),
             },
             inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 1024 },
             max_response_size: 16 * 1024 * 1024,
@@ -78,9 +78,9 @@ pub(super) fn protocols<'a>(
         .chain(iter::once(peers::ConfigRequestResponse {
             name: match &chain.fork_id {
                 Some(fork_id) => {
-                    format!("/{}/{}/light/2", hex::encode(&chain.genesis_hash), fork_id)
+                    format!("/{}/{}/light/2", hex::encode(chain.genesis_hash), fork_id)
                 }
-                None => format!("/{}/light/2", hex::encode(&chain.genesis_hash)),
+                None => format!("/{}/light/2", hex::encode(chain.genesis_hash)),
             },
             inbound_config: peers::ConfigRequestResponseIn::Payload {
                 max_size: 1024 * 512,
@@ -92,9 +92,9 @@ pub(super) fn protocols<'a>(
         .chain(iter::once(peers::ConfigRequestResponse {
             name: match &chain.fork_id {
                 Some(fork_id) => {
-                    format!("/{}/{}/kad", hex::encode(&chain.genesis_hash), fork_id)
+                    format!("/{}/{}/kad", hex::encode(chain.genesis_hash), fork_id)
                 }
-                None => format!("/{}/kad", hex::encode(&chain.genesis_hash)),
+                None => format!("/{}/kad", hex::encode(chain.genesis_hash)),
             },
             inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 1024 },
             max_response_size: 1024 * 1024,
@@ -104,13 +104,9 @@ pub(super) fn protocols<'a>(
         .chain(iter::once(peers::ConfigRequestResponse {
             name: match &chain.fork_id {
                 Some(fork_id) => {
-                    format!(
-                        "/{}/{}/sync/warp",
-                        hex::encode(&chain.genesis_hash),
-                        fork_id
-                    )
+                    format!("/{}/{}/sync/warp", hex::encode(chain.genesis_hash), fork_id)
                 }
-                None => format!("/{}/sync/warp", hex::encode(&chain.genesis_hash)),
+                None => format!("/{}/sync/warp", hex::encode(chain.genesis_hash)),
             },
             inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 32 },
             max_response_size: 16 * 1024 * 1024,
@@ -120,9 +116,9 @@ pub(super) fn protocols<'a>(
         .chain(iter::once(peers::ConfigRequestResponse {
             name: match &chain.fork_id {
                 Some(fork_id) => {
-                    format!("/{}/{}/state/2", hex::encode(&chain.genesis_hash), fork_id)
+                    format!("/{}/{}/state/2", hex::encode(chain.genesis_hash), fork_id)
                 }
-                None => format!("/{}/state/2", hex::encode(&chain.genesis_hash)),
+                None => format!("/{}/state/2", hex::encode(chain.genesis_hash)),
             },
             inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 1024 },
             // The sender tries to cap the response to 2MiB. However, if one storage item
@@ -308,7 +304,7 @@ where
                     request_id,
                 }
             } else {
-                let _ = self.inner.respond_in_request(request_id, Err(()));
+                self.inner.respond_in_request(request_id, Err(()));
                 Event::ProtocolError {
                     peer_id,
                     error: ProtocolError::BadIdentifyRequest,
@@ -342,7 +338,7 @@ where
                     }
                 }
                 Err(error) => {
-                    let _ = self.inner.respond_in_request(request_id, Err(()));
+                    self.inner.respond_in_request(request_id, Err(()));
                     Event::ProtocolError {
                         peer_id,
                         error: ProtocolError::BadBlocksRequest(error),

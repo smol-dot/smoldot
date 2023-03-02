@@ -792,7 +792,7 @@ pub struct Trap(String);
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum NewErr {
     /// Failed to resolve a function imported by the module.
-    #[display(fmt = "Unresolved function `{}`:`{}`", module_name, function)]
+    #[display(fmt = "Unresolved function `{module_name}`:`{function}`")]
     UnresolvedFunctionImport {
         /// Name of the function that was unresolved.
         function: String,
@@ -863,11 +863,7 @@ pub enum RunErr {
     #[display(fmt = "State machine is poisoned")]
     Poisoned,
     /// Passed a wrong value back.
-    #[display(
-        fmt = "Expected value of type {:?} but got {:?} instead",
-        expected,
-        obtained
-    )]
+    #[display(fmt = "Expected value of type {expected:?} but got {obtained:?} instead")]
     BadValueTy {
         /// Type of the value that was expected.
         expected: Option<ValueType>,

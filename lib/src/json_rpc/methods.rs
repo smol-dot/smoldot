@@ -86,18 +86,13 @@ pub enum MethodError<'a> {
     /// Call concerns a method that isn't recognized.
     UnknownMethod(&'a str),
     /// Format the parameters is plain invalid.
-    #[display(fmt = "Invalid parameters format when calling {}", rpc_method)]
+    #[display(fmt = "Invalid parameters format when calling {rpc_method}")]
     InvalidParametersFormat {
         /// Name of the JSON-RPC method that was attempted to be called.
         rpc_method: &'static str,
     },
     /// Too many parameters have been passed to the function.
-    #[display(
-        fmt = "{} expects {} parameters, but got {}",
-        rpc_method,
-        expected,
-        actual
-    )]
+    #[display(fmt = "{rpc_method} expects {expected} parameters, but got {actual}")]
     TooManyParameters {
         /// Name of the JSON-RPC method that was attempted to be called.
         rpc_method: &'static str,
@@ -108,10 +103,7 @@ pub enum MethodError<'a> {
     },
     /// One of the parameters of the function call is invalid.
     #[display(
-        fmt = "Parameter of index {} is invalid when calling {}: {}",
-        parameter_index,
-        rpc_method,
-        error
+        fmt = "Parameter of index {parameter_index} is invalid when calling {rpc_method}: {error}"
     )]
     InvalidParameter {
         /// Name of the JSON-RPC method that was attempted to be called.
