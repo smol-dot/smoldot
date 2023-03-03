@@ -98,7 +98,6 @@ fn nom_decode_payment_info<'a, E: nom::error::ParseError<&'a [u8]>>(
                 // number of bytes.
                 // If a field was to be added after the balance, this code would need to be
                 // modified.
-                // TODO: must make sure that TransactionPaymentApi is at version 1, see https://github.com/paritytech/smoldot/issues/949
                 let mut num = 0u128;
                 let mut shift = 0u32;
                 for byte in <[u8]>::iter(bytes) {
