@@ -69,7 +69,6 @@ use super::{
     trie_node, trie_structure, TrieEntryVersion,
 };
 
-use alloc::vec::Vec;
 use core::{fmt, iter};
 
 /// Cache containing intermediate calculation steps.
