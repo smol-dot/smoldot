@@ -490,9 +490,9 @@ impl StorageValue {
                         .map(|child| child.merkle_value.as_ref().unwrap())
                 }),
                 storage_value: match &hashed_storage_value {
-                    None => trie_node::StorageValue::Unhashed(
-                        stored_value.as_ref().unwrap().0.as_ref(),
-                    ),
+                    None => {
+                        trie_node::StorageValue::Unhashed(stored_value.as_ref().unwrap().0.as_ref())
+                    }
                     Some(hashed_storage_value) => trie_node::StorageValue::Hashed(
                         <&[u8; 32]>::try_from(hashed_storage_value.as_bytes()).unwrap(),
                     ),

@@ -111,10 +111,7 @@ impl ProofBuilder {
         // whether a separate storage node should be included in the proof.
         let storage_value_node = match (&decoded_node_value.storage_value, &unhashed_storage_value)
         {
-            (
-                trie_node::StorageValue::Unhashed(ref in_node_value),
-                Some(ref user_provided),
-            ) => {
+            (trie_node::StorageValue::Unhashed(ref in_node_value), Some(ref user_provided)) => {
                 assert_eq!(in_node_value, user_provided);
                 None
             }
@@ -303,8 +300,7 @@ impl ProofBuilder {
             if let Some(node_info) = iter.user_data().as_mut() {
                 // We already make sure that node values are valid when inserting them. As such,
                 // it is ok to `unwrap()` here.
-                let mut decoded_node_value =
-                    trie_node::decode(&node_info.node_value).unwrap();
+                let mut decoded_node_value = trie_node::decode(&node_info.node_value).unwrap();
 
                 // Update the hash of the storage value contained in `decoded_node_value`.
                 // This is done in a slightly weird way due to borrowing issues.
@@ -338,12 +334,13 @@ impl ProofBuilder {
                 // Because we are guaranteed that the node was valid when we decoded it, and that
                 // we only ever add a storage value or add children, we are sure that encoding
                 // can't reach this situation.
-                let updated_node_value = trie_node::encode(decoded_node_value)
-                    .unwrap()
-                    .fold(Vec::new(), |mut a, b| {
-                        a.extend_from_slice(b.as_ref());
-                        a
-                    });
+                let updated_node_value =
+                    trie_node::encode(decoded_node_value)
+                        .unwrap()
+                        .fold(Vec::new(), |mut a, b| {
+                            a.extend_from_slice(b.as_ref());
+                            a
+                        });
                 node_info.node_value = updated_node_value;
             }
 
