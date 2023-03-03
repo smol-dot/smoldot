@@ -165,16 +165,6 @@ pub fn encode_to_vec(
     Ok(result)
 }
 
-/// Error potentially returned by [`calculate_merkle_value`].
-#[derive(Debug, Clone, derive_more::Display, derive_more::From)]
-pub enum CalculateMerkleValueError {
-    /// Node has a non-empty partial key but isn't the root node.
-    NonRootEmptyPartialKey,
-    /// Error while encoding the node.
-    #[display(fmt = "{_0}")]
-    Encode(EncodeError),
-}
-
 /// Calculates the Merkle value of the given node.
 ///
 /// `is_root_node` must be `true` if the encoded node is the root node of the trie.
@@ -190,11 +180,9 @@ pub fn calculate_merkle_value(
         impl AsRef<[u8]> + Clone,
     >,
     is_root_node: bool,
-) -> Result<MerkleValueOutput, CalculateMerkleValueError> {
+) -> Result<MerkleValueOutput, EncodeError> {
     // The partial key can only be empty if the node is the root.
-    if !is_root_node && decoded.partial_key.len() == 0 {
-        return Err(CalculateMerkleValueError::NonRootEmptyPartialKey);
-    }
+    debug_assert!(is_root_node || decoded.partial_key.len() != 0);
 
     /// The Merkle value of a node is defined as either the hash of the node value, or the node value
     /// itself if it is shorted than 32 bytes (or if we are the root).
