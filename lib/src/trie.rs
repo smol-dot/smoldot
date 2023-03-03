@@ -107,7 +107,6 @@ use core::iter;
 mod nibble;
 
 pub mod calculate_root;
-pub mod node_value;
 pub mod prefix_proof;
 pub mod proof_decode;
 pub mod proof_encode;
