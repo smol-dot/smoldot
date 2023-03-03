@@ -1303,11 +1303,16 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
 
             let chain_info_builder = chain_information::build::ChainInformationBuild::new(
                 chain_information::build::Config {
-                    finalized_block_header:
+                    finalized_block_header: if header.number == 0 {
+                        chain_information::build::ConfigFinalizedBlockHeader::Genesis {
+                            state_trie_root_hash: header.state_root,
+                        }
+                    } else {
                         chain_information::build::ConfigFinalizedBlockHeader::NonGenesis {
                             header: header.clone(),
                             known_finality: Some(chain_information_finality.clone()),
-                        },
+                        }
+                    },
                     runtime,
                 },
             );
