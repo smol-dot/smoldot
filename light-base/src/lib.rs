@@ -72,21 +72,14 @@
 
 extern crate alloc;
 
-use alloc::{
-    borrow::ToOwned as _,
-    boxed::Box,
-    format,
-    string::{String, ToString as _},
-    sync::Arc,
-    vec,
-    vec::Vec,
-};
+use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 use core::{num::NonZeroU32, pin::Pin};
 use futures::{channel::oneshot, prelude::*};
 use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
 use smoldot::{
-    chain, chain_spec, header,
+    chain::{self, chain_information},
+    chain_spec, header,
     informant::HashDisplay,
     libp2p::{connection, multiaddr, peer_id},
 };
@@ -335,16 +328,17 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
     }
 
     /// Adds a new chain to the list of chains smoldot tries to synchronize.
-    // TODO: don't return strings as errors, but something higher level
+    ///
+    /// Returns an error in case something is wrong with the configuration.
     pub fn add_chain(
         &mut self,
         config: AddChainConfig<'_, TChain, impl Iterator<Item = ChainId>>,
-    ) -> Result<AddChainSuccess, String> {
+    ) -> Result<AddChainSuccess, AddChainError> {
         // Decode the chain specification.
         let chain_spec = match chain_spec::ChainSpec::from_json_bytes(config.specification) {
             Ok(cs) => cs,
             Err(err) => {
-                return Err(format!("Failed to decode chain specification: {err}"));
+                return Err(AddChainError::ChainSpecParseError(err));
             }
         };
 
@@ -430,18 +424,15 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                         (checkpoint, genesis_header, database_content.known_nodes)
                     } else {
                         // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
-                        return Err(
-                            "Either a checkpoint or the genesis storage must be provided"
-                                .to_string(),
-                        );
+                        // TODO: is this relevant for parachains?
+                        return Err(AddChainError::ChainSpecNeitherGenesisStorageNorCheckpoint);
                     }
                 }
 
                 (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), None, _) => {
                     // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
-                    return Err(
-                        "Either a checkpoint or the genesis storage must be provided".to_string(),
-                    );
+                    // TODO: is this relevant for parachains?
+                    return Err(AddChainError::ChainSpecNeitherGenesisStorageNorCheckpoint);
                 }
 
                 (
@@ -460,12 +451,10 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                     (checkpoint, genesis_header, Default::default())
                 }
 
-                (Err(err), _, _) => {
-                    return Err(format!("Failed to build genesis chain information: {err}"));
-                }
+                (Err(err), _, _) => return Err(AddChainError::InvalidGenesisStorage(err)),
 
                 (_, Some(Err(err)), _) => {
-                    return Err(format!("Invalid checkpoint in chain specification: {err}"));
+                    return Err(AddChainError::InvalidCheckpoint(err));
                 }
 
                 (Ok(genesis_ci), Some(Ok(checkpoint)), _) => {
@@ -501,10 +490,10 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                     // `iter` here is identical to the iterator above before `exactly_one` is
                     // called. This lets us know what failed.
                     return Err(if iter.next().is_none() {
-                        "Couldn't find any valid relay chain".to_string()
+                        AddChainError::NoRelayChainFound
                     } else {
                         debug_assert!(iter.next().is_some());
-                        "Multiple valid relay chains found".to_string()
+                        AddChainError::MultipleRelayChains
                     });
                 }
             }
@@ -969,6 +958,33 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
 
         json_rpc_sender.queue_rpc_request(json_rpc_request)
     }
+}
+
+/// Error potentially returned by [`Client::add_chain`].
+#[derive(Debug, derive_more::Display)]
+pub enum AddChainError {
+    /// Failed to decode the specification of the chain.
+    #[display(fmt = "Failed to decode chain specification: {_0}")]
+    ChainSpecParseError(chain_spec::ParseError),
+    /// The chain specification must contain either the storage of the genesis block, or a
+    /// checkpoint. Neither was provided.
+    #[display(fmt = "Either a checkpoint or the genesis storage must be provided")]
+    ChainSpecNeitherGenesisStorageNorCheckpoint,
+    /// Checkpoint provided in the chain specification is invalid.
+    #[display(fmt = "Invalid checkpoint in chain specification: {_0}")]
+    InvalidCheckpoint(chain_information::ValidityError),
+    /// Failed to build the information about the chain from the genesis storage. This indicates
+    /// invalid data in the genesis storage.
+    #[display(fmt = "Failed to build genesis chain information: {_0}")]
+    InvalidGenesisStorage(chain_spec::FromGenesisStorageError),
+    /// The list of potential relay chains doesn't contain any relay chain with the name indicated
+    /// in the chain specification of the parachain.
+    #[display(fmt = "Couldn't find relevant relay chain")]
+    NoRelayChainFound,
+    /// The list of potential relay chains contains more than one relay chain with the name
+    /// indicated in the chain specification of the parachain.
+    #[display(fmt = "Multiple relevant relay chains found")]
+    MultipleRelayChains,
 }
 
 /// Starts all the services of the client.
