@@ -181,9 +181,6 @@ pub fn calculate_merkle_value(
     >,
     is_root_node: bool,
 ) -> Result<MerkleValueOutput, EncodeError> {
-    // The partial key can only be empty if the node is the root.
-    debug_assert!(is_root_node || decoded.partial_key.len() != 0);
-
     /// The Merkle value of a node is defined as either the hash of the node value, or the node value
     /// itself if it is shorted than 32 bytes (or if we are the root).
     ///
