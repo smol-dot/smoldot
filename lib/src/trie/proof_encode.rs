@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use super::{nibble, proof_node_codec, trie_structure};
+use super::{nibble, trie_node, trie_structure};
 
 use alloc::{borrow::ToOwned as _, vec::Vec};
 use core::{array, iter};
@@ -102,7 +102,7 @@ impl ProofBuilder {
     ) {
         // The first thing to do is decode the node value, in order to detect invalid node values
         // first things first.
-        let decoded_node_value = match proof_node_codec::decode(node_value) {
+        let decoded_node_value = match trie_node::decode(node_value) {
             Ok(d) => d,
             Err(err) => panic!("failed to decode node value: {err:?}; value: {node_value:?}"),
         };
@@ -111,15 +111,12 @@ impl ProofBuilder {
         // whether a separate storage node should be included in the proof.
         let storage_value_node = match (&decoded_node_value.storage_value, &unhashed_storage_value)
         {
-            (
-                proof_node_codec::StorageValue::Unhashed(ref in_node_value),
-                Some(ref user_provided),
-            ) => {
+            (trie_node::StorageValue::Unhashed(ref in_node_value), Some(ref user_provided)) => {
                 assert_eq!(in_node_value, user_provided);
                 None
             }
-            (proof_node_codec::StorageValue::Hashed(_), Some(value)) => Some(value.to_vec()),
-            (proof_node_codec::StorageValue::None, Some(_)) => panic!(),
+            (trie_node::StorageValue::Hashed(_), Some(value)) => Some(value.to_vec()),
+            (trie_node::StorageValue::None, Some(_)) => panic!(),
             (_, None) => None,
         };
 
@@ -303,8 +300,7 @@ impl ProofBuilder {
             if let Some(node_info) = iter.user_data().as_mut() {
                 // We already make sure that node values are valid when inserting them. As such,
                 // it is ok to `unwrap()` here.
-                let mut decoded_node_value =
-                    proof_node_codec::decode(&node_info.node_value).unwrap();
+                let mut decoded_node_value = trie_node::decode(&node_info.node_value).unwrap();
 
                 // Update the hash of the storage value contained in `decoded_node_value`.
                 // This is done in a slightly weird way due to borrowing issues.
@@ -316,12 +312,12 @@ impl ProofBuilder {
                     storage_value_hash.is_some(),
                     matches!(
                         decoded_node_value.storage_value,
-                        proof_node_codec::StorageValue::Hashed(_)
+                        trie_node::StorageValue::Hashed(_)
                     )
                 );
                 if let Some(storage_value_hash) = storage_value_hash.as_ref() {
                     decoded_node_value.storage_value =
-                        proof_node_codec::StorageValue::Hashed(storage_value_hash);
+                        trie_node::StorageValue::Hashed(storage_value_hash);
                 }
 
                 // Update the children.
@@ -338,12 +334,13 @@ impl ProofBuilder {
                 // Because we are guaranteed that the node was valid when we decoded it, and that
                 // we only ever add a storage value or add children, we are sure that encoding
                 // can't reach this situation.
-                let updated_node_value = proof_node_codec::encode(decoded_node_value)
-                    .unwrap()
-                    .fold(Vec::new(), |mut a, b| {
-                        a.extend_from_slice(b.as_ref());
-                        a
-                    });
+                let updated_node_value =
+                    trie_node::encode(decoded_node_value)
+                        .unwrap()
+                        .fold(Vec::new(), |mut a, b| {
+                            a.extend_from_slice(b.as_ref());
+                            a
+                        });
                 node_info.node_value = updated_node_value;
             }
 
@@ -448,7 +445,7 @@ fn blake2_hash(data: &[u8]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{nibble, proof_decode, proof_node_codec, trie_structure};
+    use super::super::{nibble, proof_decode, trie_node, trie_structure};
     use core::array;
     use rand::distributions::{Distribution as _, Uniform};
 
@@ -567,7 +564,7 @@ mod tests {
                         .push(Uniform::new_inclusive(0, 255).sample(&mut rand::thread_rng()));
                 }
 
-                let node_value = proof_node_codec::encode_to_vec(proof_node_codec::Decoded {
+                let node_value = trie_node::encode_to_vec(trie_node::Decoded {
                     children: array::from_fn(|nibble| {
                         let nibble =
                             nibble::Nibble::try_from(u8::try_from(nibble).unwrap()).unwrap();
@@ -589,9 +586,9 @@ mod tests {
                         .collect::<Vec<_>>()
                         .into_iter(),
                     storage_value: if trie.node_by_index(node_index).unwrap().has_storage_value() {
-                        proof_node_codec::StorageValue::Unhashed(&storage_value)
+                        trie_node::StorageValue::Unhashed(&storage_value)
                     } else {
-                        proof_node_codec::StorageValue::None
+                        trie_node::StorageValue::None
                     },
                 })
                 .unwrap();
