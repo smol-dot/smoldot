@@ -9,6 +9,7 @@
 ## Changed
 
 - When a full node refuses an outbound transactions or GrandPa substream even though a block announces substream has been established, smoldot now tries to reopen the failed substream. This bypasses a Substrate issue. ([#240](https://github.com/smol-dot/smoldot/pull/240))
+- Runtime functions called through the JSON-RPC function `state_call` are now allowed to modify the storage of the chain. These storage modifications are silently discarded. Previously, a JSON-RPC error was returned.
 
 ## Fixed
 

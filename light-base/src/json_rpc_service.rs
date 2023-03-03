@@ -66,7 +66,7 @@ use hashbrown::HashMap;
 use smoldot::{
     chain::fork_tree,
     chain_spec,
-    executor::{host, read_only_runtime_host},
+    executor::{host, runtime_host},
     header,
     json_rpc::{self, methods, requests_subscriptions},
     libp2p::{multiaddr, PeerId},
@@ -1607,10 +1607,13 @@ impl<TPlat: Platform> Background<TPlat> {
         // The virtual machine might access the storage.
         // TODO: finish doc
 
-        let mut runtime_call = match read_only_runtime_host::run(read_only_runtime_host::Config {
+        let mut runtime_call = match runtime_host::run(runtime_host::Config {
             virtual_machine,
             function_to_call,
             parameter: call_parameters,
+            top_trie_root_calculation_cache: None,
+            storage_top_trie_changes: Default::default(),
+            offchain_storage_changes: Default::default(),
         }) {
             Ok(vm) => vm,
             Err((err, prototype)) => {
@@ -1621,41 +1624,43 @@ impl<TPlat: Platform> Background<TPlat> {
 
         loop {
             match runtime_call {
-                read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
                     let output = success.virtual_machine.value().as_ref().to_vec();
                     runtime_call_lock.unlock(success.virtual_machine.into_prototype());
                     break Ok((output, runtime_api_version));
                 }
-                read_only_runtime_host::RuntimeHostVm::Finished(Err(error)) => {
+                runtime_host::RuntimeHostVm::Finished(Err(error)) => {
                     runtime_call_lock.unlock(error.prototype);
-                    break Err(RuntimeCallError::ReadOnlyRuntime(error.detail));
+                    break Err(RuntimeCallError::RuntimeError(error.detail));
                 }
-                read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
+                runtime_host::RuntimeHostVm::StorageGet(get) => {
                     let storage_value = runtime_call_lock.storage_entry(get.key().as_ref());
                     let storage_value = match storage_value {
                         Ok(v) => v,
                         Err(err) => {
                             runtime_call_lock.unlock(
-                                read_only_runtime_host::RuntimeHostVm::StorageGet(get)
-                                    .into_prototype(),
+                                runtime_host::RuntimeHostVm::StorageGet(get).into_prototype(),
                             );
                             break Err(RuntimeCallError::Call(err));
                         }
                     };
-                    runtime_call = get.inject_value(storage_value.map(|(v, _)| iter::once(v)));
+                    runtime_call =
+                        get.inject_value(storage_value.map(|(val, vers)| (iter::once(val), vers)));
                 }
-                read_only_runtime_host::RuntimeHostVm::NextKey(nk) => {
+                runtime_host::RuntimeHostVm::NextKey(nk) => {
                     // TODO:
-                    runtime_call_lock.unlock(
-                        read_only_runtime_host::RuntimeHostVm::NextKey(nk).into_prototype(),
-                    );
+                    runtime_call_lock
+                        .unlock(runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
                     break Err(RuntimeCallError::NextKeyForbidden);
                 }
-                read_only_runtime_host::RuntimeHostVm::StorageRoot(storage_root) => {
-                    runtime_call = storage_root.resume(runtime_call_lock.block_storage_root());
-                }
-                read_only_runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
+                runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
                     runtime_call = sig.verify_and_resume();
+                }
+                runtime_host::RuntimeHostVm::PrefixKeys(pk) => {
+                    // TODO:
+                    runtime_call_lock
+                        .unlock(runtime_host::RuntimeHostVm::PrefixKeys(pk).into_prototype());
+                    break Err(RuntimeCallError::PrefixKeysForbidden);
                 }
             }
         }
@@ -1680,8 +1685,9 @@ enum RuntimeCallError {
     FindStorageRootHashError(StateTrieRootHashError),
     Call(runtime_service::RuntimeCallError),
     StartError(host::StartErr),
-    ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
+    RuntimeError(runtime_host::ErrorDetail),
     NextKeyForbidden,
+    PrefixKeysForbidden,
     /// Required runtime API isn't supported by the runtime.
     ApiNotFound,
     /// Version requirement of runtime API isn't supported.
