@@ -66,7 +66,7 @@
 
 use super::{
     nibble::{bytes_to_nibbles, Nibble},
-    proof_node_codec, trie_structure, TrieEntryVersion,
+    trie_node, trie_structure, TrieEntryVersion,
 };
 
 use alloc::vec::Vec;
@@ -85,7 +85,7 @@ pub struct CalculationCache {
 /// Custom data stored in each node in [`CalculationCache::structure`].
 #[derive(Default)]
 struct CacheEntry {
-    merkle_value: Option<proof_node_codec::MerkleValueOutput>,
+    merkle_value: Option<trie_node::MerkleValueOutput>,
 }
 
 impl CalculationCache {
@@ -302,11 +302,11 @@ impl CalcInner {
                         // Trie is empty.
                         // `calculate_merkle_value` can only return an error if the partial key
                         // isn't empty, meaning that it is safe to unwrap.
-                        let merkle_value = proof_node_codec::calculate_merkle_value(
-                            proof_node_codec::Decoded {
+                        let merkle_value = trie_node::calculate_merkle_value(
+                            trie_node::Decoded {
                                 partial_key: iter::empty(),
                                 children: [None::<&'static [u8]>; 16],
-                                storage_value: proof_node_codec::StorageValue::None,
+                                storage_value: trie_node::StorageValue::None,
                             },
                             true,
                         )
@@ -375,8 +375,8 @@ impl CalcInner {
                 // Calculate the Merkle value of the node.
                 // `calculate_merkle_value` returns an error if the node is invalid, which would
                 // indicate a bug in this module.
-                let merkle_value = proof_node_codec::calculate_merkle_value(
-                    proof_node_codec::Decoded {
+                let merkle_value = trie_node::calculate_merkle_value(
+                    trie_node::Decoded {
                         partial_key: current.partial_key(),
                         children: core::array::from_fn(|child_idx| {
                             current
@@ -385,7 +385,7 @@ impl CalcInner {
                                 )
                                 .map(|child| child.merkle_value.as_ref().unwrap())
                         }),
-                        storage_value: proof_node_codec::StorageValue::None,
+                        storage_value: trie_node::StorageValue::None,
                     },
                     current.is_root_node(),
                 )
@@ -479,8 +479,8 @@ impl StorageValue {
         // Calculate the Merkle value of the node.
         // `calculate_merkle_value` can only return an error if the node is invalid, which would
         // indicate a serious bug in this module.
-        let merkle_value = proof_node_codec::calculate_merkle_value(
-            proof_node_codec::Decoded {
+        let merkle_value = trie_node::calculate_merkle_value(
+            trie_node::Decoded {
                 partial_key: current.partial_key(),
                 children: core::array::from_fn(|child_idx| {
                     current
@@ -490,10 +490,10 @@ impl StorageValue {
                         .map(|child| child.merkle_value.as_ref().unwrap())
                 }),
                 storage_value: match &hashed_storage_value {
-                    None => proof_node_codec::StorageValue::Unhashed(
+                    None => trie_node::StorageValue::Unhashed(
                         stored_value.as_ref().unwrap().0.as_ref(),
                     ),
-                    Some(hashed_storage_value) => proof_node_codec::StorageValue::Hashed(
+                    Some(hashed_storage_value) => trie_node::StorageValue::Hashed(
                         <&[u8; 32]>::try_from(hashed_storage_value.as_bytes()).unwrap(),
                     ),
                 },

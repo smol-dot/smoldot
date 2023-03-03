@@ -110,7 +110,7 @@ pub mod calculate_root;
 pub mod prefix_proof;
 pub mod proof_decode;
 pub mod proof_encode;
-pub mod proof_node_codec;
+pub mod trie_node;
 pub mod trie_structure;
 
 pub use nibble::{
