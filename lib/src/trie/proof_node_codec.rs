@@ -29,9 +29,13 @@ use core::{cmp, fmt, iter, slice};
 /// >           these storage value and children values.
 ///
 /// This encoding is independent of the trie version.
-pub fn encode(
-    decoded: Decoded<'_, impl ExactSizeIterator<Item = nibble::Nibble> + Clone>,
-) -> Result<impl Iterator<Item = impl AsRef<[u8]> + '_ + Clone> + Clone + '_, EncodeError> {
+pub fn encode<'a>(
+    decoded: Decoded<
+        'a,
+        impl ExactSizeIterator<Item = nibble::Nibble> + Clone,
+        impl AsRef<[u8]> + Clone + 'a,
+    >,
+) -> Result<impl Iterator<Item = impl AsRef<[u8]> + 'a + Clone> + Clone + 'a, EncodeError> {
     // The return value is composed of three parts:
     // - Before the storage value.
     // - The storage value (which can be empty).
@@ -112,7 +116,7 @@ pub fn encode(
         .into_iter()
         .flatten()
         .flat_map(|child_value| {
-            let size = crate::util::encode_scale_compact_usize(child_value.len());
+            let size = crate::util::encode_scale_compact_usize(child_value.as_ref().len());
             [either::Left(size), either::Right(child_value)].into_iter()
         });
 
@@ -135,7 +139,11 @@ pub enum EncodeError {
 /// This is a convenient wrapper around [`encode`]. See the documentation of [`encode`] for more
 /// details.
 pub fn encode_to_vec(
-    decoded: Decoded<'_, impl ExactSizeIterator<Item = nibble::Nibble> + Clone>,
+    decoded: Decoded<
+        '_,
+        impl ExactSizeIterator<Item = nibble::Nibble> + Clone,
+        impl AsRef<[u8]> + Clone,
+    >,
 ) -> Result<Vec<u8>, EncodeError> {
     let capacity = decoded.partial_key.len() / 2
         + match decoded.storage_value {
@@ -157,10 +165,138 @@ pub fn encode_to_vec(
     Ok(result)
 }
 
+/// Calculates the Merkle value of the given node.
+///
+/// `is_root_node` must be `true` if the encoded node is the root node of the trie.
+///
+/// This is similar to [`encode`], except that the encoding is then optionally hashed.
+///
+/// Hashing is performed if the encoded value is 32 bytes or more, or if `is_root_node` is `true`.
+/// This is the reason why `is_root_node` must be provided.
+pub fn calculate_merkle_value(
+    decoded: Decoded<
+        '_,
+        impl ExactSizeIterator<Item = nibble::Nibble> + Clone,
+        impl AsRef<[u8]> + Clone,
+    >,
+    is_root_node: bool,
+) -> Result<MerkleValueOutput, EncodeError> {
+    // The partial key can only be empty if the node is the root.
+    debug_assert!(is_root_node || decoded.partial_key.len() != 0);
+
+    /// The Merkle value of a node is defined as either the hash of the node value, or the node value
+    /// itself if it is shorted than 32 bytes (or if we are the root).
+    ///
+    /// This struct serves as a helper to handle these situations. Rather than putting intermediary
+    /// values in buffers then hashing the node value as a whole, we push the elements of the node
+    /// value to this struct which automatically switches to hashing if the value exceeds 32 bytes.
+    enum HashOrInline {
+        Inline(arrayvec::ArrayVec<u8, 31>),
+        Hasher(blake2_rfc::blake2b::Blake2b),
+    }
+
+    impl HashOrInline {
+        /// Adds data to the node value. If this is a [`HashOrInline::Inline`] and the total size would
+        /// go above 32 bytes, then we switch to a hasher.
+        fn update(&mut self, data: &[u8]) {
+            match self {
+                HashOrInline::Inline(curr) => {
+                    if curr.try_extend_from_slice(data).is_err() {
+                        let mut hasher = blake2_rfc::blake2b::Blake2b::new(32);
+                        hasher.update(curr);
+                        hasher.update(data);
+                        *self = HashOrInline::Hasher(hasher);
+                    }
+                }
+                HashOrInline::Hasher(hasher) => {
+                    hasher.update(data);
+                }
+            }
+        }
+
+        fn finalize(self) -> MerkleValueOutput {
+            MerkleValueOutput {
+                inner: match self {
+                    HashOrInline::Inline(b) => MerkleValueOutputInner::Inline(b),
+                    HashOrInline::Hasher(h) => MerkleValueOutputInner::Hasher(h.finalize()),
+                },
+            }
+        }
+    }
+
+    let mut merkle_value_sink = if is_root_node {
+        HashOrInline::Hasher(blake2_rfc::blake2b::Blake2b::new(32))
+    } else {
+        HashOrInline::Inline(arrayvec::ArrayVec::new())
+    };
+
+    for buffer in encode(decoded)? {
+        merkle_value_sink.update(buffer.as_ref());
+    }
+
+    Ok(merkle_value_sink.finalize())
+}
+
+/// Output of the calculation.
+#[derive(Clone)]
+pub struct MerkleValueOutput {
+    inner: MerkleValueOutputInner,
+}
+
+#[derive(Clone)]
+enum MerkleValueOutputInner {
+    Inline(arrayvec::ArrayVec<u8, 31>),
+    Hasher(blake2_rfc::blake2b::Blake2bResult),
+    Bytes(arrayvec::ArrayVec<u8, 32>),
+}
+
+impl MerkleValueOutput {
+    /// Builds a [`MerkleValueOutput`] from a slice of bytes.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `bytes.len() > 32`.
+    ///
+    pub fn from_bytes(bytes: &[u8]) -> MerkleValueOutput {
+        assert!(bytes.len() <= 32);
+        MerkleValueOutput {
+            inner: MerkleValueOutputInner::Bytes({
+                let mut v = arrayvec::ArrayVec::new();
+                v.try_extend_from_slice(bytes).unwrap();
+                v
+            }),
+        }
+    }
+}
+
+impl AsRef<[u8]> for MerkleValueOutput {
+    fn as_ref(&self) -> &[u8] {
+        match &self.inner {
+            MerkleValueOutputInner::Inline(a) => a.as_slice(),
+            MerkleValueOutputInner::Hasher(a) => a.as_bytes(),
+            MerkleValueOutputInner::Bytes(a) => a.as_slice(),
+        }
+    }
+}
+
+impl From<MerkleValueOutput> for [u8; 32] {
+    fn from(output: MerkleValueOutput) -> Self {
+        let mut out = [0; 32];
+        out.copy_from_slice(output.as_ref());
+        out
+    }
+}
+
+impl fmt::Debug for MerkleValueOutput {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(self.as_ref(), f)
+    }
+}
+
 /// Decodes a node value found in a proof into its components.
 ///
 /// This can decode nodes no matter their version.
-pub fn decode(mut node_value: &'_ [u8]) -> Result<Decoded<DecodedPartialKey<'_>>, Error> {
+pub fn decode(mut node_value: &'_ [u8]) -> Result<Decoded<DecodedPartialKey<'_>, &'_ [u8]>, Error> {
     if node_value.is_empty() {
         return Err(Error::Empty);
     }
@@ -307,7 +443,7 @@ pub fn decode(mut node_value: &'_ [u8]) -> Result<Decoded<DecodedPartialKey<'_>>
 
 /// Decoded node value. Returned by [`decode`] or passed as parameter to [`encode`].
 #[derive(Debug, Clone)]
-pub struct Decoded<'a, I> {
+pub struct Decoded<'a, I, C> {
     /// Iterator to the nibbles of the partial key of the node.
     pub partial_key: I,
 
@@ -319,13 +455,13 @@ pub struct Decoded<'a, I> {
     /// - Empty when decoding a compact trie proof.
     /// - Of length inferior to 32, in which case the slice is directly the node value.
     ///
-    pub children: [Option<&'a [u8]>; 16],
+    pub children: [Option<C>; 16],
 
     /// Storage value of this node.
     pub storage_value: StorageValue<'a>,
 }
 
-impl<'a, I> Decoded<'a, I> {
+impl<'a, I, C> Decoded<'a, I, C> {
     /// Returns a bits map of the children that are present, as found in the node value.
     pub fn children_bitmap(&self) -> u16 {
         let mut out = 0u16;
@@ -521,7 +657,7 @@ mod tests {
     fn no_children_no_storage_value() {
         assert!(matches!(
             super::encode(super::Decoded {
-                children: [None; 16],
+                children: [None::<&'static [u8]>; 16],
                 storage_value: super::StorageValue::None,
                 partial_key: core::iter::empty()
             }),
@@ -530,7 +666,7 @@ mod tests {
 
         assert!(matches!(
             super::encode(super::Decoded {
-                children: [None; 16],
+                children: [None::<&'static [u8]>; 16],
                 storage_value: super::StorageValue::None,
                 partial_key: core::iter::once(nibble::Nibble::try_from(2).unwrap())
             }),

@@ -943,7 +943,7 @@ impl<'a, TUd> NodeAccess<'a, TUd> {
     }
 
     /// Returns the partial key of the node.
-    pub fn partial_key(&'_ self) -> impl ExactSizeIterator<Item = Nibble> + '_ {
+    pub fn partial_key(&'_ self) -> impl ExactSizeIterator<Item = Nibble> + Clone + '_ {
         match self {
             NodeAccess::Storage(n) => Either::Left(n.partial_key()),
             NodeAccess::Branch(n) => Either::Right(n.partial_key()),
@@ -1071,7 +1071,7 @@ impl<'a, TUd> StorageNodeAccess<'a, TUd> {
     }
 
     /// Returns the partial key of the node.
-    pub fn partial_key(&'_ self) -> impl ExactSizeIterator<Item = Nibble> + '_ {
+    pub fn partial_key(&'_ self) -> impl ExactSizeIterator<Item = Nibble> + Clone + '_ {
         self.trie
             .nodes
             .get(self.node_index)
@@ -1441,7 +1441,7 @@ impl<'a, TUd> BranchNodeAccess<'a, TUd> {
     }
 
     /// Returns the partial key of the node.
-    pub fn partial_key(&'_ self) -> impl ExactSizeIterator<Item = Nibble> + '_ {
+    pub fn partial_key(&'_ self) -> impl ExactSizeIterator<Item = Nibble> + Clone + '_ {
         self.trie
             .nodes
             .get(self.node_index)
