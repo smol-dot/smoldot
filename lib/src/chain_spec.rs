@@ -487,13 +487,13 @@ pub enum FromGenesisStorageError {
     /// Runtime couldn't be found in the storage.
     RuntimeNotFound,
     /// Error while building the chain information.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     BuildChainInformation(build::Error),
     /// Failed to decode heap pages from the storage.
-    #[display(fmt = "Failed to decode heap pages from the storage: {}", _0)]
+    #[display(fmt = "Failed to decode heap pages from the storage: {_0}")]
     HeapPagesDecode(executor::InvalidHeapPagesError),
     /// Error when initializing the virtual machine.
-    #[display(fmt = "Error when initializing the virtual machine: {}", _0)]
+    #[display(fmt = "Error when initializing the virtual machine: {_0}")]
     VmInitialization(executor::host::NewErr),
     /// Chain specification doesn't contain the list of storage items.
     UnknownStorageItems,
@@ -506,7 +506,7 @@ mod tests {
     #[test]
     fn can_decode_polkadot_genesis() {
         let spec = &include_bytes!("chain_spec/example.json")[..];
-        let specs = ChainSpec::from_json_bytes(&spec).unwrap();
+        let specs = ChainSpec::from_json_bytes(spec).unwrap();
         assert_eq!(specs.id(), "polkadot");
 
         // code_substitutes field
@@ -541,7 +541,7 @@ mod tests {
     #[test]
     fn relay_chain_para_id_either_both_present_or_absent() {
         ChainSpec::from_json_bytes(
-            &r#"{
+            r#"{
             "name": "Test",
             "id": "test",
             "bootNodes": [],
@@ -557,7 +557,7 @@ mod tests {
         .unwrap();
 
         ChainSpec::from_json_bytes(
-            &r#"{
+            r#"{
             "name": "Test",
             "id": "test",
             "bootNodes": [],
@@ -575,7 +575,7 @@ mod tests {
         .unwrap();
 
         ChainSpec::from_json_bytes(
-            &r#"{
+            r#"{
             "name": "Test",
             "id": "test",
             "bootNodes": [],
@@ -593,7 +593,7 @@ mod tests {
         .unwrap();
 
         assert!(ChainSpec::from_json_bytes(
-            &r#"{
+            r#"{
             "name": "Test",
             "id": "test",
             "bootNodes": [],
@@ -610,7 +610,7 @@ mod tests {
         .is_err());
 
         assert!(ChainSpec::from_json_bytes(
-            &r#"{
+            r#"{
             "name": "Test",
             "id": "test",
             "bootNodes": [],

@@ -20,7 +20,10 @@
 use super::*;
 use crate::finality::{grandpa, justification};
 
-use core::{cmp::Ordering, iter};
+use core::{
+    cmp::{self, Ordering},
+    iter,
+};
 
 impl<T> NonFinalizedTree<T> {
     /// Returns a list of blocks (by their height and hash) that need to be finalized before any
@@ -168,13 +171,15 @@ impl<T> NonFinalizedTreeInner<T> {
                 finalized_scheduled_change,
                 finalized_triggered_authorities,
             } => {
-                if target_number == self.finalized_block_header.number {
-                    if *target_hash == self.finalized_block_hash {
-                        return Err(FinalityVerifyError::EqualToFinalized);
+                match target_number.cmp(&self.finalized_block_header.number) {
+                    cmp::Ordering::Equal if *target_hash == self.finalized_block_hash => {
+                        return Err(FinalityVerifyError::EqualToFinalized)
                     }
-                    return Err(FinalityVerifyError::EqualFinalizedHeightButInequalHash);
-                } else if target_number < self.finalized_block_header.number {
-                    return Err(FinalityVerifyError::BelowFinalized);
+                    cmp::Ordering::Equal => {
+                        return Err(FinalityVerifyError::EqualFinalizedHeightButInequalHash)
+                    }
+                    cmp::Ordering::Less => return Err(FinalityVerifyError::BelowFinalized),
+                    _ => {}
                 }
 
                 // Find in the list of non-finalized blocks the one targeted by the justification.
@@ -544,14 +549,14 @@ pub enum JustificationVerifyError {
     /// >           always returned.
     JustificationEngineMismatch,
     /// Error while decoding the justification.
-    #[display(fmt = "Error while decoding the justification: {}", _0)]
+    #[display(fmt = "Error while decoding the justification: {_0}")]
     InvalidJustification(justification::decode::Error),
     /// The justification verification has failed. The justification is invalid and should be
     /// thrown away.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     VerificationFailed(justification::verify::Error),
     /// Error while verifying the finality in the context of the chain.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     FinalityVerify(FinalityVerifyError),
 }
 
@@ -563,7 +568,7 @@ pub enum CommitVerifyError {
     /// Error while decoding the commit.
     InvalidCommit,
     /// Error while verifying the finality in the context of the chain.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     FinalityVerify(FinalityVerifyError),
     /// Not enough blocks are known by the tree to verify this commit.
     ///
@@ -575,7 +580,7 @@ pub enum CommitVerifyError {
         target_block_number: u64,
     },
     /// The commit verification has failed. The commit is invalid and should be thrown away.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     VerificationFailed(grandpa::commit::verify::Error),
 }
 
@@ -591,10 +596,7 @@ pub enum FinalityVerifyError {
     /// The target block height is strictly inferior to the finalized block height.
     BelowFinalized,
     /// Finality proof targets a block that isn't in the chain.
-    #[display(
-        fmt = "Justification targets a block (#{}) that isn't in the chain.",
-        block_number
-    )]
+    #[display(fmt = "Justification targets a block (#{block_number}) that isn't in the chain.")]
     UnknownTargetBlock {
         /// Number of the block that isn't in the chain.
         block_number: u64,

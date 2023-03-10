@@ -66,7 +66,7 @@ use hashbrown::HashMap;
 use smoldot::{
     chain::fork_tree,
     chain_spec,
-    executor::{host, read_only_runtime_host},
+    executor::{host, runtime_host},
     header,
     json_rpc::{self, methods, requests_subscriptions},
     libp2p::{multiaddr, PeerId},
@@ -388,7 +388,7 @@ pub enum HandleRpcError {
         json_rpc_request: String,
     },
     /// The request isn't a valid JSON-RPC request.
-    #[display(fmt = "The request isn't a valid JSON-RPC request: {}", _0)]
+    #[display(fmt = "The request isn't a valid JSON-RPC request: {_0}")]
     MalformedJsonRpc(json_rpc::parse::ParseError),
 }
 
@@ -404,15 +404,14 @@ impl HandleRpcError {
         };
 
         match json_rpc::parse::parse_call(&json_rpc_request) {
-            Ok(call) => match call.id_json {
-                Some(id) => Some(json_rpc::parse::build_error_response(
-                    id,
-                    json_rpc::parse::ErrorResponse::ServerError(-32000, "Too busy"),
-                    None,
-                )),
-                None => None,
-            },
-            Err(_) => None,
+            Ok(json_rpc::parse::Call {
+                id_json: Some(id), ..
+            }) => Some(json_rpc::parse::build_error_response(
+                id,
+                json_rpc::parse::ErrorResponse::ServerError(-32000, "Too busy"),
+                None,
+            )),
+            Ok(json_rpc::parse::Call { id_json: None, .. }) | Err(_) => None,
         }
     }
 }
@@ -848,12 +847,8 @@ impl<TPlat: Platform> Background<TPlat> {
                 .await
             }
             methods::MethodCall::author_unwatchExtrinsic { subscription } => {
-                self.author_unwatch_extrinsic(
-                    request_id,
-                    &state_machine_request_id,
-                    &*subscription,
-                )
-                .await;
+                self.author_unwatch_extrinsic(request_id, &state_machine_request_id, &subscription)
+                    .await;
             }
             methods::MethodCall::chain_getBlock { hash } => {
                 self.chain_get_block(request_id, &state_machine_request_id, hash)
@@ -974,7 +969,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.state_unsubscribe_runtime_version(
                     request_id,
                     &state_machine_request_id,
-                    &*subscription,
+                    &subscription,
                 )
                 .await;
             }
@@ -986,7 +981,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.state_unsubscribe_storage(
                     request_id,
                     &state_machine_request_id,
-                    &*subscription,
+                    &subscription,
                 )
                 .await;
             }
@@ -1047,7 +1042,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_unstable_stop_body(
                     request_id,
                     &state_machine_request_id,
-                    &*subscription,
+                    &subscription,
                 )
                 .await;
             }
@@ -1059,7 +1054,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_unstable_body(
                     request_id,
                     &state_machine_request_id,
-                    &*follow_subscription,
+                    &follow_subscription,
                     hash,
                     network_config,
                 )
@@ -1075,9 +1070,9 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_call(
                     request_id,
                     &state_machine_request_id,
-                    &*follow_subscription,
+                    &follow_subscription,
                     hash,
-                    &*function,
+                    &function,
                     call_parameters,
                     network_config,
                 )
@@ -1087,7 +1082,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_unstable_stop_call(
                     request_id,
                     &state_machine_request_id,
-                    &*subscription,
+                    &subscription,
                 )
                 .await;
             }
@@ -1095,7 +1090,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_unstable_stop_storage(
                     request_id,
                     &state_machine_request_id,
-                    &*subscription,
+                    &subscription,
                 )
                 .await;
             }
@@ -1109,7 +1104,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_storage(
                     request_id,
                     &state_machine_request_id,
-                    &*follow_subscription,
+                    &follow_subscription,
                     hash,
                     key,
                     child_key,
@@ -1132,7 +1127,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_unstable_header(
                     request_id,
                     &state_machine_request_id,
-                    &*follow_subscription,
+                    &follow_subscription,
                     hash,
                 )
                 .await;
@@ -1144,7 +1139,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_unstable_unpin(
                     request_id,
                     &state_machine_request_id,
-                    &*follow_subscription,
+                    &follow_subscription,
                     hash,
                 )
                 .await;
@@ -1155,7 +1150,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_unstable_unfollow(
                     request_id,
                     &state_machine_request_id,
-                    &*follow_subscription,
+                    &follow_subscription,
                 )
                 .await;
             }
@@ -1180,7 +1175,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::sudo_unstable_p2pDiscover { multiaddr } => {
-                self.sudo_unstable_p2p_discover(request_id, &state_machine_request_id, &*multiaddr)
+                self.sudo_unstable_p2p_discover(request_id, &state_machine_request_id, &multiaddr)
                     .await;
             }
             methods::MethodCall::sudo_unstable_version {} => {
@@ -1200,7 +1195,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.transaction_unstable_unwatch(
                     request_id,
                     &state_machine_request_id,
-                    &*subscription,
+                    &subscription,
                 )
                 .await;
             }
@@ -1402,7 +1397,7 @@ impl<TPlat: Platform> Background<TPlat> {
         max_parallel: NonZeroU32,
     ) -> Result<Vec<Option<Vec<u8>>>, StorageQueryError> {
         let (state_trie_root_hash, block_number) = self
-            .state_trie_root_hash(&hash)
+            .state_trie_root_hash(hash)
             .await
             .map_err(StorageQueryError::FindStorageRootHashError)?;
 
@@ -1438,7 +1433,7 @@ impl<TPlat: Platform> Background<TPlat> {
             // The runtime service has the block pinned, meaning that we can ask the runtime
             // service to perform the call.
             self.runtime_service
-                .pinned_block_runtime_lock(cache_lock.subscription_id.clone().unwrap(), block_hash)
+                .pinned_block_runtime_lock(cache_lock.subscription_id.unwrap(), block_hash)
                 .await
                 .ok()
         } else {
@@ -1612,10 +1607,13 @@ impl<TPlat: Platform> Background<TPlat> {
         // The virtual machine might access the storage.
         // TODO: finish doc
 
-        let mut runtime_call = match read_only_runtime_host::run(read_only_runtime_host::Config {
+        let mut runtime_call = match runtime_host::run(runtime_host::Config {
             virtual_machine,
             function_to_call,
             parameter: call_parameters,
+            top_trie_root_calculation_cache: None,
+            storage_top_trie_changes: Default::default(),
+            offchain_storage_changes: Default::default(),
         }) {
             Ok(vm) => vm,
             Err((err, prototype)) => {
@@ -1626,41 +1624,43 @@ impl<TPlat: Platform> Background<TPlat> {
 
         loop {
             match runtime_call {
-                read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
                     let output = success.virtual_machine.value().as_ref().to_vec();
                     runtime_call_lock.unlock(success.virtual_machine.into_prototype());
                     break Ok((output, runtime_api_version));
                 }
-                read_only_runtime_host::RuntimeHostVm::Finished(Err(error)) => {
+                runtime_host::RuntimeHostVm::Finished(Err(error)) => {
                     runtime_call_lock.unlock(error.prototype);
-                    break Err(RuntimeCallError::ReadOnlyRuntime(error.detail));
+                    break Err(RuntimeCallError::RuntimeError(error.detail));
                 }
-                read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
+                runtime_host::RuntimeHostVm::StorageGet(get) => {
                     let storage_value = runtime_call_lock.storage_entry(get.key().as_ref());
                     let storage_value = match storage_value {
                         Ok(v) => v,
                         Err(err) => {
                             runtime_call_lock.unlock(
-                                read_only_runtime_host::RuntimeHostVm::StorageGet(get)
-                                    .into_prototype(),
+                                runtime_host::RuntimeHostVm::StorageGet(get).into_prototype(),
                             );
                             break Err(RuntimeCallError::Call(err));
                         }
                     };
-                    runtime_call = get.inject_value(storage_value.map(|(v, _)| iter::once(v)));
+                    runtime_call =
+                        get.inject_value(storage_value.map(|(val, vers)| (iter::once(val), vers)));
                 }
-                read_only_runtime_host::RuntimeHostVm::NextKey(nk) => {
+                runtime_host::RuntimeHostVm::NextKey(nk) => {
                     // TODO:
-                    runtime_call_lock.unlock(
-                        read_only_runtime_host::RuntimeHostVm::NextKey(nk).into_prototype(),
-                    );
+                    runtime_call_lock
+                        .unlock(runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
                     break Err(RuntimeCallError::NextKeyForbidden);
                 }
-                read_only_runtime_host::RuntimeHostVm::StorageRoot(storage_root) => {
-                    runtime_call = storage_root.resume(runtime_call_lock.block_storage_root());
-                }
-                read_only_runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
+                runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
                     runtime_call = sig.verify_and_resume();
+                }
+                runtime_host::RuntimeHostVm::PrefixKeys(pk) => {
+                    // TODO:
+                    runtime_call_lock
+                        .unlock(runtime_host::RuntimeHostVm::PrefixKeys(pk).into_prototype());
+                    break Err(RuntimeCallError::PrefixKeysForbidden);
                 }
             }
         }
@@ -1670,10 +1670,10 @@ impl<TPlat: Platform> Background<TPlat> {
 #[derive(Debug, derive_more::Display)]
 enum StorageQueryError {
     /// Error while finding the storage root hash of the requested block.
-    #[display(fmt = "Failed to obtain block state trie root: {}", _0)]
+    #[display(fmt = "Failed to obtain block state trie root: {_0}")]
     FindStorageRootHashError(StateTrieRootHashError),
     /// Error while retrieving the storage item from other nodes.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     StorageRetrieval(sync_service::StorageQueryError),
 }
 
@@ -1681,12 +1681,13 @@ enum StorageQueryError {
 #[derive(Debug, derive_more::Display, Clone)]
 enum RuntimeCallError {
     /// Error while finding the storage root hash of the requested block.
-    #[display(fmt = "Failed to obtain block state trie root: {}", _0)]
+    #[display(fmt = "Failed to obtain block state trie root: {_0}")]
     FindStorageRootHashError(StateTrieRootHashError),
     Call(runtime_service::RuntimeCallError),
     StartError(host::StartErr),
-    ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
+    RuntimeError(runtime_host::ErrorDetail),
     NextKeyForbidden,
+    PrefixKeysForbidden,
     /// Required runtime API isn't supported by the runtime.
     ApiNotFound,
     /// Version requirement of runtime API isn't supported.

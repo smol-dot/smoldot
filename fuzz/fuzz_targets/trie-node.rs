@@ -18,9 +18,9 @@
 #![no_main]
 
 libfuzzer_sys::fuzz_target!(|data: &[u8]| {
-    if let Ok(decoded) = smoldot::trie::proof_node_codec::decode(data) {
+    if let Ok(decoded) = smoldot::trie::trie_node::decode(data) {
         assert_eq!(
-            smoldot::trie::proof_node_codec::encode(decoded.clone())
+            smoldot::trie::trie_node::encode(decoded.clone())
                 .unwrap()
                 .fold(Vec::new(), |mut a, b| {
                     a.extend_from_slice(b.as_ref());

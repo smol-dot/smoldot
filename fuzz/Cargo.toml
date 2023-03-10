@@ -86,8 +86,8 @@ test = false
 doc = false
 
 [[bin]]
-name = "proof-node-codec"
-path = "fuzz_targets/proof-node-codec.rs"
+name = "trie-node"
+path = "fuzz_targets/trie-node.rs"
 test = false
 doc = false
 

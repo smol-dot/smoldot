@@ -150,7 +150,7 @@ impl fmt::Debug for SuccessVirtualMachine {
 
 /// Error that can happen during the execution.
 #[derive(Debug, derive_more::Display)]
-#[display(fmt = "{}", detail)]
+#[display(fmt = "{detail}")]
 pub struct Error {
     /// Exact error that happened.
     pub detail: ErrorDetail,
@@ -162,7 +162,7 @@ pub struct Error {
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum ErrorDetail {
     /// Error while executing the Wasm virtual machine.
-    #[display(fmt = "Error while executing Wasm VM: {}\n{:?}", error, logs)]
+    #[display(fmt = "Error while executing Wasm VM: {error}\n{logs:?}")]
     WasmVm {
         /// Error that happened.
         error: host::Error,
@@ -951,10 +951,7 @@ impl Inner {
                             Ok(())
                         }
                     }
-                    match fmt::write(
-                        &mut WriterWithMax(&mut self.logs),
-                        format_args!("{}\n", req),
-                    ) {
+                    match fmt::write(&mut WriterWithMax(&mut self.logs), format_args!("{req}\n")) {
                         Ok(()) => {}
                         Err(fmt::Error) => {
                             return RuntimeHostVm::Finished(Err(Error {

@@ -26,7 +26,7 @@ use hashbrown::HashMap;
 /// Error that can happen when deserializing the data.
 #[derive(Debug, derive_more::Display)]
 pub(super) enum DeserializeError {
-    #[display(fmt = "Failed to decode header: {}", _0)]
+    #[display(fmt = "Failed to decode header: {_0}")]
     Header(header::Error),
     ConsensusAlgorithmsMismatch,
     /// Some Babe-related information is missing.
@@ -503,7 +503,7 @@ fn serialize_bytes<S: serde::Serializer>(data: &[u8], serializer: S) -> Result<S
     impl<'a> fmt::Display for Writer<'a> {
         fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
             for byte in self.0 {
-                write!(f, "{:02x}", byte)?;
+                write!(f, "{byte:02x}")?;
             }
             Ok(())
         }

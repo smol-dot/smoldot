@@ -789,7 +789,7 @@ impl<TPlat: Platform> Task<TPlat> {
                                 .network_service
                                 .clone()
                                 .send_block_announce(
-                                    &source_peer_id,
+                                    source_peer_id,
                                     self.network_chain_index,
                                     &scale_encoded_header,
                                     is_new_best,
@@ -1080,16 +1080,13 @@ impl<TPlat: Platform> Task<TPlat> {
                 let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
                 let decoded = announce.decode();
 
-                match header::decode(
-                    &decoded.scale_encoded_header,
-                    self.sync.block_number_bytes(),
-                ) {
+                match header::decode(decoded.scale_encoded_header, self.sync.block_number_bytes()) {
                     Ok(decoded_header) => {
                         log::debug!(
                             target: &self.log_target,
                             "Sync <= BlockAnnounce(sender={}, hash={}, is_best={}, parent_hash={})",
                             peer_id,
-                            HashDisplay(&header::hash_from_scale_encoded_header(&decoded.scale_encoded_header)),
+                            HashDisplay(&header::hash_from_scale_encoded_header(decoded.scale_encoded_header)),
                             decoded.is_best,
                             HashDisplay(decoded_header.parent_hash)
                         );
@@ -1099,7 +1096,7 @@ impl<TPlat: Platform> Task<TPlat> {
                             target: &self.log_target,
                             "Sync <= BlockAnnounce(sender={}, hash={}, is_best={}, parent_hash=<unknown>)",
                             peer_id,
-                            HashDisplay(&header::hash_from_scale_encoded_header(&decoded.scale_encoded_header)),
+                            HashDisplay(&header::hash_from_scale_encoded_header(decoded.scale_encoded_header)),
                             decoded.is_best,
                         );
 

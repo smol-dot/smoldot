@@ -2151,7 +2151,7 @@ pub enum ShutdownPeer {
 #[derive(Debug, derive_more::Display)]
 pub enum ShutdownCause {
     /// Problem on the connection level.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Connection(collection::ShutdownCause),
     /// Remote hasn't responded in time to a ping.
     OutPingTimeout,

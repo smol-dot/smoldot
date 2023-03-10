@@ -137,9 +137,7 @@ impl smoldot_light::platform::Platform for Platform {
         };
 
         async move {
-            if let Err(err) = result {
-                return Err(err);
-            }
+            result?;
 
             let mut lock = loop {
                 let something_happened = {

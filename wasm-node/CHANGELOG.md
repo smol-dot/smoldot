@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.13 - 2022-03-03
+
 ## Added
 
 - Add support for the `ext_hashing_keccak_512_version_1` host function. ([#231](https://github.com/smol-dot/smoldot/pull/231))
@@ -9,9 +11,11 @@
 ## Changed
 
 - When a full node refuses an outbound transactions or GrandPa substream even though a block announces substream has been established, smoldot now tries to reopen the failed substream. This bypasses a Substrate issue. ([#240](https://github.com/smol-dot/smoldot/pull/240))
+- Runtime functions called through the JSON-RPC function `state_call` are now allowed to modify the storage of the chain. These storage modifications are silently discarded. Previously, a JSON-RPC error was returned. ([#259](https://github.com/smol-dot/smoldot/pull/259))
 
 ## Fixed
 
+- Fix panic when connecting to a chain that hasn't finalized any block yet. ([#258](https://github.com/smol-dot/smoldot/pull/258))
 - Fix the signatures of the `ext_default_child_storage_read_version_1` and `ext_default_child_storage_root_version_2` host functions. This would lead to a warning about these function being unresolved. ([#244](https://github.com/smol-dot/smoldot/pull/244))
 - Fix panic when the input data of a Wasm function call is larger than a Wasm page. ([#218](https://github.com/smol-dot/smoldot/pull/218))
 - Subscriptions to the `chain_subscribeAllHeads` JSON-RPC function now generate notifications named `chain_allHead`, like in Substrate. They were erroneously named `chain_newHead`. ([#227](https://github.com/smol-dot/smoldot/pull/227))

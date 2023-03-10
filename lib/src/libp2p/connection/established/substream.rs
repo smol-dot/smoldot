@@ -1480,10 +1480,10 @@ pub enum InboundTy {
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum InboundError {
     /// Error during protocol negotiation.
-    #[display(fmt = "Protocol negotiation error: {}", _0)]
+    #[display(fmt = "Protocol negotiation error: {_0}")]
     NegotiationError(multistream_select::Error),
     /// Error while receiving an inbound request.
-    #[display(fmt = "Error receiving inbound request: {}", _0)]
+    #[display(fmt = "Error receiving inbound request: {_0}")]
     RequestInLebError(leb128::FramedError),
     /// Unexpected end of file while receiving an inbound request.
     RequestInExpectedEof,
@@ -1522,10 +1522,10 @@ pub enum RequestError {
     /// detected a protocol error.
     SubstreamReset,
     /// Error during protocol negotiation.
-    #[display(fmt = "Protocol negotiation error: {}", _0)]
+    #[display(fmt = "Protocol negotiation error: {_0}")]
     NegotiationError(multistream_select::Error),
     /// Error while receiving the response.
-    #[display(fmt = "Error while receiving response: {}", _0)]
+    #[display(fmt = "Error while receiving response: {_0}")]
     ResponseLebError(leb128::FramedError),
 }
 
@@ -1561,12 +1561,12 @@ pub enum NotificationsOutErr {
     /// Remote has indicated that it doesn't support the requested protocol.
     ProtocolNotAvailable,
     /// Error during the multistream-select handshake.
-    #[display(fmt = "Protocol negotiation error: {}", _0)]
+    #[display(fmt = "Protocol negotiation error: {_0}")]
     NegotiationError(multistream_select::Error),
     /// Substream has been reset during the negotiation.
     SubstreamReset,
     /// Error while receiving the remote's handshake.
-    #[display(fmt = "Error while receiving remote handshake: {}", _0)]
+    #[display(fmt = "Error while receiving remote handshake: {_0}")]
     HandshakeRecvError(leb128::FramedError),
 }
 
@@ -1574,7 +1574,7 @@ pub enum NotificationsOutErr {
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum NotificationsInClosedErr {
     /// Error in the protocol.
-    #[display(fmt = "Error while receiving notification: {}", _0)]
+    #[display(fmt = "Error while receiving notification: {_0}")]
     ProtocolError(leb128::FramedError),
     /// Substream has been reset.
     SubstreamReset,

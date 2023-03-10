@@ -1222,6 +1222,17 @@ pub enum Event {
         announce: EncodedBlockAnnounce,
     },
 
+    /// Received a  GrandPa neighbor packet from the network. This contains an update to the
+    /// finality state of the given peer.
+    GrandpaNeighborPacket {
+        /// Identity of the sender of the message.
+        peer_id: PeerId,
+        /// Index of the chain the message relates to.
+        chain_index: usize,
+        /// State of the remote.
+        state: GrandpaState,
+    },
+
     /// Received a GrandPa commit message from the network.
     GrandpaCommitMessage {
         /// Identity of the sender of the message.
@@ -1290,7 +1301,7 @@ pub enum SlotTy {
 #[derive(Debug, derive_more::Display)]
 pub enum ProtocolError {
     /// Error in an incoming substream.
-    #[display(fmt = "Error in an incoming substream: {}", _0)]
+    #[display(fmt = "Error in an incoming substream: {_0}")]
     InboundError(InboundError),
     /// Error while decoding the handshake of the block announces substream.
     #[display(
@@ -1299,14 +1310,14 @@ pub enum ProtocolError {
     )]
     BadBlockAnnouncesHandshake(protocol::BlockAnnouncesHandshakeDecodeError),
     /// Error while decoding a received block announce.
-    #[display(fmt = "Error while decoding a received block announce: {}", _0)]
+    #[display(fmt = "Error while decoding a received block announce: {_0}")]
     BadBlockAnnounce(protocol::DecodeBlockAnnounceError),
     /// Error while decoding a received Grandpa notification.
-    #[display(fmt = "Error while decoding a received Grandpa notification: {}", _0)]
+    #[display(fmt = "Error while decoding a received Grandpa notification: {_0}")]
     BadGrandpaNotification(protocol::DecodeGrandpaNotificationError),
     /// Received an invalid identify request.
     BadIdentifyRequest,
     /// Error while decoding a received blocks request.
-    #[display(fmt = "Error while decoding a received blocks request: {}", _0)]
+    #[display(fmt = "Error while decoding a received blocks request: {_0}")]
     BadBlocksRequest(protocol::DecodeBlockRequestError),
 }

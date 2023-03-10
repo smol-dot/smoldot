@@ -87,13 +87,13 @@ pub enum InProgress {
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
     /// Error while starting the Wasm virtual machine.
-    #[display(fmt = "While calling {:?}: {}", call, error)]
+    #[display(fmt = "While calling {call:?}: {error}")]
     WasmStart {
         call: RuntimeCall,
         error: host::StartErr,
     },
     /// Error while running the Wasm virtual machine.
-    #[display(fmt = "While calling {:?}: {}", call, error)]
+    #[display(fmt = "While calling {call:?}: {error}")]
     WasmVm {
         call: RuntimeCall,
         error: read_only_runtime_host::ErrorDetail,
@@ -113,7 +113,7 @@ pub enum Error {
     /// Failed to decode the output of the `GrandpaApi_current_set_id` runtime call.
     GrandpaCurrentSetIdOutputDecode,
     /// The combination of the information retrieved from the runtime doesn't make sense together.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     InvalidChainInformation(chain_information::ValidityError),
     /// Multiple consensus algorithms have been detected.
     MultipleConsensusAlgorithms,
@@ -379,7 +379,7 @@ impl ChainInformationBuild {
             grandpa_current_set_id,
         ]
         .into_iter()
-        .filter_map(|c| c)
+        .flatten()
     }
 
     fn start_next_call(mut inner: ChainInformationBuildInner) -> Self {
@@ -678,7 +678,7 @@ impl ChainInformationBuild {
                     call = get_root.resume(match &inner.finalized_block_header {
                         ConfigFinalizedBlockHeader::Genesis {
                             state_trie_root_hash,
-                        } => &state_trie_root_hash,
+                        } => state_trie_root_hash,
                         ConfigFinalizedBlockHeader::NonGenesis { header, .. } => &header.state_root,
                     })
                 }
@@ -748,7 +748,7 @@ fn decode_aura_authorities_output(
 ) -> Result<Vec<header::AuraAuthority>, Error> {
     match header::AuraAuthoritiesIter::decode(scale_encoded) {
         Ok(iter) => Ok(iter.map(header::AuraAuthority::from).collect::<Vec<_>>()),
-        Err(_) => return Err(Error::AuraSlotDurationOutputDecode),
+        Err(_) => Err(Error::AuraSlotDurationOutputDecode),
     }
 }
 
@@ -940,7 +940,7 @@ fn decode_grandpa_authorities_output(
 fn decode_grandpa_current_set_id_output(bytes: &[u8]) -> Result<u64, Error> {
     <[u8; 8]>::try_from(bytes)
         .ok()
-        .map(|b| u64::from_le_bytes(b))
+        .map(u64::from_le_bytes)
         .ok_or(Error::GrandpaCurrentSetIdOutputDecode)
 }
 

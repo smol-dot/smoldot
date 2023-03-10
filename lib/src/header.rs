@@ -189,7 +189,7 @@ pub enum Error {
     /// Error while decoding a digest item.
     DigestItemDecodeError,
     /// Digest log item with an unrecognized type.
-    #[display(fmt = "Digest log with an unrecognized type {}", _0)]
+    #[display(fmt = "Digest log with an unrecognized type {_0}")]
     UnknownDigestLogType(u8),
     /// Found a seal that isn't the last item in the list.
     SealIsntLastItem,
@@ -532,7 +532,7 @@ impl<'a> DigestRef<'a> {
 
                 let mut iter = LogsIter {
                     inner: LogsIterInner::Undecoded {
-                        pointer: *digest,
+                        pointer: digest,
                         remaining_len: *digest_logs_len,
                         block_number_bytes: *block_number_bytes,
                     },
@@ -958,7 +958,7 @@ impl<'a> Iterator for LogsIter<'a> {
                 }
 
                 // Validity is guaranteed when the `DigestRef` is constructed.
-                let (item, new_pointer) = decode_item(*pointer, *block_number_bytes).unwrap();
+                let (item, new_pointer) = decode_item(pointer, *block_number_bytes).unwrap();
                 *pointer = new_pointer;
                 *remaining_len -= 1;
 

@@ -392,7 +392,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                                 };
 
                                 let parablock_hash =
-                                    header::hash_from_scale_encoded_header(&parablock);
+                                    header::hash_from_scale_encoded_header(parablock);
 
                                 if let Some((_, entry)) =
                                     list.iter_mut().find(|(h, _)| *h == parablock_hash)
@@ -406,7 +406,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                                         .ancestors(relay_block.id)
                                         .find_map(|idx| {
                                             let hash = header::hash_from_scale_encoded_header(
-                                                &runtime_subscription
+                                                runtime_subscription
                                                     .async_tree
                                                     .block_async_user_data(idx)
                                                     .unwrap()
@@ -422,7 +422,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                                         .or_else(|| {
                                             let finalized_parahash =
                                                 header::hash_from_scale_encoded_header(
-                                                    &finalized_parahead,
+                                                    finalized_parahead,
                                                 );
                                             if finalized_parahash != parablock_hash {
                                                 Some(finalized_parahash)
@@ -548,10 +548,10 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                 let local_id = *self.sync_sources_map.get(&peer_id).unwrap();
                 let decoded = announce.decode();
                 if let Ok(decoded_header) =
-                    header::decode(&decoded.scale_encoded_header, self.block_number_bytes)
+                    header::decode(decoded.scale_encoded_header, self.block_number_bytes)
                 {
                     let decoded_header_hash =
-                        header::hash_from_scale_encoded_header(&decoded.scale_encoded_header);
+                        header::hash_from_scale_encoded_header(decoded.scale_encoded_header);
                     self.sync_sources.add_known_block(
                         local_id,
                         decoded_header.number,
@@ -824,7 +824,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                             .async_tree
                             .best_block_index()
                             .map(|(_, b)| b.as_ref().unwrap())
-                            .unwrap_or(&finalized_parahead),
+                            .unwrap_or(finalized_parahead),
                     );
 
                     if runtime_subscription.reported_best_parahead_hash.as_ref() != Some(&parahash)
@@ -919,7 +919,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                     }
 
                     let parent_hash = header::hash_from_scale_encoded_header(
-                        &runtime_subscription
+                        runtime_subscription
                             .async_tree
                             .parent(block_index)
                             .map(|idx| {
@@ -1190,23 +1190,20 @@ async fn parahead<TPlat: Platform>(
 #[derive(Debug, derive_more::Display)]
 enum ParaheadError {
     /// Error while performing call request over the network.
-    #[display(fmt = "Error while performing call request over the network: {}", _0)]
+    #[display(fmt = "Error while performing call request over the network: {_0}")]
     Call(runtime_service::RuntimeCallError),
     /// Error while starting virtual machine to verify call proof.
-    #[display(
-        fmt = "Error while starting virtual machine to verify call proof: {}",
-        _0
-    )]
+    #[display(fmt = "Error while starting virtual machine to verify call proof: {_0}")]
     StartError(host::StartErr),
     /// Error during the execution of the virtual machine to verify call proof.
-    #[display(fmt = "Error during the call proof verification: {}", _0)]
+    #[display(fmt = "Error during the call proof verification: {_0}")]
     ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
     /// Parachain doesn't have a core in the relay chain.
     NoCore,
     /// Error while decoding the output of the call.
     ///
     /// This indicates some kind of incompatibility between smoldot and the relay chain.
-    #[display(fmt = "Error while decoding the output of the call: {}", _0)]
+    #[display(fmt = "Error while decoding the output of the call: {_0}")]
     InvalidRuntimeOutput(para::Error),
     /// Fetching following keys is not supported by call proofs.
     NextKeyForbidden,

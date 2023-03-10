@@ -785,14 +785,14 @@ pub enum ExecOutcome {
 
 /// Opaque error that happened during execution, such as an `unreachable` instruction.
 #[derive(Debug, derive_more::Display, Clone)]
-#[display(fmt = "{}", _0)]
+#[display(fmt = "{_0}")]
 pub struct Trap(String);
 
 /// Error that can happen when initializing a [`VirtualMachinePrototype`].
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum NewErr {
     /// Failed to resolve a function imported by the module.
-    #[display(fmt = "Unresolved function `{}`:`{}`", module_name, function)]
+    #[display(fmt = "Unresolved function `{module_name}`:`{function}`")]
     UnresolvedFunctionImport {
         /// Name of the function that was unresolved.
         function: String,
@@ -820,7 +820,7 @@ pub enum NewErr {
     /// Other error. This error is unfortunately necessary due to the underlying implementation
     /// returning an opaque error without explaining what can error.
     // TODO: remove as too imprecise?
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Other(String),
 }
 
@@ -848,7 +848,7 @@ pub enum StartErr {
 
 /// Opaque error indicating an error while parsing or compiling the WebAssembly code.
 #[derive(Debug, derive_more::Display, Clone)]
-#[display(fmt = "{}", _0)]
+#[display(fmt = "{_0}")]
 pub struct ModuleError(String);
 
 /// Error while reading memory.
@@ -863,11 +863,7 @@ pub enum RunErr {
     #[display(fmt = "State machine is poisoned")]
     Poisoned,
     /// Passed a wrong value back.
-    #[display(
-        fmt = "Expected value of type {:?} but got {:?} instead",
-        expected,
-        obtained
-    )]
+    #[display(fmt = "Expected value of type {expected:?} but got {obtained:?} instead")]
     BadValueTy {
         /// Type of the value that was expected.
         expected: Option<ValueType>,
