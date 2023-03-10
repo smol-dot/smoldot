@@ -193,6 +193,7 @@ pub fn build_block(config: Config) -> BlockBuild {
         top_trie_root_calculation_cache: config.top_trie_root_calculation_cache,
         storage_top_trie_changes: Default::default(),
         offchain_storage_changes: Default::default(),
+        max_log_level: Default::default(),
     });
 
     let vm = match init_result {
@@ -330,6 +331,7 @@ impl BlockBuild {
                         ),
                         storage_top_trie_changes: success.storage_top_trie_changes,
                         offchain_storage_changes: success.offchain_storage_changes,
+                        max_log_level: Default::default(),
                     });
 
                     inner = Inner::Runtime(match init_result {
@@ -523,6 +525,7 @@ impl InherentExtrinsics {
             top_trie_root_calculation_cache: Some(self.top_trie_root_calculation_cache),
             storage_top_trie_changes: self.storage_top_trie_changes,
             offchain_storage_changes: self.offchain_storage_changes,
+            max_log_level: Default::default(),
         });
 
         let vm = match init_result {
@@ -556,6 +559,7 @@ impl ApplyExtrinsic {
             top_trie_root_calculation_cache: Some(self.top_trie_root_calculation_cache),
             storage_top_trie_changes: self.storage_top_trie_changes,
             offchain_storage_changes: self.offchain_storage_changes,
+            max_log_level: Default::default(),
         });
 
         self.shared.stage = Stage::ApplyExtrinsic(extrinsic);
@@ -579,6 +583,7 @@ impl ApplyExtrinsic {
             top_trie_root_calculation_cache: Some(self.top_trie_root_calculation_cache),
             storage_top_trie_changes: self.storage_top_trie_changes,
             offchain_storage_changes: self.offchain_storage_changes,
+            max_log_level: Default::default(),
         });
 
         let vm = match init_result {
