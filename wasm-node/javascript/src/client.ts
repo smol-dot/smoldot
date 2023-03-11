@@ -57,17 +57,23 @@ export interface Client {
   /**
    * Connects to a chain.
    *
-   * Throws an exception if the chain specification isn't valid, or if the chain specification
-   * concerns a parachain but no corresponding relay chain can be found.
+   * After you've called this function, the client will verify whether the chain specification is
+   * valid. Once this is done, the `Promise` returned by this function will yield a
+   * {@link Chain} that can be used to interact with that chain. Only after the `Promise` has
+   * yielded will the client actually start establishing networking connections to the chain.
+   *
+   * The `Promise` throws an exception if the chain specification isn't valid, or if the chain
+   * specification concerns a parachain but no corresponding relay chain can be found.
    *
    * Smoldot will automatically de-duplicate chains if multiple identical chains are added, in
    * order to save resources. In other words, it is not a problem to call `addChain` multiple
-   * times with the same chain specifications and obtain multiple `Chain`.
+   * times with the same chain specifications and obtain multiple {@link Chain} objects.
    * When the same client is used for multiple different purposes, you are in fact strongly
    * encouraged to trust smoldot and not attempt to de-duplicate chains yourself, as determining
    * whether two chains are identical is complicated and might have security implications.
    *
-   * Smoldot tries to distribute CPU resources equally between all active `Chain` objects.
+   * Smoldot tries to distribute CPU resources equally between all active {@link Chain} objects
+   * of the same client.
    *
    * @param options Configuration of the chain to add.
    *
@@ -79,6 +85,9 @@ export interface Client {
 
   /**
    * Terminates the client.
+   *
+   * This implicitly calls {@link Chain.remove} on all the chains associated with this client,
+   * then shuts down the client itself.
    *
    * Afterwards, trying to use the client or any of its chains again will lead to an exception
    * being thrown.
@@ -103,10 +112,15 @@ export interface Chain {
    * Be aware that some requests will cause notifications to be sent back using the same callback
    * as the responses.
    *
-   * A {@link MalformedJsonRpcError} is thrown if the request isn't a valid JSON-RPC request or
-   * if the request is unreasonably large (64 MiB at the time of writing of this comment).
-   * If, however, the request is a valid JSON-RPC request but that concerns an unknown method, a
-   * error response is properly generated.
+   * A {@link MalformedJsonRpcError} is thrown if the request isn't a valid JSON-RPC request
+   * (for example if it is not valid JSON) or if the request is unreasonably large (64 MiB at the
+   * time of writing of this comment).
+   * If, however, the request is a valid JSON-RPC request but that concerns an unknown method, or
+   * if for example some parameters are missing, an error response is properly generated and
+   * yielded through the JSON-RPC callback.
+   * In other words, a {@link MalformedJsonRpcError} is thrown in situations where something
+   * is *so wrong* with the request that it is not possible for smoldot to send back an error
+   * through the JSON-RPC callback.
    *
    * Two JSON-RPC APIs are supported by smoldot:
    *
@@ -126,13 +140,16 @@ export interface Chain {
   /**
    * Waits for a JSON-RPC response or notification to be generated.
    *
-   * If this function is called multiple times "simultaneously" (generating multiple different
-   * `Promise`s), each `Promise` will return a different JSON-RPC response or notification.
-   *
    * Each chain contains a buffer of the responses waiting to be sent out. Calling this function
    * pulls one element from the buffer. If this function is called at a slower rate than responses
-   * are generated, then buffer will eventually become full, at which point calling
+   * are generated, then the buffer will eventually become full, at which point calling
    * {@link Chain.sendJsonRpc} will throw an exception.
+   *
+   * If this function is called multiple times "simultaneously" (generating multiple different
+   * `Promise`s), each `Promise` will return a different JSON-RPC response or notification. In
+   * that situation, there is no guarantee in the ordering in which the responses or notifications
+   * are yielded. Calling this function multiple times "simultaneously" is in general a niche
+   * corner case that you are encouraged to avoid.
    *
    * @throws {@link AlreadyDestroyedError} If the chain has been removed or the client has been terminated.
    * @throws {@link JsonRpcDisabledError} If the JSON-RPC system was disabled in the options of the chain.
@@ -143,14 +160,15 @@ export interface Chain {
   /**
    * Disconnects from the blockchain.
    *
-   * The JSON-RPC callback will no longer be called.
+   * The JSON-RPC callback will no longer be called. This is the case immediately after this
+   * function is called. Any on-going JSON-RPC request is instantaneously aborted.
    *
    * Trying to use the chain again will lead to an exception being thrown.
    *
    * If this chain is a relay chain, then all parachains that use it will continue to work. Smoldot
    * automatically keeps alive all relay chains that have an active parachains. There is no need
-   * to track parachains and relaychains, or to destroy them in the correct order, as this is
-   * handled automatically.
+   * to track parachains and relay chains, or to destroy them in the correct order, as this is
+   * handled automatically internally.
    *
    * @throws {@link AlreadyDestroyedError} If the chain has already been removed or the client has been terminated.
    * @throws {@link CrashError} If the background client has crashed.
@@ -179,10 +197,10 @@ export interface ClientOptions {
   logCallback?: LogCallback;
 
   /**
-   * The client will never call the callback with a value of `level` superior to this value.
+   * The client will never call the log callback with a value of `level` superior to this value.
    * Defaults to 3.
    *
-   * While this filtering could be done directly by the `logCallback`, passing a maximum log level
+   * While this filtering could be done manually in the `logCallback`, passing a maximum log level
    * leads to better performances as the client doesn't even need to generate a `message` when it
    * knows that this message isn't interesting.
    */
@@ -272,34 +290,49 @@ export interface AddChainOptions {
    * `<client> build-spec --raw > spec.json`. Only "raw" chain specifications are supported by
    * smoldot at the moment.
    *
-   * If the chain specification contains a `relay_chain` field, then smoldot will try to match
-   * the value in `relay_chain` with the value in `id` of the chains in `potentialRelayChains`.
+   * If the chain specification contains a `relayChain` field, then smoldot will try to match
+   * the value in `relayChain` with the value in `id` of the chains in
+   * {@link AddChainOptions.potentialRelayChains}.
    */
   chainSpec: string;
 
   /**
-   * Content of the database of this chain. Can be obtained by using the
-   * `chainHead_unstable_finalizedDatabase` JSON-RPC function.
+   * Content of the database of this chain.
+   *
+   * The content of the database can be obtained by using the
+   * `chainHead_unstable_finalizedDatabase` JSON-RPC function. This undocumented JSON-RPC function
+   * accepts one parameter of type `number` indicating an upper limit to the size of the database.
+   * The content of the database is always a UTF-8 string whose content is at the discretion of
+   * the smoldot implementation.
    *
    * Smoldot reserves the right to change its database format, making previous databases
-   * incompatible. For this reason, no error is generated if the content of the database is invalid
-   * and/or can't be decoded.
+   * incompatible. For this reason, no error is generated if the content of the database is
+   * invalid and/or can't be decoded.
+   *
+   * Providing a database can considerably improve the time it takes for smoldot to be fully
+   * synchronized with a chain by reducing the amount of data that it has to download.
+   * Furthermore, the database also contains a list of nodes that smoldot can use in order to
+   * reduce the load that is being put on the bootnodes.
    *
    * Important: please note that using a malicious database content can lead to a security
    * vulnerability. This database content is considered by smoldot as trusted input. It is the
    * responsibility of the API user to make sure that the value passed in this field comes from
    * the same source of trust as the chain specification that was used when retrieving this
-   * database content.
+   * database content. In other words, if you load this database content for example from the disk
+   * or from the browser's local storage, be absolutely certain that no malicious program has
+   * modified the content of that file or local storage.
    */
   databaseContent?: string;
 
   /**
    * If `chainSpec` concerns a parachain, contains the list of chains whose `id` smoldot will try
-   * to match with the parachain's `relay_chain`.
+   * to match with the parachain's `relayChain`.
    * Defaults to `[]`.
    *
-   * Must contain exactly the objects that were returned by previous calls to `addChain`. The
-   * library uses a `WeakMap` in its implementation in order to identify chains.
+   * Must contain exactly the {@link Chain} objects that were returned by previous calls to
+   * `addChain`. The library uses a `WeakMap` in its implementation in order to identify chains.
+   *
+   * # Explanation and usage
    *
    * The primary way smoldot determines which relay chain is associated to a parachain is by
    * inspecting the chain specification of that parachain (i.e. the `chainSpec` field).
@@ -308,7 +341,7 @@ export interface AddChainOptions {
    * applications: multiple applications could add mutiple different chains with the same `id`,
    * creating an ambiguity, or an application could register malicious chains with small variations
    * of a popular chain's `id` and try to benefit from a typo in a legitimate application's
-   * `relay_chain`.
+   * `relayChain`.
    *
    * These problems can be solved by using this parameter to segregate multiple different uses of
    * the same client. To use it, pass the list of all chains that the same application has
