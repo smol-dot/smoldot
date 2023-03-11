@@ -228,7 +228,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             } else {
                 // TCP
                 connection.socket.destroyed = true;
-                connection.socket.inner.then((connec) => connec?.close());
+                connection.socket.inner.then((connec) => connec!.close());
             }
         },
 
