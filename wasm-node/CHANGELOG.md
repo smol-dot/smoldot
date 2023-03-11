@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## Fixed
+
+- Fix Deno throwing an exception when failing to connect to an unreachable node through a TCP/IP multiaddr. (([#246]https://github.com/smol-dot/smoldot/pull/246))
+
 ## 0.7.13 - 2022-03-03
 
 ## Added
