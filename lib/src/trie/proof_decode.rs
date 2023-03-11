@@ -38,7 +38,7 @@
 //! Once decoded, one can examine the content of the proof, in other words the list of storage
 //! items and values.
 
-use super::{nibble, proof_node_codec, TrieEntryVersion};
+use super::{nibble, trie_node, TrieEntryVersion};
 
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 use core::{fmt, mem, ops};
@@ -63,7 +63,7 @@ pub struct Config<'a, I> {
 ///
 /// Returns an error if the proof is invalid, or if the proof contains entries that are
 /// disconnected from the root node of the trie.
-pub fn decode_and_verify_proof<'a, T>(config: Config<'a, T>) -> Result<DecodedTrieProof<T>, Error>
+pub fn decode_and_verify_proof<T>(config: Config<T>) -> Result<DecodedTrieProof<T>, Error>
 where
     T: AsRef<[u8]>,
 {
@@ -106,7 +106,7 @@ where
                     )
                     .unwrap();
 
-                    let proof_entry_offset = if proof_entry.len() == 0 {
+                    let proof_entry_offset = if proof_entry.is_empty() {
                         0
                     } else {
                         proof_entry.as_ptr() as usize - proof_as_ref.as_ptr() as usize
@@ -170,7 +170,7 @@ where
             // Decodes the proof entry.
             let proof_entry = &proof_as_ref[proof_entry_range.clone()];
             let decoded_node_value =
-                proof_node_codec::decode(proof_entry).map_err(Error::InvalidNodeValue)?;
+                trie_node::decode(proof_entry).map_err(Error::InvalidNodeValue)?;
             let decoded_node_value_children_bitmap = decoded_node_value.children_bitmap();
 
             // Build the storage key of the node.
@@ -247,8 +247,8 @@ where
             // This is done at the end so that `storage_key` doesn't need to be cloned.
             let _prev_value = entries.insert(storage_key, {
                 let storage_value = match decoded_node_value.storage_value {
-                    proof_node_codec::StorageValue::None => StorageValueInner::None,
-                    proof_node_codec::StorageValue::Hashed(value_hash) => {
+                    trie_node::StorageValue::None => StorageValueInner::None,
+                    trie_node::StorageValue::Hashed(value_hash) => {
                         if let Some((value_position, value_entry_range)) =
                             merkle_values.get(&value_hash[..])
                         {
@@ -266,7 +266,7 @@ where
                             StorageValueInner::HashKnownValueMissing { offset }
                         }
                     }
-                    proof_node_codec::StorageValue::Unhashed(v) => {
+                    trie_node::StorageValue::Unhashed(v) => {
                         let offset = if !v.is_empty() {
                             v.as_ptr() as usize - proof_as_ref.as_ptr() as usize
                         } else {
@@ -560,7 +560,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                     } else if let Some((descendant, _)) = self
                         .entries
                         .range::<[nibble::Nibble], _>((
-                            ops::Bound::Included(&key[..]),
+                            ops::Bound::Included(key),
                             ops::Bound::Unbounded,
                         ))
                         .next()
@@ -704,8 +704,8 @@ pub enum Error {
     /// Trie root wasn't found in the proof.
     TrieRootNotFound,
     /// One of the node values in the proof has an invalid format.
-    #[display(fmt = "A node of the proof has an invalid format: {}", _0)]
-    InvalidNodeValue(proof_node_codec::Error),
+    #[display(fmt = "A node of the proof has an invalid format: {_0}")]
+    InvalidNodeValue(trie_node::Error),
     /// One of the entries of the proof is disconnected from the root node.
     UnusedProofEntry,
     /// The same entry has been found multiple times in the proof.

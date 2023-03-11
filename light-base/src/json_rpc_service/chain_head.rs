@@ -324,7 +324,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         methods::ServerToClient::chainHead_unstable_callEvent {
                             subscription: (&subscription_id).into(),
                             result: methods::ChainHeadCallEvent::Error {
-                                error: format!("failed to fetch call proof: {}", error).into(),
+                                error: format!("failed to fetch call proof: {error}").into(),
                             },
                         }
                         .to_json_call_object_parameters(None)
@@ -412,7 +412,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
             self.requests_subscriptions
                 .respond(
-                    &state_machine_request_id,
+                    state_machine_request_id,
                     methods::Response::chainHead_unstable_follow((&subscription_id).into())
                         .to_json_response(request_id),
                 )
@@ -578,7 +578,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     non_finalized_blocks,
                     pinned_blocks_headers,
                     runtime_subscribe_all,
-                    abort_handle: abort_handle,
+                    abort_handle,
                 },
             );
 
@@ -886,7 +886,7 @@ impl<TPlat: Platform> Background<TPlat> {
         if child_key.is_some() {
             self.requests_subscriptions
                 .respond(
-                    &state_machine_request_id,
+                    state_machine_request_id,
                     json_rpc::parse::build_error_response(
                         request_id,
                         json_rpc::parse::ErrorResponse::ServerError(
@@ -915,7 +915,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 } else {
                     self.requests_subscriptions
                         .respond(
-                            &state_machine_request_id,
+                            state_machine_request_id,
                             json_rpc::parse::build_error_response(
                                 request_id,
                                 json_rpc::parse::ErrorResponse::InvalidParams,
@@ -932,14 +932,14 @@ impl<TPlat: Platform> Background<TPlat> {
 
         let state_machine_subscription = match self
             .requests_subscriptions
-            .start_subscription(&state_machine_request_id, 1)
+            .start_subscription(state_machine_request_id, 1)
             .await
         {
             Ok(v) => v,
             Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
                 self.requests_subscriptions
                     .respond(
-                        &state_machine_request_id,
+                        state_machine_request_id,
                         json_rpc::parse::build_error_response(
                             request_id,
                             json_rpc::parse::ErrorResponse::ServerError(
@@ -971,7 +971,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
         self.requests_subscriptions
             .respond(
-                &state_machine_request_id,
+                state_machine_request_id,
                 methods::Response::chainHead_unstable_storage((&subscription_id).into())
                     .to_json_response(request_id),
             )
@@ -991,7 +991,7 @@ impl<TPlat: Platform> Background<TPlat> {
                             .storage_query(
                                 decoded_header.number,
                                 &hash.0,
-                                &decoded_header.state_root,
+                                decoded_header.state_root,
                                 iter::once(&key.0),
                                 cmp::min(10, network_config.total_attempts),
                                 Duration::from_millis(u64::from(cmp::min(
@@ -1082,12 +1082,12 @@ impl<TPlat: Platform> Background<TPlat> {
             if let Some(subscription) = lock.chain_head_follow.get(follow_subscription) {
                 if let Some(header) = subscription.pinned_blocks_headers.get(&hash.0) {
                     let decoded =
-                        header::decode(&header, self.sync_service.block_number_bytes()).unwrap(); // TODO: unwrap?
+                        header::decode(header, self.sync_service.block_number_bytes()).unwrap(); // TODO: unwrap?
                     Some(decoded.number)
                 } else {
                     self.requests_subscriptions
                         .respond(
-                            &state_machine_request_id,
+                            state_machine_request_id,
                             json_rpc::parse::build_error_response(
                                 request_id,
                                 json_rpc::parse::ErrorResponse::InvalidParams,
@@ -1111,7 +1111,7 @@ impl<TPlat: Platform> Background<TPlat> {
             Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
                 self.requests_subscriptions
                     .respond(
-                        &state_machine_request_id,
+                        state_machine_request_id,
                         json_rpc::parse::build_error_response(
                             request_id,
                             json_rpc::parse::ErrorResponse::ServerError(
@@ -1143,7 +1143,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
         self.requests_subscriptions
             .respond(
-                &state_machine_request_id,
+                state_machine_request_id,
                 methods::Response::chainHead_unstable_body((&subscription_id).into())
                     .to_json_response(request_id),
             )

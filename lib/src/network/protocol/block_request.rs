@@ -298,11 +298,7 @@ pub fn decode_block_response(
 
         blocks_out.push(BlockData {
             hash: <[u8; 32]>::try_from(block.hash).unwrap(),
-            header: if let Some(header) = block.header {
-                Some(header.to_vec())
-            } else {
-                None
-            },
+            header: block.header.as_ref().map(|h| h.to_vec()),
             // TODO: no; we might not have asked for the body
             body: Some(block.body.into_iter().map(|tx| tx.to_vec()).collect()),
             justifications: if let Some(justifications) = block.justifications {

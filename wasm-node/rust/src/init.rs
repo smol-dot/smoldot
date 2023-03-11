@@ -177,11 +177,11 @@ pub(crate) fn init<TPlat: smoldot_light::platform::Platform, TChain>(
                     // increasing the size of `TOTAL_BYTES_RECEIVED` or `TOTAL_BYTES_SENT`.
 
                     let bytes_rx = platform::TOTAL_BYTES_RECEIVED.load(Ordering::Relaxed);
-                    let avg_dl = u64::try_from(bytes_rx.wrapping_sub(previous_read_bytes)).unwrap() / interval;
+                    let avg_dl = bytes_rx.wrapping_sub(previous_read_bytes) / interval;
                     previous_read_bytes = bytes_rx;
 
                     let bytes_tx = platform::TOTAL_BYTES_SENT.load(Ordering::Relaxed);
-                    let avg_up = u64::try_from(bytes_tx.wrapping_sub(previous_sent_bytes)).unwrap() / interval;
+                    let avg_up = bytes_tx.wrapping_sub(previous_sent_bytes) / interval;
                     previous_sent_bytes = bytes_tx;
 
                     // Note that we also print the version at every interval, in order to increase

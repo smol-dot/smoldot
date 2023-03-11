@@ -203,7 +203,7 @@ impl Keystore {
                                     continue;
                                 }
                             }
-                            Err(err) => panic!("{:?}", err),
+                            Err(err) => panic!("{err:?}"),
                         }
                     }
                     _ => unreachable!(),
@@ -378,7 +378,7 @@ impl Keystore {
                     }
                     Err(err) => {
                         guarded.keys.remove(&(key_namespace, *public_key));
-                        return Err(err.into());
+                        Err(err.into())
                     }
                 }
             }
@@ -401,7 +401,7 @@ impl Keystore {
                     }
                     Err(err) => {
                         guarded.keys.remove(&(key_namespace, *public_key));
-                        return Err(err.into());
+                        Err(err.into())
                     }
                 }
             }
@@ -578,7 +578,7 @@ impl Keystore {
 
         let mut path =
             path::PathBuf::with_capacity(keys_directory.as_os_str().len() + file_name.len() + 16);
-        path.push(&keys_directory);
+        path.push(keys_directory);
         path.push(file_name);
         Some(path)
     }
@@ -601,25 +601,25 @@ pub enum SignError {
     /// Error while accessing the file containing the secret key.
     /// Typically indicates the content of the file has been modified by something else than
     /// the keystore.
-    #[display(fmt = "Error loading the secret key; {}", _0)]
+    #[display(fmt = "Error loading the secret key; {_0}")]
     KeyLoad(KeyLoadError),
 }
 
 #[derive(Debug, derive_more::Display)]
 pub enum KeyLoadError {
     /// Error reported by the operating system.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Io(io::Error),
     /// Content of the file is invalid. Contains a human-readable error message as a string.
     /// Because the format of the content of the file is an implementation detail, no detail is
     /// provided.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     BadFormat(String),
 }
 
 #[derive(Debug, derive_more::Display)]
 pub enum SignVrfError {
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Sign(SignError),
     WrongKeyAlgorithm,
 }

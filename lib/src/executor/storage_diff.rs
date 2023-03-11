@@ -180,9 +180,9 @@ impl<T> StorageDiff<T> {
     ///
     /// Panics if `in_parent_next_key` is provided and is inferior or equal to `key`.
     ///
-    pub fn storage_next_key<'a, 'b>(
+    pub fn storage_next_key<'a>(
         &'a self,
-        key: &'b [u8],
+        key: &'_ [u8],
         in_parent_next_key: Option<&'a [u8]>,
     ) -> StorageNextKey<'a> {
         if let Some(in_parent_next_key) = in_parent_next_key {

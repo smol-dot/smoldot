@@ -431,7 +431,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
                     let decoded = outcome.decode();
                     let decoded = proof_decode::decode_and_verify_proof(proof_decode::Config {
                         proof: decoded,
-                        trie_root_hash: &storage_trie_root,
+                        trie_root_hash: storage_trie_root,
                     })
                     .map_err(StorageQueryErrorDetail::ProofVerification)?;
 
@@ -637,7 +637,7 @@ impl fmt::Display for StorageQueryError {
         } else {
             write!(f, "Storage query errors:")?;
             for err in &self.errors {
-                write!(f, "\n- {}", err)?;
+                write!(f, "\n- {err}")?;
             }
             Ok(())
         }
@@ -648,10 +648,10 @@ impl fmt::Display for StorageQueryError {
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum StorageQueryErrorDetail {
     /// Error during the network request.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Network(network_service::StorageProofRequestError),
     /// Error verifying the proof.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     ProofVerification(proof_decode::Error),
     /// Proof is missing one or more desired storage items.
     MissingProofEntry,
@@ -680,7 +680,7 @@ impl fmt::Display for CallProofQueryError {
         } else {
             write!(f, "Call proof query errors:")?;
             for err in &self.errors {
-                write!(f, "\n- {}", err)?;
+                write!(f, "\n- {err}")?;
             }
             Ok(())
         }

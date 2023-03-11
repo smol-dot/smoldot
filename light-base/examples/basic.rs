@@ -98,7 +98,7 @@ fn main() {
     async_std::task::block_on(async move {
         loop {
             let response = json_rpc_responses.next().await.unwrap();
-            println!("JSON-RPC response: {}", response);
+            println!("JSON-RPC response: {response}");
         }
     })
 }

@@ -101,7 +101,7 @@ fn basic_core_version() {
         loop {
             match vm {
                 HostVm::ReadyToRun(r) => vm = r.run(),
-                HostVm::Error { error, .. } => panic!("{:?}", error),
+                HostVm::Error { error, .. } => panic!("{error:?}"),
                 HostVm::Finished(_) => break,
                 HostVm::GetMaxLogLevel(r) => vm = r.resume(0),
                 _ => unreachable!(),

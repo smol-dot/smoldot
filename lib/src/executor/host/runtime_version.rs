@@ -59,7 +59,7 @@ pub fn find_embedded_runtime_version(
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum FindEmbeddedRuntimeVersionError {
     /// Error while finding the custom section.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     FindSections(FindEncodedEmbeddedRuntimeVersionApisError),
     /// Only one of the two desired custom sections is present.
     CustomSectionsPresenceMismatch,
@@ -132,16 +132,10 @@ pub enum CoreVersionError {
     /// Error while decoding the output.
     Decode,
     /// Error while starting the execution of the `Core_version` function.
-    #[display(
-        fmt = "Error while starting the execution of the `Core_version` function: {}",
-        _0
-    )]
+    #[display(fmt = "Error while starting the execution of the `Core_version` function: {_0}")]
     Start(host::StartErr),
     /// Error during the execution of the `Core_version` function.
-    #[display(
-        fmt = "Error during the execution of the `Core_version` function: {}",
-        _0
-    )]
+    #[display(fmt = "Error during the execution of the `Core_version` function: {_0}")]
     Run(host::Error),
     /// `Core_version` used a host function that is forbidden in this context.
     ForbiddenHostFunction,
@@ -483,7 +477,7 @@ fn core_version_api<'a, E: nom::error::ParseError<&'a [u8]>>(
 }
 
 /// Parses a Wasm section. If it is a custom section, returns its name and content.
-fn wasm_section<'a>(bytes: &'a [u8]) -> nom::IResult<&'a [u8], Option<(&'a [u8], &'a [u8])>> {
+fn wasm_section(bytes: &'_ [u8]) -> nom::IResult<&'_ [u8], Option<(&'_ [u8], &'_ [u8])>> {
     nom::branch::alt((
         nom::combinator::map(
             nom::combinator::map_parser(

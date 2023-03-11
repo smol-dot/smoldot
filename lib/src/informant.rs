@@ -185,15 +185,7 @@ impl<'a> fmt::Display for InformantLine<'a> {
             usize::try_from(bar_width).unwrap()
         );
 
-        write!(
-            f,
-            "{header}{done_bar1}{done_bar2}{todo_bar}{trailer}",
-            header = header,
-            done_bar1 = done_bar1,
-            done_bar2 = done_bar2,
-            todo_bar = todo_bar,
-            trailer = trailer
-        )
+        write!(f, "{header}{done_bar1}{done_bar2}{todo_bar}{trailer}")
     }
 }
 
@@ -205,7 +197,7 @@ impl<'a> fmt::Display for HashDisplay<'a> {
         write!(f, "0x")?;
         if self.0.len() >= 2 {
             let val = u16::from_be_bytes(<[u8; 2]>::try_from(&self.0[..2]).unwrap());
-            write!(f, "{:04x}", val)?;
+            write!(f, "{val:04x}")?;
         }
         if self.0.len() >= 5 {
             write!(f, "…")?;
@@ -213,7 +205,7 @@ impl<'a> fmt::Display for HashDisplay<'a> {
         if self.0.len() >= 4 {
             let len = self.0.len();
             let val = u16::from_be_bytes(<[u8; 2]>::try_from(&self.0[len - 2..]).unwrap());
-            write!(f, "{:04x}", val)?;
+            write!(f, "{val:04x}")?;
         }
         Ok(())
     }
@@ -227,43 +219,43 @@ impl fmt::Display for BytesDisplay {
         let mut value = self.0 as f64;
 
         if value < 1000.0 {
-            return write!(f, "{} B", value);
+            return write!(f, "{value} B");
         }
         value /= 1024.0;
 
         if value < 100.0 {
-            return write!(f, "{:.1} kiB", value);
+            return write!(f, "{value:.1} kiB");
         }
         if value < 1000.0 {
-            return write!(f, "{:.0} kiB", value);
+            return write!(f, "{value:.0} kiB");
         }
         value /= 1024.0;
 
         if value < 100.0 {
-            return write!(f, "{:.1} MiB", value);
+            return write!(f, "{value:.1} MiB");
         }
         if value < 1000.0 {
-            return write!(f, "{:.0} MiB", value);
+            return write!(f, "{value:.0} MiB");
         }
         value /= 1024.0;
 
         if value < 100.0 {
-            return write!(f, "{:.1} GiB", value);
+            return write!(f, "{value:.1} GiB");
         }
         if value < 1000.0 {
-            return write!(f, "{:.0} GiB", value);
+            return write!(f, "{value:.0} GiB");
         }
         value /= 1024.0;
 
         if value < 100.0 {
-            return write!(f, "{:.1} TiB", value);
+            return write!(f, "{value:.1} TiB");
         }
         if value < 1000.0 {
-            return write!(f, "{:.0} TiB", value);
+            return write!(f, "{value:.0} TiB");
         }
         value /= 1024.0;
 
-        write!(f, "{:.1} PiB", value)
+        write!(f, "{value:.1} PiB")
 
         // Hopefully we never have to go above petabytes.
     }

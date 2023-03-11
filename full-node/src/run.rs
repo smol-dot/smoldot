@@ -163,7 +163,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                     let relay_chain_path = parachain_path
                         .parent()
                         .unwrap()
-                        .join(format!("{}.json", relay_chain_name));
+                        .join(format!("{relay_chain_name}.json"));
                     fs::read(&relay_chain_path)
                         .expect("Failed to read relay chain specs")
                         .into()
@@ -212,7 +212,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         // Directory supposed to contain the database.
         let db_path = base_storage_directory
             .as_ref()
-            .map(|d| d.join(chain_spec.id()).join("database").to_owned());
+            .map(|d| d.join(chain_spec.id()).join("database"));
 
         let (db, existed) = open_database(
             &chain_spec,
@@ -228,7 +228,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     let relay_chain_database = if let Some(relay_chain_spec) = &relay_chain_spec {
         let relay_db_path = base_storage_directory
             .as_ref()
-            .map(|d| d.join(relay_chain_spec.id()).join("database").to_owned());
+            .map(|d| d.join(relay_chain_spec.id()).join("database"));
 
         Some(Arc::new(database_thread::DatabaseThread::from(
             open_database(
@@ -353,14 +353,13 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                     for node in chain_spec.boot_nodes() {
                         match node {
                             chain_spec::Bootnode::UnrecognizedFormat(raw) => {
-                                panic!("Failed to parse bootnode in chain specification: {}", raw)
+                                panic!("Failed to parse bootnode in chain specification: {raw}")
                             }
                             chain_spec::Bootnode::Parsed { multiaddr, peer_id } => {
                                 let multiaddr: multiaddr::Multiaddr = match multiaddr.parse() {
                                     Ok(a) => a,
                                     Err(_) => panic!(
-                                        "Failed to parse bootnode in chain specification: {}",
-                                        multiaddr
+                                        "Failed to parse bootnode in chain specification: {multiaddr}"
                                     ),
                                 };
                                 let peer_id = PeerId::from_bytes(peer_id.to_vec()).unwrap();
@@ -410,14 +409,13 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                             for node in relay_chains_specs.boot_nodes() {
                                 match node {
                                     chain_spec::Bootnode::UnrecognizedFormat(raw) => {
-                                        panic!("Failed to parse bootnode in chain specification: {}", raw)
+                                        panic!("Failed to parse bootnode in chain specification: {raw}")
                                     }
                                     chain_spec::Bootnode::Parsed { multiaddr, peer_id } => {
                                         let multiaddr: multiaddr::Multiaddr = match multiaddr.parse() {
                                             Ok(a) => a,
                                             Err(_) => panic!(
-                                                "Failed to parse bootnode in chain specification: {}",
-                                                multiaddr
+                                                "Failed to parse bootnode in chain specification: {multiaddr}"
                                             ),
                                         };
                                         let peer_id = PeerId::from_bytes(peer_id.to_vec()).unwrap();
@@ -524,7 +522,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
         Some(match result {
             Ok(service) => service,
-            Err(err) => panic!("failed to initialize JSON-RPC endpoint: {}", err),
+            Err(err) => panic!("failed to initialize JSON-RPC endpoint: {err}"),
         })
     } else {
         None
@@ -692,7 +690,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 if matches!(cli_output, cli::Output::Informant) {
                     // Adding a new line after the informant so that the user's shell doesn't
                     // overwrite it.
-                    eprintln!("");
+                    eprintln!();
                 }
 
                 return
@@ -760,7 +758,7 @@ async fn open_database(
             .runtime_version()
             .decode()
             .state_version
-            .map(|v| u8::from(v))
+            .map(u8::from)
             .unwrap_or(0);
 
             // The finalized block is the genesis block. As such, it has an empty body and

@@ -209,7 +209,6 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// warp syncing.
     ///
     /// See [`SubscribeAll`] for information about the return value.
-    #[must_use]
     pub async fn subscribe_all(
         &self,
         subscription_name: &'static str,
@@ -406,7 +405,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                     // Cold path.
                     if let Some((sub_name, _, _)) = all_blocks_subscriptions.get(&subscription_id.0)
                     {
-                        panic!("block already unpinned for {} subscription", sub_name);
+                        panic!("block already unpinned for {sub_name} subscription");
                     } else {
                         return;
                     }
@@ -463,7 +462,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                         if let Some((sub_name, _, _)) =
                             all_blocks_subscriptions.get(&subscription_id.0)
                         {
-                            panic!("block already unpinned for subscription {}", sub_name);
+                            panic!("block already unpinned for subscription {sub_name}");
                         } else {
                             return Err(PinnedBlockRuntimeLockError::ObsoleteSubscription);
                         }
@@ -493,17 +492,17 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     ///
     /// Panics if the provided [`PinnedRuntimeId`] is stale or invalid.
     ///
-    pub async fn pinned_runtime_lock<'a>(
-        &'a self,
+    pub async fn pinned_runtime_lock(
+        &self,
         pinned_runtime_id: PinnedRuntimeId,
         block_hash: [u8; 32],
         block_number: u64,
         block_state_trie_root_hash: [u8; 32],
-    ) -> RuntimeLock<'a, TPlat> {
+    ) -> RuntimeLock<TPlat> {
         RuntimeLock {
             service: self,
             hash: block_hash,
-            runtime: pinned_runtime_id.0.clone(),
+            runtime: pinned_runtime_id.0,
             block_number,
             block_state_root_hash: block_state_trie_root_hash,
         }
@@ -940,19 +939,19 @@ impl<'a> Drop for RuntimeCallLock<'a> {
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum RuntimeCallError {
     /// Runtime of the block isn't valid.
-    #[display(fmt = "Runtime of the block isn't valid: {}", _0)]
+    #[display(fmt = "Runtime of the block isn't valid: {_0}")]
     InvalidRuntime(RuntimeError),
     /// Error while retrieving the storage item from other nodes.
     // TODO: change error type?
-    #[display(fmt = "Error in call proof: {}", _0)]
+    #[display(fmt = "Error in call proof: {_0}")]
     StorageRetrieval(proof_decode::Error),
     /// One or more entries are missing from the call proof.
     MissingProofEntry,
     /// Error while retrieving the call proof from the network.
-    #[display(fmt = "Error when retrieving the call proof: {}", _0)]
+    #[display(fmt = "Error when retrieving the call proof: {_0}")]
     CallProof(sync_service::CallProofQueryError),
     /// Error while querying the storage of the block.
-    #[display(fmt = "Error while querying block storage: {}", _0)]
+    #[display(fmt = "Error while querying block storage: {_0}")]
     StorageQuery(sync_service::StorageQueryError),
 }
 
@@ -976,10 +975,10 @@ pub enum RuntimeError {
     /// The `:code` key of the storage is empty.
     CodeNotFound,
     /// Error while parsing the `:heappages` storage value.
-    #[display(fmt = "Failed to parse `:heappages` storage value: {}", _0)]
+    #[display(fmt = "Failed to parse `:heappages` storage value: {_0}")]
     InvalidHeapPages(executor::InvalidHeapPagesError),
     /// Error while compiling the runtime.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Build(executor::host::NewErr),
 }
 
@@ -1471,9 +1470,9 @@ async fn run_background<TPlat: Platform>(
 
 #[derive(Debug, Clone, derive_more::Display)]
 enum RuntimeDownloadError {
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     StorageQuery(sync_service::StorageQueryError),
-    #[display(fmt = "Couldn't decode header: {}", _0)]
+    #[display(fmt = "Couldn't decode header: {_0}")]
     InvalidHeader(header::Error),
 }
 

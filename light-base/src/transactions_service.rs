@@ -269,10 +269,10 @@ pub enum DropReason {
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum ValidateTransactionError {
     /// Error during the network request.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Call(runtime_service::RuntimeCallError),
     /// Error during the validation runtime call.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     Validation(validate::Error),
     /// Tried to access the next key of a storage key. This isn't possible through a call request
     /// at the moment.
@@ -423,8 +423,7 @@ async fn background_task<TPlat: Platform>(
                 let to_start_validate = worker
                     .pending_transactions
                     .unvalidated_transactions()
-                    .filter(|(_, tx)| tx.validation_in_progress.is_none())
-                    .next()
+                    .find(|(_, tx)| tx.validation_in_progress.is_none())
                     .map(|(tx_id, ..)| tx_id);
                 let to_start_validate = match to_start_validate {
                     Some(tx_id) => tx_id,

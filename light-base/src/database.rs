@@ -159,7 +159,7 @@ pub fn decode_database(encoded: &str, block_number_bytes: usize) -> Result<Datab
         .filter_map(|(peer_id, addrs)| {
             let addrs = addrs
                 .iter()
-                .filter_map(|a| Some(a.parse::<multiaddr::Multiaddr>().ok()?))
+                .filter_map(|a| a.parse::<multiaddr::Multiaddr>().ok())
                 .collect();
             Some((peer_id.parse::<PeerId>().ok()?, addrs))
         })

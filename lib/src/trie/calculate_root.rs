@@ -66,10 +66,9 @@
 
 use super::{
     nibble::{bytes_to_nibbles, Nibble},
-    node_value, trie_structure, TrieEntryVersion,
+    trie_node, trie_structure, TrieEntryVersion,
 };
 
-use alloc::vec::Vec;
 use core::{fmt, iter};
 
 /// Cache containing intermediate calculation steps.
@@ -85,7 +84,7 @@ pub struct CalculationCache {
 /// Custom data stored in each node in [`CalculationCache::structure`].
 #[derive(Default)]
 struct CacheEntry {
-    merkle_value: Option<node_value::Output>,
+    merkle_value: Option<trie_node::MerkleValueOutput>,
 }
 
 impl CalculationCache {
@@ -300,11 +299,17 @@ impl CalcInner {
                     Some(c) => Some(c.node_index()),
                     None => {
                         // Trie is empty.
-                        let merkle_value = node_value::calculate_merkle_value(node_value::Config {
-                            ty: node_value::NodeTy::Root { key: iter::empty() },
-                            children: (0..16).map(|_| None),
-                            stored_value: None::<(Vec<u8>, _)>,
-                        });
+                        // `calculate_merkle_value` can only return an error if the partial key
+                        // isn't empty, meaning that it is safe to unwrap.
+                        let merkle_value = trie_node::calculate_merkle_value(
+                            trie_node::Decoded {
+                                partial_key: iter::empty(),
+                                children: [None::<&'static [u8]>; 16],
+                                storage_value: trie_node::StorageValue::None,
+                            },
+                            true,
+                        )
+                        .unwrap();
 
                         return RootMerkleValueCalculation::Finished {
                             hash: merkle_value.into(),
@@ -367,23 +372,23 @@ impl CalcInner {
 
             if !current.has_storage_value() {
                 // Calculate the Merkle value of the node.
-                let merkle_value = node_value::calculate_merkle_value(node_value::Config {
-                    ty: if current.is_root_node() {
-                        node_value::NodeTy::Root {
-                            key: current.partial_key(),
-                        }
-                    } else {
-                        node_value::NodeTy::NonRoot {
-                            partial_key: current.partial_key(),
-                        }
+                // `calculate_merkle_value` returns an error if the node is invalid, which would
+                // indicate a bug in this module.
+                let merkle_value = trie_node::calculate_merkle_value(
+                    trie_node::Decoded {
+                        partial_key: current.partial_key(),
+                        children: core::array::from_fn(|child_idx| {
+                            current
+                                .child_user_data(
+                                    Nibble::try_from(u8::try_from(child_idx).unwrap()).unwrap(),
+                                )
+                                .map(|child| child.merkle_value.as_ref().unwrap())
+                        }),
+                        storage_value: trie_node::StorageValue::None,
                     },
-                    children: (0..16u8).map(|child_idx| {
-                        current
-                            .child_user_data(Nibble::try_from(child_idx).unwrap())
-                            .map(|child| child.merkle_value.as_ref().unwrap())
-                    }),
-                    stored_value: None::<(Vec<u8>, _)>,
-                });
+                    current.is_root_node(),
+                )
+                .unwrap();
 
                 current.user_data().merkle_value = Some(merkle_value);
                 continue;
@@ -451,31 +456,50 @@ impl StorageValue {
         mut self,
         stored_value: Option<(impl AsRef<[u8]>, TrieEntryVersion)>,
     ) -> RootMerkleValueCalculation {
-        assert!(stored_value.is_some());
-
         let trie_structure = self.calculation.cache.structure.as_mut().unwrap();
         let mut current: trie_structure::NodeAccess<_> = trie_structure
             .node_by_index(self.calculation.current.unwrap())
             .unwrap();
 
+        // Due to borrowing issues, we need to build the hash of the storage value ahead of time
+        // if necessary.
+        let hashed_storage_value = match &stored_value {
+            Some((_, TrieEntryVersion::V0)) => None,
+            Some((value, TrieEntryVersion::V1)) if value.as_ref().len() >= 33 => {
+                Some(blake2_rfc::blake2b::blake2b(32, &[], value.as_ref()))
+            }
+            Some((_, TrieEntryVersion::V1)) => None,
+            None => {
+                // API user misbehaved.
+                panic!("Injected no value when previously reported a value at this key")
+            }
+        };
+
         // Calculate the Merkle value of the node.
-        let merkle_value = node_value::calculate_merkle_value(node_value::Config {
-            ty: if current.is_root_node() {
-                node_value::NodeTy::Root {
-                    key: current.partial_key(),
-                }
-            } else {
-                node_value::NodeTy::NonRoot {
-                    partial_key: current.partial_key(),
-                }
+        // `calculate_merkle_value` can only return an error if the node is invalid, which would
+        // indicate a serious bug in this module.
+        let merkle_value = trie_node::calculate_merkle_value(
+            trie_node::Decoded {
+                partial_key: current.partial_key(),
+                children: core::array::from_fn(|child_idx| {
+                    current
+                        .child_user_data(
+                            Nibble::try_from(u8::try_from(child_idx).unwrap()).unwrap(),
+                        )
+                        .map(|child| child.merkle_value.as_ref().unwrap())
+                }),
+                storage_value: match &hashed_storage_value {
+                    None => {
+                        trie_node::StorageValue::Unhashed(stored_value.as_ref().unwrap().0.as_ref())
+                    }
+                    Some(hashed_storage_value) => trie_node::StorageValue::Hashed(
+                        <&[u8; 32]>::try_from(hashed_storage_value.as_bytes()).unwrap(),
+                    ),
+                },
             },
-            children: (0..16u8).map(|child_idx| {
-                current
-                    .child_user_data(Nibble::try_from(child_idx).unwrap())
-                    .map(|child| child.merkle_value.as_ref().unwrap())
-            }),
-            stored_value,
-        });
+            current.is_root_node(),
+        )
+        .unwrap();
 
         current.user_data().merkle_value = Some(merkle_value);
         self.calculation.next()
@@ -567,22 +591,23 @@ mod tests {
         trie.insert([0x48, 0x19].to_vec(), [0xfe].to_vec());
         trie.insert([0x13, 0x14].to_vec(), [0xff].to_vec());
 
-        let mut ex = vec![];
-        ex.push(0x80); // branch, no value (0b_10..) no nibble
-        ex.push(0x12); // slots 1 & 4 are taken from 0-7
-        ex.push(0x00); // no slots from 8-15
-        ex.push(0x05 << 2); // first slot: LEAF, 5 bytes long.
-        ex.push(0x43); // leaf 0x40 with 3 nibbles
-        ex.push(0x03); // first nibble
-        ex.push(0x14); // second & third nibble
-        ex.push(0x01 << 2); // 1 byte data
-        ex.push(0xff); // value data
-        ex.push(0x05 << 2); // second slot: LEAF, 5 bytes long.
-        ex.push(0x43); // leaf with 3 nibbles
-        ex.push(0x08); // first nibble
-        ex.push(0x19); // second & third nibble
-        ex.push(0x01 << 2); // 1 byte data
-        ex.push(0xfe); // value data
+        let ex = vec![
+            0x80,      // branch, no value (0b_10..) no nibble
+            0x12,      // slots 1 & 4 are taken from 0-7
+            0x00,      // no slots from 8-15
+            0x05 << 2, // first slot: LEAF, 5 bytes long.
+            0x43,      // leaf 0x40 with 3 nibbles
+            0x03,      // first nibble
+            0x14,      // second & third nibble
+            0x01 << 2, // 1 byte data
+            0xff,      // value data
+            0x05 << 2, // second slot: LEAF, 5 bytes long.
+            0x43,      // leaf with 3 nibbles
+            0x08,      // first nibble
+            0x19,      // second & third nibble
+            0x01 << 2, // 1 byte data
+            0xfe,      // value data
+        ];
 
         let expected = blake2_rfc::blake2b::blake2b(32, &[], &ex);
         assert_eq!(

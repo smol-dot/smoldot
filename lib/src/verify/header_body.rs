@@ -160,16 +160,13 @@ pub enum SuccessConsensus {
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
     /// Error while starting the Wasm virtual machine to execute the block.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     WasmStart(host::StartErr),
     /// Error while running the Wasm virtual machine to execute the block.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     WasmVm(runtime_host::ErrorDetail),
     /// Runtime has returned some errors when verifying inherents.
-    #[display(
-        fmt = "Runtime has returned some errors when verifying inherents: {:?}",
-        errors
-    )]
+    #[display(fmt = "Runtime has returned some errors when verifying inherents: {errors:?}")]
     CheckInherentsError {
         /// List of errors produced by the runtime.
         ///
@@ -187,23 +184,20 @@ pub enum Error {
     /// Block header contains items relevant to multiple consensus engines at the same time.
     MultipleConsensusEngines,
     /// Block header contains an unrecognized consensus engine.
-    #[display(
-        fmt = "Block header contains an unrecognized consensus engine: {:?}",
-        engine
-    )]
+    #[display(fmt = "Block header contains an unrecognized consensus engine: {engine:?}")]
     UnknownConsensusEngine { engine: [u8; 4] },
     /// Failed to verify the authenticity of the block with the AURA algorithm.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     AuraVerification(aura::VerifyError),
     /// Failed to verify the authenticity of the block with the BABE algorithm.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "{_0}")]
     BabeVerification(babe::VerifyError),
     /// Error while compiling new runtime.
     NewRuntimeCompilationError(host::NewErr),
     /// Block being verified has erased the `:code` key from the storage.
     CodeKeyErased,
     /// Block has modified the `:heappages` key in a way that fails to parse.
-    #[display(fmt = "Block has modified `:heappages` key in invalid way: {}", _0)]
+    #[display(fmt = "Block has modified `:heappages` key in invalid way: {_0}")]
     HeapPagesParseError(executor::InvalidHeapPagesError),
     /// Block has modified the `:heappages` key without modifying the `:code` key. This isn't
     /// supported by smoldot.
