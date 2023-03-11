@@ -391,6 +391,7 @@ impl ChainInformationBuild {
                 function_to_call: call.function_name(),
                 parameter: call.parameter_vectored(),
                 virtual_machine: inner.virtual_machine.take().unwrap(),
+                max_log_level: Default::default(),
             });
 
             let vm = match vm_start_result {

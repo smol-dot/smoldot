@@ -229,6 +229,7 @@ impl AuthoringStart {
                     })
                 }
             },
+            max_log_level: Default::default(),
         });
 
         let inherent_data = inherents::InherentData {

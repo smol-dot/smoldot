@@ -1127,6 +1127,7 @@ async fn parahead<TPlat: Platform>(
             parachain_id,
             para::OccupiedCoreAssumption::TimedOut,
         ),
+        max_log_level: Default::default(),
     }) {
         Ok(vm) => vm,
         Err((err, prototype)) => {
