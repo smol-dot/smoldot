@@ -693,6 +693,7 @@ impl SyncBackground {
                     parent_runtime,
                     block_body_capacity: 0, // TODO: could be set to the size of the tx pool
                     top_trie_root_calculation_cache: None, // TODO: pretty important for performances
+                    max_log_level: 0, // TODO: propagate config, not sure which is the best way
                 })
             };
 

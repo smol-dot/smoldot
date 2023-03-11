@@ -327,7 +327,7 @@ pub fn validate_transaction(
                 top_trie_root_calculation_cache: None,
                 storage_top_trie_changes: storage_diff::StorageDiff::empty(),
                 offchain_storage_changes: storage_diff::StorageDiff::empty(),
-                max_log_level: Default::default(),
+                max_log_level: 0,
             });
 
             // Information used later, after `Core_initialize_block` is done.
@@ -364,7 +364,7 @@ pub fn validate_transaction(
                 top_trie_root_calculation_cache: None,
                 storage_top_trie_changes: storage_diff::StorageDiff::empty(),
                 offchain_storage_changes: storage_diff::StorageDiff::empty(),
-                max_log_level: Default::default(),
+                max_log_level: 0,
             });
 
             match vm {
@@ -456,7 +456,7 @@ impl Query {
                         top_trie_root_calculation_cache: Some(
                             success.top_trie_root_calculation_cache,
                         ),
-                        max_log_level: Default::default(),
+                        max_log_level: 0,
                     });
 
                     match vm {

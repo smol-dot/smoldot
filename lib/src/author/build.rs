@@ -229,7 +229,7 @@ impl AuthoringStart {
                     })
                 }
             },
-            max_log_level: Default::default(),
+            max_log_level: config.max_log_level,
         });
 
         let inherent_data = inherents::InherentData {
@@ -276,6 +276,11 @@ pub struct AuthoringStartConfig<'a> {
     /// Capacity to reserve for the number of extrinsics. Should be higher than the approximate
     /// number of extrinsics that are going to be applied.
     pub block_body_capacity: usize,
+
+    /// Maximum log level of the runtime.
+    ///
+    /// > **Note**: This value is opaque from the point of the view of the client, and the runtime is free to interpret it the way it ways. However, usually values are: `0` for "off", `1` for "error", `2` for "warn", `3` for "info", `4` for "debug", and `5` for "trace".
+    pub max_log_level: u32,
 }
 
 /// More transactions can be added.

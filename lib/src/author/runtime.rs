@@ -92,8 +92,9 @@ pub struct Config<'a> {
     /// number of extrinsics that are going to be applied.
     pub block_body_capacity: usize,
 
-    /// Runtime maximum log level
-    /// 0 means off, 1 means error, 2 means warn, 3 means info, 4 means debug, 5 means trace.
+    /// Maximum log level of the runtime.
+    ///
+    /// > **Note**: This value is opaque from the point of the view of the client, and the runtime is free to interpret it the way it ways. However, usually values are: `0` for "off", `1` for "error", `2` for "warn", `3` for "info", `4` for "debug", and `5` for "trace".
     pub max_log_level: u32,
 }
 
@@ -454,7 +455,7 @@ struct Shared {
     block_body: Vec<Vec<u8>>,
     /// Concatenation of all logs produced by the multiple calls.
     logs: String,
-    /// Runtime maximum log level
+    /// Value provided by [`Config::max_log_level`].
     max_log_level: u32,
 }
 

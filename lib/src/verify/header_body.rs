@@ -364,7 +364,7 @@ pub fn verify(
             top_trie_root_calculation_cache: config.top_trie_root_calculation_cache,
             storage_top_trie_changes: Default::default(),
             offchain_storage_changes: Default::default(),
-            max_log_level: Default::default(),
+            max_log_level: 0,
         });
 
         match vm {
@@ -444,7 +444,7 @@ impl VerifyInner {
                             ),
                             storage_top_trie_changes: success.storage_top_trie_changes,
                             offchain_storage_changes: success.offchain_storage_changes,
-                            max_log_level: Default::default(),
+                            max_log_level: 0,
                         });
 
                         match vm {

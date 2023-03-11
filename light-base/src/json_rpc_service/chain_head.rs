@@ -184,7 +184,7 @@ impl<TPlat: Platform> Background<TPlat> {
                             top_trie_root_calculation_cache: None,
                             offchain_storage_changes: Default::default(),
                             storage_top_trie_changes: Default::default(),
-                            max_log_level: Default::default(),
+                            max_log_level: 0,
                         }) {
                             Err((error, prototype)) => {
                                 runtime_call_lock.unlock(prototype);
