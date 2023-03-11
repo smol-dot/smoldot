@@ -64,7 +64,9 @@ pub(super) async fn connection_task<TPlat: Platform>(
             (Err(None), true) => {
                 log::warn!(
                     target: "connections",
-                    "Timeout when trying to reach bootnode {} through {}",
+                    "Timeout when trying to reach bootnode {} through {}. Because bootnodes \
+                    constitue the access point of a chain, they are expected to be online at all \
+                    time.",
                     start_connect.expected_peer_id, start_connect.multiaddr
                 );
             }
@@ -79,7 +81,8 @@ pub(super) async fn connection_task<TPlat: Platform>(
             (Err(Some(err)), true) if !err.is_bad_addr => {
                 log::warn!(
                     target: "connections",
-                    "Failed to reach bootnode {} through {}: {}",
+                    "Failed to reach bootnode {} through {}: {}. Because bootnodes constitue the \
+                    access point of a chain, they are expected to be online at all time.",
                     start_connect.expected_peer_id, start_connect.multiaddr,
                     err.message
                 );
