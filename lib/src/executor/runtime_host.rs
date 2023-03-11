@@ -49,18 +49,6 @@ use hashbrown::{hash_map::Entry, HashMap, HashSet};
 
 pub use trie::TrieEntryVersion;
 
-#[repr(u8)]
-#[derive(Copy, Clone, Default)]
-pub enum MaxLogLevel {
-    #[default]
-    Off,
-    Error,
-    Warn,
-    Info,
-    Debug,
-    Trace,
-}
-
 /// Configuration for [`run`].
 pub struct Config<'a, TParams> {
     /// Virtual machine to be run.
@@ -86,7 +74,8 @@ pub struct Config<'a, TParams> {
     pub offchain_storage_changes: storage_diff::StorageDiff,
 
     /// Runtime maximum log level
-    pub max_log_level: MaxLogLevel,
+    /// 0 means off, 1 means error, 2 means warn, 3 means info, 4 means debug, 5 means trace.
+    pub max_log_level: u32,
 }
 
 /// Start running the WebAssembly virtual machine.
@@ -649,7 +638,7 @@ struct Inner {
     logs: String,
 
     /// Runtime maximum log level
-    max_log_level: MaxLogLevel,
+    max_log_level: u32,
 }
 
 impl Inner {
@@ -936,7 +925,7 @@ impl Inner {
                 }
 
                 host::HostVm::GetMaxLogLevel(resume) => {
-                    self.vm = resume.resume(self.max_log_level as u32);
+                    self.vm = resume.resume(self.max_log_level);
                 }
 
                 host::HostVm::LogEmit(req) => {
