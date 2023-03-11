@@ -161,6 +161,10 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             inner: Deno.connect({
                 hostname: tcpParsed[2],
                 port: parseInt(tcpParsed[3]!, 10),
+            }).catch((error) => {
+                socket.destroyed = true;
+                config.onConnectionReset(error.toString());
+                return null;
             })
         };
 
@@ -179,7 +183,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             // The task ends automatically if an EOF or error is detected, which should also happen
             // if the user calls `close()`.
             const read = async (readBuffer: Uint8Array): Promise<void> => {
-                if (socket.destroyed)
+                if (socket.destroyed || established === null)
                     return;
                 let outcome: null | number | string = null;
                 try {
@@ -224,7 +228,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             } else {
                 // TCP
                 connection.socket.destroyed = true;
-                connection.socket.inner.then((connec) => connec.close());
+                connection.socket.inner.then((connec) => connec!.close());
             }
         },
 
@@ -246,7 +250,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
                 const socket = connection.socket;
                 connection.socket.inner = connection.socket.inner.then(async (c) => {
                     while (dataCopy.length > 0) {
-                        if (socket.destroyed)
+                        if (socket.destroyed || c === null)
                             return c;
                         let outcome: number | string;
                         try {
@@ -290,7 +294,7 @@ interface TcpConnection {
     // `Promise` that resolves when the connection is ready to accept more data to send, or when
     // the connection is closed. Check `destroyed` in order to know whether the connection
     // is closed.
-    inner: Promise<Deno.TcpConn>,
+    inner: Promise<Deno.TcpConn | null>,
     destroyed: boolean,
 }
 
