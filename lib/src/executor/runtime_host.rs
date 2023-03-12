@@ -75,7 +75,7 @@ pub struct Config<'a, TParams> {
 
     /// Maximum log level of the runtime.
     ///
-    /// > **Note**: This value is opaque from the point of the view of the client, and the runtime is free to interpret it the way it ways. However, usually values are: `0` for "off", `1` for "error", `2` for "warn", `3` for "info", `4` for "debug", and `5` for "trace".
+    /// > **Note**: This value is opaque from the point of the view of the client, and the runtime is free to interpret it the way it wants. However, usually values are: `0` for "off", `1` for "error", `2` for "warn", `3` for "info", `4` for "debug", and `5` for "trace".
     pub max_log_level: u32,
 }
 
@@ -952,7 +952,7 @@ impl Inner {
                             Ok(())
                         }
                     }
-                    match fmt::write(&mut WriterWithMax(&mut self.logs), format_args!("{req}\n")) {
+                    match fmt::write(&mut WriterWithMax(&mut self.logs), format_args!("{req}")) {
                         Ok(()) => {}
                         Err(fmt::Error) => {
                             return RuntimeHostVm::Finished(Err(Error {
