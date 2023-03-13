@@ -16,7 +16,7 @@ This repository contains the following components:
   - 📚 <https://smol-dot.github.io/smoldot/doc-rust/smoldot_light/index.html> (latest commit)
   - Has a semi-stable API that might change occasionally in minor ways.
 
-- `/wasm-node`: A JavaScript package that can connect to a Substrate-based chains as a light client, using the Rust library under `/light-base` in its internals. Works both in the browser and on NodeJS/Deno. **This is the main component of this repository. The development mostly focuses around it, and the name `smoldot` generally refers to this component in particular.**
+- `/wasm-node`: A JavaScript package that can connect to a Substrate-based chains as a light client, using the `smoldot-light` Rust library in its internals. Works both in the browser and on NodeJS/Deno. **This is the main component of this repository. The development mostly focuses around it, and the name `smoldot` generally refers to this component in particular.**
   - 📦 NPM: <https://www.npmjs.com/package/smoldot>
   - 📦 Deno.land/x: <https://deno.land/x/smoldot2> (URL to import: `https://deno.land/x/smoldot2/index-deno.js`)
   - 📄 CHANGELOG: <https://github.com/smol-dot/smoldot/blob/main/wasm-node/CHANGELOG.md>
