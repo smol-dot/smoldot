@@ -1,5 +1,3 @@
-Lightweight Substrate and Polkadot client.
-
 # Introduction
 
 `smoldot` is an alternative client of [Substrate](https://github.com/paritytech/substrate)-based chains, including [Polkadot](https://github.com/paritytech/polkadot/).
