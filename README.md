@@ -5,18 +5,23 @@
 This repository contains the following components:
 
 - `/lib`: An unopinionated Rust library named `smoldot` of general-purpose primitives that relate to Substrate and Polkadot. Serves as a base for the other components.
-  - 📦 <https://docs.rs/smoldot/>
-  - 📚 <https://smol-dot.github.io/smoldot/doc-rust/smoldot/index.html>
+  - 📦 <https://crates.io/crates/smoldot>
+  - 📚 <https://docs.rs/smoldot> (latest published version)
+  - 📚 <https://smol-dot.github.io/smoldot/doc-rust/smoldot/index.html> (latest commit)
+  - Has an unstable API.
 
 - `/light-base`: A platform-agnostic Rust library named `smoldot-light` that can connect to a Substrate-based chain as a light client. Serves as the base for the `wasm-node` component below.
-  - 📦 <https://docs.rs/smoldot-light/>
-  - 📚 <https://smol-dot.github.io/smoldot/doc-rust/smoldot_light/index.html>
+  - 📦 <https://crates.io/crates/smoldot-light>
+  - 📚 <https://docs.rs/smoldot-light> (latest published version)
+  - 📚 <https://smol-dot.github.io/smoldot/doc-rust/smoldot_light/index.html> (latest commit)
+  - Has a semi-stable API that might change occasionally in minor ways.
 
 - `/wasm-node`: A JavaScript package that can connect to a Substrate-based chains as a light client, using the Rust library under `/light-base` in its internals. Works both in the browser and on NodeJS/Deno. **This is the main component of this repository. The development mostly focuses around it, and the name `smoldot` generally refers to this component in particular.**
   - 📦 NPM: <https://www.npmjs.com/package/smoldot>
   - 📦 Deno.land/x: <https://deno.land/x/smoldot2> (URL to import: `https://deno.land/x/smoldot2/index-deno.js`)
   - 📄 CHANGELOG: <https://github.com/smol-dot/smoldot/blob/main/wasm-node/CHANGELOG.md>
-  - 📚 <https://smol-dot.github.io/smoldot/doc-javascript/>
+  - 📚 <https://smol-dot.github.io/smoldot/doc-javascript/> (latest commit)
+  - Has a stable API that rarely changes.
 
 - `/full-node`: A work-in-progress prototype of a full node binary that can connect to Substrate-base chains. Doesn't support many features that the official client supports.
 
