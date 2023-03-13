@@ -23,7 +23,7 @@ This repository contains the following components:
   - 📚 <https://smol-dot.github.io/smoldot/doc-javascript/> (latest commit)
   - Has a stable API that rarely changes.
 
-- `/full-node`: A work-in-progress prototype of a full node binary that can connect to Substrate-base chains. Doesn't support many features that the official client supports.
+- `/full-node`: A work-in-progress prototype of a full node binary that can connect to Substrate-base chains. Doesn't yet support many features that the official client supports.
 
 ## Does smoldot support &lt;blockchain&gt;?
 
@@ -54,23 +54,23 @@ Anyone contributing to this project pledges to propose a welcoming, constructive
 
 While the light client is fully maintained, please be aware that at the moment the full node is completely experimental. While none of the source code in this repository comes with any guarantee, it is even more true for the full node. You are at the moment strongly encouraged to not run a validator using the smoldot full node in a production environment, as it could result in a loss of money.
 
-The smoldot light client does in no way have access to any private key (with the exception of the networking private key, which isn't sensitive). Any transaction (such as a balance transfer) is signed *before* being provided to smoldot. While it is not possible for smoldot to contain for example a remote code execution issue that could lead to an attacker reading your private key, this type of issue is extremely unlikely. Using the smoldot light client isn't more risky than using a JSON-RPC server, and in most likelihood the worst that could happen is "things aren't working".
+The smoldot light client does in no way have access to any private key (with the exception of the networking private key, which isn't sensitive). Any transaction (such as a balance transfer) is signed *before* being provided to smoldot. While it is possible for smoldot to contain for example a remote code execution issue that could lead to an attacker reading a private key, this type of issue is extremely unlikely to happen. Using the smoldot light client isn't inherently more risky than using a JSON-RPC server, and in most likelihood the worst that could happen is "things aren't working".
 
-The following are considered critical security issues. If you find such an issue, please use the GitHub private disclosure feature found at <https://github.com/smol-dot/smoldot/security/advisories>:
+**The following are considered critical security issues**. If you find such an issue, please use the GitHub private disclosure feature found at <https://github.com/smol-dot/smoldot/security/advisories>:
 
 - Smoldot believes that a certain block has been finalized, when it is not actually the case on the blockchain it is connected to.
 - Remote arbitrary memory accesses.
 - Remote code executions.
 
-The following are considered security issues and are given particular attention. Given the extreme difficulty, monetary risk, and extremely low potential of reward for an attacker to exploit these issues, it is not problematic to publicly disclose them:
+**The following are considered security issues and are given particular attention**. Given the extreme difficulty, monetary risk, and extremely low potential of reward for an attacker to exploit these issues, it is not problematic to publicly disclose them:
 
 - Smoldot crashes due to a certain exchange of messages on the libp2p networking level, including a high volume of data.
 - Smoldot crashes due to a certain exchange of messages on the JSON-RPC requests level, including a high volume of JSON-RPC requests.
-- A response to a JSON-RPC request provides incorrect or incomplete information. In the context of the light client, this doesn't apply to the legacy JSON-RPC requests that can't be implemented properly by a light client due to techincal reasons. A warning is printed when a legacy JSON-RPC request is called.
+- A response to a JSON-RPC request provides incorrect or incomplete information. In the context of the light client, this doesn't apply to the legacy JSON-RPC requests that can't be implemented properly due to techincal reasons. A warning is printed when a legacy JSON-RPC request is called.
 
 Where "crash" includes: Rust panics, JavaScript exceptions (except for the ones documented), infinite loops, or allocating an ever increasing amount of memory (a.k.a. a "memory leak").
 
-Is not considered a security issue:
+**Is not considered a security issue**:
 
 - **The smoldot light client believes that a certain block exists or is valid, while in reality it isn't valid**. A light client has no way to determine for sure whether a block is valid. Only finality should be relied upon when accuracy is critical.
 - Smoldot crashes due to an intended use of its API. Note that "API" here doesn't include the content or volume of JSON-RPC requests, as smoldot is meant to be resilient to malicious JSON-RPC requests or to a huge volume of JSON-RPC requests.
