@@ -65,7 +65,7 @@ The smoldot light client does in no way have access to any private key (with the
 **The following are considered security issues and are given particular attention**. Given the extreme difficulty, monetary risk, and extremely low potential of reward for an attacker to exploit these issues, it is not problematic to publicly disclose them:
 
 - Smoldot crashes due to a certain exchange of messages on the libp2p networking level, including a high volume of data.
-- Smoldot crashes due to a certain exchange of messages on the JSON-RPC requests level, including a high volume of JSON-RPC requests.
+- Smoldot crashes due to a certain exchange of messages on the JSON-RPC requests level, including a high volume of requests or responses.
 - A response to a JSON-RPC request provides incorrect or incomplete information. In the context of the light client, this doesn't apply to the legacy JSON-RPC requests that can't be implemented properly due to techincal reasons. A warning is printed when a legacy JSON-RPC request is called.
 
 Where "crash" includes: Rust panics, JavaScript exceptions (except for the ones documented), infinite loops, or allocating an ever increasing amount of memory (a.k.a. a "memory leak").
@@ -73,7 +73,7 @@ Where "crash" includes: Rust panics, JavaScript exceptions (except for the ones 
 **Is not considered a security issue**:
 
 - **The smoldot light client believes that a certain block exists or is valid, while in reality it isn't valid**. A light client has no way to determine for sure whether a block is valid. Only finality should be relied upon when accuracy is critical.
-- Smoldot crashes due to an intended use of its API. Note that "API" here doesn't include the content or volume of JSON-RPC requests, as smoldot is meant to be resilient to malicious JSON-RPC requests or to a huge volume of JSON-RPC requests.
+- Smoldot crashes due to an unintended use of its API. Note that "API" here doesn't include the content or volume of JSON-RPC requests, as smoldot is meant to be resilient to malicious JSON-RPC requests or to a huge volume of JSON-RPC requests.
 - Smoldot runs out of memory because it is being asked to connect to a high number of chains at the same time. The precise limit to the number of chains depends on the amount of memory available.
 - Being able to determine the identity (including the IP address) of the sender of a transaction sent using smoldot. This aspect could be improved in the future, but at the moment the Polkadot network protocol doesn't provide enough tools to make anonymity possible.
 - Smoldot failing to connect to a certain chain. While this isn't a *security* issue, please open an issue regardless.
