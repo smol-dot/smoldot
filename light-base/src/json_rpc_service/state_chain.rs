@@ -22,7 +22,6 @@ use super::{Background, Platform, SubscriptionTy};
 use crate::runtime_service;
 
 use alloc::{
-    borrow::ToOwned as _,
     boxed::Box,
     format,
     string::{String, ToString as _},
@@ -37,6 +36,7 @@ use core::{
     time::Duration,
 };
 use futures::{lock::MutexGuard, prelude::*};
+use hashbrown::hash_map;
 use smoldot::{
     header,
     informant::HashDisplay,
@@ -400,9 +400,13 @@ impl<TPlat: Platform> Background<TPlat> {
         let abort_registration = {
             let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
             let mut subscriptions_list = self.subscriptions.lock().await;
-            subscriptions_list.misc.insert(
-                (subscription_id.clone(), SubscriptionTy::AllHeads),
-                (abort_handle, state_machine_subscription.clone()),
+            subscriptions_list.insert(
+                subscription_id.clone(),
+                (
+                    abort_handle,
+                    state_machine_subscription.clone(),
+                    SubscriptionTy::AllHeads,
+                ),
             );
             abort_registration
         };
@@ -557,9 +561,13 @@ impl<TPlat: Platform> Background<TPlat> {
         let abort_registration = {
             let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
             let mut subscriptions_list = self.subscriptions.lock().await;
-            subscriptions_list.misc.insert(
-                (subscription_id.clone(), SubscriptionTy::FinalizedHeads),
-                (abort_handle, state_machine_subscription.clone()),
+            subscriptions_list.insert(
+                subscription_id.clone(),
+                (
+                    abort_handle,
+                    state_machine_subscription.clone(),
+                    SubscriptionTy::FinalizedHeads,
+                ),
             );
             abort_registration
         };
@@ -665,9 +673,13 @@ impl<TPlat: Platform> Background<TPlat> {
         let abort_registration = {
             let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
             let mut subscriptions_list = self.subscriptions.lock().await;
-            subscriptions_list.misc.insert(
-                (subscription_id.clone(), SubscriptionTy::NewHeads),
-                (abort_handle, state_machine_subscription.clone()),
+            subscriptions_list.insert(
+                subscription_id.clone(),
+                (
+                    abort_handle,
+                    state_machine_subscription.clone(),
+                    SubscriptionTy::NewHeads,
+                ),
             );
             abort_registration
         };
@@ -742,18 +754,17 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         subscription: String,
     ) {
-        let state_machine_subscription = if let Some((abort_handle, state_machine_subscription)) =
-            self.subscriptions
-                .lock()
-                .await
-                .misc
-                .remove(&(subscription.to_owned(), SubscriptionTy::AllHeads))
-        {
-            abort_handle.abort();
-            Some(state_machine_subscription)
-        } else {
-            None
-        };
+        let state_machine_subscription =
+            match self.subscriptions.lock().await.entry_ref(&subscription) {
+                hash_map::EntryRef::Occupied(e)
+                    if matches!(e.get().2, SubscriptionTy::AllHeads) =>
+                {
+                    let (abort_handle, state_machine_subscription, _) = e.remove();
+                    abort_handle.abort();
+                    Some(state_machine_subscription)
+                }
+                hash_map::EntryRef::Occupied(_) | hash_map::EntryRef::Vacant(_) => None,
+            };
 
         if let Some(state_machine_subscription) = &state_machine_subscription {
             self.requests_subscriptions
@@ -777,18 +788,17 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         subscription: String,
     ) {
-        let state_machine_subscription = if let Some((abort_handle, state_machine_subscription)) =
-            self.subscriptions
-                .lock()
-                .await
-                .misc
-                .remove(&(subscription.to_owned(), SubscriptionTy::FinalizedHeads))
-        {
-            abort_handle.abort();
-            Some(state_machine_subscription)
-        } else {
-            None
-        };
+        let state_machine_subscription =
+            match self.subscriptions.lock().await.entry_ref(&subscription) {
+                hash_map::EntryRef::Occupied(e)
+                    if matches!(e.get().2, SubscriptionTy::FinalizedHeads) =>
+                {
+                    let (abort_handle, state_machine_subscription, _) = e.remove();
+                    abort_handle.abort();
+                    Some(state_machine_subscription)
+                }
+                hash_map::EntryRef::Occupied(_) | hash_map::EntryRef::Vacant(_) => None,
+            };
 
         if let Some(state_machine_subscription) = &state_machine_subscription {
             self.requests_subscriptions
@@ -814,18 +824,17 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         subscription: String,
     ) {
-        let state_machine_subscription = if let Some((abort_handle, state_machine_subscription)) =
-            self.subscriptions
-                .lock()
-                .await
-                .misc
-                .remove(&(subscription.to_owned(), SubscriptionTy::NewHeads))
-        {
-            abort_handle.abort();
-            Some(state_machine_subscription)
-        } else {
-            None
-        };
+        let state_machine_subscription =
+            match self.subscriptions.lock().await.entry_ref(&subscription) {
+                hash_map::EntryRef::Occupied(e)
+                    if matches!(e.get().2, SubscriptionTy::NewHeads) =>
+                {
+                    let (abort_handle, state_machine_subscription, _) = e.remove();
+                    abort_handle.abort();
+                    Some(state_machine_subscription)
+                }
+                hash_map::EntryRef::Occupied(_) | hash_map::EntryRef::Vacant(_) => None,
+            };
 
         if let Some(state_machine_subscription) = &state_machine_subscription {
             self.requests_subscriptions
@@ -1333,9 +1342,13 @@ impl<TPlat: Platform> Background<TPlat> {
         let abort_registration = {
             let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
             let mut subscriptions_list = self.subscriptions.lock().await;
-            subscriptions_list.misc.insert(
-                (subscription_id.clone(), SubscriptionTy::RuntimeSpec),
-                (abort_handle, state_machine_subscription.clone()),
+            subscriptions_list.insert(
+                subscription_id.clone(),
+                (
+                    abort_handle,
+                    state_machine_subscription.clone(),
+                    SubscriptionTy::RuntimeSpec,
+                ),
             );
             abort_registration
         };
@@ -1445,23 +1458,24 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         subscription: &str,
     ) {
-        let state_machine_subscription = if let Some((abort_handle, state_machine_subscription)) =
-            self.subscriptions
-                .lock()
-                .await
-                .misc
-                .remove(&(subscription.to_owned(), SubscriptionTy::RuntimeSpec))
-        {
-            abort_handle.abort();
-            Some(state_machine_subscription)
-        } else {
-            None
-        };
+        let state_machine_subscription =
+            match self.subscriptions.lock().await.entry_ref(subscription) {
+                hash_map::EntryRef::Occupied(e)
+                    if matches!(e.get().2, SubscriptionTy::RuntimeSpec) =>
+                {
+                    let (abort_handle, state_machine_subscription, _) = e.remove();
+                    abort_handle.abort();
+                    Some(state_machine_subscription)
+                }
+                hash_map::EntryRef::Occupied(_) | hash_map::EntryRef::Vacant(_) => None,
+            };
+
         if let Some(state_machine_subscription) = &state_machine_subscription {
             self.requests_subscriptions
                 .stop_subscription(state_machine_subscription)
                 .await;
         }
+
         self.requests_subscriptions
             .respond(
                 state_machine_request_id,
@@ -1480,23 +1494,22 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         subscription: &str,
     ) {
-        let state_machine_subscription = if let Some((abort_handle, state_machine_subscription)) =
-            self.subscriptions
-                .lock()
-                .await
-                .misc
-                .remove(&(subscription.to_owned(), SubscriptionTy::Storage))
-        {
-            abort_handle.abort();
-            Some(state_machine_subscription)
-        } else {
-            None
-        };
+        let state_machine_subscription =
+            match self.subscriptions.lock().await.entry_ref(subscription) {
+                hash_map::EntryRef::Occupied(e) if matches!(e.get().2, SubscriptionTy::Storage) => {
+                    let (abort_handle, state_machine_subscription, _) = e.remove();
+                    abort_handle.abort();
+                    Some(state_machine_subscription)
+                }
+                hash_map::EntryRef::Occupied(_) | hash_map::EntryRef::Vacant(_) => None,
+            };
+
         if let Some(state_machine_subscription) = &state_machine_subscription {
             self.requests_subscriptions
                 .stop_subscription(state_machine_subscription)
                 .await;
         }
+
         self.requests_subscriptions
             .respond(
                 state_machine_request_id,
@@ -1545,9 +1558,13 @@ impl<TPlat: Platform> Background<TPlat> {
         let abort_registration = {
             let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
             let mut subscriptions_list = self.subscriptions.lock().await;
-            subscriptions_list.misc.insert(
-                (subscription_id.clone(), SubscriptionTy::Storage),
-                (abort_handle, state_machine_subscription.clone()),
+            subscriptions_list.insert(
+                subscription_id.clone(),
+                (
+                    abort_handle,
+                    state_machine_subscription.clone(),
+                    SubscriptionTy::Storage,
+                ),
             );
             abort_registration
         };

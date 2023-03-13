@@ -345,16 +345,10 @@ impl ServicePrototype {
             }),
             genesis_block_hash: config.genesis_block_hash,
             next_subscription_id: atomic::AtomicU64::new(0),
-            subscriptions: Mutex::new(Subscriptions {
-                misc: HashMap::with_capacity_and_hasher(
-                    usize::try_from(self.max_subscriptions).unwrap_or(usize::max_value()),
-                    Default::default(),
-                ),
-                chain_head_follow: HashMap::with_capacity_and_hasher(
-                    usize::try_from(self.max_subscriptions).unwrap_or(usize::max_value()),
-                    Default::default(),
-                ),
-            }),
+            subscriptions: Mutex::new(HashMap::with_capacity_and_hasher(
+                usize::try_from(self.max_subscriptions).unwrap_or(usize::max_value()),
+                Default::default(),
+            )),
             printed_legacy_json_rpc_warning: atomic::AtomicBool::new(false),
         });
 
@@ -472,24 +466,24 @@ struct Background<TPlat: Platform> {
     /// connected.
     next_subscription_id: atomic::AtomicU64,
 
-    subscriptions: Mutex<Subscriptions>,
+    /// For each active subscription (the key), an abort handle and the id of the subscription in
+    /// the state machine. The abort handle is linked to the task dedicated to handling that
+    /// subscription.
+    subscriptions: Mutex<
+        HashMap<
+            String,
+            (
+                future::AbortHandle,
+                requests_subscriptions::SubscriptionId,
+                SubscriptionTy,
+            ),
+            fnv::FnvBuildHasher,
+        >,
+    >,
 
     /// If `true`, we have already printed a warning about usage of the legacy JSON-RPC API. This
     /// flag prevents printing this message multiple times.
     printed_legacy_json_rpc_warning: atomic::AtomicBool,
-}
-
-struct Subscriptions {
-    /// For each active subscription (the key), an abort handle and the id of the subscription in
-    /// the state machine. The abort handle is linked to the task dedicated to handling that
-    /// subscription.
-    misc: HashMap<
-        (String, SubscriptionTy),
-        (future::AbortHandle, requests_subscriptions::SubscriptionId),
-        fnv::FnvBuildHasher,
-    >,
-
-    chain_head_follow: HashMap<String, FollowSubscription, fnv::FnvBuildHasher>,
 }
 
 struct FollowSubscription {
@@ -500,11 +494,8 @@ struct FollowSubscription {
     pinned_blocks_headers: HashMap<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
 
     runtime_subscribe_all: Option<runtime_service::SubscriptionId>,
-
-    abort_handle: future::AbortHandle,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 enum SubscriptionTy {
     AllHeads,
     NewHeads,
@@ -516,6 +507,7 @@ enum SubscriptionTy {
     ChainHeadBody,
     ChainHeadCall,
     ChainHeadStorage,
+    Follow(FollowSubscription),
 }
 
 struct Cache {
