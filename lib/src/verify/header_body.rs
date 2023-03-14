@@ -70,6 +70,14 @@ pub struct Config<'a, TBody> {
     /// Optional cache corresponding to the storage trie root hash calculation of the parent
     /// block.
     pub top_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
+
+    /// Maximum log level of the runtime.
+    ///
+    /// > **Note**: This value is opaque from the point of the view of the client, and the runtime
+    /// >           is free to interpret it the way it wants. However, usually values are: `0` for
+    /// >           "off", `1` for "error", `2` for "warn", `3` for "info", `4` for "debug",
+    /// >           and `5` for "trace".
+    pub max_log_level: u32,
 }
 
 /// Extra items of [`Config`] that are dependant on the consensus engine of the chain.
@@ -364,6 +372,7 @@ pub fn verify(
             top_trie_root_calculation_cache: config.top_trie_root_calculation_cache,
             storage_top_trie_changes: Default::default(),
             offchain_storage_changes: Default::default(),
+            max_log_level: config.max_log_level,
         });
 
         match vm {
@@ -443,6 +452,7 @@ impl VerifyInner {
                             ),
                             storage_top_trie_changes: success.storage_top_trie_changes,
                             offchain_storage_changes: success.offchain_storage_changes,
+                            max_log_level: 0,
                         });
 
                         match vm {

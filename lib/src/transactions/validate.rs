@@ -48,6 +48,14 @@ pub struct Config<'a, TTx> {
     /// This information is passed to the runtime, which might perform some additional
     /// verifications if the source isn't trusted.
     pub source: TransactionSource,
+
+    /// Maximum log level of the runtime.
+    ///
+    /// > **Note**: This value is opaque from the point of the view of the client, and the runtime
+    /// >           is free to interpret it the way it wants. However, usually values are: `0` for
+    /// >           "off", `1` for "error", `2` for "warn", `3` for "info", `4` for "debug",
+    /// >           and `5` for "trace".
+    pub max_log_level: u32,
 }
 
 /// Source of the transaction.
@@ -327,6 +335,7 @@ pub fn validate_transaction(
                 top_trie_root_calculation_cache: None,
                 storage_top_trie_changes: storage_diff::StorageDiff::empty(),
                 offchain_storage_changes: storage_diff::StorageDiff::empty(),
+                max_log_level: config.max_log_level,
             });
 
             // Information used later, after `Core_initialize_block` is done.
@@ -363,6 +372,7 @@ pub fn validate_transaction(
                 top_trie_root_calculation_cache: None,
                 storage_top_trie_changes: storage_diff::StorageDiff::empty(),
                 offchain_storage_changes: storage_diff::StorageDiff::empty(),
+                max_log_level: config.max_log_level,
             });
 
             match vm {
@@ -454,6 +464,7 @@ impl Query {
                         top_trie_root_calculation_cache: Some(
                             success.top_trie_root_calculation_cache,
                         ),
+                        max_log_level: 0,
                     });
 
                     match vm {

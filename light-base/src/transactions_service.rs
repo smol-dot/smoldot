@@ -1165,6 +1165,7 @@ async fn validate_transaction<TPlat: Platform>(
         block_number_bytes: relay_chain_sync.block_number_bytes(),
         scale_encoded_transaction: iter::once(scale_encoded_transaction),
         source,
+        max_log_level: 0,
     });
 
     loop {

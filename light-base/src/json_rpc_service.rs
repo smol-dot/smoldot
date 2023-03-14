@@ -1606,6 +1606,7 @@ impl<TPlat: Platform> Background<TPlat> {
             top_trie_root_calculation_cache: None,
             storage_top_trie_changes: Default::default(),
             offchain_storage_changes: Default::default(),
+            max_log_level: 0,
         }) {
             Ok(vm) => vm,
             Err((err, prototype)) => {

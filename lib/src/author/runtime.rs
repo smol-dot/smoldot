@@ -91,6 +91,14 @@ pub struct Config<'a> {
     /// Capacity to reserve for the number of extrinsics. Should be higher than the approximate
     /// number of extrinsics that are going to be applied.
     pub block_body_capacity: usize,
+
+    /// Maximum log level of the runtime.
+    ///
+    /// > **Note**: This value is opaque from the point of the view of the client, and the runtime
+    /// >           is free to interpret it the way it wants. However, usually values are: `0` for
+    /// >           "off", `1` for "error", `2` for "warn", `3` for "info", `4` for "debug",
+    /// >           and `5` for "trace".
+    pub max_log_level: u32,
 }
 
 /// Extra configuration depending on the consensus algorithm.
@@ -185,6 +193,7 @@ pub fn build_block(config: Config) -> BlockBuild {
         top_trie_root_calculation_cache: config.top_trie_root_calculation_cache,
         storage_top_trie_changes: Default::default(),
         offchain_storage_changes: Default::default(),
+        max_log_level: config.max_log_level,
     });
 
     let vm = match init_result {
@@ -196,6 +205,7 @@ pub fn build_block(config: Config) -> BlockBuild {
         stage: Stage::InitializeBlock,
         block_body: Vec::with_capacity(config.block_body_capacity),
         logs: String::new(),
+        max_log_level: config.max_log_level,
     };
 
     BlockBuild::from_inner(vm, shared)
@@ -322,6 +332,7 @@ impl BlockBuild {
                         ),
                         storage_top_trie_changes: success.storage_top_trie_changes,
                         offchain_storage_changes: success.offchain_storage_changes,
+                        max_log_level: shared.max_log_level,
                     });
 
                     inner = Inner::Runtime(match init_result {
@@ -447,6 +458,8 @@ struct Shared {
     block_body: Vec<Vec<u8>>,
     /// Concatenation of all logs produced by the multiple calls.
     logs: String,
+    /// Value provided by [`Config::max_log_level`].
+    max_log_level: u32,
 }
 
 /// The block building process is separated into multiple stages.
@@ -515,6 +528,7 @@ impl InherentExtrinsics {
             top_trie_root_calculation_cache: Some(self.top_trie_root_calculation_cache),
             storage_top_trie_changes: self.storage_top_trie_changes,
             offchain_storage_changes: self.offchain_storage_changes,
+            max_log_level: self.shared.max_log_level,
         });
 
         let vm = match init_result {
@@ -548,6 +562,7 @@ impl ApplyExtrinsic {
             top_trie_root_calculation_cache: Some(self.top_trie_root_calculation_cache),
             storage_top_trie_changes: self.storage_top_trie_changes,
             offchain_storage_changes: self.offchain_storage_changes,
+            max_log_level: self.shared.max_log_level,
         });
 
         self.shared.stage = Stage::ApplyExtrinsic(extrinsic);
@@ -571,6 +586,7 @@ impl ApplyExtrinsic {
             top_trie_root_calculation_cache: Some(self.top_trie_root_calculation_cache),
             storage_top_trie_changes: self.storage_top_trie_changes,
             offchain_storage_changes: self.offchain_storage_changes,
+            max_log_level: self.shared.max_log_level,
         });
 
         let vm = match init_result {

@@ -809,6 +809,7 @@ impl<T> BodyVerifyRuntimeRequired<T> {
             parent_block_header: parent_block_header.into(),
             block_body,
             top_trie_root_calculation_cache,
+            max_log_level: 0,
         });
 
         self.context.with_body_verify(process)
