@@ -223,13 +223,16 @@ pub fn bip39_to_seed(phrase: &str, password: &str) -> Result<[u8; 32], Bip39ToSe
     salt.push_str("mnemonic");
     salt.push_str(password);
 
+    // This function returns an error only in case of wrong buffer length, making it safe to
+    // unwrap.
     let mut seed = [0u8; 64];
     pbkdf2::pbkdf2::<hmac::Hmac<sha2::Sha512>>(
         &entropy[..entropy_len],
         salt.as_bytes(),
         2048,
         &mut seed,
-    );
+    )
+    .unwrap();
 
     // TODO: salt.zeroize();
 

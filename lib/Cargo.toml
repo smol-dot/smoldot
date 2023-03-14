@@ -52,20 +52,20 @@ hex = { version = "0.4.3", default-features = false }
 hmac = { version = "0.12.1", default-features = false }
 itertools = { version = "0.10.5", default-features = false }
 libsecp256k1 = { version = "0.7.1", default-features = false, features = ["static-context", "hmac"] }
-# Reminder: `log` is forbidden
+# The log` crate is forbidden, as it is very impolite to emit logs from a library.
 merlin = { version = "3.0", default-features = false }
 nom = { version = "7.1.3", default-features = false, features = ["alloc"] }
 no-std-net = { version = "0.6.0", default-features = false }
 num-bigint = { version = "0.4.3", default-features = false }
 num-rational = { version = "0.4.1", default-features = false, features = ["num-bigint"] }
 num-traits = { version = "0.2.15", default-features = false }
-pbkdf2 = { version = "0.11.0", default-features = false }
+pbkdf2 = { version = "0.12.1", default-features = false }
 rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }  # TODO: rand is used in hack-y ways at the moment ; these features should be removed
 rand_chacha = { version = "0.3.1", default-features = false }
 ruzstd = { version = "0.3.0" }  # TODO: doesn't support no_std :-/
 schnorrkel = { version = "0.10.2", default-features = false, features = ["preaudit_deprecated", "u64_backend"] }
 serde = { version = "1.0.152", default-features = false, features = ["alloc", "derive"] }
-serde_json = { version = "1.0.93", default-features = false, features = ["alloc", "raw_value"] }
+serde_json = { version = "1.0.94", default-features = false, features = ["alloc", "raw_value"] }
 sha2 = { version = "0.10.6", default-features = false }
 siphasher = { version = "0.3.10", default-features = false }
 slab = { version = "0.4.8", default-features = false }
@@ -92,7 +92,7 @@ parity-scale-codec = { version = "3.4.0", features = ["derive"], default-feature
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 # `std` feature
 anyhow = { version = "1.0.69", default-features = false, features = ["std"], optional = true }  # Used only in order to interact with wasmtime
-wasmtime = { version = "6.0.0", default-features = false, features = ["async", "cranelift"], optional = true }
+wasmtime = { version = "6.0.1", default-features = false, features = ["async", "cranelift"], optional = true }
 
 [dev-dependencies]
 async-std = "1.12.0"

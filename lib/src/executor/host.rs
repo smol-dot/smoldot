@@ -3390,8 +3390,8 @@ impl fmt::Display for LogEmit {
                     .read_memory(msg_str_ptr, msg_str_size)
                     .unwrap();
                 let str = str::from_utf8(str.as_ref()).unwrap();
-                // TODO: don't just ignore the target and log level? better log representation? more control?
-                write!(f, "{str}")
+                // TODO: don't just ignore the target and log level? better log representation? more control? also, it's unclear whether it should be an individual line
+                writeln!(f, "{str}")
             }
         }
     }

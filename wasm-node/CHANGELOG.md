@@ -2,18 +2,24 @@
 
 ## Unreleased
 
+## 1.0.0 - 2022-03-12
+
+### Fixed
+
+- Fix Deno throwing an exception when failing to connect to an unreachable node through a TCP/IP multiaddr. (([#246]https://github.com/smol-dot/smoldot/pull/246))
+
 ## 0.7.13 - 2022-03-03
 
-## Added
+### Added
 
 - Add support for the `ext_hashing_keccak_512_version_1` host function. ([#231](https://github.com/smol-dot/smoldot/pull/231))
 
-## Changed
+### Changed
 
 - When a full node refuses an outbound transactions or GrandPa substream even though a block announces substream has been established, smoldot now tries to reopen the failed substream. This bypasses a Substrate issue. ([#240](https://github.com/smol-dot/smoldot/pull/240))
 - Runtime functions called through the JSON-RPC function `state_call` are now allowed to modify the storage of the chain. These storage modifications are silently discarded. Previously, a JSON-RPC error was returned. ([#259](https://github.com/smol-dot/smoldot/pull/259))
 
-## Fixed
+### Fixed
 
 - Fix panic when connecting to a chain that hasn't finalized any block yet. ([#258](https://github.com/smol-dot/smoldot/pull/258))
 - Fix the signatures of the `ext_default_child_storage_read_version_1` and `ext_default_child_storage_root_version_2` host functions. This would lead to a warning about these function being unresolved. ([#244](https://github.com/smol-dot/smoldot/pull/244))
