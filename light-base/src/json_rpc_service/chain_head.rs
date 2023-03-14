@@ -17,19 +17,30 @@
 
 //! All JSON-RPC method handlers that related to the `chainHead` API.
 
-use super::{Background, FollowSubscription, SubscriptionTy};
+use super::{Background, FollowSubscription, SubscriptionMessage};
 
 use crate::{platform::Platform, runtime_service, sync_service};
 
-use alloc::{borrow::ToOwned as _, boxed::Box, format, string::ToString as _, sync::Arc, vec::Vec};
+use alloc::{
+    borrow::ToOwned as _,
+    boxed::Box,
+    format,
+    string::{String, ToString as _},
+    sync::Arc,
+    vec::Vec,
+};
 use core::{
     cmp, iter,
     num::{NonZeroU32, NonZeroUsize},
     sync::atomic,
     time::Duration,
 };
-use futures::prelude::*;
-use hashbrown::{hash_map, HashMap};
+use futures::{
+    channel::{mpsc, oneshot},
+    lock::Mutex,
+    prelude::*,
+};
+use hashbrown::HashMap;
 use smoldot::{
     chain::fork_tree,
     executor::{self, runtime_host},
@@ -46,7 +57,7 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         follow_subscription: &str,
         hash: methods::HashHexString,
-        function_to_call: &str,
+        function_to_call: String,
         call_parameters: methods::HexString,
         network_config: Option<methods::NetworkConfig>,
     ) {
@@ -56,64 +67,71 @@ impl<TPlat: Platform> Background<TPlat> {
             total_attempts: 3,
         });
 
+        // This is implemented by sending a message to the notifications task.
+        // The task dedicated to this subscription will receive the message and send a response to
+        // the JSON-RPC client.
+        let message_received = {
+            let sender = self
+                .subscriptions
+                .lock()
+                .await
+                .get(follow_subscription)
+                .map(|(tx, _)| tx.clone());
+
+            if let Some(sender) = sender {
+                let (tx, rx) = oneshot::channel();
+                let _ = sender
+                    .lock()
+                    .await
+                    .send((
+                        SubscriptionMessage::ChainHeadCall {
+                            get_state_machine_request_id: state_machine_request_id.clone(),
+                            get_request_id: request_id.to_owned(),
+                            hash,
+                            call_parameters,
+                            function_to_call,
+                            network_config,
+                        },
+                        tx,
+                    ))
+                    .await;
+                rx.await.is_ok()
+            } else {
+                false
+            }
+        };
+
+        // Send back a response manually if the task doesn't exist, or has discarded the message,
+        // which happens if the block isn't pinned.
+        if !message_received {
+            self.requests_subscriptions
+                .respond(
+                    state_machine_request_id,
+                    json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::InvalidParams,
+                        None,
+                    ),
+                )
+                .await;
+        }
+    }
+
+    async fn start_chain_head_call(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        function_to_call: &str,
+        call_parameters: methods::HexString,
+        pre_runtime_call: Option<runtime_service::RuntimeLock<TPlat>>,
+        network_config: methods::NetworkConfig,
+    ) {
         let task = {
             let me = self.clone();
             let request_id = request_id.to_owned();
             let function_to_call = function_to_call.to_owned();
             let state_machine_request_id = state_machine_request_id.clone();
-            let follow_subscription = follow_subscription.to_owned();
             async move {
-                // Determine whether the requested block hash is valid and start the call.
-                let pre_runtime_call = {
-                    let lock = me.subscriptions.lock().await;
-                    if let Some(subscription) =
-                        lock.get(&follow_subscription)
-                            .and_then(|(_, _, ty)| match ty {
-                                SubscriptionTy::Follow(f) => Some(f),
-                                _ => None,
-                            })
-                    {
-                        let runtime_service_subscribe_all = match subscription.runtime_subscribe_all
-                        {
-                            Some(sa) => sa,
-                            None => {
-                                me.requests_subscriptions
-                                    .respond(
-                                        &state_machine_request_id,
-                                        json_rpc::parse::build_error_response(
-                                            &request_id,
-                                            json_rpc::parse::ErrorResponse::InvalidParams,
-                                            None,
-                                        ),
-                                    )
-                                    .await;
-                                return;
-                            }
-                        };
-
-                        if !subscription.pinned_blocks_headers.contains_key(&hash.0) {
-                            me.requests_subscriptions
-                                .respond(
-                                    &state_machine_request_id,
-                                    json_rpc::parse::build_error_response(
-                                        &request_id,
-                                        json_rpc::parse::ErrorResponse::InvalidParams,
-                                        None,
-                                    ),
-                                )
-                                .await;
-                            return;
-                        }
-
-                        me.runtime_service
-                            .pinned_block_runtime_lock(runtime_service_subscribe_all, &hash.0)
-                            .await
-                            .ok()
-                    } else {
-                        None
-                    }
-                };
-
                 let state_machine_subscription = match me
                     .requests_subscriptions
                     .start_subscription(&state_machine_request_id, 1)
@@ -143,20 +161,15 @@ impl<TPlat: Platform> Background<TPlat> {
                     .fetch_add(1, atomic::Ordering::Relaxed)
                     .to_string();
 
-                // TODO: make use of this
-                let _abort_registration = {
-                    let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
-                    let mut subscriptions_list = me.subscriptions.lock().await;
-                    subscriptions_list.insert(
-                        subscription_id.clone(),
-                        (
-                            abort_handle,
-                            state_machine_subscription.clone(),
-                            SubscriptionTy::ChainHeadCall,
-                        ),
-                    );
-                    abort_registration
-                };
+                let (messages_tx, mut messages_rx) = mpsc::channel(0);
+
+                me.subscriptions.lock().await.insert(
+                    subscription_id.clone(),
+                    (
+                        Arc::new(Mutex::new(messages_tx)),
+                        state_machine_subscription.clone(),
+                    ),
+                );
 
                 me.requests_subscriptions
                     .respond(
@@ -167,20 +180,59 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
 
                 let pre_runtime_call = if let Some(pre_runtime_call) = &pre_runtime_call {
-                    Some(
-                        pre_runtime_call
-                            .start(
-                                &function_to_call,
-                                iter::once(&call_parameters.0),
-                                cmp::min(10, network_config.total_attempts),
-                                Duration::from_millis(u64::from(cmp::min(
-                                    20000,
-                                    network_config.timeout_ms,
-                                ))),
-                                NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
-                            )
-                            .await,
-                    )
+                    let call_future = pre_runtime_call.start(
+                        &function_to_call,
+                        iter::once(&call_parameters.0),
+                        cmp::min(10, network_config.total_attempts),
+                        Duration::from_millis(u64::from(cmp::min(
+                            20000,
+                            network_config.timeout_ms,
+                        ))),
+                        NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
+                    );
+                    futures::pin_mut!(call_future);
+
+                    loop {
+                        let outcome = {
+                            match future::select(&mut call_future, messages_rx.next()).await {
+                                future::Either::Left((v, _)) => either::Left(v),
+                                future::Either::Right((v, _)) => either::Right(v),
+                            }
+                        };
+
+                        match outcome {
+                            either::Left(outcome) => break Some(outcome),
+                            either::Right(None) => {
+                                unreachable!()
+                            }
+                            either::Right(Some((
+                                SubscriptionMessage::StopIfChainHeadCall {
+                                    stop_state_machine_request_id,
+                                    stop_request_id,
+                                },
+                                confirmation_sender,
+                            ))) => {
+                                me.requests_subscriptions
+                                    .stop_subscription(&state_machine_subscription)
+                                    .await;
+
+                                me.requests_subscriptions
+                                    .respond(
+                                        &stop_state_machine_request_id,
+                                        methods::Response::chainHead_unstable_stopCall(())
+                                            .to_json_response(&stop_request_id),
+                                    )
+                                    .await;
+
+                                let _ = confirmation_sender.send(());
+                                return;
+                            }
+                            either::Right(Some(_)) => {
+                                // Any other message.
+                                // Silently discard the confirmation sender.
+                            }
+                        }
+                    }
                 } else {
                     None
                 };
@@ -409,7 +461,9 @@ impl<TPlat: Platform> Background<TPlat> {
             )
         };
 
-        let (subscription_id, initial_notifications, abort_registration) = {
+        let (messages_tx, mut messages_rx) = mpsc::channel(0);
+
+        let (subscription_id, initial_notifications, mut subscription_state) = {
             let subscription_id = self
                 .next_subscription_id
                 .fetch_add(1, atomic::Ordering::Relaxed)
@@ -573,55 +627,54 @@ impl<TPlat: Platform> Background<TPlat> {
                 }
             }
 
-            let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
-
             let mut lock = self.subscriptions.lock().await;
 
             lock.insert(
                 subscription_id.clone(),
                 (
-                    abort_handle,
+                    Arc::new(Mutex::new(messages_tx)),
                     state_machine_subscription.clone(),
-                    SubscriptionTy::Follow(FollowSubscription {
-                        non_finalized_blocks,
-                        pinned_blocks_headers,
-                        runtime_subscribe_all,
-                    }),
                 ),
             );
 
-            (subscription_id, initial_notifications, abort_registration)
+            let subscription_state = FollowSubscription {
+                non_finalized_blocks,
+                pinned_blocks_headers,
+                runtime_subscribe_all,
+            };
+
+            (subscription_id, initial_notifications, subscription_state)
         };
 
         // Spawn a separate task for the subscription.
-        let task =
-            {
-                let me = self.clone();
-                async move {
-                    // Send back to the user the initial notifications.
-                    for notif in initial_notifications {
-                        me.requests_subscriptions
-                            .push_notification(&state_machine_subscription, notif)
-                            .await;
-                    }
+        let task = {
+            let me = self.clone();
+            async move {
+                // Send back to the user the initial notifications.
+                for notif in initial_notifications {
+                    me.requests_subscriptions
+                        .push_notification(&state_machine_subscription, notif)
+                        .await;
+                }
 
-                    loop {
-                        let next_block = match &mut subscribe_all {
-                            either::Left(subscribe_all) => future::Either::Left(
-                                subscribe_all.new_blocks.next().map(either::Left),
-                            ),
-                            either::Right(subscribe_all) => future::Either::Right(
-                                subscribe_all.new_blocks.next().map(either::Right),
-                            ),
-                        };
-                        futures::pin_mut!(next_block);
+                loop {
+                    let next_block = match &mut subscribe_all {
+                        either::Left(subscribe_all) => {
+                            future::Either::Left(subscribe_all.new_blocks.next().map(either::Left))
+                        }
+                        either::Right(subscribe_all) => future::Either::Right(
+                            subscribe_all.new_blocks.next().map(either::Right),
+                        ),
+                    };
+                    futures::pin_mut!(next_block);
 
-                        // TODO: doesn't enforce any maximum number of pinned blocks
-                        match next_block.await {
-                            either::Left(None) | either::Right(None) => {
-                                // TODO: clear queue of notifications?
-                                break;
-                            }
+                    // TODO: doesn't enforce any maximum number of pinned blocks
+                    match future::select(next_block, messages_rx.next()).await {
+                        future::Either::Left((either::Left(None) | either::Right(None), _)) => {
+                            // TODO: clear queue of notifications?
+                            break;
+                        }
+                        future::Either::Left((
                             either::Left(Some(runtime_service::Notification::Finalized {
                                 best_block_hash,
                                 hash,
@@ -630,151 +683,148 @@ impl<TPlat: Platform> Background<TPlat> {
                             | either::Right(Some(sync_service::Notification::Finalized {
                                 best_block_hash,
                                 hash,
-                            })) => {
-                                let mut finalized_blocks_hashes = Vec::new();
-                                let mut pruned_blocks_hashes = Vec::new();
+                            })),
+                            _,
+                        )) => {
+                            let mut finalized_blocks_hashes = Vec::new();
+                            let mut pruned_blocks_hashes = Vec::new();
 
-                                let mut subscriptions = me.subscriptions.lock().await;
-                                if let Some(sub) = subscriptions.get_mut(&subscription_id).and_then(
-                                    |(_, _, ty)| match ty {
-                                        SubscriptionTy::Follow(f) => Some(f),
-                                        _ => None,
-                                    },
-                                ) {
-                                    let node_index =
-                                        sub.non_finalized_blocks.find(|b| *b == hash).unwrap();
-                                    for pruned in
-                                        sub.non_finalized_blocks.prune_ancestors(node_index)
-                                    {
-                                        if pruned.is_prune_target_ancestor {
-                                            finalized_blocks_hashes
-                                                .push(methods::HashHexString(pruned.user_data));
-                                        } else {
-                                            pruned_blocks_hashes
-                                                .push(methods::HashHexString(pruned.user_data));
-                                        }
-                                    }
-                                }
-
-                                // TODO: don't always generate
-                                if me
-                                    .requests_subscriptions
-                                    .try_push_notification(
-                                        &state_machine_subscription,
-                                        methods::ServerToClient::chainHead_unstable_followEvent {
-                                            subscription: (&subscription_id).into(),
-                                            result: methods::FollowEvent::BestBlockChanged {
-                                                best_block_hash: methods::HashHexString(
-                                                    best_block_hash,
-                                                ),
-                                            },
-                                        }
-                                        .to_json_call_object_parameters(None),
-                                    )
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
-
-                                if me
-                                    .requests_subscriptions
-                                    .try_push_notification(
-                                        &state_machine_subscription,
-                                        methods::ServerToClient::chainHead_unstable_followEvent {
-                                            subscription: (&subscription_id).into(),
-                                            result: methods::FollowEvent::Finalized {
-                                                finalized_blocks_hashes,
-                                                pruned_blocks_hashes,
-                                            },
-                                        }
-                                        .to_json_call_object_parameters(None),
-                                    )
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
+                            let node_index = subscription_state
+                                .non_finalized_blocks
+                                .find(|b| *b == hash)
+                                .unwrap();
+                            for pruned in subscription_state
+                                .non_finalized_blocks
+                                .prune_ancestors(node_index)
+                            {
+                                if pruned.is_prune_target_ancestor {
+                                    finalized_blocks_hashes
+                                        .push(methods::HashHexString(pruned.user_data));
+                                } else {
+                                    pruned_blocks_hashes
+                                        .push(methods::HashHexString(pruned.user_data));
                                 }
                             }
-                            either::Left(Some(
-                                runtime_service::Notification::BestBlockChanged { hash },
-                            ))
+
+                            // TODO: don't always generate
+                            if me
+                                .requests_subscriptions
+                                .try_push_notification(
+                                    &state_machine_subscription,
+                                    methods::ServerToClient::chainHead_unstable_followEvent {
+                                        subscription: (&subscription_id).into(),
+                                        result: methods::FollowEvent::BestBlockChanged {
+                                            best_block_hash: methods::HashHexString(
+                                                best_block_hash,
+                                            ),
+                                        },
+                                    }
+                                    .to_json_call_object_parameters(None),
+                                )
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+
+                            if me
+                                .requests_subscriptions
+                                .try_push_notification(
+                                    &state_machine_subscription,
+                                    methods::ServerToClient::chainHead_unstable_followEvent {
+                                        subscription: (&subscription_id).into(),
+                                        result: methods::FollowEvent::Finalized {
+                                            finalized_blocks_hashes,
+                                            pruned_blocks_hashes,
+                                        },
+                                    }
+                                    .to_json_call_object_parameters(None),
+                                )
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        future::Either::Left((
+                            either::Left(Some(runtime_service::Notification::BestBlockChanged {
+                                hash,
+                            }))
                             | either::Right(Some(sync_service::Notification::BestBlockChanged {
                                 hash,
-                            })) => {
-                                let _ = me
-                                    .requests_subscriptions
-                                    .try_push_notification(
-                                        &state_machine_subscription,
-                                        methods::ServerToClient::chainHead_unstable_followEvent {
-                                            subscription: (&subscription_id).into(),
-                                            result: methods::FollowEvent::BestBlockChanged {
-                                                best_block_hash: methods::HashHexString(hash),
+                            })),
+                            _,
+                        )) => {
+                            let _ = me
+                                .requests_subscriptions
+                                .try_push_notification(
+                                    &state_machine_subscription,
+                                    methods::ServerToClient::chainHead_unstable_followEvent {
+                                        subscription: (&subscription_id).into(),
+                                        result: methods::FollowEvent::BestBlockChanged {
+                                            best_block_hash: methods::HashHexString(hash),
+                                        },
+                                    }
+                                    .to_json_call_object_parameters(None),
+                                )
+                                .await;
+                        }
+                        future::Either::Left((
+                            either::Left(Some(runtime_service::Notification::Block(block))),
+                            _,
+                        )) => {
+                            let hash =
+                                header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+
+                            let _was_in = subscription_state
+                                .pinned_blocks_headers
+                                .insert(hash, block.scale_encoded_header);
+                            debug_assert!(_was_in.is_none());
+
+                            // TODO: check if it matches current finalized block
+                            // TODO: O(n)
+                            let parent_node_index = subscription_state
+                                .non_finalized_blocks
+                                .find(|b| *b == block.parent_hash);
+                            subscription_state
+                                .non_finalized_blocks
+                                .insert(parent_node_index, hash);
+
+                            if me
+                                .requests_subscriptions
+                                .try_push_notification(
+                                    &state_machine_subscription,
+                                    methods::ServerToClient::chainHead_unstable_followEvent {
+                                        subscription: (&subscription_id).into(),
+                                        result: methods::FollowEvent::NewBlock {
+                                            block_hash: methods::HashHexString(hash),
+                                            parent_block_hash: methods::HashHexString(
+                                                block.parent_hash,
+                                            ),
+                                            new_runtime: if let Some(new_runtime) =
+                                                &block.new_runtime
+                                            {
+                                                Some(convert_runtime_spec(new_runtime))
+                                            } else {
+                                                None
                                             },
-                                        }
-                                        .to_json_call_object_parameters(None),
-                                    )
-                                    .await;
+                                        },
+                                    }
+                                    .to_json_call_object_parameters(None),
+                                )
+                                .await
+                                .is_err()
+                            {
+                                break;
                             }
-                            either::Left(Some(runtime_service::Notification::Block(block))) => {
-                                let hash = header::hash_from_scale_encoded_header(
-                                    &block.scale_encoded_header,
-                                );
 
-                                let mut subscriptions = me.subscriptions.lock().await;
-                                if let Some(sub) = subscriptions.get_mut(&subscription_id).and_then(
-                                    |(_, _, ty)| match ty {
-                                        SubscriptionTy::Follow(f) => Some(f),
-                                        _ => None,
-                                    },
-                                ) {
-                                    let _was_in = sub
-                                        .pinned_blocks_headers
-                                        .insert(hash, block.scale_encoded_header);
-                                    debug_assert!(_was_in.is_none());
-
-                                    // TODO: check if it matches current finalized block
-                                    // TODO: O(n)
-                                    let parent_node_index =
-                                        sub.non_finalized_blocks.find(|b| *b == block.parent_hash);
-                                    sub.non_finalized_blocks.insert(parent_node_index, hash);
-                                }
-
+                            if block.is_new_best {
                                 if me
                                     .requests_subscriptions
                                     .try_push_notification(
                                         &state_machine_subscription,
                                         methods::ServerToClient::chainHead_unstable_followEvent {
                                             subscription: (&subscription_id).into(),
-                                            result: methods::FollowEvent::NewBlock {
-                                                block_hash: methods::HashHexString(hash),
-                                                parent_block_hash: methods::HashHexString(
-                                                    block.parent_hash,
-                                                ),
-                                                new_runtime: if let Some(new_runtime) =
-                                                    &block.new_runtime
-                                                {
-                                                    Some(convert_runtime_spec(new_runtime))
-                                                } else {
-                                                    None
-                                                },
-                                            },
-                                        }
-                                        .to_json_call_object_parameters(None),
-                                    )
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
-
-                                if block.is_new_best {
-                                    if me
-                                    .requests_subscriptions
-                                    .try_push_notification(
-                                        &state_machine_subscription,
-                                        methods::ServerToClient::chainHead_unstable_followEvent {
-                                            subscription: (&subscription_id).into(),
                                             result: methods::FollowEvent::BestBlockChanged {
                                                 best_block_hash: methods::HashHexString(hash),
                                             },
@@ -785,100 +835,345 @@ impl<TPlat: Platform> Background<TPlat> {
                                     .is_err()
                                 {
                                     break;
-                                }
-                                }
-                            }
-                            either::Right(Some(sync_service::Notification::Block(block))) => {
-                                let hash = header::hash_from_scale_encoded_header(
-                                    &block.scale_encoded_header,
-                                );
-
-                                let mut subscriptions = me.subscriptions.lock().await;
-                                if let Some(sub) = subscriptions.get_mut(&subscription_id).and_then(
-                                    |(_, _, ty)| match ty {
-                                        SubscriptionTy::Follow(f) => Some(f),
-                                        _ => None,
-                                    },
-                                ) {
-                                    let _was_in = sub
-                                        .pinned_blocks_headers
-                                        .insert(hash, block.scale_encoded_header);
-                                    debug_assert!(_was_in.is_none());
-
-                                    // TODO: check if it matches current finalized block
-                                    // TODO: O(n)
-                                    let parent_node_index =
-                                        sub.non_finalized_blocks.find(|b| *b == block.parent_hash);
-                                    sub.non_finalized_blocks.insert(parent_node_index, hash);
-                                }
-                                if me
-                                    .requests_subscriptions
-                                    .try_push_notification(
-                                        &state_machine_subscription,
-                                        methods::ServerToClient::chainHead_unstable_followEvent {
-                                            subscription: (&subscription_id).into(),
-                                            result: methods::FollowEvent::NewBlock {
-                                                block_hash: methods::HashHexString(hash),
-                                                parent_block_hash: methods::HashHexString(
-                                                    block.parent_hash,
-                                                ),
-                                                new_runtime: None, // TODO:
-                                            },
-                                        }
-                                        .to_json_call_object_parameters(None),
-                                    )
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
-
-                                if block.is_new_best {
-                                    if me
-                                    .requests_subscriptions
-                                    .try_push_notification(
-                                        &state_machine_subscription,
-                                        methods::ServerToClient::chainHead_unstable_followEvent {
-                                            subscription: (&subscription_id).into(),
-                                            result: methods::FollowEvent::BestBlockChanged {
-                                                best_block_hash: methods::HashHexString(hash),
-                                            },
-                                        }
-                                        .to_json_call_object_parameters(None),
-                                    )
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
                                 }
                             }
                         }
-                    }
+                        future::Either::Left((
+                            either::Right(Some(sync_service::Notification::Block(block))),
+                            _,
+                        )) => {
+                            let hash =
+                                header::hash_from_scale_encoded_header(&block.scale_encoded_header);
 
-                    let _ = me.subscriptions.lock().await.remove(&subscription_id);
-                    me.requests_subscriptions
-                        .push_notification(
-                            &state_machine_subscription,
-                            methods::ServerToClient::chainHead_unstable_followEvent {
-                                subscription: (&subscription_id).into(),
-                                result: methods::FollowEvent::Stop {},
+                            let _was_in = subscription_state
+                                .pinned_blocks_headers
+                                .insert(hash, block.scale_encoded_header);
+                            debug_assert!(_was_in.is_none());
+
+                            // TODO: check if it matches current finalized block
+                            // TODO: O(n)
+                            let parent_node_index = subscription_state
+                                .non_finalized_blocks
+                                .find(|b| *b == block.parent_hash);
+                            subscription_state
+                                .non_finalized_blocks
+                                .insert(parent_node_index, hash);
+
+                            if me
+                                .requests_subscriptions
+                                .try_push_notification(
+                                    &state_machine_subscription,
+                                    methods::ServerToClient::chainHead_unstable_followEvent {
+                                        subscription: (&subscription_id).into(),
+                                        result: methods::FollowEvent::NewBlock {
+                                            block_hash: methods::HashHexString(hash),
+                                            parent_block_hash: methods::HashHexString(
+                                                block.parent_hash,
+                                            ),
+                                            new_runtime: None, // TODO:
+                                        },
+                                    }
+                                    .to_json_call_object_parameters(None),
+                                )
+                                .await
+                                .is_err()
+                            {
+                                break;
                             }
-                            .to_json_call_object_parameters(None),
-                        )
-                        .await;
-                    me.requests_subscriptions
-                        .stop_subscription(&state_machine_subscription)
-                        .await;
+
+                            if block.is_new_best {
+                                if me
+                                    .requests_subscriptions
+                                    .try_push_notification(
+                                        &state_machine_subscription,
+                                        methods::ServerToClient::chainHead_unstable_followEvent {
+                                            subscription: (&subscription_id).into(),
+                                            result: methods::FollowEvent::BestBlockChanged {
+                                                best_block_hash: methods::HashHexString(hash),
+                                            },
+                                        }
+                                        .to_json_call_object_parameters(None),
+                                    )
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                        future::Either::Right((None, _)) => {
+                            unreachable!()
+                        }
+                        future::Either::Right((
+                            Some((
+                                SubscriptionMessage::StopIfChainHeadFollow {
+                                    stop_state_machine_request_id,
+                                    stop_request_id,
+                                },
+                                confirmation_sender,
+                            )),
+                            _,
+                        )) => {
+                            me.requests_subscriptions
+                                .stop_subscription(&state_machine_subscription)
+                                .await;
+
+                            me.requests_subscriptions
+                                .respond(
+                                    &stop_state_machine_request_id,
+                                    methods::Response::chainHead_unstable_unfollow(())
+                                        .to_json_response(&stop_request_id),
+                                )
+                                .await;
+
+                            let _ = confirmation_sender.send(());
+                            break;
+                        }
+                        future::Either::Right((
+                            Some((
+                                SubscriptionMessage::ChainHeadBody {
+                                    hash,
+                                    get_state_machine_request_id,
+                                    get_request_id,
+                                    network_config,
+                                },
+                                confirmation_sender,
+                            )),
+                            _,
+                        )) => {
+                            // Determine whether the requested block hash is valid, and if yes its number.
+                            let block_number = {
+                                if let Some(header) =
+                                    subscription_state.pinned_blocks_headers.get(&hash.0)
+                                {
+                                    let decoded = header::decode(
+                                        header,
+                                        me.sync_service.block_number_bytes(),
+                                    )
+                                    .unwrap(); // TODO: unwrap?
+                                    Some(decoded.number)
+                                } else {
+                                    continue;
+                                }
+                            };
+
+                            me.start_chain_head_body(
+                                &get_request_id,
+                                &get_state_machine_request_id,
+                                hash,
+                                network_config,
+                                block_number,
+                            )
+                            .await;
+                            let _ = confirmation_sender.send(());
+                        }
+                        future::Either::Right((
+                            Some((
+                                SubscriptionMessage::ChainHeadStorage {
+                                    hash,
+                                    get_state_machine_request_id,
+                                    get_request_id,
+                                    network_config,
+                                    key,
+                                    child_key,
+                                },
+                                confirmation_sender,
+                            )),
+                            _,
+                        )) => {
+                            // Obtain the header of the requested block.
+                            // Contains `None` if the subscription is disjoint.
+                            let block_scale_encoded_header = {
+                                if let Some(header) =
+                                    subscription_state.pinned_blocks_headers.get(&hash.0)
+                                {
+                                    Some(header.clone())
+                                } else {
+                                    continue;
+                                }
+                            };
+
+                            me.start_chain_head_storage(
+                                &get_request_id,
+                                &get_state_machine_request_id,
+                                hash,
+                                key,
+                                child_key,
+                                network_config,
+                                block_scale_encoded_header,
+                            )
+                            .await;
+                            let _ = confirmation_sender.send(());
+                        }
+                        future::Either::Right((
+                            Some((
+                                SubscriptionMessage::ChainHeadCall {
+                                    hash,
+                                    get_state_machine_request_id,
+                                    get_request_id,
+                                    network_config,
+                                    function_to_call,
+                                    call_parameters,
+                                },
+                                confirmation_sender,
+                            )),
+                            _,
+                        )) => {
+                            // Determine whether the requested block hash is valid and start the call.
+                            let pre_runtime_call = {
+                                let runtime_service_subscribe_all =
+                                    match subscription_state.runtime_subscribe_all {
+                                        Some(sa) => sa,
+                                        None => {
+                                            me.requests_subscriptions
+                                            .respond(
+                                                &get_state_machine_request_id,
+                                                json_rpc::parse::build_error_response(
+                                                    &get_request_id,
+                                                    json_rpc::parse::ErrorResponse::InvalidParams,
+                                                    None,
+                                                ),
+                                            )
+                                            .await;
+                                            return;
+                                        }
+                                    };
+
+                                if !subscription_state
+                                    .pinned_blocks_headers
+                                    .contains_key(&hash.0)
+                                {
+                                    me.requests_subscriptions
+                                        .respond(
+                                            &get_state_machine_request_id,
+                                            json_rpc::parse::build_error_response(
+                                                &get_request_id,
+                                                json_rpc::parse::ErrorResponse::InvalidParams,
+                                                None,
+                                            ),
+                                        )
+                                        .await;
+                                    return;
+                                }
+
+                                me.runtime_service
+                                    .pinned_block_runtime_lock(
+                                        runtime_service_subscribe_all,
+                                        &hash.0,
+                                    )
+                                    .await
+                                    .ok()
+                            };
+
+                            me.start_chain_head_call(
+                                &get_request_id,
+                                &get_state_machine_request_id,
+                                &function_to_call,
+                                call_parameters,
+                                pre_runtime_call,
+                                network_config,
+                            )
+                            .await;
+                            let _ = confirmation_sender.send(());
+                        }
+                        future::Either::Right((
+                            Some((
+                                SubscriptionMessage::ChainHeadHeader {
+                                    hash,
+                                    get_state_machine_request_id,
+                                    get_request_id,
+                                },
+                                confirmation_sender,
+                            )),
+                            _,
+                        )) => {
+                            let response = {
+                                subscription_state
+                                    .pinned_blocks_headers
+                                    .get(&hash.0)
+                                    .cloned()
+                            };
+
+                            me.requests_subscriptions
+                                .respond(
+                                    &get_state_machine_request_id,
+                                    methods::Response::chainHead_unstable_header(
+                                        response.map(methods::HexString),
+                                    )
+                                    .to_json_response(&get_request_id),
+                                )
+                                .await;
+                            let _ = confirmation_sender.send(());
+                        }
+                        future::Either::Right((
+                            Some((
+                                SubscriptionMessage::ChainHeadFollowUnpin {
+                                    hash,
+                                    unpin_state_machine_request_id,
+                                    unpin_request_id,
+                                },
+                                confirmation_sender,
+                            )),
+                            _,
+                        )) => {
+                            let valid = {
+                                if subscription_state
+                                    .pinned_blocks_headers
+                                    .remove(&hash.0)
+                                    .is_some()
+                                {
+                                    if let Some(runtime_subscribe_all) =
+                                        subscription_state.runtime_subscribe_all
+                                    {
+                                        me.runtime_service
+                                            .unpin_block(runtime_subscribe_all, &hash.0)
+                                            .await;
+                                    }
+                                    true
+                                } else {
+                                    false
+                                }
+                            };
+
+                            if valid {
+                                me.requests_subscriptions
+                                    .respond(
+                                        &unpin_state_machine_request_id,
+                                        methods::Response::chainHead_unstable_unpin(())
+                                            .to_json_response(&unpin_request_id),
+                                    )
+                                    .await;
+                                let _ = confirmation_sender.send(());
+                            }
+                        }
+                        future::Either::Right((Some(_), _)) => {
+                            // Any other message.
+                            // Silently discard the confirmation sender.
+                        }
+                    }
                 }
-            };
+
+                let _ = me.subscriptions.lock().await.remove(&subscription_id);
+                me.requests_subscriptions
+                    .push_notification(
+                        &state_machine_subscription,
+                        methods::ServerToClient::chainHead_unstable_followEvent {
+                            subscription: (&subscription_id).into(),
+                            result: methods::FollowEvent::Stop {},
+                        }
+                        .to_json_call_object_parameters(None),
+                    )
+                    .await;
+                me.requests_subscriptions
+                    .stop_subscription(&state_machine_subscription)
+                    .await;
+            }
+        };
 
         self.new_child_tasks_tx
             .lock()
             .await
-            .unbounded_send(Box::pin(
-                future::Abortable::new(task, abort_registration).map(|_| ()),
-            ))
+            .unbounded_send(Box::pin(task))
             .unwrap();
     }
 
@@ -899,6 +1194,66 @@ impl<TPlat: Platform> Background<TPlat> {
             total_attempts: 3,
         });
 
+        // This is implemented by sending a message to the notifications task.
+        // The task dedicated to this subscription will receive the message and send a response to
+        // the JSON-RPC client.
+        let message_received = {
+            let sender = self
+                .subscriptions
+                .lock()
+                .await
+                .get(follow_subscription)
+                .map(|(tx, _)| tx.clone());
+
+            if let Some(sender) = sender {
+                let (tx, rx) = oneshot::channel();
+                let _ = sender
+                    .lock()
+                    .await
+                    .send((
+                        SubscriptionMessage::ChainHeadStorage {
+                            get_state_machine_request_id: state_machine_request_id.clone(),
+                            get_request_id: request_id.to_owned(),
+                            hash,
+                            key,
+                            child_key,
+                            network_config,
+                        },
+                        tx,
+                    ))
+                    .await;
+                rx.await.is_ok()
+            } else {
+                false
+            }
+        };
+
+        // Send back a response manually if the task doesn't exist, or has discarded the message,
+        // which happens if the block isn't pinned.
+        if !message_received {
+            self.requests_subscriptions
+                .respond(
+                    state_machine_request_id,
+                    json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::InvalidParams,
+                        None,
+                    ),
+                )
+                .await;
+        }
+    }
+
+    async fn start_chain_head_storage(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        hash: methods::HashHexString,
+        key: methods::HexString,
+        child_key: Option<methods::HexString>,
+        network_config: methods::NetworkConfig,
+        block_scale_encoded_header: Option<Vec<u8>>,
+    ) {
         if child_key.is_some() {
             self.requests_subscriptions
                 .respond(
@@ -920,37 +1275,6 @@ impl<TPlat: Platform> Background<TPlat> {
             );
             return;
         }
-
-        // Obtain the header of the requested block.
-        // Contains `None` if the subscription is disjoint.
-        let block_scale_encoded_header = {
-            let lock = self.subscriptions.lock().await;
-            if let Some(subscription) =
-                lock.get(follow_subscription)
-                    .and_then(|(_, _, ty)| match ty {
-                        SubscriptionTy::Follow(f) => Some(f),
-                        _ => None,
-                    })
-            {
-                if let Some(header) = subscription.pinned_blocks_headers.get(&hash.0) {
-                    Some(header.clone())
-                } else {
-                    self.requests_subscriptions
-                        .respond(
-                            state_machine_request_id,
-                            json_rpc::parse::build_error_response(
-                                request_id,
-                                json_rpc::parse::ErrorResponse::InvalidParams,
-                                None,
-                            ),
-                        )
-                        .await;
-                    return;
-                }
-            } else {
-                None
-            }
-        };
 
         let state_machine_subscription = match self
             .requests_subscriptions
@@ -981,19 +1305,15 @@ impl<TPlat: Platform> Background<TPlat> {
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
 
-        let abort_registration = {
-            let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
-            let mut subscriptions_list = self.subscriptions.lock().await;
-            subscriptions_list.insert(
-                subscription_id.clone(),
-                (
-                    abort_handle,
-                    state_machine_subscription.clone(),
-                    SubscriptionTy::ChainHeadStorage,
-                ),
-            );
-            abort_registration
-        };
+        let (messages_tx, mut messages_rx) = mpsc::channel(0);
+
+        self.subscriptions.lock().await.insert(
+            subscription_id.clone(),
+            (
+                Arc::new(Mutex::new(messages_tx)),
+                state_machine_subscription.clone(),
+            ),
+        );
 
         self.requests_subscriptions
             .respond(
@@ -1011,41 +1331,81 @@ impl<TPlat: Platform> Background<TPlat> {
                     .map(|h| header::decode(&h, me.sync_service.block_number_bytes()))
                 {
                     Some(Ok(decoded_header)) => {
-                        let response = me
-                            .sync_service
-                            .clone()
-                            .storage_query(
-                                decoded_header.number,
-                                &hash.0,
-                                decoded_header.state_root,
-                                iter::once(&key.0),
-                                cmp::min(10, network_config.total_attempts),
-                                Duration::from_millis(u64::from(cmp::min(
-                                    20000,
-                                    network_config.timeout_ms,
-                                ))),
-                                NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
-                            )
-                            .await;
-                        match response {
-                            Ok(values) => {
-                                // `storage_query` returns a list of values because it can perform
-                                // multiple queries at once. In our situation, we only start one query
-                                // and as such the outcome only ever contains one element.
-                                debug_assert_eq!(values.len(), 1);
-                                let value = values.into_iter().next().unwrap();
-                                let output = value.map(|v| methods::HexString(v).to_string());
-                                methods::ServerToClient::chainHead_unstable_storageEvent {
-                                    subscription: (&subscription_id).into(),
-                                    result: methods::ChainHeadStorageEvent::Done { value: output },
+                        let future = me.sync_service.clone().storage_query(
+                            decoded_header.number,
+                            &hash.0,
+                            decoded_header.state_root,
+                            iter::once(&key.0),
+                            cmp::min(10, network_config.total_attempts),
+                            Duration::from_millis(u64::from(cmp::min(
+                                20000,
+                                network_config.timeout_ms,
+                            ))),
+                            NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
+                        );
+                        futures::pin_mut!(future);
+
+                        loop {
+                            let outcome = {
+                                match future::select(&mut future, messages_rx.next()).await {
+                                    future::Either::Left((v, _)) => either::Left(v),
+                                    future::Either::Right((v, _)) => either::Right(v),
                                 }
-                                .to_json_call_object_parameters(None)
+                            };
+
+                            match outcome {
+                                either::Left(Ok(values)) => {
+                                    // `storage_query` returns a list of values because it can perform
+                                    // multiple queries at once. In our situation, we only start one query
+                                    // and as such the outcome only ever contains one element.
+                                    debug_assert_eq!(values.len(), 1);
+                                    let value = values.into_iter().next().unwrap();
+                                    let output = value.map(|v| methods::HexString(v).to_string());
+                                    break methods::ServerToClient::chainHead_unstable_storageEvent {
+                                        subscription: (&subscription_id).into(),
+                                        result: methods::ChainHeadStorageEvent::Done {
+                                            value: output,
+                                        },
+                                    }
+                                    .to_json_call_object_parameters(None)
+                                }
+                                either::Left(Err(_)) => {
+                                    break methods::ServerToClient::chainHead_unstable_storageEvent {
+                                        subscription: (&subscription_id).into(),
+                                        result: methods::ChainHeadStorageEvent::Inaccessible {},
+                                    }
+                                    .to_json_call_object_parameters(None)
+                                }
+                                either::Right(None) => {
+                                    unreachable!()
+                                }
+                                either::Right(Some((
+                                    SubscriptionMessage::StopIfChainHeadBody {
+                                        stop_state_machine_request_id,
+                                        stop_request_id,
+                                    },
+                                    confirmation_sender,
+                                ))) => {
+                                    me.requests_subscriptions
+                                        .stop_subscription(&state_machine_subscription)
+                                        .await;
+
+                                    me.requests_subscriptions
+                                        .respond(
+                                            &stop_state_machine_request_id,
+                                            methods::Response::chainHead_unstable_stopBody(())
+                                                .to_json_response(&stop_request_id),
+                                        )
+                                        .await;
+
+                                    let _ = confirmation_sender.send(());
+                                    return;
+                                }
+                                either::Right(Some(_)) => {
+                                    // Any other message.
+                                    // Silently discard the confirmation sender.
+                                }
                             }
-                            Err(_) => methods::ServerToClient::chainHead_unstable_storageEvent {
-                                subscription: (&subscription_id).into(),
-                                result: methods::ChainHeadStorageEvent::Inaccessible {},
-                            }
-                            .to_json_call_object_parameters(None),
                         }
                     }
                     Some(Err(err)) => methods::ServerToClient::chainHead_unstable_storageEvent {
@@ -1075,9 +1435,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self.new_child_tasks_tx
             .lock()
             .await
-            .unbounded_send(Box::pin(
-                future::Abortable::new(task, abort_registration).map(|_| ()),
-            ))
+            .unbounded_send(Box::pin(task))
             .unwrap();
     }
 
@@ -1096,38 +1454,62 @@ impl<TPlat: Platform> Background<TPlat> {
             total_attempts: 3,
         });
 
-        // Determine whether the requested block hash is valid, and if yes its number.
-        let block_number = {
-            let lock = self.subscriptions.lock().await;
-            if let Some(subscription) =
-                lock.get(follow_subscription)
-                    .and_then(|(_, _, ty)| match ty {
-                        SubscriptionTy::Follow(f) => Some(f),
-                        _ => None,
-                    })
-            {
-                if let Some(header) = subscription.pinned_blocks_headers.get(&hash.0) {
-                    let decoded =
-                        header::decode(header, self.sync_service.block_number_bytes()).unwrap(); // TODO: unwrap?
-                    Some(decoded.number)
-                } else {
-                    self.requests_subscriptions
-                        .respond(
-                            state_machine_request_id,
-                            json_rpc::parse::build_error_response(
-                                request_id,
-                                json_rpc::parse::ErrorResponse::InvalidParams,
-                                None,
-                            ),
-                        )
-                        .await;
-                    return;
-                }
+        // This is implemented by sending a message to the notifications task.
+        // The task dedicated to this subscription will receive the message and send a response to
+        // the JSON-RPC client.
+        let message_received = {
+            let sender = self
+                .subscriptions
+                .lock()
+                .await
+                .get(follow_subscription)
+                .map(|(tx, _)| tx.clone());
+
+            if let Some(sender) = sender {
+                let (tx, rx) = oneshot::channel();
+                let _ = sender
+                    .lock()
+                    .await
+                    .send((
+                        SubscriptionMessage::ChainHeadBody {
+                            get_state_machine_request_id: state_machine_request_id.clone(),
+                            get_request_id: request_id.to_owned(),
+                            hash,
+                            network_config,
+                        },
+                        tx,
+                    ))
+                    .await;
+                rx.await.is_ok()
             } else {
-                None
+                false
             }
         };
 
+        // Send back a response manually if the task doesn't exist, or has discarded the message,
+        // which happens if the block isn't pinned.
+        if !message_received {
+            self.requests_subscriptions
+                .respond(
+                    state_machine_request_id,
+                    json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::InvalidParams,
+                        None,
+                    ),
+                )
+                .await;
+        }
+    }
+
+    async fn start_chain_head_body(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        hash: methods::HashHexString,
+        network_config: methods::NetworkConfig,
+        block_number: Option<u64>,
+    ) {
         let state_machine_subscription = match self
             .requests_subscriptions
             .start_subscription(&state_machine_request_id, 1)
@@ -1157,19 +1539,15 @@ impl<TPlat: Platform> Background<TPlat> {
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
 
-        let abort_registration = {
-            let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
-            let mut subscriptions_list = self.subscriptions.lock().await;
-            subscriptions_list.insert(
-                subscription_id.clone(),
-                (
-                    abort_handle,
-                    state_machine_subscription.clone(),
-                    SubscriptionTy::ChainHeadBody,
-                ),
-            );
-            abort_registration
-        };
+        let (messages_tx, mut messages_rx) = mpsc::channel(0);
+
+        self.subscriptions.lock().await.insert(
+            subscription_id.clone(),
+            (
+                Arc::new(Mutex::new(messages_tx)),
+                state_machine_subscription.clone(),
+            ),
+        );
 
         self.requests_subscriptions
             .respond(
@@ -1184,43 +1562,83 @@ impl<TPlat: Platform> Background<TPlat> {
             async move {
                 let response = if let Some(block_number) = block_number {
                     // TODO: right now we query the header because the underlying function returns an error if we don't
-                    let response = me
-                        .sync_service
-                        .clone()
-                        .block_query(
-                            block_number,
-                            hash.0,
-                            protocol::BlocksRequestFields {
-                                header: true,
-                                body: true,
-                                justifications: false,
-                            },
-                            cmp::min(10, network_config.total_attempts),
-                            Duration::from_millis(u64::from(cmp::min(
-                                20000,
-                                network_config.timeout_ms,
-                            ))),
-                            NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
-                        )
-                        .await;
-                    match response {
-                        Ok(block_data) => methods::ServerToClient::chainHead_unstable_bodyEvent {
-                            subscription: (&subscription_id).into(),
-                            result: methods::ChainHeadBodyEvent::Done {
-                                value: block_data
-                                    .body
-                                    .unwrap()
-                                    .into_iter()
-                                    .map(methods::HexString)
-                                    .collect(),
-                            },
+                    let future = me.sync_service.clone().block_query(
+                        block_number,
+                        hash.0,
+                        protocol::BlocksRequestFields {
+                            header: true,
+                            body: true,
+                            justifications: false,
+                        },
+                        cmp::min(10, network_config.total_attempts),
+                        Duration::from_millis(u64::from(cmp::min(
+                            20000,
+                            network_config.timeout_ms,
+                        ))),
+                        NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
+                    );
+                    futures::pin_mut!(future);
+
+                    loop {
+                        let outcome = {
+                            match future::select(&mut future, messages_rx.next()).await {
+                                future::Either::Left((v, _)) => either::Left(v),
+                                future::Either::Right((v, _)) => either::Right(v),
+                            }
+                        };
+
+                        match outcome {
+                            either::Left(Ok(block_data)) => {
+                                break methods::ServerToClient::chainHead_unstable_bodyEvent {
+                                    subscription: (&subscription_id).into(),
+                                    result: methods::ChainHeadBodyEvent::Done {
+                                        value: block_data
+                                            .body
+                                            .unwrap()
+                                            .into_iter()
+                                            .map(methods::HexString)
+                                            .collect(),
+                                    },
+                                }
+                                .to_json_call_object_parameters(None)
+                            }
+                            either::Left(Err(())) => {
+                                break methods::ServerToClient::chainHead_unstable_bodyEvent {
+                                    subscription: (&subscription_id).into(),
+                                    result: methods::ChainHeadBodyEvent::Inaccessible {},
+                                }
+                                .to_json_call_object_parameters(None)
+                            }
+                            either::Right(None) => {
+                                unreachable!()
+                            }
+                            either::Right(Some((
+                                SubscriptionMessage::StopIfChainHeadStorage {
+                                    stop_state_machine_request_id,
+                                    stop_request_id,
+                                },
+                                confirmation_sender,
+                            ))) => {
+                                me.requests_subscriptions
+                                    .stop_subscription(&state_machine_subscription)
+                                    .await;
+
+                                me.requests_subscriptions
+                                    .respond(
+                                        &stop_state_machine_request_id,
+                                        methods::Response::chainHead_unstable_stopBody(())
+                                            .to_json_response(&stop_request_id),
+                                    )
+                                    .await;
+
+                                let _ = confirmation_sender.send(());
+                                return;
+                            }
+                            either::Right(Some(_)) => {
+                                // Any other message.
+                                // Silently discard the confirmation sender.
+                            }
                         }
-                        .to_json_call_object_parameters(None),
-                        Err(()) => methods::ServerToClient::chainHead_unstable_bodyEvent {
-                            subscription: (&subscription_id).into(),
-                            result: methods::ChainHeadBodyEvent::Inaccessible {},
-                        }
-                        .to_json_call_object_parameters(None),
                     }
                 } else {
                     methods::ServerToClient::chainHead_unstable_bodyEvent {
@@ -1243,9 +1661,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self.new_child_tasks_tx
             .lock()
             .await
-            .unbounded_send(Box::pin(
-                future::Abortable::new(task, abort_registration).map(|_| ()),
-            ))
+            .unbounded_send(Box::pin(task))
             .unwrap();
     }
 
@@ -1257,36 +1673,40 @@ impl<TPlat: Platform> Background<TPlat> {
         follow_subscription: &str,
         hash: methods::HashHexString,
     ) {
-        let response = {
-            let lock = self.subscriptions.lock().await;
-            if let Some(subscription) =
-                lock.get(follow_subscription)
-                    .and_then(|(_, _, ty)| match ty {
-                        SubscriptionTy::Follow(f) => Some(f),
-                        _ => None,
-                    })
-            {
-                subscription
-                    .pinned_blocks_headers
-                    .get(&hash.0)
-                    .cloned()
-                    .map(Some)
+        // This is implemented by sending a message to the notifications task.
+        // The task dedicated to this subscription will receive the message and send a response to
+        // the JSON-RPC client.
+        let message_received = {
+            let sender = self
+                .subscriptions
+                .lock()
+                .await
+                .get(follow_subscription)
+                .map(|(tx, _)| tx.clone());
+
+            if let Some(sender) = sender {
+                let (tx, rx) = oneshot::channel();
+                let _ = sender
+                    .lock()
+                    .await
+                    .send((
+                        SubscriptionMessage::ChainHeadHeader {
+                            get_state_machine_request_id: state_machine_request_id.clone(),
+                            get_request_id: request_id.to_owned(),
+                            hash,
+                        },
+                        tx,
+                    ))
+                    .await;
+                rx.await.is_ok()
             } else {
-                Some(None)
+                false
             }
         };
 
-        if let Some(response) = response {
-            self.requests_subscriptions
-                .respond(
-                    state_machine_request_id,
-                    methods::Response::chainHead_unstable_header(response.map(methods::HexString))
-                        .to_json_response(request_id),
-                )
-                .await;
-        } else {
-            // Reached if the subscription is valid but the block couldn't be found in
-            // `pinned_blocks_headers`.
+        // Send back a response manually if the task doesn't exist, or has discarded the message,
+        // which happens if the block isn't pinned.
+        if !message_received {
             self.requests_subscriptions
                 .respond(
                     state_machine_request_id,
@@ -1307,30 +1727,47 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         subscription_id: &str,
     ) {
-        let state_machine_subscription =
-            match self.subscriptions.lock().await.entry_ref(subscription_id) {
-                hash_map::EntryRef::Occupied(e)
-                    if matches!(e.get().2, SubscriptionTy::ChainHeadBody) =>
-                {
-                    let (abort_handle, state_machine_subscription, _) = e.remove();
-                    abort_handle.abort();
-                    Some(state_machine_subscription)
-                }
-                hash_map::EntryRef::Occupied(_) | hash_map::EntryRef::Vacant(_) => None,
-            };
+        // Stopping the subscription is done by sending a message to it.
+        // The task dedicated to this subscription will receive the message, send a response to
+        // the JSON-RPC client, then shut down.
+        let stop_message_received = {
+            let sender = self
+                .subscriptions
+                .lock()
+                .await
+                .get(subscription_id)
+                .map(|(tx, _)| tx.clone());
 
-        if let Some(state_machine_subscription) = &state_machine_subscription {
+            if let Some(sender) = sender {
+                let (tx, rx) = oneshot::channel();
+                let _ = sender
+                    .lock()
+                    .await
+                    .send((
+                        SubscriptionMessage::StopIfChainHeadBody {
+                            stop_state_machine_request_id: state_machine_request_id.clone(),
+                            stop_request_id: request_id.to_owned(),
+                        },
+                        tx,
+                    ))
+                    .await;
+                rx.await.is_ok()
+            } else {
+                false
+            }
+        };
+
+        // Send back a response manually if the task doesn't exist, or has discarded the message,
+        // which could happen for example because there was already a stop message earlier in its
+        // queue or because it was the wrong type of subscription.
+        if !stop_message_received {
             self.requests_subscriptions
-                .stop_subscription(state_machine_subscription)
+                .respond(
+                    state_machine_request_id,
+                    methods::Response::chainHead_unstable_stopBody(()).to_json_response(request_id),
+                )
                 .await;
         }
-
-        self.requests_subscriptions
-            .respond(
-                state_machine_request_id,
-                methods::Response::chainHead_unstable_stopBody(()).to_json_response(request_id),
-            )
-            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_stopCall`].
@@ -1340,30 +1777,47 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         subscription_id: &str,
     ) {
-        let state_machine_subscription =
-            match self.subscriptions.lock().await.entry_ref(subscription_id) {
-                hash_map::EntryRef::Occupied(e)
-                    if matches!(e.get().2, SubscriptionTy::ChainHeadCall) =>
-                {
-                    let (abort_handle, state_machine_subscription, _) = e.remove();
-                    abort_handle.abort();
-                    Some(state_machine_subscription)
-                }
-                hash_map::EntryRef::Occupied(_) | hash_map::EntryRef::Vacant(_) => None,
-            };
+        // Stopping the subscription is done by sending a message to it.
+        // The task dedicated to this subscription will receive the message, send a response to
+        // the JSON-RPC client, then shut down.
+        let stop_message_received = {
+            let sender = self
+                .subscriptions
+                .lock()
+                .await
+                .get(subscription_id)
+                .map(|(tx, _)| tx.clone());
 
-        if let Some(state_machine_subscription) = &state_machine_subscription {
+            if let Some(sender) = sender {
+                let (tx, rx) = oneshot::channel();
+                let _ = sender
+                    .lock()
+                    .await
+                    .send((
+                        SubscriptionMessage::StopIfChainHeadCall {
+                            stop_state_machine_request_id: state_machine_request_id.clone(),
+                            stop_request_id: request_id.to_owned(),
+                        },
+                        tx,
+                    ))
+                    .await;
+                rx.await.is_ok()
+            } else {
+                false
+            }
+        };
+
+        // Send back a response manually if the task doesn't exist, or has discarded the message,
+        // which could happen for example because there was already a stop message earlier in its
+        // queue or because it was the wrong type of subscription.
+        if !stop_message_received {
             self.requests_subscriptions
-                .stop_subscription(state_machine_subscription)
+                .respond(
+                    state_machine_request_id,
+                    methods::Response::chainHead_unstable_stopCall(()).to_json_response(request_id),
+                )
                 .await;
         }
-
-        self.requests_subscriptions
-            .respond(
-                state_machine_request_id,
-                methods::Response::chainHead_unstable_stopCall(()).to_json_response(request_id),
-            )
-            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_stopStorage`].
@@ -1373,30 +1827,48 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         subscription_id: &str,
     ) {
-        let state_machine_subscription =
-            match self.subscriptions.lock().await.entry_ref(subscription_id) {
-                hash_map::EntryRef::Occupied(e)
-                    if matches!(e.get().2, SubscriptionTy::ChainHeadStorage) =>
-                {
-                    let (abort_handle, state_machine_subscription, _) = e.remove();
-                    abort_handle.abort();
-                    Some(state_machine_subscription)
-                }
-                hash_map::EntryRef::Occupied(_) | hash_map::EntryRef::Vacant(_) => None,
-            };
+        // Stopping the subscription is done by sending a message to it.
+        // The task dedicated to this subscription will receive the message, send a response to
+        // the JSON-RPC client, then shut down.
+        let stop_message_received = {
+            let sender = self
+                .subscriptions
+                .lock()
+                .await
+                .get(subscription_id)
+                .map(|(tx, _)| tx.clone());
 
-        if let Some(state_machine_subscription) = &state_machine_subscription {
+            if let Some(sender) = sender {
+                let (tx, rx) = oneshot::channel();
+                let _ = sender
+                    .lock()
+                    .await
+                    .send((
+                        SubscriptionMessage::StopIfChainHeadStorage {
+                            stop_state_machine_request_id: state_machine_request_id.clone(),
+                            stop_request_id: request_id.to_owned(),
+                        },
+                        tx,
+                    ))
+                    .await;
+                rx.await.is_ok()
+            } else {
+                false
+            }
+        };
+
+        // Send back a response manually if the task doesn't exist, or has discarded the message,
+        // which could happen for example because there was already a stop message earlier in its
+        // queue or because it was the wrong type of subscription.
+        if !stop_message_received {
             self.requests_subscriptions
-                .stop_subscription(state_machine_subscription)
+                .respond(
+                    state_machine_request_id,
+                    methods::Response::chainHead_unstable_stopStorage(())
+                        .to_json_response(request_id),
+                )
                 .await;
         }
-
-        self.requests_subscriptions
-            .respond(
-                state_machine_request_id,
-                methods::Response::chainHead_unstable_stopStorage(()).to_json_response(request_id),
-            )
-            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_unfollow`].
@@ -1406,32 +1878,47 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         follow_subscription: &str,
     ) {
-        let state_machine_subscription = match self
-            .subscriptions
-            .lock()
-            .await
-            .entry_ref(follow_subscription)
-        {
-            hash_map::EntryRef::Occupied(e) if matches!(e.get().2, SubscriptionTy::Follow(_)) => {
-                let (abort_handle, state_machine_subscription, _) = e.remove();
-                abort_handle.abort();
-                Some(state_machine_subscription)
+        // Stopping the subscription is done by sending a message to it.
+        // The task dedicated to this subscription will receive the message, send a response to
+        // the JSON-RPC client, then shut down.
+        let stop_message_received = {
+            let sender = self
+                .subscriptions
+                .lock()
+                .await
+                .get(follow_subscription)
+                .map(|(tx, _)| tx.clone());
+
+            if let Some(sender) = sender {
+                let (tx, rx) = oneshot::channel();
+                let _ = sender
+                    .lock()
+                    .await
+                    .send((
+                        SubscriptionMessage::StopIfChainHeadFollow {
+                            stop_state_machine_request_id: state_machine_request_id.clone(),
+                            stop_request_id: request_id.to_owned(),
+                        },
+                        tx,
+                    ))
+                    .await;
+                rx.await.is_ok()
+            } else {
+                false
             }
-            hash_map::EntryRef::Occupied(_) | hash_map::EntryRef::Vacant(_) => None,
         };
 
-        if let Some(state_machine_subscription) = &state_machine_subscription {
+        // Send back a response manually if the task doesn't exist, or has discarded the message,
+        // which could happen for example because there was already a stop message earlier in its
+        // queue or because it was the wrong type of subscription.
+        if !stop_message_received {
             self.requests_subscriptions
-                .stop_subscription(state_machine_subscription)
+                .respond(
+                    state_machine_request_id,
+                    methods::Response::chainHead_unstable_unfollow(()).to_json_response(request_id),
+                )
                 .await;
         }
-
-        self.requests_subscriptions
-            .respond(
-                state_machine_request_id,
-                methods::Response::chainHead_unstable_unfollow(()).to_json_response(request_id),
-            )
-            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_unpin`].
@@ -1442,38 +1929,40 @@ impl<TPlat: Platform> Background<TPlat> {
         follow_subscription: &str,
         hash: methods::HashHexString,
     ) {
-        let valid = {
-            let mut lock = self.subscriptions.lock().await;
-            if let Some(subscription) =
-                lock.get_mut(follow_subscription)
-                    .and_then(|(_, _, ty)| match ty {
-                        SubscriptionTy::Follow(f) => Some(f),
-                        _ => None,
-                    })
-            {
-                if subscription.pinned_blocks_headers.remove(&hash.0).is_some() {
-                    if let Some(runtime_subscribe_all) = subscription.runtime_subscribe_all {
-                        self.runtime_service
-                            .unpin_block(runtime_subscribe_all, &hash.0)
-                            .await;
-                    }
-                    true
-                } else {
-                    false
-                }
+        // This is implemented by sending a message to the notifications task.
+        // The task dedicated to this subscription will receive the message and send a response to
+        // the JSON-RPC client.
+        let message_received = {
+            let sender = self
+                .subscriptions
+                .lock()
+                .await
+                .get(follow_subscription)
+                .map(|(tx, _)| tx.clone());
+
+            if let Some(sender) = sender {
+                let (tx, rx) = oneshot::channel();
+                let _ = sender
+                    .lock()
+                    .await
+                    .send((
+                        SubscriptionMessage::ChainHeadFollowUnpin {
+                            unpin_state_machine_request_id: state_machine_request_id.clone(),
+                            unpin_request_id: request_id.to_owned(),
+                            hash,
+                        },
+                        tx,
+                    ))
+                    .await;
+                rx.await.is_ok()
             } else {
-                true
+                false
             }
         };
 
-        if valid {
-            self.requests_subscriptions
-                .respond(
-                    state_machine_request_id,
-                    methods::Response::chainHead_unstable_unpin(()).to_json_response(request_id),
-                )
-                .await;
-        } else {
+        // Send back a response manually if the task doesn't exist, or has discarded the message,
+        // which happens if the block to unpin isn't valid.
+        if !message_received {
             self.requests_subscriptions
                 .respond(
                     state_machine_request_id,

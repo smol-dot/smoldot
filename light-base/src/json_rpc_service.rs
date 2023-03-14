@@ -61,7 +61,11 @@ use core::{
     sync::atomic,
     time::Duration,
 };
-use futures::{channel::mpsc, lock::Mutex, prelude::*};
+use futures::{
+    channel::{mpsc, oneshot},
+    lock::Mutex,
+    prelude::*,
+};
 use hashbrown::HashMap;
 use smoldot::{
     chain::fork_tree,
@@ -473,9 +477,8 @@ struct Background<TPlat: Platform> {
         HashMap<
             String,
             (
-                future::AbortHandle,
+                Arc<Mutex<mpsc::Sender<(SubscriptionMessage, oneshot::Sender<()>)>>>,
                 requests_subscriptions::SubscriptionId,
-                SubscriptionTy,
             ),
             fnv::FnvBuildHasher,
         >,
@@ -496,18 +499,83 @@ struct FollowSubscription {
     runtime_subscribe_all: Option<runtime_service::SubscriptionId>,
 }
 
-enum SubscriptionTy {
-    AllHeads,
-    NewHeads,
-    FinalizedHeads,
-    Storage,
-    TransactionLegacy,
-    Transaction,
-    RuntimeSpec,
-    ChainHeadBody,
-    ChainHeadCall,
-    ChainHeadStorage,
-    Follow(FollowSubscription),
+enum SubscriptionMessage {
+    StopIfAllHeads {
+        stop_state_machine_request_id: requests_subscriptions::RequestId,
+        stop_request_id: String,
+    },
+    StopIfNewHeads {
+        stop_state_machine_request_id: requests_subscriptions::RequestId,
+        stop_request_id: String,
+    },
+    StopIfFinalizedHeads {
+        stop_state_machine_request_id: requests_subscriptions::RequestId,
+        stop_request_id: String,
+    },
+    StopIfStorage {
+        stop_state_machine_request_id: requests_subscriptions::RequestId,
+        stop_request_id: String,
+    },
+    StopIfTransactionLegacy {
+        stop_state_machine_request_id: requests_subscriptions::RequestId,
+        stop_request_id: String,
+    },
+    StopIfTransaction {
+        stop_state_machine_request_id: requests_subscriptions::RequestId,
+        stop_request_id: String,
+    },
+    StopIfRuntimeSpec {
+        stop_state_machine_request_id: requests_subscriptions::RequestId,
+        stop_request_id: String,
+    },
+    StopIfChainHeadBody {
+        stop_state_machine_request_id: requests_subscriptions::RequestId,
+        stop_request_id: String,
+    },
+    StopIfChainHeadCall {
+        stop_state_machine_request_id: requests_subscriptions::RequestId,
+        stop_request_id: String,
+    },
+    StopIfChainHeadStorage {
+        stop_state_machine_request_id: requests_subscriptions::RequestId,
+        stop_request_id: String,
+    },
+    StopIfChainHeadFollow {
+        stop_state_machine_request_id: requests_subscriptions::RequestId,
+        stop_request_id: String,
+    },
+    ChainHeadFollowUnpin {
+        hash: methods::HashHexString,
+        unpin_state_machine_request_id: requests_subscriptions::RequestId,
+        unpin_request_id: String,
+    },
+    ChainHeadHeader {
+        hash: methods::HashHexString,
+        get_state_machine_request_id: requests_subscriptions::RequestId,
+        get_request_id: String,
+    },
+    ChainHeadCall {
+        hash: methods::HashHexString,
+        get_state_machine_request_id: requests_subscriptions::RequestId,
+        get_request_id: String,
+        function_to_call: String,
+        call_parameters: methods::HexString,
+        network_config: methods::NetworkConfig,
+    },
+    ChainHeadStorage {
+        hash: methods::HashHexString,
+        get_state_machine_request_id: requests_subscriptions::RequestId,
+        get_request_id: String,
+        network_config: methods::NetworkConfig,
+        key: methods::HexString,
+        child_key: Option<methods::HexString>,
+    },
+    ChainHeadBody {
+        hash: methods::HashHexString,
+        get_state_machine_request_id: requests_subscriptions::RequestId,
+        get_request_id: String,
+        network_config: methods::NetworkConfig,
+    },
 }
 
 struct Cache {
@@ -1064,7 +1132,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     &state_machine_request_id,
                     &follow_subscription,
                     hash,
-                    &function,
+                    function.into_owned(),
                     call_parameters,
                     network_config,
                 )
