@@ -436,11 +436,11 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     ///
     /// Panics if the given block isn't currently pinned by the given subscription.
     ///
-    pub async fn pinned_block_runtime_lock<'a>(
-        &'a self,
+    pub async fn pinned_block_runtime_lock(
+        &self,
         subscription_id: SubscriptionId,
         block_hash: &[u8; 32],
-    ) -> Result<RuntimeLock<'a, TPlat>, PinnedBlockRuntimeLockError> {
+    ) -> Result<RuntimeLock<TPlat>, PinnedBlockRuntimeLockError> {
         // Note: copying the hash ahead of time fixes some weird intermittent borrow checker
         // issue.
         let block_hash = *block_hash;
@@ -474,7 +474,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         };
 
         Ok(RuntimeLock {
-            service: self,
+            sync_service: self.sync_service.clone(),
             hash: block_hash,
             runtime: pinned_block.runtime,
             block_number: pinned_block.block_number,
@@ -500,7 +500,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         block_state_trie_root_hash: [u8; 32],
     ) -> RuntimeLock<TPlat> {
         RuntimeLock {
-            service: self,
+            sync_service: self.sync_service.clone(),
             hash: block_hash,
             runtime: pinned_runtime_id.0,
             block_number,
@@ -746,8 +746,8 @@ pub enum PinnedBlockRuntimeLockError {
 /// See [`RuntimeService::pinned_block_runtime_lock`].
 // TODO: rename, as it doesn't lock anything anymore
 #[must_use]
-pub struct RuntimeLock<'a, TPlat: Platform> {
-    service: &'a RuntimeService<TPlat>,
+pub struct RuntimeLock<TPlat: Platform> {
+    sync_service: Arc<sync_service::SyncService<TPlat>>,
 
     block_number: u64,
     block_state_root_hash: [u8; 32],
@@ -755,7 +755,7 @@ pub struct RuntimeLock<'a, TPlat: Platform> {
     runtime: Arc<Runtime>,
 }
 
-impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
+impl<TPlat: Platform> RuntimeLock<TPlat> {
     /// Returns the hash of the block the call is being made against.
     pub fn block_hash(&self) -> &[u8; 32] {
         &self.hash
@@ -770,13 +770,13 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
     }
 
     pub async fn start<'b>(
-        &'a self,
+        &'b self,
         method: &'b str,
-        parameter_vectored: impl Iterator<Item = impl AsRef<[u8]>> + Clone + 'b,
+        parameter_vectored: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
         total_attempts: u32,
         timeout_per_request: Duration,
         max_parallel: NonZeroU32,
-    ) -> Result<(RuntimeCallLock<'a>, executor::host::HostVmPrototype), RuntimeCallError> {
+    ) -> Result<(RuntimeCallLock<'b>, executor::host::HostVmPrototype), RuntimeCallError> {
         // TODO: DRY :-/ this whole thing is messy
 
         // Perform the call proof request.
@@ -784,7 +784,6 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
         // TODO: there's no way to verify that the call proof is actually correct; we have to ban the peer and restart the whole call process if it turns out that it's not
         // TODO: also, an empty proof will be reported as an error right now, which is weird
         let call_proof = self
-            .service
             .sync_service
             .clone()
             .call_proof_query(

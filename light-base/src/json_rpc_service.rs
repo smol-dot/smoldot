@@ -1413,10 +1413,10 @@ impl<TPlat: Platform> Background<TPlat> {
 
     /// Obtain a lock to the runtime of the given block against the runtime service.
     // TODO: return better error?
-    async fn runtime_lock<'a>(
-        self: &'a Arc<Self>,
+    async fn runtime_lock(
+        self: &Arc<Self>,
         block_hash: &[u8; 32],
-    ) -> Result<runtime_service::RuntimeLock<'a, TPlat>, RuntimeCallError> {
+    ) -> Result<runtime_service::RuntimeLock<TPlat>, RuntimeCallError> {
         let cache_lock = self.cache.lock().await;
 
         // Try to find the block in the cache of recent blocks. Most of the time, the call target
