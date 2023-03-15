@@ -408,8 +408,7 @@ impl<TPlat: Platform> Background<TPlat> {
             }
         };
 
-        self.requests_subscriptions
-            .add_subscription_task(task.boxed());
+        self.requests_subscriptions.add_subscription_task(task);
     }
 
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_follow`].
@@ -1166,8 +1165,7 @@ impl<TPlat: Platform> Background<TPlat> {
             }
         };
 
-        self.requests_subscriptions
-            .add_subscription_task(task.boxed());
+        self.requests_subscriptions.add_subscription_task(task);
     }
 
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_storage`].
@@ -1425,8 +1423,7 @@ impl<TPlat: Platform> Background<TPlat> {
             }
         };
 
-        self.requests_subscriptions
-            .add_subscription_task(task.boxed());
+        self.requests_subscriptions.add_subscription_task(task);
     }
 
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_body`].
@@ -1648,8 +1645,7 @@ impl<TPlat: Platform> Background<TPlat> {
             }
         };
 
-        self.requests_subscriptions
-            .add_subscription_task(task.boxed());
+        self.requests_subscriptions.add_subscription_task(task);
     }
 
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_header`].

@@ -35,7 +35,7 @@ use alloc::{
     boxed::Box,
     sync::{Arc, Weak},
 };
-use core::{future::Future as _, pin::Pin, ptr, sync::atomic, task};
+use core::{future::Future, pin::Pin, ptr, sync::atomic, task};
 use futures::future::BoxFuture;
 
 /// See [the module-level documentation](..).
@@ -54,7 +54,11 @@ impl TasksQueue {
     }
 
     /// Pushes a task to the end of the queue.
-    pub fn push(self: &Arc<Self>, future: BoxFuture<'static, ()>) {
+    pub fn push(self: &Arc<Self>, future: impl Future<Output = ()> + Send + 'static) {
+        self.push_inner(Box::pin(future));
+    }
+
+    fn push_inner(self: &Arc<Self>, future: BoxFuture<'static, ()>) {
         self.queue.push(future);
         self.item_pushed_to_queue.notify_additional(1);
     }
@@ -143,7 +147,7 @@ impl TasksQueue {
                         // If the state is `NotPolling`, push this task back to the queue.
                         let task = unsafe { Box::from_raw(task_ptr) };
                         let Some(tasks_queue) = self.tasks_queue.upgrade() else { return };
-                        tasks_queue.push(*task);
+                        tasks_queue.push_inner(*task);
                     }
                 }
             }
@@ -176,7 +180,7 @@ impl TasksQueue {
                         // In that case, push the task to the back of the queue.
                         debug_assert!(_actual_val.is_null());
                         let task = unsafe { Box::from_raw(task_ptr) };
-                        self.push(*task);
+                        self.push_inner(*task);
                     }
                 }
             }

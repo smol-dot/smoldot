@@ -114,12 +114,14 @@ use alloc::{
     vec::Vec,
 };
 use core::{
-    cmp, fmt, hash,
+    cmp, fmt,
+    future::Future,
+    hash,
     num::NonZeroU32,
     ops,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use futures::{future, lock::Mutex};
+use futures::lock::Mutex;
 
 mod tests;
 
@@ -654,7 +656,7 @@ impl RequestsSubscriptions {
     /// The task doesn't run automatically. Instead,
     /// [`RequestsSubscriptions::run_subscription_task`] must be called.
     // TODO: it is planned to merge this into `start_subscription`
-    pub fn add_subscription_task(&self, task: future::BoxFuture<'static, ()>) {
+    pub fn add_subscription_task(&self, task: impl Future<Output = ()> + Send + 'static) {
         self.subscriptions_tasks.push(task);
     }
 

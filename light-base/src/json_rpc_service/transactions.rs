@@ -520,8 +520,7 @@ impl<TPlat: Platform> Background<TPlat> {
             }
         };
 
-        self.requests_subscriptions
-            .add_subscription_task(task.boxed());
+        self.requests_subscriptions.add_subscription_task(task);
     }
 
     /// Handles a call to [`methods::MethodCall::transaction_unstable_unwatch`].
