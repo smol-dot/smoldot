@@ -657,7 +657,8 @@ impl RequestsSubscriptions {
     /// [`RequestsSubscriptions::run_subscription_task`] must be called.
     // TODO: it is planned to merge this into `start_subscription`
     pub fn add_subscription_task(&self, task: impl Future<Output = ()> + Send + 'static) {
-        self.subscriptions_tasks.push(task);
+        // TODO: it is planned to tweak task a bit, in which case accepting an impl Future makes sense, but if task isn't tweaked, then a BoxFuture makes more sense
+        self.subscriptions_tasks.push(Box::pin(task));
     }
 
     /// Waits until a subscription task is ready to be polled, and polls it.

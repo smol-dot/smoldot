@@ -31,17 +31,21 @@
 
 // Note: believe or not, but I couldn't find a library that does this in the Rust ecosystem.
 
-use alloc::{
-    boxed::Box,
-    sync::{Arc, Weak},
-};
-use core::{future::Future, pin::Pin, ptr, sync::atomic, task};
+use alloc::sync::{Arc, Weak};
+use core::{fmt, future::Future, pin::Pin, sync::atomic, task};
 use futures::future::BoxFuture;
+use futures::lock::Mutex;
 
 /// See [the module-level documentation](..).
 pub struct TasksQueue {
-    queue: crossbeam_queue::SegQueue<BoxFuture<'static, ()>>,
+    queue: crossbeam_queue::SegQueue<QueuedTask>,
     item_pushed_to_queue: event_listener::Event,
+    sleeping_tasks: Mutex<slab::Slab<BoxFuture<'static, ()>>>,
+}
+
+enum QueuedTask {
+    Task(BoxFuture<'static, ()>),
+    InSlab(usize),
 }
 
 impl TasksQueue {
@@ -50,16 +54,13 @@ impl TasksQueue {
         Arc::new(TasksQueue {
             queue: crossbeam_queue::SegQueue::new(),
             item_pushed_to_queue: event_listener::Event::new(),
+            sleeping_tasks: Mutex::new(slab::Slab::new()),
         })
     }
 
     /// Pushes a task to the end of the queue.
-    pub fn push(self: &Arc<Self>, future: impl Future<Output = ()> + Send + 'static) {
-        self.push_inner(Box::pin(future));
-    }
-
-    fn push_inner(self: &Arc<Self>, future: BoxFuture<'static, ()>) {
-        self.queue.push(future);
+    pub fn push(self: &Arc<Self>, future: BoxFuture<'static, ()>) {
+        self.queue.push(QueuedTask::Task(future));
         self.item_pushed_to_queue.notify_additional(1);
     }
 
@@ -76,7 +77,10 @@ impl TasksQueue {
 
             loop {
                 if let Some(task) = self.queue.pop() {
-                    break task;
+                    break match task {
+                        QueuedTask::Task(t) => t,
+                        QueuedTask::InSlab(index) => self.sleeping_tasks.lock().await.remove(index),
+                    };
                 }
 
                 match listener.take() {
@@ -87,33 +91,26 @@ impl TasksQueue {
         };
 
         // Poll it.
-        self.run_inner(task);
+        self.run_inner(task).await;
     }
 
     /// Polls a future with a `Waker` that pushes back the future to the back of the queue once
     /// ready to be polled again.
-    fn run_inner(self: &Arc<Self>, mut task: BoxFuture<'static, ()>) {
+    async fn run_inner(self: &Arc<Self>, mut task: BoxFuture<'static, ()>) {
         struct Waker {
             tasks_queue: Weak<TasksQueue>,
 
-            // While the easy solution here would be to use a `Mutex`, mutexes are unfortunately
-            // not available in no_std environments. `parking_lot` notably uses the clock for some
-            // reason, which is something we don't want.
-            // The good news is we don't need a `Mutex`. The bad news is that not using one makes
-            // things more complicated and requires using unsafe code.
-            //
-            // The `AtomicPtr` in this field is equivalent to the following enum:
+            // The `AtomicU64` in this field is equivalent to the following enum:
             // ```
             // enum State {
             //     Polling,
-            //     NotPolling(BoxFuture<'static, ()>),
+            //     NotPolling(usize),
             //     WokeUp,
             // }
             // ```
             //
-            // The state `WokeUp` is represented with a null pointer, the state `Polling` is
-            // represented as `invalid_non_null_ptr!()`, and any other pointer represents
-            // `NotPolling`.
+            // The state `WokeUp` is represented as `-1`, the state `Polling` is represented as
+            // `-2`, and any other value represents `NotPolling`.
             //
             // `WokeUp` means that the task has already woken up successfully.
             // `Polling` means that the task hasn't been woken up yet, and that we are currently
@@ -123,31 +120,23 @@ impl TasksQueue {
             //
             // The distinction between `Polling` and `NotPolling` is necessary because we can't
             // store the task in the waker while it is still being polled.
-            state: atomic::AtomicPtr<BoxFuture<'static, ()>>,
+            state: atomic::AtomicU64,
         }
 
-        // In order to represent `Polling`, we use a pointer to a static variable. The pointer
-        // is invalid (because we convert it to the wrong type), but the important point here is
-        // that it isn't null and can't accidentally be equal to a pointer to `task`.
-        static DUMMY_POINTED_VALUE: usize = 0;
-        macro_rules! invalid_non_null_ptr {
-            () => {
-                (&DUMMY_POINTED_VALUE as *const usize as *mut usize as *mut BoxFuture<'static, ()>)
-            };
-        }
+        const WOKE_UP: u64 = u64::max_value();
+        const POLLING: u64 = u64::max_value() - 1;
 
         impl alloc::task::Wake for Waker {
             fn wake(self: Arc<Self>) {
-                // Store `WokeUp` (i.e. null) in `state`, and examine what is inside.
-                match self.state.swap(ptr::null_mut(), atomic::Ordering::Relaxed) {
-                    ptr if ptr.is_null() || ptr == invalid_non_null_ptr!() => {}
-                    task_ptr => {
-                        // Any value other than null or `invalid_non_null_ptr!()` represents a
-                        // valid task.
+                // Store `WokeUp` in `state`, and examine what is inside.
+                match self.state.swap(WOKE_UP, atomic::Ordering::Relaxed) {
+                    val if val == WOKE_UP || val == POLLING => {}
+                    idx => {
+                        // Any other value represents a valid task.
                         // If the state is `NotPolling`, push this task back to the queue.
-                        let task = unsafe { Box::from_raw(task_ptr) };
                         let Some(tasks_queue) = self.tasks_queue.upgrade() else { return };
-                        tasks_queue.push_inner(*task);
+                        tasks_queue.queue.push(QueuedTask::InSlab(idx as usize));
+                        tasks_queue.item_pushed_to_queue.notify_additional(1);
                     }
                 }
             }
@@ -156,35 +145,43 @@ impl TasksQueue {
         let waker = Arc::new(Waker {
             tasks_queue: Arc::downgrade(self),
             // Initialize `state` to `Polling`.
-            state: atomic::AtomicPtr::new(invalid_non_null_ptr!()),
+            state: atomic::AtomicU64::new(POLLING),
         });
 
         match Pin::new(&mut task).poll(&mut task::Context::from_waker(&waker.clone().into())) {
             task::Poll::Ready(()) => {}
             task::Poll::Pending => {
-                // Prepare to store `NotPolling(task)` in `state`.
-                let task_ptr = Box::into_raw(Box::new(task));
-                debug_assert_ne!(task_ptr, invalid_non_null_ptr!());
+                // Prepare to store `NotPolling(task_index)` in `state`.
+                let task_index = self.sleeping_tasks.lock().await.insert(task);
+                let task_index_u64 = u64::try_from(task_index).unwrap();
+                debug_assert_ne!(task_index_u64, POLLING);
+                debug_assert_ne!(task_index_u64, WOKE_UP);
 
                 // Store `NotPolling` if equal to `Polling`.
                 match waker.state.compare_exchange(
-                    invalid_non_null_ptr!(),
-                    task_ptr,
+                    POLLING,
+                    task_index_u64,
                     atomic::Ordering::Relaxed,
                     atomic::Ordering::Relaxed,
                 ) {
                     Ok(_) => {}
                     Err(_actual_val) => {
                         // The only way we could reach here is if `wake()` has been called,
-                        // in which case it has replaced `Polling` with `WokeUp` (i.e. null).
+                        // in which case it has replaced `Polling` with `WokeUp`.
                         // In that case, push the task to the back of the queue.
-                        debug_assert!(_actual_val.is_null());
-                        let task = unsafe { Box::from_raw(task_ptr) };
-                        self.push_inner(*task);
+                        debug_assert_eq!(_actual_val, WOKE_UP);
+                        self.queue.push(QueuedTask::InSlab(task_index));
+                        self.item_pushed_to_queue.notify_additional(1);
                     }
                 }
             }
         }
+    }
+}
+
+impl fmt::Debug for TasksQueue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("TasksQueue").finish()
     }
 }
 
@@ -248,6 +245,35 @@ mod tests {
             // actually detect the limit and the others will be sleeping.
             let _ = finished_rx.next().await.unwrap();
             assert_eq!(counter.load(atomic::Ordering::SeqCst), NUM_TASKS);
+        })
+    }
+
+    #[test]
+    fn tasks_destroyed_when_queue_destroyed() {
+        // Push infinite tasks in the queue. These tasks share an `Arc`. Destroy the queue. Verify
+        // that the `Arc` is stale.
+        async_std::task::block_on(async move {
+            let queue = super::TasksQueue::new();
+            let counter = Arc::new(());
+
+            // Spawn the tasks themselves.
+            for _ in 0..1000 {
+                let counter = counter.clone();
+                queue.push(Box::pin(async move {
+                    // Sleep for twelve hours, which basically means infinitely.
+                    async_std::task::sleep(core::time::Duration::from_secs(12 * 3600)).await;
+                    drop(counter);
+                }));
+            }
+
+            // Execute tasks a bit.
+            for _ in 0..100 {
+                queue.run_one().await;
+            }
+
+            // Then drop the queue and make sure that there's no clone of `counter` remaining.
+            let _ = Arc::try_unwrap(queue).unwrap();
+            let () = Arc::try_unwrap(counter).unwrap();
         })
     }
 }
