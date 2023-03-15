@@ -316,8 +316,8 @@ pub struct StartConfig<'a, TPlat: Platform> {
 
     /// Maximum number of subscriptions that can be processed simultaneously.
     ///
-    /// In combination with [`Config::max_parallel_requests`], this can increase or decrease the
-    /// priority of updating subscriptions compared to answering requests.
+    /// In combination with [`StartConfig::max_parallel_requests`], this can increase or decrease
+    /// the priority of updating subscriptions compared to answering requests.
     pub max_parallel_subscription_updates: NonZeroU32,
 }
 
