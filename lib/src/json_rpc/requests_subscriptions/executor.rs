@@ -20,14 +20,14 @@
 //! This module provides the [`TasksQueue`] struct, which consists in a queue of `future`s.
 //! The futures in the queue must yield `()`.
 //!
-//! Use [`TasksQueue::add`] to add a future to the back of the queue.
+//! Use [`TasksQueue::push`] to add a future to the back of the queue.
 //!
-//! Use [`TasksQueue::run_once`] to pull a future from the queue and poll it. If the queue is
+//! Use [`TasksQueue::run_one`] to pull a future from the queue and poll it. If the queue is
 //! empty, this function waits until a future enters the queue. If the future finishes executing,
 //! then it is destroyed. Otherwise, it is added to the back of the queue once it is ready to be
 //! polled again.
 //!
-//! [`TasksQueue::run_once`] can be called multiple times in parallel.
+//! [`TasksQueue::run_one`] can be called multiple times in parallel.
 
 // Note: believe or not, but I couldn't find a library that does this in the Rust ecosystem.
 
