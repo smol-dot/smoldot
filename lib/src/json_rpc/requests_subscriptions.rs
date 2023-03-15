@@ -37,7 +37,8 @@
 //!
 //! - One lightweight task for each client currently connected to the server.
 //! - A fixed number of lightweight tasks (e.g. 16) dedicated to answering requests.
-//! - A fixed number of lightweight tasks (e.g. 8) dedicated to processing subscription tasks.
+//! - A fixed number of lightweight tasks (e.g. 8) dedicated to processing subscription tasks by
+//! calling [`RequestsSubscriptions::run_subscription_task`] in a loop.
 //!
 //! ## Clients
 //!
