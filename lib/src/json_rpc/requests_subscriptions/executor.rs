@@ -86,7 +86,7 @@ impl TasksQueue {
         self.run_inner(task);
     }
 
-    /// Polls a future with a waker that pushes back the future to the back of the queue once
+    /// Polls a future with a `Waker` that pushes back the future to the back of the queue once
     /// ready to be polled again.
     fn run_inner(self: &Arc<Self>, mut task: BoxFuture<'static, ()>) {
         struct Waker {
