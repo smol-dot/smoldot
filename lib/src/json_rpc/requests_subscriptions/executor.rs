@@ -79,6 +79,7 @@ impl TasksQueue {
                 if let Some(task) = self.queue.pop() {
                     break match task {
                         QueuedTask::Task(t) => t,
+                        // TODO: future cancellation issue /!\ what if this await is cancelled after we've extracted an item from the queue
                         QueuedTask::InSlab(index) => self.sleeping_tasks.lock().await.remove(index),
                     };
                 }
@@ -152,6 +153,7 @@ impl TasksQueue {
             task::Poll::Ready(()) => {}
             task::Poll::Pending => {
                 // Prepare to store `NotPolling(task_index)` in `state`.
+                // TODO: future cancellation issue /!\ what if this await is cancelled and task is thrown away?
                 let task_index = self.sleeping_tasks.lock().await.insert(task);
                 let task_index_u64 = u64::try_from(task_index).unwrap();
                 debug_assert_ne!(task_index_u64, POLLING);
