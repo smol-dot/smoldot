@@ -37,6 +37,7 @@
 //!
 //! - One lightweight task for each client currently connected to the server.
 //! - A fixed number of lightweight tasks (e.g. 16) dedicated to answering requests.
+//! - A fixed number of lightweight tasks (e.g. 8) dedicated to processing subscription tasks.
 //!
 //! ## Clients
 //!
@@ -117,7 +118,7 @@ use core::{
     ops,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use futures::lock::Mutex;
+use futures::{future, lock::Mutex};
 
 mod tests;
 
@@ -129,6 +130,8 @@ pub struct RequestId(u64, Weak<ClientInner>);
 
 #[derive(Clone)]
 pub struct SubscriptionId(u64, Weak<ClientInner>);
+
+pub mod executor;
 
 /// Configuration to pass to [`RequestsSubscriptions::new`].
 pub struct Config {
@@ -162,6 +165,10 @@ pub struct RequestsSubscriptions {
 
     /// Event notified whenever an element is pushed to [`RequestsSubscriptions::unpulled_requests`].
     new_unpulled_request: event_listener::Event,
+
+    /// Queue of subscription-related tasks. Run manually using
+    /// [`RequestsSubscriptions::run_subscription_task`].
+    subscriptions_tasks: Arc<executor::TasksQueue>,
 
     /// Next identifier to assign to the next request.
     ///
@@ -206,6 +213,7 @@ impl RequestsSubscriptions {
                 next_id: 0,
             }),
             unpulled_requests: crossbeam_queue::SegQueue::new(),
+            subscriptions_tasks: executor::TasksQueue::new(),
             new_unpulled_request: event_listener::Event::new(),
             next_request_id: atomic::Atomic::new(0),
             next_subscription_id: atomic::Atomic::new(0),
@@ -638,6 +646,24 @@ impl RequestsSubscriptions {
                 .push_back(ResponseSendBack::Response(response));
             lock.responses_send_back_pushed_or_dead.notify_additional(1);
         }
+    }
+
+    /// Adds a subscription task to the state machine.
+    ///
+    /// The task doesn't run automatically. Instead,
+    /// [`RequestsSubscriptions::run_subscription_task`] must be called.
+    // TODO: it is planned to merge this into `start_subscription`
+    pub fn add_subscription_task(&self, task: future::BoxFuture<'static, ()>) {
+        self.subscriptions_tasks.push(task);
+    }
+
+    /// Waits until a subscription task is ready to be polled, and polls it.
+    ///
+    /// The subscription tasks do not run unless this function is called.
+    ///
+    /// This function is typically expected to be called multiple times in parallel and in a loop.
+    pub async fn run_subscription_task(&self) {
+        self.subscriptions_tasks.run_one().await
     }
 
     /// Adds a new subscription to the state machine, associated with the client that started

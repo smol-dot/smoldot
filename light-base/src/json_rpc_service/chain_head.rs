@@ -23,7 +23,6 @@ use crate::{platform::Platform, runtime_service, sync_service};
 
 use alloc::{
     borrow::ToOwned as _,
-    boxed::Box,
     format,
     string::{String, ToString as _},
     sync::Arc,
@@ -409,11 +408,8 @@ impl<TPlat: Platform> Background<TPlat> {
             }
         };
 
-        self.new_child_tasks_tx
-            .lock()
-            .await
-            .unbounded_send(task.boxed())
-            .unwrap();
+        self.requests_subscriptions
+            .add_subscription_task(task.boxed());
     }
 
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_follow`].
@@ -1170,11 +1166,8 @@ impl<TPlat: Platform> Background<TPlat> {
             }
         };
 
-        self.new_child_tasks_tx
-            .lock()
-            .await
-            .unbounded_send(Box::pin(task))
-            .unwrap();
+        self.requests_subscriptions
+            .add_subscription_task(task.boxed());
     }
 
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_storage`].
@@ -1432,11 +1425,8 @@ impl<TPlat: Platform> Background<TPlat> {
             }
         };
 
-        self.new_child_tasks_tx
-            .lock()
-            .await
-            .unbounded_send(Box::pin(task))
-            .unwrap();
+        self.requests_subscriptions
+            .add_subscription_task(task.boxed());
     }
 
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_body`].
@@ -1658,11 +1648,8 @@ impl<TPlat: Platform> Background<TPlat> {
             }
         };
 
-        self.new_child_tasks_tx
-            .lock()
-            .await
-            .unbounded_send(Box::pin(task))
-            .unwrap();
+        self.requests_subscriptions
+            .add_subscription_task(task.boxed());
     }
 
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_header`].

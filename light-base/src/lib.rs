@@ -844,6 +844,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                     genesis_block_hash,
                     genesis_block_state_root,
                     max_parallel_requests: NonZeroU32::new(24).unwrap(),
+                    max_parallel_subscription_updates: NonZeroU32::new(8).unwrap(),
                 })
             };
 

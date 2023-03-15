@@ -21,7 +21,7 @@ use super::{Background, Platform, SubscriptionMessage};
 
 use crate::transactions_service;
 
-use alloc::{borrow::ToOwned as _, boxed::Box, str, string::ToString as _, sync::Arc, vec::Vec};
+use alloc::{borrow::ToOwned as _, str, string::ToString as _, sync::Arc, vec::Vec};
 use core::sync::atomic;
 use futures::{
     channel::{mpsc, oneshot},
@@ -520,11 +520,8 @@ impl<TPlat: Platform> Background<TPlat> {
             }
         };
 
-        self.new_child_tasks_tx
-            .lock()
-            .await
-            .unbounded_send(Box::pin(task))
-            .unwrap();
+        self.requests_subscriptions
+            .add_subscription_task(task.boxed());
     }
 
     /// Handles a call to [`methods::MethodCall::transaction_unstable_unwatch`].
