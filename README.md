@@ -4,26 +4,26 @@
 
 This repository contains the following components:
 
-- `/lib`: An unopinionated Rust library named `smoldot` of general-purpose primitives that relate to Substrate and Polkadot. Serves as a base for the other components.
-  - 📦 <https://crates.io/crates/smoldot>
-  - 📚 <https://docs.rs/smoldot> (latest published version)
-  - 📚 <https://smol-dot.github.io/smoldot/doc-rust/smoldot/index.html> (latest commit)
-  - Has an unstable API.
-
-- `/light-base`: A platform-agnostic Rust library named `smoldot-light` that can connect to a Substrate-based chain as a light client. Serves as the base for the `wasm-node` component below.
-  - 📦 <https://crates.io/crates/smoldot-light>
-  - 📚 <https://docs.rs/smoldot-light> (latest published version)
-  - 📚 <https://smol-dot.github.io/smoldot/doc-rust/smoldot_light/index.html> (latest commit)
-  - Has a semi-stable API that might change occasionally in minor ways.
-
-- `/wasm-node`: A JavaScript package that can connect to a Substrate-based chains as a light client, using the `smoldot-light` Rust library in its internals. Works both in the browser and on NodeJS/Deno. **This is the main component of this repository. The development mostly focuses around it, and the name `smoldot` generally refers to this component in particular.**
+- `smoldot-light-js` (`/wasm-node`): A JavaScript package that can connect to a Substrate-based chains as a light client, using the `smoldot-light` Rust library in its internals. Works both in the browser and on NodeJS/Deno. **This is the main component of this repository. The development mostly focuses around it, and the name `smoldot` generally refers to this component in particular.**
   - 📦 NPM: <https://www.npmjs.com/package/smoldot>
   - 📦 Deno.land/x: <https://deno.land/x/smoldot2> (URL to import: `https://deno.land/x/smoldot2/index-deno.js`)
   - 📄 CHANGELOG: <https://github.com/smol-dot/smoldot/blob/main/wasm-node/CHANGELOG.md>
   - 📚 <https://smol-dot.github.io/smoldot/doc-javascript/> (latest commit)
   - Has a stable API that rarely changes.
 
-- `/full-node`: A work-in-progress prototype of a full node binary that can connect to Substrate-base chains. Doesn't yet support many features that the official client supports.
+- `smoldot` (`/lib`): An unopinionated Rust library of general-purpose primitives that relate to Substrate and Polkadot. Serves as a base for the other components.
+  - 📦 <https://crates.io/crates/smoldot>
+  - 📚 <https://docs.rs/smoldot> (latest published version)
+  - 📚 <https://smol-dot.github.io/smoldot/doc-rust/smoldot/index.html> (latest commit)
+  - Has an unstable API.
+
+- `smoldot-light` (`/light-base`): A platform-agnostic Rust library that can connect to a Substrate-based chain as a light client. Serves as the base for the `smoldot-light-js` component explained above.
+  - 📦 <https://crates.io/crates/smoldot-light>
+  - 📚 <https://docs.rs/smoldot-light> (latest published version)
+  - 📚 <https://smol-dot.github.io/smoldot/doc-rust/smoldot_light/index.html> (latest commit)
+  - Has a semi-stable API that might change occasionally in minor ways.
+
+- `smoldot-full-node` (`/full-node`): A work-in-progress prototype of a full node binary that can connect to Substrate-base chains. Doesn't yet support many features that the official client supports.
 
 ## Does smoldot support &lt;blockchain&gt;?
 
@@ -36,7 +36,7 @@ However, given that Substrate is a very generic framework that doesn't offer any
 
 ## License
 
-The source code in this repository is distributed under the GPLv3 license. See the <LICENSE> file.
+The source code in this repository is distributed under the GPLv3 license. See the &lt;LICENSE&gt; file.
 
 This source code comes with absolutely no warranty. Use at your own risk.
 
@@ -46,7 +46,7 @@ Due to the history of this repository, the code written in 2022 and before belon
 
 This project operates under the typical "benevolent dictator" model. The main maintener, @tomaka, is being remunerated to work on the source code through Polkadot treasury proposals.
 
-Pull requests are welcome. However, if your changes are substantial, you are strongly encouraged to first discuss the nature of the changes through an issue or discussion. In general, unless the changes you are making are trivial, you are never wrong if you first open an issue instead of a pull request.
+Pull requests are welcome. However, if your changes are substantial, you are strongly encouraged to first discuss the nature of the changes through an issue or discussion. In general, unless the changes you are making are trivial, you are never wrong if you first open an issue instead of a pull request. Keep in mind that changes that might seem easy are often harder than they look. Changes that are *actually* easy have a high chance of having already been completed.
 
 Anyone contributing to this project pledges to propose a welcoming, constructive, and respectful environment for everyone. Trolling, harassment, or sexual advances aren't tolerated.
 
@@ -78,6 +78,7 @@ Where "crash" includes: Rust panics, JavaScript exceptions (except for the ones 
 - Being able to determine the identity (including the IP address) of the sender of a transaction sent using smoldot. This aspect could be improved in the future, but at the moment the Polkadot network protocol doesn't provide enough tools to make anonymity possible.
 - Smoldot failing to connect to a certain chain. While this isn't a *security* issue, please open an issue regardless.
 - A transaction sent through smoldot not being included in the chain in a certain time period. While this isn't a *security* issue, please open an issue regardless.
+- The best block and/or finalized block reported by smoldot lags behind the one on the chain.
 
 ## Building manually
 
