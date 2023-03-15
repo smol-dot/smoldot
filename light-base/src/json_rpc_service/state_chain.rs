@@ -17,11 +17,12 @@
 
 //! All legacy JSON-RPC method handlers that relate to the chain or the storage.
 
-use super::{Background, Platform, SubscriptionTy};
+use super::{Background, Platform, SubscriptionMessage};
 
 use crate::runtime_service;
 
 use alloc::{
+    borrow::ToOwned as _,
     boxed::Box,
     format,
     string::{String, ToString as _},
@@ -35,8 +36,11 @@ use core::{
     sync::atomic,
     time::Duration,
 };
-use futures::{lock::MutexGuard, prelude::*};
-use hashbrown::hash_map;
+use futures::{
+    channel::{mpsc, oneshot},
+    lock::{Mutex, MutexGuard},
+    prelude::*,
+};
 use smoldot::{
     header,
     informant::HashDisplay,
@@ -397,19 +401,15 @@ impl<TPlat: Platform> Background<TPlat> {
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
 
-        let abort_registration = {
-            let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
-            let mut subscriptions_list = self.subscriptions.lock().await;
-            subscriptions_list.insert(
-                subscription_id.clone(),
-                (
-                    abort_handle,
-                    state_machine_subscription.clone(),
-                    SubscriptionTy::AllHeads,
-                ),
-            );
-            abort_registration
-        };
+        let (messages_tx, mut messages_rx) = mpsc::channel(0);
+
+        self.subscriptions.lock().await.insert(
+            subscription_id.clone(),
+            (
+                Arc::new(Mutex::new(messages_tx)),
+                state_machine_subscription.clone(),
+            ),
+        );
 
         self.requests_subscriptions
             .respond(
@@ -423,7 +423,7 @@ impl<TPlat: Platform> Background<TPlat> {
         let task = {
             let me = self.clone();
             async move {
-                loop {
+                'main_sub_loop: loop {
                     let mut new_blocks = {
                         // The buffer size should be large enough so that, if the CPU is busy, it
                         // doesn't become full before the execution of the runtime service resumes.
@@ -460,8 +460,21 @@ impl<TPlat: Platform> Background<TPlat> {
                     };
 
                     loop {
-                        match new_blocks.next().await {
-                            Some(runtime_service::Notification::Block(block)) => {
+                        let message = {
+                            let next_new_block = new_blocks.next();
+                            futures::pin_mut!(next_new_block);
+                            match future::select(next_new_block, messages_rx.next()).await {
+                                future::Either::Left((v, _)) => either::Left(v),
+                                future::Either::Right((v, _)) => either::Right(v),
+                            }
+                        };
+
+                        match message {
+                            either::Left(None) => {
+                                // Break from the inner loop in order to recreate the channel.
+                                break;
+                            }
+                            either::Left(Some(runtime_service::Notification::Block(block))) => {
                                 new_blocks
                                     .unpin_block(&header::hash_from_scale_encoded_header(
                                         &block.scale_encoded_header,
@@ -502,11 +515,40 @@ impl<TPlat: Platform> Background<TPlat> {
                                     )
                                     .await;
                             }
-                            Some(runtime_service::Notification::BestBlockChanged { .. })
-                            | Some(runtime_service::Notification::Finalized { .. }) => {}
-                            None => {
-                                // Break from the inner loop in order to recreate the channel.
-                                break;
+                            either::Left(Some(
+                                runtime_service::Notification::BestBlockChanged { .. },
+                            ))
+                            | either::Left(Some(runtime_service::Notification::Finalized {
+                                ..
+                            })) => {}
+                            either::Right(None) => {
+                                unreachable!()
+                            }
+                            either::Right(Some((
+                                SubscriptionMessage::StopIfAllHeads {
+                                    stop_state_machine_request_id,
+                                    stop_request_id,
+                                },
+                                confirmation_sender,
+                            ))) => {
+                                me.requests_subscriptions
+                                    .stop_subscription(&state_machine_subscription)
+                                    .await;
+
+                                me.requests_subscriptions
+                                    .respond(
+                                        &stop_state_machine_request_id,
+                                        methods::Response::chain_unsubscribeAllHeads(true)
+                                            .to_json_response(&stop_request_id),
+                                    )
+                                    .await;
+
+                                let _ = confirmation_sender.send(());
+                                break 'main_sub_loop;
+                            }
+                            either::Right(Some(_)) => {
+                                // Any other message.
+                                // Silently discard the confirmation sender.
                             }
                         }
                     }
@@ -517,9 +559,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self.new_child_tasks_tx
             .lock()
             .await
-            .unbounded_send(Box::pin(
-                future::Abortable::new(task, abort_registration).map(|_| ()),
-            ))
+            .unbounded_send(Box::pin(task))
             .unwrap();
     }
 
@@ -558,19 +598,15 @@ impl<TPlat: Platform> Background<TPlat> {
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
 
-        let abort_registration = {
-            let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
-            let mut subscriptions_list = self.subscriptions.lock().await;
-            subscriptions_list.insert(
-                subscription_id.clone(),
-                (
-                    abort_handle,
-                    state_machine_subscription.clone(),
-                    SubscriptionTy::FinalizedHeads,
-                ),
-            );
-            abort_registration
-        };
+        let (messages_tx, mut messages_rx) = mpsc::channel(0);
+
+        self.subscriptions.lock().await.insert(
+            subscription_id.clone(),
+            (
+                Arc::new(Mutex::new(messages_tx)),
+                state_machine_subscription.clone(),
+            ),
+        );
 
         self.requests_subscriptions
             .respond(
@@ -591,37 +627,74 @@ impl<TPlat: Platform> Background<TPlat> {
             let me = self.clone();
             async move {
                 loop {
-                    // Stream returned by `subscribe_finalized` is always unlimited.
-                    let header = blocks_list.next().await.unwrap();
-
-                    let header = match methods::Header::from_scale_encoded_header(
-                        &header,
-                        me.sync_service.block_number_bytes(),
-                    ) {
-                        Ok(h) => h,
-                        Err(error) => {
-                            log::warn!(
-                                target: &me.log_target,
-                                "`chain_subscribeFinalizedHeads` subscription has skipped block \
-                                due to undecodable header. Hash: {}. Error: {}",
-                                HashDisplay(&header::hash_from_scale_encoded_header(&header)),
-                                error,
-                            );
-                            continue;
+                    match future::select(blocks_list.next(), messages_rx.next()).await {
+                        future::Either::Left((None, _)) => {
+                            // Stream returned by `subscribe_finalized` is always unlimited.
+                            unreachable!()
                         }
-                    };
+                        future::Either::Left((Some(header), _)) => {
+                            let header = match methods::Header::from_scale_encoded_header(
+                                &header,
+                                me.sync_service.block_number_bytes(),
+                            ) {
+                                Ok(h) => h,
+                                Err(error) => {
+                                    log::warn!(
+                                        target: &me.log_target,
+                                        "`chain_subscribeFinalizedHeads` subscription has skipped \
+                                        block due to undecodable header. Hash: {}. Error: {}",
+                                        HashDisplay(&header::hash_from_scale_encoded_header(&header)),
+                                        error,
+                                    );
+                                    continue;
+                                }
+                            };
 
-                    me.requests_subscriptions
-                        .set_queued_notification(
-                            &state_machine_subscription,
-                            0,
-                            methods::ServerToClient::chain_finalizedHead {
-                                subscription: (&subscription_id).into(),
-                                result: header,
-                            }
-                            .to_json_call_object_parameters(None),
-                        )
-                        .await;
+                            me.requests_subscriptions
+                                .set_queued_notification(
+                                    &state_machine_subscription,
+                                    0,
+                                    methods::ServerToClient::chain_finalizedHead {
+                                        subscription: (&subscription_id).into(),
+                                        result: header,
+                                    }
+                                    .to_json_call_object_parameters(None),
+                                )
+                                .await;
+                        }
+                        future::Either::Right((None, _)) => {
+                            unreachable!()
+                        }
+                        future::Either::Right((
+                            Some((
+                                SubscriptionMessage::StopIfFinalizedHeads {
+                                    stop_state_machine_request_id,
+                                    stop_request_id,
+                                },
+                                confirmation_sender,
+                            )),
+                            _,
+                        )) => {
+                            me.requests_subscriptions
+                                .stop_subscription(&state_machine_subscription)
+                                .await;
+
+                            me.requests_subscriptions
+                                .respond(
+                                    &stop_state_machine_request_id,
+                                    methods::Response::chain_unsubscribeFinalizedHeads(true)
+                                        .to_json_response(&stop_request_id),
+                                )
+                                .await;
+
+                            let _ = confirmation_sender.send(());
+                            break;
+                        }
+                        future::Either::Right((Some(_), _)) => {
+                            // Any other message.
+                            // Silently discard the confirmation sender.
+                        }
+                    }
                 }
             }
         };
@@ -629,9 +702,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self.new_child_tasks_tx
             .lock()
             .await
-            .unbounded_send(Box::pin(
-                future::Abortable::new(task, abort_registration).map(|_| ()),
-            ))
+            .unbounded_send(Box::pin(task))
             .unwrap();
     }
 
@@ -670,19 +741,15 @@ impl<TPlat: Platform> Background<TPlat> {
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
 
-        let abort_registration = {
-            let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
-            let mut subscriptions_list = self.subscriptions.lock().await;
-            subscriptions_list.insert(
-                subscription_id.clone(),
-                (
-                    abort_handle,
-                    state_machine_subscription.clone(),
-                    SubscriptionTy::NewHeads,
-                ),
-            );
-            abort_registration
-        };
+        let (messages_tx, mut messages_rx) = mpsc::channel(0);
+
+        self.subscriptions.lock().await.insert(
+            subscription_id.clone(),
+            (
+                Arc::new(Mutex::new(messages_tx)),
+                state_machine_subscription.clone(),
+            ),
+        );
 
         self.requests_subscriptions
             .respond(
@@ -703,37 +770,74 @@ impl<TPlat: Platform> Background<TPlat> {
             let me = self.clone();
             async move {
                 loop {
-                    // Stream returned by `subscribe_best` is always unlimited.
-                    let header = blocks_list.next().await.unwrap();
-
-                    let header = match methods::Header::from_scale_encoded_header(
-                        &header,
-                        me.sync_service.block_number_bytes(),
-                    ) {
-                        Ok(h) => h,
-                        Err(error) => {
-                            log::warn!(
-                                target: &me.log_target,
-                                "`chain_subscribeNewHeads` subscription has skipped block due to \
-                                undecodable header. Hash: {}. Error: {}",
-                                HashDisplay(&header::hash_from_scale_encoded_header(&header)),
-                                error,
-                            );
-                            continue;
+                    match future::select(blocks_list.next(), messages_rx.next()).await {
+                        future::Either::Left((None, _)) => {
+                            // Stream returned by `subscribe_best` is always unlimited.
+                            unreachable!()
                         }
-                    };
+                        future::Either::Left((Some(header), _)) => {
+                            let header = match methods::Header::from_scale_encoded_header(
+                                &header,
+                                me.sync_service.block_number_bytes(),
+                            ) {
+                                Ok(h) => h,
+                                Err(error) => {
+                                    log::warn!(
+                                        target: &me.log_target,
+                                        "`chain_subscribeNewHeads` subscription has skipped block \
+                                        due to undecodable header. Hash: {}. Error: {}",
+                                        HashDisplay(&header::hash_from_scale_encoded_header(&header)),
+                                        error,
+                                    );
+                                    continue;
+                                }
+                            };
 
-                    me.requests_subscriptions
-                        .set_queued_notification(
-                            &state_machine_subscription,
-                            0,
-                            methods::ServerToClient::chain_newHead {
-                                subscription: (&subscription_id).into(),
-                                result: header,
-                            }
-                            .to_json_call_object_parameters(None),
-                        )
-                        .await;
+                            me.requests_subscriptions
+                                .set_queued_notification(
+                                    &state_machine_subscription,
+                                    0,
+                                    methods::ServerToClient::chain_newHead {
+                                        subscription: (&subscription_id).into(),
+                                        result: header,
+                                    }
+                                    .to_json_call_object_parameters(None),
+                                )
+                                .await;
+                        }
+                        future::Either::Right((None, _)) => {
+                            unreachable!()
+                        }
+                        future::Either::Right((
+                            Some((
+                                SubscriptionMessage::StopIfNewHeads {
+                                    stop_state_machine_request_id,
+                                    stop_request_id,
+                                },
+                                confirmation_sender,
+                            )),
+                            _,
+                        )) => {
+                            me.requests_subscriptions
+                                .stop_subscription(&state_machine_subscription)
+                                .await;
+
+                            me.requests_subscriptions
+                                .respond(
+                                    &stop_state_machine_request_id,
+                                    methods::Response::chain_unsubscribeNewHeads(true)
+                                        .to_json_response(&stop_request_id),
+                                )
+                                .await;
+
+                            let _ = confirmation_sender.send(());
+                            break;
+                        }
+                        future::Either::Right((Some(_), _)) => {
+                            // Any other message.
+                            // Silently discard the confirmation sender.
+                        }
+                    }
                 }
             }
         };
@@ -741,9 +845,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self.new_child_tasks_tx
             .lock()
             .await
-            .unbounded_send(Box::pin(
-                future::Abortable::new(task, abort_registration).map(|_| ()),
-            ))
+            .unbounded_send(Box::pin(task))
             .unwrap();
     }
 
@@ -754,31 +856,48 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         subscription: String,
     ) {
-        let state_machine_subscription =
-            match self.subscriptions.lock().await.entry_ref(&subscription) {
-                hash_map::EntryRef::Occupied(e)
-                    if matches!(e.get().2, SubscriptionTy::AllHeads) =>
-                {
-                    let (abort_handle, state_machine_subscription, _) = e.remove();
-                    abort_handle.abort();
-                    Some(state_machine_subscription)
-                }
-                hash_map::EntryRef::Occupied(_) | hash_map::EntryRef::Vacant(_) => None,
-            };
+        // Stopping the subscription is done by sending a message to it.
+        // The task dedicated to this subscription will receive the message, send a response to
+        // the JSON-RPC client, then shut down.
+        let stop_message_received = {
+            let sender = self
+                .subscriptions
+                .lock()
+                .await
+                .get(&subscription)
+                .map(|(tx, _)| tx.clone());
 
-        if let Some(state_machine_subscription) = &state_machine_subscription {
+            if let Some(sender) = sender {
+                let (tx, rx) = oneshot::channel();
+                let _ = sender
+                    .lock()
+                    .await
+                    .send((
+                        SubscriptionMessage::StopIfAllHeads {
+                            stop_state_machine_request_id: state_machine_request_id.clone(),
+                            stop_request_id: request_id.to_owned(),
+                        },
+                        tx,
+                    ))
+                    .await;
+                rx.await.is_ok()
+            } else {
+                false
+            }
+        };
+
+        // Send back a response manually if the task doesn't exist, or has discarded the message,
+        // which could happen for example because there was already a stop message earlier in its
+        // queue or because it was the wrong type of subscription.
+        if !stop_message_received {
             self.requests_subscriptions
-                .stop_subscription(state_machine_subscription)
+                .respond(
+                    state_machine_request_id,
+                    methods::Response::chain_unsubscribeAllHeads(false)
+                        .to_json_response(request_id),
+                )
                 .await;
         }
-
-        self.requests_subscriptions
-            .respond(
-                state_machine_request_id,
-                methods::Response::chain_unsubscribeAllHeads(state_machine_subscription.is_some())
-                    .to_json_response(request_id),
-            )
-            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::chain_unsubscribeFinalizedHeads`].
@@ -788,33 +907,48 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         subscription: String,
     ) {
-        let state_machine_subscription =
-            match self.subscriptions.lock().await.entry_ref(&subscription) {
-                hash_map::EntryRef::Occupied(e)
-                    if matches!(e.get().2, SubscriptionTy::FinalizedHeads) =>
-                {
-                    let (abort_handle, state_machine_subscription, _) = e.remove();
-                    abort_handle.abort();
-                    Some(state_machine_subscription)
-                }
-                hash_map::EntryRef::Occupied(_) | hash_map::EntryRef::Vacant(_) => None,
-            };
+        // Stopping the subscription is done by sending a message to it.
+        // The task dedicated to this subscription will receive the message, send a response to
+        // the JSON-RPC client, then shut down.
+        let stop_message_received = {
+            let sender = self
+                .subscriptions
+                .lock()
+                .await
+                .get(&subscription)
+                .map(|(tx, _)| tx.clone());
 
-        if let Some(state_machine_subscription) = &state_machine_subscription {
+            if let Some(sender) = sender {
+                let (tx, rx) = oneshot::channel();
+                let _ = sender
+                    .lock()
+                    .await
+                    .send((
+                        SubscriptionMessage::StopIfFinalizedHeads {
+                            stop_state_machine_request_id: state_machine_request_id.clone(),
+                            stop_request_id: request_id.to_owned(),
+                        },
+                        tx,
+                    ))
+                    .await;
+                rx.await.is_ok()
+            } else {
+                false
+            }
+        };
+
+        // Send back a response manually if the task doesn't exist, or has discarded the message,
+        // which could happen for example because there was already a stop message earlier in its
+        // queue or because it was the wrong type of subscription.
+        if !stop_message_received {
             self.requests_subscriptions
-                .stop_subscription(state_machine_subscription)
+                .respond(
+                    state_machine_request_id,
+                    methods::Response::chain_unsubscribeFinalizedHeads(false)
+                        .to_json_response(request_id),
+                )
                 .await;
         }
-
-        self.requests_subscriptions
-            .respond(
-                state_machine_request_id,
-                methods::Response::chain_unsubscribeFinalizedHeads(
-                    state_machine_subscription.is_some(),
-                )
-                .to_json_response(request_id),
-            )
-            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::chain_unsubscribeNewHeads`].
@@ -824,31 +958,48 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         subscription: String,
     ) {
-        let state_machine_subscription =
-            match self.subscriptions.lock().await.entry_ref(&subscription) {
-                hash_map::EntryRef::Occupied(e)
-                    if matches!(e.get().2, SubscriptionTy::NewHeads) =>
-                {
-                    let (abort_handle, state_machine_subscription, _) = e.remove();
-                    abort_handle.abort();
-                    Some(state_machine_subscription)
-                }
-                hash_map::EntryRef::Occupied(_) | hash_map::EntryRef::Vacant(_) => None,
-            };
+        // Stopping the subscription is done by sending a message to it.
+        // The task dedicated to this subscription will receive the message, send a response to
+        // the JSON-RPC client, then shut down.
+        let stop_message_received = {
+            let sender = self
+                .subscriptions
+                .lock()
+                .await
+                .get(&subscription)
+                .map(|(tx, _)| tx.clone());
 
-        if let Some(state_machine_subscription) = &state_machine_subscription {
+            if let Some(sender) = sender {
+                let (tx, rx) = oneshot::channel();
+                let _ = sender
+                    .lock()
+                    .await
+                    .send((
+                        SubscriptionMessage::StopIfNewHeads {
+                            stop_state_machine_request_id: state_machine_request_id.clone(),
+                            stop_request_id: request_id.to_owned(),
+                        },
+                        tx,
+                    ))
+                    .await;
+                rx.await.is_ok()
+            } else {
+                false
+            }
+        };
+
+        // Send back a response manually if the task doesn't exist, or has discarded the message,
+        // which could happen for example because there was already a stop message earlier in its
+        // queue or because it was the wrong type of subscription.
+        if !stop_message_received {
             self.requests_subscriptions
-                .stop_subscription(state_machine_subscription)
+                .respond(
+                    state_machine_request_id,
+                    methods::Response::chain_unsubscribeNewHeads(false)
+                        .to_json_response(request_id),
+                )
                 .await;
         }
-
-        self.requests_subscriptions
-            .respond(
-                state_machine_request_id,
-                methods::Response::chain_unsubscribeNewHeads(state_machine_subscription.is_some())
-                    .to_json_response(request_id),
-            )
-            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::payment_queryInfo`].
@@ -1339,19 +1490,15 @@ impl<TPlat: Platform> Background<TPlat> {
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
 
-        let abort_registration = {
-            let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
-            let mut subscriptions_list = self.subscriptions.lock().await;
-            subscriptions_list.insert(
-                subscription_id.clone(),
-                (
-                    abort_handle,
-                    state_machine_subscription.clone(),
-                    SubscriptionTy::RuntimeSpec,
-                ),
-            );
-            abort_registration
-        };
+        let (messages_tx, mut messages_rx) = mpsc::channel(0);
+
+        self.subscriptions.lock().await.insert(
+            subscription_id.clone(),
+            (
+                Arc::new(Mutex::new(messages_tx)),
+                state_machine_subscription.clone(),
+            ),
+        );
 
         self.requests_subscriptions
             .respond(
@@ -1370,44 +1517,92 @@ impl<TPlat: Platform> Background<TPlat> {
                 futures::pin_mut!(spec_changes);
 
                 loop {
-                    let new_runtime = spec_changes.next().await;
-                    let notification_body = if let Ok(runtime_spec) = new_runtime.unwrap() {
-                        let runtime_spec = runtime_spec.decode();
-                        methods::ServerToClient::state_runtimeVersion {
-                            subscription: (&subscription_id).into(),
-                            result: Some(methods::RuntimeVersion {
-                                spec_name: runtime_spec.spec_name.into(),
-                                impl_name: runtime_spec.impl_name.into(),
-                                authoring_version: u64::from(runtime_spec.authoring_version),
-                                spec_version: u64::from(runtime_spec.spec_version),
-                                impl_version: u64::from(runtime_spec.impl_version),
-                                transaction_version: runtime_spec
-                                    .transaction_version
-                                    .map(u64::from),
-                                state_version: runtime_spec
-                                    .state_version
-                                    .map(u8::from)
-                                    .map(u64::from),
-                                apis: runtime_spec
-                                    .apis
-                                    .map(|api| {
-                                        (methods::HexString(api.name_hash.to_vec()), api.version)
-                                    })
-                                    .collect(),
-                            }),
+                    match future::select(spec_changes.next(), messages_rx.next()).await {
+                        future::Either::Left((None, _)) => {
+                            // Stream returned by `subscribe_runtime_version` is always unlimited.
+                            unreachable!()
                         }
-                        .to_json_call_object_parameters(None)
-                    } else {
-                        methods::ServerToClient::state_runtimeVersion {
-                            subscription: (&subscription_id).into(),
-                            result: None,
-                        }
-                        .to_json_call_object_parameters(None)
-                    };
+                        future::Either::Left((Some(new_runtime), _)) => {
+                            let notification_body = if let Ok(runtime_spec) = new_runtime {
+                                let runtime_spec = runtime_spec.decode();
+                                methods::ServerToClient::state_runtimeVersion {
+                                    subscription: (&subscription_id).into(),
+                                    result: Some(methods::RuntimeVersion {
+                                        spec_name: runtime_spec.spec_name.into(),
+                                        impl_name: runtime_spec.impl_name.into(),
+                                        authoring_version: u64::from(
+                                            runtime_spec.authoring_version,
+                                        ),
+                                        spec_version: u64::from(runtime_spec.spec_version),
+                                        impl_version: u64::from(runtime_spec.impl_version),
+                                        transaction_version: runtime_spec
+                                            .transaction_version
+                                            .map(u64::from),
+                                        state_version: runtime_spec
+                                            .state_version
+                                            .map(u8::from)
+                                            .map(u64::from),
+                                        apis: runtime_spec
+                                            .apis
+                                            .map(|api| {
+                                                (
+                                                    methods::HexString(api.name_hash.to_vec()),
+                                                    api.version,
+                                                )
+                                            })
+                                            .collect(),
+                                    }),
+                                }
+                                .to_json_call_object_parameters(None)
+                            } else {
+                                methods::ServerToClient::state_runtimeVersion {
+                                    subscription: (&subscription_id).into(),
+                                    result: None,
+                                }
+                                .to_json_call_object_parameters(None)
+                            };
 
-                    me.requests_subscriptions
-                        .set_queued_notification(&state_machine_subscription, 0, notification_body)
-                        .await;
+                            me.requests_subscriptions
+                                .set_queued_notification(
+                                    &state_machine_subscription,
+                                    0,
+                                    notification_body,
+                                )
+                                .await;
+                        }
+                        future::Either::Right((None, _)) => {
+                            unreachable!()
+                        }
+                        future::Either::Right((
+                            Some((
+                                SubscriptionMessage::StopIfRuntimeSpec {
+                                    stop_state_machine_request_id,
+                                    stop_request_id,
+                                },
+                                confirmation_sender,
+                            )),
+                            _,
+                        )) => {
+                            me.requests_subscriptions
+                                .stop_subscription(&state_machine_subscription)
+                                .await;
+
+                            me.requests_subscriptions
+                                .respond(
+                                    &stop_state_machine_request_id,
+                                    methods::Response::state_unsubscribeRuntimeVersion(true)
+                                        .to_json_response(&stop_request_id),
+                                )
+                                .await;
+
+                            let _ = confirmation_sender.send(());
+                            break;
+                        }
+                        future::Either::Right((Some(_), _)) => {
+                            // Any other message.
+                            // Silently discard the confirmation sender.
+                        }
+                    }
                 }
             }
         };
@@ -1415,9 +1610,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self.new_child_tasks_tx
             .lock()
             .await
-            .unbounded_send(Box::pin(
-                future::Abortable::new(task, abort_registration).map(|_| ()),
-            ))
+            .unbounded_send(Box::pin(task))
             .unwrap();
     }
 
@@ -1458,33 +1651,48 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         subscription: &str,
     ) {
-        let state_machine_subscription =
-            match self.subscriptions.lock().await.entry_ref(subscription) {
-                hash_map::EntryRef::Occupied(e)
-                    if matches!(e.get().2, SubscriptionTy::RuntimeSpec) =>
-                {
-                    let (abort_handle, state_machine_subscription, _) = e.remove();
-                    abort_handle.abort();
-                    Some(state_machine_subscription)
-                }
-                hash_map::EntryRef::Occupied(_) | hash_map::EntryRef::Vacant(_) => None,
-            };
+        // Stopping the subscription is done by sending a message to it.
+        // The task dedicated to this subscription will receive the message, send a response to
+        // the JSON-RPC client, then shut down.
+        let stop_message_received = {
+            let sender = self
+                .subscriptions
+                .lock()
+                .await
+                .get(subscription)
+                .map(|(tx, _)| tx.clone());
 
-        if let Some(state_machine_subscription) = &state_machine_subscription {
+            if let Some(sender) = sender {
+                let (tx, rx) = oneshot::channel();
+                let _ = sender
+                    .lock()
+                    .await
+                    .send((
+                        SubscriptionMessage::StopIfRuntimeSpec {
+                            stop_state_machine_request_id: state_machine_request_id.clone(),
+                            stop_request_id: request_id.to_owned(),
+                        },
+                        tx,
+                    ))
+                    .await;
+                rx.await.is_ok()
+            } else {
+                false
+            }
+        };
+
+        // Send back a response manually if the task doesn't exist, or has discarded the message,
+        // which could happen for example because there was already a stop message earlier in its
+        // queue or because it was the wrong type of subscription.
+        if !stop_message_received {
             self.requests_subscriptions
-                .stop_subscription(state_machine_subscription)
+                .respond(
+                    state_machine_request_id,
+                    methods::Response::state_unsubscribeRuntimeVersion(false)
+                        .to_json_response(request_id),
+                )
                 .await;
         }
-
-        self.requests_subscriptions
-            .respond(
-                state_machine_request_id,
-                methods::Response::state_unsubscribeRuntimeVersion(
-                    state_machine_subscription.is_some(),
-                )
-                .to_json_response(request_id),
-            )
-            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::state_unsubscribeStorage`].
@@ -1494,29 +1702,47 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         subscription: &str,
     ) {
-        let state_machine_subscription =
-            match self.subscriptions.lock().await.entry_ref(subscription) {
-                hash_map::EntryRef::Occupied(e) if matches!(e.get().2, SubscriptionTy::Storage) => {
-                    let (abort_handle, state_machine_subscription, _) = e.remove();
-                    abort_handle.abort();
-                    Some(state_machine_subscription)
-                }
-                hash_map::EntryRef::Occupied(_) | hash_map::EntryRef::Vacant(_) => None,
-            };
+        // Stopping the subscription is done by sending a message to it.
+        // The task dedicated to this subscription will receive the message, send a response to
+        // the JSON-RPC client, then shut down.
+        let stop_message_received = {
+            let sender = self
+                .subscriptions
+                .lock()
+                .await
+                .get(subscription)
+                .map(|(tx, _)| tx.clone());
 
-        if let Some(state_machine_subscription) = &state_machine_subscription {
+            if let Some(sender) = sender {
+                let (tx, rx) = oneshot::channel();
+                let _ = sender
+                    .lock()
+                    .await
+                    .send((
+                        SubscriptionMessage::StopIfStorage {
+                            stop_state_machine_request_id: state_machine_request_id.clone(),
+                            stop_request_id: request_id.to_owned(),
+                        },
+                        tx,
+                    ))
+                    .await;
+                rx.await.is_ok()
+            } else {
+                false
+            }
+        };
+
+        // Send back a response manually if the task doesn't exist, or has discarded the message,
+        // which could happen for example because there was already a stop message earlier in its
+        // queue or because it was the wrong type of subscription.
+        if !stop_message_received {
             self.requests_subscriptions
-                .stop_subscription(state_machine_subscription)
+                .respond(
+                    state_machine_request_id,
+                    methods::Response::state_unsubscribeStorage(false).to_json_response(request_id),
+                )
                 .await;
         }
-
-        self.requests_subscriptions
-            .respond(
-                state_machine_request_id,
-                methods::Response::state_unsubscribeStorage(state_machine_subscription.is_some())
-                    .to_json_response(request_id),
-            )
-            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::state_subscribeStorage`].
@@ -1555,19 +1781,15 @@ impl<TPlat: Platform> Background<TPlat> {
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
 
-        let abort_registration = {
-            let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
-            let mut subscriptions_list = self.subscriptions.lock().await;
-            subscriptions_list.insert(
-                subscription_id.clone(),
-                (
-                    abort_handle,
-                    state_machine_subscription.clone(),
-                    SubscriptionTy::Storage,
-                ),
-            );
-            abort_registration
-        };
+        let (messages_tx, mut messages_rx) = mpsc::channel(0);
+
+        self.subscriptions.lock().await.insert(
+            subscription_id.clone(),
+            (
+                Arc::new(Mutex::new(messages_tx)),
+                state_machine_subscription.clone(),
+            ),
+        );
 
         self.requests_subscriptions
             .respond(
@@ -1682,8 +1904,12 @@ impl<TPlat: Platform> Background<TPlat> {
                 futures::pin_mut!(storage_updates);
 
                 loop {
-                    match storage_updates.next().await {
-                        Some(changes) => {
+                    match future::select(storage_updates.next(), messages_rx.next()).await {
+                        future::Either::Left((None, _)) => {
+                            // Stream created above is always unlimited.
+                            unreachable!()
+                        }
+                        future::Either::Left((Some(changes), _)) => {
                             me.requests_subscriptions
                                 .set_queued_notification(
                                     &state_machine_subscription,
@@ -1696,9 +1922,37 @@ impl<TPlat: Platform> Background<TPlat> {
                                 )
                                 .await;
                         }
-                        None => {
-                            // The stream created above is infinite.
+                        future::Either::Right((None, _)) => {
                             unreachable!()
+                        }
+                        future::Either::Right((
+                            Some((
+                                SubscriptionMessage::StopIfStorage {
+                                    stop_state_machine_request_id,
+                                    stop_request_id,
+                                },
+                                confirmation_sender,
+                            )),
+                            _,
+                        )) => {
+                            me.requests_subscriptions
+                                .stop_subscription(&state_machine_subscription)
+                                .await;
+
+                            me.requests_subscriptions
+                                .respond(
+                                    &stop_state_machine_request_id,
+                                    methods::Response::state_unsubscribeStorage(true)
+                                        .to_json_response(&stop_request_id),
+                                )
+                                .await;
+
+                            let _ = confirmation_sender.send(());
+                            break;
+                        }
+                        future::Either::Right((Some(_), _)) => {
+                            // Any other message.
+                            // Silently discard the confirmation sender.
                         }
                     }
                 }
@@ -1708,9 +1962,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self.new_child_tasks_tx
             .lock()
             .await
-            .unbounded_send(Box::pin(
-                future::Abortable::new(task, abort_registration).map(|_| ()),
-            ))
+            .unbounded_send(Box::pin(task))
             .unwrap();
     }
 }
