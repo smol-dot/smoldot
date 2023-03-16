@@ -410,18 +410,21 @@ impl<TPlat: Platform> Background<TPlat> {
             ),
         );
 
-        self.requests_subscriptions
-            .respond(
-                state_machine_request_id,
-                methods::Response::chain_subscribeAllHeads((&subscription_id).into())
-                    .to_json_response(request_id),
-            )
-            .await;
-
         // Spawn a separate task for the subscription.
         let task = {
             let me = self.clone();
+            let request_id = request_id.to_owned();
+            let state_machine_request_id = state_machine_request_id.clone();
+
             async move {
+                me.requests_subscriptions
+                    .respond(
+                        &state_machine_request_id,
+                        methods::Response::chain_subscribeAllHeads((&subscription_id).into())
+                            .to_json_response(&request_id),
+                    )
+                    .await;
+
                 'main_sub_loop: loop {
                     let mut new_blocks = {
                         // The buffer size should be large enough so that, if the CPU is busy, it
@@ -603,14 +606,6 @@ impl<TPlat: Platform> Background<TPlat> {
             ),
         );
 
-        self.requests_subscriptions
-            .respond(
-                state_machine_request_id,
-                methods::Response::chain_subscribeFinalizedHeads((&subscription_id).into())
-                    .to_json_response(request_id),
-            )
-            .await;
-
         let mut blocks_list = {
             let (finalized_block_header, finalized_blocks_subscription) =
                 sub_utils::subscribe_finalized(&self.runtime_service).await;
@@ -620,7 +615,18 @@ impl<TPlat: Platform> Background<TPlat> {
         // Spawn a separate task for the subscription.
         let task = {
             let me = self.clone();
+            let request_id = request_id.to_owned();
+            let state_machine_request_id = state_machine_request_id.clone();
+
             async move {
+                me.requests_subscriptions
+                    .respond(
+                        &state_machine_request_id,
+                        methods::Response::chain_subscribeFinalizedHeads((&subscription_id).into())
+                            .to_json_response(&request_id),
+                    )
+                    .await;
+
                 loop {
                     match future::select(blocks_list.next(), messages_rx.next()).await {
                         future::Either::Left((None, _)) => {
@@ -742,14 +748,6 @@ impl<TPlat: Platform> Background<TPlat> {
             ),
         );
 
-        self.requests_subscriptions
-            .respond(
-                state_machine_request_id,
-                methods::Response::chain_subscribeNewHeads((&subscription_id).into())
-                    .to_json_response(request_id),
-            )
-            .await;
-
         let mut blocks_list = {
             let (block_header, blocks_subscription) =
                 sub_utils::subscribe_best(&self.runtime_service).await;
@@ -759,7 +757,18 @@ impl<TPlat: Platform> Background<TPlat> {
         // Spawn a separate task for the subscription.
         let task = {
             let me = self.clone();
+            let request_id = request_id.to_owned();
+            let state_machine_request_id = state_machine_request_id.clone();
+
             async move {
+                me.requests_subscriptions
+                    .respond(
+                        &state_machine_request_id,
+                        methods::Response::chain_subscribeNewHeads((&subscription_id).into())
+                            .to_json_response(&request_id),
+                    )
+                    .await;
+
                 loop {
                     match future::select(blocks_list.next(), messages_rx.next()).await {
                         future::Either::Left((None, _)) => {
@@ -1487,17 +1496,19 @@ impl<TPlat: Platform> Background<TPlat> {
             ),
         );
 
-        self.requests_subscriptions
-            .respond(
-                state_machine_request_id,
-                methods::Response::state_subscribeRuntimeVersion((&subscription_id).into())
-                    .to_json_response(request_id),
-            )
-            .await;
-
         let task = {
             let me = self.clone();
+            let request_id = request_id.to_owned();
+            let state_machine_request_id = state_machine_request_id.clone();
             async move {
+                me.requests_subscriptions
+                    .respond(
+                        &state_machine_request_id,
+                        methods::Response::state_subscribeRuntimeVersion((&subscription_id).into())
+                            .to_json_response(&request_id),
+                    )
+                    .await;
+
                 let (current_spec, spec_changes) =
                     sub_utils::subscribe_runtime_version(&me.runtime_service).await;
                 let spec_changes = stream::iter(iter::once(current_spec)).chain(spec_changes);
@@ -1729,7 +1740,7 @@ impl<TPlat: Platform> Background<TPlat> {
     }
 
     /// Handles a call to [`methods::MethodCall::state_subscribeStorage`].
-    pub(super) async fn subscribe_storage(
+    async fn subscribe_storage(
         self: &Arc<Self>,
         request_id: &str,
         state_machine_request_id: &requests_subscriptions::RequestId,
@@ -1773,14 +1784,6 @@ impl<TPlat: Platform> Background<TPlat> {
                 state_machine_subscription.clone(),
             ),
         );
-
-        self.requests_subscriptions
-            .respond(
-                state_machine_request_id,
-                methods::Response::state_subscribeStorage((&subscription_id).into())
-                    .to_json_response(request_id),
-            )
-            .await;
 
         // Build a stream of `methods::StorageChangeSet` items to send back to the user.
         let storage_updates = {
@@ -1883,7 +1886,18 @@ impl<TPlat: Platform> Background<TPlat> {
         // Spawn a separate task for the subscription.
         let task = {
             let me = self.clone();
+            let request_id = request_id.to_owned();
+            let state_machine_request_id = state_machine_request_id.clone();
+
             async move {
+                me.requests_subscriptions
+                    .respond(
+                        &state_machine_request_id,
+                        methods::Response::state_subscribeStorage((&subscription_id).into())
+                            .to_json_response(&request_id),
+                    )
+                    .await;
+
                 futures::pin_mut!(storage_updates);
 
                 loop {

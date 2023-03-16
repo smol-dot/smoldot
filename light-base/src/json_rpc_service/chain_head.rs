@@ -464,14 +464,6 @@ impl<TPlat: Platform> Background<TPlat> {
                 .fetch_add(1, atomic::Ordering::Relaxed)
                 .to_string();
 
-            self.requests_subscriptions
-                .respond(
-                    state_machine_request_id,
-                    methods::Response::chainHead_unstable_follow((&subscription_id).into())
-                        .to_json_response(request_id),
-                )
-                .await;
-
             let mut initial_notifications = Vec::with_capacity(match &subscribe_all {
                 either::Left(sa) => 1 + sa.non_finalized_blocks_ancestry_order.len(),
                 either::Right(sa) => 1 + sa.non_finalized_blocks_ancestry_order.len(),
@@ -644,7 +636,18 @@ impl<TPlat: Platform> Background<TPlat> {
         // Spawn a separate task for the subscription.
         let task = {
             let me = self.clone();
+            let request_id = request_id.to_owned();
+            let state_machine_request_id = state_machine_request_id.clone();
+
             async move {
+                me.requests_subscriptions
+                    .respond(
+                        &state_machine_request_id,
+                        methods::Response::chainHead_unstable_follow((&subscription_id).into())
+                            .to_json_response(&request_id),
+                    )
+                    .await;
+
                 // Send back to the user the initial notifications.
                 for notif in initial_notifications {
                     me.requests_subscriptions
@@ -1306,17 +1309,20 @@ impl<TPlat: Platform> Background<TPlat> {
             ),
         );
 
-        self.requests_subscriptions
-            .respond(
-                state_machine_request_id,
-                methods::Response::chainHead_unstable_storage((&subscription_id).into())
-                    .to_json_response(request_id),
-            )
-            .await;
-
         let task = {
             let me = self.clone();
+            let request_id = request_id.to_owned();
+            let state_machine_request_id = state_machine_request_id.clone();
+
             async move {
+                me.requests_subscriptions
+                    .respond(
+                        &state_machine_request_id,
+                        methods::Response::chainHead_unstable_storage((&subscription_id).into())
+                            .to_json_response(&request_id),
+                    )
+                    .await;
+
                 let response = match block_scale_encoded_header
                     .as_ref()
                     .map(|h| header::decode(&h, me.sync_service.block_number_bytes()))
@@ -1536,17 +1542,20 @@ impl<TPlat: Platform> Background<TPlat> {
             ),
         );
 
-        self.requests_subscriptions
-            .respond(
-                state_machine_request_id,
-                methods::Response::chainHead_unstable_body((&subscription_id).into())
-                    .to_json_response(request_id),
-            )
-            .await;
-
         let task = {
             let me = self.clone();
+            let request_id = request_id.to_owned();
+            let state_machine_request_id = state_machine_request_id.clone();
+
             async move {
+                me.requests_subscriptions
+                    .respond(
+                        &state_machine_request_id,
+                        methods::Response::chainHead_unstable_body((&subscription_id).into())
+                            .to_json_response(&request_id),
+                    )
+                    .await;
+
                 let response = if let Some(block_number) = block_number {
                     // TODO: right now we query the header because the underlying function returns an error if we don't
                     let future = me.sync_service.clone().block_query(

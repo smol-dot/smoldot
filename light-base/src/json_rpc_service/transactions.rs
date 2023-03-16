@@ -184,21 +184,6 @@ impl<TPlat: Platform> Background<TPlat> {
             ),
         );
 
-        self.requests_subscriptions
-            .respond(
-                state_machine_request_id,
-                if is_legacy {
-                    methods::Response::author_submitAndWatchExtrinsic((&subscription_id).into())
-                        .to_json_response(request_id)
-                } else {
-                    methods::Response::transaction_unstable_submitAndWatch(
-                        (&subscription_id).into(),
-                    )
-                    .to_json_response(request_id)
-                },
-            )
-            .await;
-
         // Spawn a separate task for the transaction updates.
         let task = {
             let mut transaction_updates = self
@@ -206,7 +191,27 @@ impl<TPlat: Platform> Background<TPlat> {
                 .submit_and_watch_transaction(transaction.0, 16)
                 .await;
             let me = self.clone();
+            let request_id = request_id.to_owned();
+            let state_machine_request_id = state_machine_request_id.clone();
+
             async move {
+                me.requests_subscriptions
+                    .respond(
+                        &state_machine_request_id,
+                        if is_legacy {
+                            methods::Response::author_submitAndWatchExtrinsic(
+                                (&subscription_id).into(),
+                            )
+                            .to_json_response(&request_id)
+                        } else {
+                            methods::Response::transaction_unstable_submitAndWatch(
+                                (&subscription_id).into(),
+                            )
+                            .to_json_response(&request_id)
+                        },
+                    )
+                    .await;
+
                 let mut included_block = None;
                 let mut num_broadcasted_peers = 0;
 
