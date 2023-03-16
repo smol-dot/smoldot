@@ -131,7 +131,7 @@ impl JsonRpcBackground {
             self.server.queue_send(
                 connection_id,
                 json_rpc::parse::build_error_response(
-                    request_id,
+                    request_id.0,
                     json_rpc::parse::ErrorResponse::ServerError(
                         -32000,
                         "Not implemented in smoldot yet",

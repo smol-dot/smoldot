@@ -29,8 +29,7 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::author_pendingExtrinsics`].
     pub(super) async fn author_pending_extrinsics(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
     ) {
         // Because multiple different chains ("chain" in the context of the public API of smoldot)
         // might share the same transactions service, it could be possible for chain A to submit
@@ -41,9 +40,9 @@ impl<TPlat: Platform> Background<TPlat> {
         // return an empty list of pending extrinsics.
         self.requests_subscriptions
             .respond(
-                state_machine_request_id,
+                request_id.1,
                 methods::Response::author_pendingExtrinsics(Vec::new())
-                    .to_json_response(request_id),
+                    .to_json_response(request_id.0),
             )
             .await;
     }
@@ -51,8 +50,7 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::author_submitExtrinsic`].
     pub(super) async fn author_submit_extrinsic(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         transaction: methods::HexString,
     ) {
         // Note that this function is misnamed. It should really be called
@@ -73,9 +71,9 @@ impl<TPlat: Platform> Background<TPlat> {
             .await;
         self.requests_subscriptions
             .respond(
-                state_machine_request_id,
+                request_id.1,
                 methods::Response::author_submitExtrinsic(methods::HashHexString(transaction_hash))
-                    .to_json_response(request_id),
+                    .to_json_response(request_id.0),
             )
             .await;
     }
@@ -83,8 +81,7 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::author_unwatchExtrinsic`].
     pub(super) async fn author_unwatch_extrinsic(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         subscription: &str,
     ) {
         // Stopping the subscription is done by sending a message to it.
@@ -93,11 +90,10 @@ impl<TPlat: Platform> Background<TPlat> {
         let stop_message_received = self
             .requests_subscriptions
             .subscription_send(
-                state_machine_request_id,
+                request_id.1,
                 subscription,
                 SubscriptionMessage::StopIfTransactionLegacy {
-                    stop_state_machine_request_id: state_machine_request_id.clone(),
-                    stop_request_id: request_id.to_owned(),
+                    stop_request_id: (request_id.0.to_owned(), request_id.1.clone()),
                 },
             )
             .await;
@@ -108,8 +104,9 @@ impl<TPlat: Platform> Background<TPlat> {
         if stop_message_received.is_err() {
             self.requests_subscriptions
                 .respond(
-                    state_machine_request_id,
-                    methods::Response::author_unwatchExtrinsic(false).to_json_response(request_id),
+                    request_id.1,
+                    methods::Response::author_unwatchExtrinsic(false)
+                        .to_json_response(request_id.0),
                 )
                 .await;
         }
@@ -120,23 +117,22 @@ impl<TPlat: Platform> Background<TPlat> {
     /// `is_legacy` is `false`).
     pub(super) async fn submit_and_watch_transaction(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         transaction: methods::HexString,
         is_legacy: bool,
     ) {
         let (subscription_id, mut messages_rx, subscription_start) = match self
             .requests_subscriptions
-            .start_subscription(state_machine_request_id, 16)
+            .start_subscription(request_id.1, 16)
             .await
         {
             Ok(v) => v,
             Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
                 self.requests_subscriptions
                     .respond(
-                        state_machine_request_id,
+                        request_id.1,
                         json_rpc::parse::build_error_response(
-                            request_id,
+                            request_id.0,
                             json_rpc::parse::ErrorResponse::ServerError(
                                 -32000,
                                 "Too many active subscriptions",
@@ -155,23 +151,22 @@ impl<TPlat: Platform> Background<TPlat> {
                 .submit_and_watch_transaction(transaction.0, 16)
                 .await;
             let me = self.clone();
-            let request_id = request_id.to_owned();
-            let state_machine_request_id = state_machine_request_id.clone();
+            let request_id = (request_id.0.to_owned(), request_id.1.clone());
 
             async move {
                 me.requests_subscriptions
                     .respond(
-                        &state_machine_request_id,
+                        &request_id.1,
                         if is_legacy {
                             methods::Response::author_submitAndWatchExtrinsic(
                                 (&subscription_id).into(),
                             )
-                            .to_json_response(&request_id)
+                            .to_json_response(&request_id.0)
                         } else {
                             methods::Response::transaction_unstable_submitAndWatch(
                                 (&subscription_id).into(),
                             )
-                            .to_json_response(&request_id)
+                            .to_json_response(&request_id.0)
                         },
                     )
                     .await;
@@ -204,16 +199,15 @@ impl<TPlat: Platform> Background<TPlat> {
                                 match messages_rx.next().await {
                                     Some((
                                         SubscriptionMessage::StopIfTransactionLegacy {
-                                            stop_state_machine_request_id,
                                             stop_request_id,
                                         },
                                         confirmation_sender,
                                     )) => {
                                         me.requests_subscriptions
                                             .respond(
-                                                &stop_state_machine_request_id,
+                                                &stop_request_id.1,
                                                 methods::Response::author_unwatchExtrinsic(true)
-                                                    .to_json_response(&stop_request_id),
+                                                    .to_json_response(&stop_request_id.0),
                                             )
                                             .await;
 
@@ -228,19 +222,16 @@ impl<TPlat: Platform> Background<TPlat> {
                         future::Either::Right((None, _)) => unreachable!(),
                         future::Either::Right((
                             Some((
-                                SubscriptionMessage::StopIfTransaction {
-                                    stop_state_machine_request_id,
-                                    stop_request_id,
-                                },
+                                SubscriptionMessage::StopIfTransaction { stop_request_id },
                                 confirmation_sender,
                             )),
                             _,
                         )) if !is_legacy => {
                             me.requests_subscriptions
                                 .respond(
-                                    &stop_state_machine_request_id,
+                                    &stop_request_id.1,
                                     methods::Response::transaction_unstable_unwatch(())
-                                        .to_json_response(&stop_request_id),
+                                        .to_json_response(&stop_request_id.0),
                                 )
                                 .await;
 
@@ -249,19 +240,16 @@ impl<TPlat: Platform> Background<TPlat> {
                         }
                         future::Either::Right((
                             Some((
-                                SubscriptionMessage::StopIfTransactionLegacy {
-                                    stop_state_machine_request_id,
-                                    stop_request_id,
-                                },
+                                SubscriptionMessage::StopIfTransactionLegacy { stop_request_id },
                                 confirmation_sender,
                             )),
                             _,
                         )) if is_legacy => {
                             me.requests_subscriptions
                                 .respond(
-                                    &stop_state_machine_request_id,
+                                    &stop_request_id.1,
                                     methods::Response::author_unwatchExtrinsic(true)
-                                        .to_json_response(&stop_request_id),
+                                        .to_json_response(&stop_request_id.0),
                                 )
                                 .await;
 
@@ -471,7 +459,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     // TODO: handle situation where buffer is full
                     let _ = me
                         .requests_subscriptions
-                        .try_push_notification(&state_machine_request_id, &subscription_id, update)
+                        .try_push_notification(&request_id.1, &subscription_id, update)
                         .await;
                 }
             }
@@ -481,8 +469,7 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::transaction_unstable_unwatch`].
     pub(super) async fn transaction_unstable_unwatch(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         subscription: &str,
     ) {
         // Stopping the subscription is done by sending a message to it.
@@ -491,11 +478,10 @@ impl<TPlat: Platform> Background<TPlat> {
         let stop_message_received = self
             .requests_subscriptions
             .subscription_send(
-                state_machine_request_id,
+                request_id.1,
                 subscription,
                 SubscriptionMessage::StopIfTransaction {
-                    stop_state_machine_request_id: state_machine_request_id.clone(),
-                    stop_request_id: request_id.to_owned(),
+                    stop_request_id: (request_id.0.to_owned(), request_id.1.clone()),
                 },
             )
             .await;
@@ -506,9 +492,9 @@ impl<TPlat: Platform> Background<TPlat> {
         if stop_message_received.is_err() {
             self.requests_subscriptions
                 .respond(
-                    state_machine_request_id,
+                    request_id.1,
                     methods::Response::transaction_unstable_unwatch(())
-                        .to_json_response(request_id),
+                        .to_json_response(request_id.0),
                 )
                 .await;
         }

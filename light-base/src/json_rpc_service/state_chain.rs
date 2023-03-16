@@ -49,8 +49,7 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::system_accountNextIndex`].
     pub(super) async fn account_next_index(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         account: methods::AccountId,
     ) {
         let block_hash = header::hash_from_scale_encoded_header(
@@ -77,7 +76,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 let index =
                     u32::from_le_bytes(<[u8; 4]>::try_from(&result.return_value[..]).unwrap());
                 methods::Response::system_accountNextIndex(u64::from(index))
-                    .to_json_response(request_id)
+                    .to_json_response(request_id.0)
             }
             Err(error) => {
                 log::warn!(
@@ -87,7 +86,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     error
                 );
                 json_rpc::parse::build_error_response(
-                    request_id,
+                    request_id.0,
                     json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
                     None,
                 )
@@ -95,15 +94,14 @@ impl<TPlat: Platform> Background<TPlat> {
         };
 
         self.requests_subscriptions
-            .respond(state_machine_request_id, response)
+            .respond(request_id.1, response)
             .await;
     }
 
     /// Handles a call to [`methods::MethodCall::chain_getBlock`].
     pub(super) async fn chain_get_block(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         hash: Option<methods::HashHexString>,
     ) {
         // `hash` equal to `None` means "the current best block".
@@ -191,21 +189,20 @@ impl<TPlat: Platform> Background<TPlat> {
                 .unwrap(),
                 justifications: block.justifications,
             })
-            .to_json_response(request_id)
+            .to_json_response(request_id.0)
         } else {
-            json_rpc::parse::build_success_response(request_id, "null")
+            json_rpc::parse::build_success_response(request_id.0, "null")
         };
 
         self.requests_subscriptions
-            .respond(state_machine_request_id, response)
+            .respond(request_id.1, response)
             .await;
     }
 
     /// Handles a call to [`methods::MethodCall::chain_getBlockHash`].
     pub(super) async fn chain_get_block_hash(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         height: Option<u64>,
     ) {
         // TODO: maybe store values in cache?
@@ -214,34 +211,33 @@ impl<TPlat: Platform> Background<TPlat> {
                 Some(0) => methods::Response::chain_getBlockHash(methods::HashHexString(
                     self.genesis_block_hash,
                 ))
-                .to_json_response(request_id),
+                .to_json_response(request_id.0),
                 None => {
                     let best_block = header::hash_from_scale_encoded_header(
                         sub_utils::subscribe_best(&self.runtime_service).await.0,
                     );
                     methods::Response::chain_getBlockHash(methods::HashHexString(best_block))
-                        .to_json_response(request_id)
+                        .to_json_response(request_id.0)
                 }
                 Some(_) => {
                     // While the block could be found in `known_blocks`, there is no guarantee
                     // that blocks in `known_blocks` are canonical, and we have no choice but to
                     // return null.
                     // TODO: ask a full node instead? or maybe keep a list of canonical blocks?
-                    json_rpc::parse::build_success_response(request_id, "null")
+                    json_rpc::parse::build_success_response(request_id.0, "null")
                 }
             }
         };
 
         self.requests_subscriptions
-            .respond(&state_machine_request_id, response)
+            .respond(request_id.1, response)
             .await;
     }
 
     /// Handles a call to [`methods::MethodCall::chain_getHeader`].
     pub(super) async fn chain_get_header(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         hash: Option<methods::HashHexString>,
     ) {
         // `hash` equal to `None` means "best block".
@@ -336,10 +332,10 @@ impl<TPlat: Platform> Background<TPlat> {
                     self.sync_service.block_number_bytes(),
                 ) {
                     Ok(decoded) => {
-                        methods::Response::chain_getHeader(decoded).to_json_response(request_id)
+                        methods::Response::chain_getHeader(decoded).to_json_response(request_id.0)
                     }
                     Err(error) => json_rpc::parse::build_error_response(
-                        request_id,
+                        request_id.0,
                         json_rpc::parse::ErrorResponse::ServerError(
                             -32000,
                             &format!("Failed to decode header: {error}"),
@@ -351,33 +347,32 @@ impl<TPlat: Platform> Background<TPlat> {
             Err(()) => {
                 // Failed to retrieve the header.
                 // TODO: error or null?
-                json_rpc::parse::build_success_response(request_id, "null")
+                json_rpc::parse::build_success_response(request_id.0, "null")
             }
         };
 
         self.requests_subscriptions
-            .respond(state_machine_request_id, response)
+            .respond(request_id.1, response)
             .await;
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeAllHeads`].
     pub(super) async fn chain_subscribe_all_heads(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
     ) {
         let (subscription_id, mut messages_rx, subscription_start) = match self
             .requests_subscriptions
-            .start_subscription(state_machine_request_id, 16)
+            .start_subscription(request_id.1, 16)
             .await
         {
             Ok(v) => v,
             Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
                 self.requests_subscriptions
                     .respond(
-                        state_machine_request_id,
+                        &request_id.1,
                         json_rpc::parse::build_error_response(
-                            request_id,
+                            request_id.0,
                             json_rpc::parse::ErrorResponse::ServerError(
                                 -32000,
                                 "Too many active subscriptions",
@@ -392,15 +387,14 @@ impl<TPlat: Platform> Background<TPlat> {
 
         subscription_start.start({
             let me = self.clone();
-            let request_id = request_id.to_owned();
-            let state_machine_request_id = state_machine_request_id.clone();
+            let request_id = (request_id.0.to_owned(), request_id.1.clone());
 
             async move {
                 me.requests_subscriptions
                     .respond(
-                        &state_machine_request_id,
+                        &request_id.1,
                         methods::Response::chain_subscribeAllHeads((&subscription_id).into())
-                            .to_json_response(&request_id),
+                            .to_json_response(&request_id.0),
                     )
                     .await;
 
@@ -487,7 +481,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                 let _ = me
                                     .requests_subscriptions
                                     .try_push_notification(
-                                        &state_machine_request_id,
+                                        &request_id.1,
                                         &subscription_id,
                                         methods::ServerToClient::chain_allHead {
                                             subscription: (&subscription_id).into(),
@@ -508,16 +502,15 @@ impl<TPlat: Platform> Background<TPlat> {
                             }
                             either::Right(Some((
                                 SubscriptionMessage::StopIfAllHeads {
-                                    stop_state_machine_request_id,
                                     stop_request_id,
                                 },
                                 confirmation_sender,
                             ))) => {
                                 me.requests_subscriptions
                                     .respond(
-                                        &stop_state_machine_request_id,
+                                        &stop_request_id.1,
                                         methods::Response::chain_unsubscribeAllHeads(true)
-                                            .to_json_response(&stop_request_id),
+                                            .to_json_response(&stop_request_id.0),
                                     )
                                     .await;
 
@@ -538,21 +531,20 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::chain_subscribeFinalizedHeads`].
     pub(super) async fn chain_subscribe_finalized_heads(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
     ) {
         let (subscription_id, mut messages_rx, subscription_start) = match self
             .requests_subscriptions
-            .start_subscription(state_machine_request_id, 1)
+            .start_subscription(request_id.1, 1)
             .await
         {
             Ok(v) => v,
             Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
                 self.requests_subscriptions
                     .respond(
-                        state_machine_request_id,
+                        request_id.1,
                         json_rpc::parse::build_error_response(
-                            request_id,
+                            request_id.0,
                             json_rpc::parse::ErrorResponse::ServerError(
                                 -32000,
                                 "Too many active subscriptions",
@@ -573,15 +565,14 @@ impl<TPlat: Platform> Background<TPlat> {
 
         subscription_start.start({
             let me = self.clone();
-            let request_id = request_id.to_owned();
-            let state_machine_request_id = state_machine_request_id.clone();
+            let request_id = (request_id.0.to_owned(), request_id.1.clone());
 
             async move {
                 me.requests_subscriptions
                     .respond(
-                        &state_machine_request_id,
+                        &request_id.1,
                         methods::Response::chain_subscribeFinalizedHeads((&subscription_id).into())
-                            .to_json_response(&request_id),
+                            .to_json_response(&request_id.0),
                     )
                     .await;
 
@@ -611,7 +602,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                             me.requests_subscriptions
                                 .set_queued_notification(
-                                    &state_machine_request_id,
+                                    &request_id.1,
                                     &subscription_id,
                                     0,
                                     methods::ServerToClient::chain_finalizedHead {
@@ -628,7 +619,6 @@ impl<TPlat: Platform> Background<TPlat> {
                         future::Either::Right((
                             Some((
                                 SubscriptionMessage::StopIfFinalizedHeads {
-                                    stop_state_machine_request_id,
                                     stop_request_id,
                                 },
                                 confirmation_sender,
@@ -637,9 +627,9 @@ impl<TPlat: Platform> Background<TPlat> {
                         )) => {
                             me.requests_subscriptions
                                 .respond(
-                                    &stop_state_machine_request_id,
+                                    &stop_request_id.1,
                                     methods::Response::chain_unsubscribeFinalizedHeads(true)
-                                        .to_json_response(&stop_request_id),
+                                        .to_json_response(&stop_request_id.0),
                                 )
                                 .await;
 
@@ -659,21 +649,20 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::chain_subscribeNewHeads`].
     pub(super) async fn chain_subscribe_new_heads(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
     ) {
         let (subscription_id, mut messages_rx, subscription_start) = match self
             .requests_subscriptions
-            .start_subscription(state_machine_request_id, 1)
+            .start_subscription(request_id.1, 1)
             .await
         {
             Ok(v) => v,
             Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
                 self.requests_subscriptions
                     .respond(
-                        state_machine_request_id,
+                        request_id.1,
                         json_rpc::parse::build_error_response(
-                            request_id,
+                            request_id.0,
                             json_rpc::parse::ErrorResponse::ServerError(
                                 -32000,
                                 "Too many active subscriptions",
@@ -694,15 +683,14 @@ impl<TPlat: Platform> Background<TPlat> {
 
         subscription_start.start({
             let me = self.clone();
-            let request_id = request_id.to_owned();
-            let state_machine_request_id = state_machine_request_id.clone();
+            let request_id = (request_id.0.to_owned(), request_id.1.clone());
 
             async move {
                 me.requests_subscriptions
                     .respond(
-                        &state_machine_request_id,
+                        &request_id.1,
                         methods::Response::chain_subscribeNewHeads((&subscription_id).into())
-                            .to_json_response(&request_id),
+                            .to_json_response(&request_id.0),
                     )
                     .await;
 
@@ -732,7 +720,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                             me.requests_subscriptions
                                 .set_queued_notification(
-                                    &state_machine_request_id,
+                                    &request_id.1,
                                     &subscription_id,
                                     0,
                                     methods::ServerToClient::chain_newHead {
@@ -749,7 +737,6 @@ impl<TPlat: Platform> Background<TPlat> {
                         future::Either::Right((
                             Some((
                                 SubscriptionMessage::StopIfNewHeads {
-                                    stop_state_machine_request_id,
                                     stop_request_id,
                                 },
                                 confirmation_sender,
@@ -758,9 +745,9 @@ impl<TPlat: Platform> Background<TPlat> {
                         )) => {
                             me.requests_subscriptions
                                 .respond(
-                                    &stop_state_machine_request_id,
+                                    &stop_request_id.1,
                                     methods::Response::chain_unsubscribeNewHeads(true)
-                                        .to_json_response(&stop_request_id),
+                                        .to_json_response(&stop_request_id.0),
                                 )
                                 .await;
 
@@ -780,8 +767,7 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::chain_unsubscribeAllHeads`].
     pub(super) async fn chain_unsubscribe_all_heads(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         subscription: String,
     ) {
         // Stopping the subscription is done by sending a message to it.
@@ -790,11 +776,10 @@ impl<TPlat: Platform> Background<TPlat> {
         let stop_message_received = self
             .requests_subscriptions
             .subscription_send(
-                state_machine_request_id,
+                request_id.1,
                 &subscription,
                 SubscriptionMessage::StopIfAllHeads {
-                    stop_state_machine_request_id: state_machine_request_id.clone(),
-                    stop_request_id: request_id.to_owned(),
+                    stop_request_id: (request_id.0.to_owned(), request_id.1.clone()),
                 },
             )
             .await;
@@ -805,9 +790,9 @@ impl<TPlat: Platform> Background<TPlat> {
         if stop_message_received.is_err() {
             self.requests_subscriptions
                 .respond(
-                    state_machine_request_id,
+                    request_id.1,
                     methods::Response::chain_unsubscribeAllHeads(false)
-                        .to_json_response(request_id),
+                        .to_json_response(request_id.0),
                 )
                 .await;
         }
@@ -816,8 +801,7 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::chain_unsubscribeFinalizedHeads`].
     pub(super) async fn chain_unsubscribe_finalized_heads(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         subscription: String,
     ) {
         // Stopping the subscription is done by sending a message to it.
@@ -826,11 +810,10 @@ impl<TPlat: Platform> Background<TPlat> {
         let stop_message_received = self
             .requests_subscriptions
             .subscription_send(
-                state_machine_request_id,
+                request_id.1,
                 &subscription,
                 SubscriptionMessage::StopIfFinalizedHeads {
-                    stop_state_machine_request_id: state_machine_request_id.clone(),
-                    stop_request_id: request_id.to_owned(),
+                    stop_request_id: (request_id.0.to_owned(), request_id.1.clone()),
                 },
             )
             .await;
@@ -841,9 +824,9 @@ impl<TPlat: Platform> Background<TPlat> {
         if stop_message_received.is_err() {
             self.requests_subscriptions
                 .respond(
-                    state_machine_request_id,
+                    request_id.1,
                     methods::Response::chain_unsubscribeFinalizedHeads(false)
-                        .to_json_response(request_id),
+                        .to_json_response(request_id.0),
                 )
                 .await;
         }
@@ -852,8 +835,7 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::chain_unsubscribeNewHeads`].
     pub(super) async fn chain_unsubscribe_new_heads(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         subscription: String,
     ) {
         // Stopping the subscription is done by sending a message to it.
@@ -862,11 +844,10 @@ impl<TPlat: Platform> Background<TPlat> {
         let stop_message_received = self
             .requests_subscriptions
             .subscription_send(
-                state_machine_request_id,
+                request_id.1,
                 &subscription,
                 SubscriptionMessage::StopIfNewHeads {
-                    stop_state_machine_request_id: state_machine_request_id.clone(),
-                    stop_request_id: request_id.to_owned(),
+                    stop_request_id: (request_id.0.to_owned(), request_id.1.clone()),
                 },
             )
             .await;
@@ -877,9 +858,9 @@ impl<TPlat: Platform> Background<TPlat> {
         if stop_message_received.is_err() {
             self.requests_subscriptions
                 .respond(
-                    state_machine_request_id,
+                    request_id.1,
                     methods::Response::chain_unsubscribeNewHeads(false)
-                        .to_json_response(request_id),
+                        .to_json_response(request_id.0),
                 )
                 .await;
         }
@@ -888,8 +869,7 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::payment_queryInfo`].
     pub(super) async fn payment_query_info(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         extrinsic: &[u8],
         block_hash: Option<&[u8; 32]>,
     ) {
@@ -918,9 +898,11 @@ impl<TPlat: Platform> Background<TPlat> {
                 &result.return_value,
                 result.api_version,
             ) {
-                Ok(info) => methods::Response::payment_queryInfo(info).to_json_response(request_id),
+                Ok(info) => {
+                    methods::Response::payment_queryInfo(info).to_json_response(request_id.0)
+                }
                 Err(error) => json_rpc::parse::build_error_response(
-                    request_id,
+                    request_id.0,
                     json_rpc::parse::ErrorResponse::ServerError(
                         -32000,
                         &format!("Failed to decode runtime output: {error}"),
@@ -936,7 +918,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     error
                 );
                 json_rpc::parse::build_error_response(
-                    request_id,
+                    request_id.0,
                     json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
                     None,
                 )
@@ -944,15 +926,14 @@ impl<TPlat: Platform> Background<TPlat> {
         };
 
         self.requests_subscriptions
-            .respond(&state_machine_request_id, response)
+            .respond(&request_id.1, response)
             .await;
     }
 
     /// Handles a call to [`methods::MethodCall::state_call`].
     pub(super) async fn state_call(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         function_to_call: &str,
         call_parameters: methods::HexString,
         hash: Option<methods::HashHexString>,
@@ -978,24 +959,23 @@ impl<TPlat: Platform> Background<TPlat> {
 
         let response = match result {
             Ok(data) => methods::Response::state_call(methods::HexString(data.to_vec()))
-                .to_json_response(request_id),
+                .to_json_response(request_id.0),
             Err(error) => json_rpc::parse::build_error_response(
-                request_id,
+                request_id.0,
                 json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
                 None,
             ),
         };
 
         self.requests_subscriptions
-            .respond(state_machine_request_id, response)
+            .respond(request_id.1, response)
             .await;
     }
 
     /// Handles a call to [`methods::MethodCall::state_getKeys`].
     pub(super) async fn state_get_keys(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         prefix: methods::HexString,
         hash: Option<methods::HashHexString>,
     ) {
@@ -1014,9 +994,9 @@ impl<TPlat: Platform> Background<TPlat> {
             Err(err) => {
                 self.requests_subscriptions
                     .respond(
-                        state_machine_request_id,
+                        request_id.1,
                         json_rpc::parse::build_error_response(
-                            request_id,
+                            request_id.0,
                             json_rpc::parse::ErrorResponse::ServerError(
                                 -32000,
                                 &format!("Failed to fetch block information: {err}"),
@@ -1046,25 +1026,24 @@ impl<TPlat: Platform> Background<TPlat> {
         let response = match outcome {
             Ok(keys) => {
                 let out = keys.into_iter().map(methods::HexString).collect::<Vec<_>>();
-                methods::Response::state_getKeys(out).to_json_response(request_id)
+                methods::Response::state_getKeys(out).to_json_response(request_id.0)
             }
             Err(error) => json_rpc::parse::build_error_response(
-                request_id,
+                request_id.0,
                 json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
                 None,
             ),
         };
 
         self.requests_subscriptions
-            .respond(&state_machine_request_id, response)
+            .respond(&request_id.1, response)
             .await;
     }
 
     /// Handles a call to [`methods::MethodCall::state_getKeysPaged`].
     pub(super) async fn state_get_keys_paged(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         prefix: Option<methods::HexString>,
         count: u32,
         start_key: Option<methods::HexString>,
@@ -1085,9 +1064,9 @@ impl<TPlat: Platform> Background<TPlat> {
             Err(err) => {
                 self.requests_subscriptions
                     .respond(
-                        state_machine_request_id,
+                        request_id.1,
                         json_rpc::parse::build_error_response(
-                            request_id,
+                            request_id.0,
                             json_rpc::parse::ErrorResponse::ServerError(
                                 -32000,
                                 &format!("Failed to fetch block information: {err}"),
@@ -1123,25 +1102,24 @@ impl<TPlat: Platform> Background<TPlat> {
                     .map(methods::HexString)
                     .take(usize::try_from(count).unwrap_or(usize::max_value()))
                     .collect::<Vec<_>>();
-                methods::Response::state_getKeysPaged(out).to_json_response(request_id)
+                methods::Response::state_getKeysPaged(out).to_json_response(request_id.0)
             }
             Err(error) => json_rpc::parse::build_error_response(
-                request_id,
+                request_id.0,
                 json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
                 None,
             ),
         };
 
         self.requests_subscriptions
-            .respond(state_machine_request_id, response)
+            .respond(request_id.1, response)
             .await;
     }
 
     /// Handles a call to [`methods::MethodCall::state_getMetadata`].
     pub(super) async fn state_get_metadata(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         hash: Option<methods::HashHexString>,
     ) {
         let block_hash = if let Some(hash) = hash {
@@ -1171,10 +1149,10 @@ impl<TPlat: Platform> Background<TPlat> {
         let response = match result {
             Ok(Ok(metadata)) => {
                 methods::Response::state_getMetadata(methods::HexString(metadata.to_vec()))
-                    .to_json_response(request_id)
+                    .to_json_response(request_id.0)
             }
             Ok(Err(())) => json_rpc::parse::build_error_response(
-                request_id,
+                request_id.0,
                 json_rpc::parse::ErrorResponse::ServerError(
                     -32000,
                     "Failed to decode metadata from runtime",
@@ -1189,7 +1167,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     error
                 );
                 json_rpc::parse::build_error_response(
-                    request_id,
+                    request_id.0,
                     json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
                     None,
                 )
@@ -1197,15 +1175,14 @@ impl<TPlat: Platform> Background<TPlat> {
         };
 
         self.requests_subscriptions
-            .respond(state_machine_request_id, response)
+            .respond(request_id.1, response)
             .await;
     }
 
     /// Handles a call to [`methods::MethodCall::state_getRuntimeVersion`].
     pub(super) async fn state_get_runtime_version(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         block_hash: Option<&[u8; 32]>,
     ) {
         let block_hash = match block_hash {
@@ -1235,30 +1212,29 @@ impl<TPlat: Platform> Background<TPlat> {
                         .map(|api| (methods::HexString(api.name_hash.to_vec()), api.version))
                         .collect(),
                 })
-                .to_json_response(request_id)
+                .to_json_response(request_id.0)
             }
             Ok(Err(error)) => json_rpc::parse::build_error_response(
-                request_id,
+                request_id.0,
                 json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
                 None,
             ),
             Err(error) => json_rpc::parse::build_error_response(
-                request_id,
+                request_id.0,
                 json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
                 None,
             ),
         };
 
         self.requests_subscriptions
-            .respond(state_machine_request_id, response)
+            .respond(request_id.1, response)
             .await;
     }
 
     /// Handles a call to [`methods::MethodCall::state_getStorage`].
     pub(super) async fn state_get_storage(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         key: methods::HexString,
         hash: Option<methods::HashHexString>,
     ) {
@@ -1279,25 +1255,24 @@ impl<TPlat: Platform> Background<TPlat> {
         let response = fut.await;
         let response = match response.map(|mut r| r.pop().unwrap()) {
             Ok(Some(value)) => methods::Response::state_getStorage(methods::HexString(value))
-                .to_json_response(request_id),
-            Ok(None) => json_rpc::parse::build_success_response(request_id, "null"),
+                .to_json_response(request_id.0),
+            Ok(None) => json_rpc::parse::build_success_response(request_id.0, "null"),
             Err(error) => json_rpc::parse::build_error_response(
-                request_id,
+                request_id.0,
                 json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
                 None,
             ),
         };
 
         self.requests_subscriptions
-            .respond(state_machine_request_id, response)
+            .respond(request_id.1, response)
             .await;
     }
 
     /// Handles a call to [`methods::MethodCall::state_queryStorageAt`].
     pub(super) async fn state_query_storage_at(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         keys: Vec<methods::HexString>,
         at: Option<methods::HashHexString>,
     ) {
@@ -1332,8 +1307,8 @@ impl<TPlat: Platform> Background<TPlat> {
 
         self.requests_subscriptions
             .respond(
-                state_machine_request_id,
-                methods::Response::state_queryStorageAt(vec![out]).to_json_response(request_id),
+                request_id.1,
+                methods::Response::state_queryStorageAt(vec![out]).to_json_response(request_id.0),
             )
             .await;
     }
@@ -1341,21 +1316,20 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::state_subscribeRuntimeVersion`].
     pub(super) async fn state_subscribe_runtime_version(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
     ) {
         let (subscription_id, mut messages_rx, subscription_start) = match self
             .requests_subscriptions
-            .start_subscription(state_machine_request_id, 1)
+            .start_subscription(request_id.1, 1)
             .await
         {
             Ok(v) => v,
             Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
                 self.requests_subscriptions
                     .respond(
-                        state_machine_request_id,
+                        request_id.1,
                         json_rpc::parse::build_error_response(
-                            request_id,
+                            request_id.0,
                             json_rpc::parse::ErrorResponse::ServerError(
                                 -32000,
                                 "Too many active subscriptions",
@@ -1370,14 +1344,13 @@ impl<TPlat: Platform> Background<TPlat> {
 
         subscription_start.start({
             let me = self.clone();
-            let request_id = request_id.to_owned();
-            let state_machine_request_id = state_machine_request_id.clone();
+            let request_id = (request_id.0.to_owned(), request_id.1.clone());
             async move {
                 me.requests_subscriptions
                     .respond(
-                        &state_machine_request_id,
+                        &request_id.1,
                         methods::Response::state_subscribeRuntimeVersion((&subscription_id).into())
-                            .to_json_response(&request_id),
+                            .to_json_response(&request_id.0),
                     )
                     .await;
 
@@ -1434,7 +1407,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                             me.requests_subscriptions
                                 .set_queued_notification(
-                                    &state_machine_request_id,
+                                    &request_id.1,
                                     &subscription_id,
                                     0,
                                     notification_body,
@@ -1446,19 +1419,16 @@ impl<TPlat: Platform> Background<TPlat> {
                         }
                         future::Either::Right((
                             Some((
-                                SubscriptionMessage::StopIfRuntimeSpec {
-                                    stop_state_machine_request_id,
-                                    stop_request_id,
-                                },
+                                SubscriptionMessage::StopIfRuntimeSpec { stop_request_id },
                                 confirmation_sender,
                             )),
                             _,
                         )) => {
                             me.requests_subscriptions
                                 .respond(
-                                    &stop_state_machine_request_id,
+                                    &stop_request_id.1,
                                     methods::Response::state_unsubscribeRuntimeVersion(true)
-                                        .to_json_response(&stop_request_id),
+                                        .to_json_response(&stop_request_id.0),
                                 )
                                 .await;
 
@@ -1478,8 +1448,7 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::state_subscribeStorage`].
     pub(super) async fn state_subscribe_storage(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         list: Vec<methods::HexString>,
     ) {
         if list.is_empty() {
@@ -1488,9 +1457,9 @@ impl<TPlat: Platform> Background<TPlat> {
             // light client.
             self.requests_subscriptions
                 .respond(
-                    state_machine_request_id,
+                    request_id.1,
                     json_rpc::parse::build_error_response(
-                        request_id,
+                        request_id.0,
                         json_rpc::parse::ErrorResponse::ServerError(
                             -32000,
                             "Subscribing to all storage changes isn't supported",
@@ -1500,16 +1469,14 @@ impl<TPlat: Platform> Background<TPlat> {
                 )
                 .await;
         } else {
-            self.subscribe_storage(request_id, state_machine_request_id, list)
-                .await;
+            self.subscribe_storage(request_id, list).await;
         }
     }
 
     /// Handles a call to [`methods::MethodCall::state_unsubscribeRuntimeVersion`].
     pub(super) async fn state_unsubscribe_runtime_version(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         subscription: &str,
     ) {
         // Stopping the subscription is done by sending a message to it.
@@ -1518,11 +1485,10 @@ impl<TPlat: Platform> Background<TPlat> {
         let stop_message_received = self
             .requests_subscriptions
             .subscription_send(
-                state_machine_request_id,
+                request_id.1,
                 subscription,
                 SubscriptionMessage::StopIfRuntimeSpec {
-                    stop_state_machine_request_id: state_machine_request_id.clone(),
-                    stop_request_id: request_id.to_owned(),
+                    stop_request_id: (request_id.0.to_owned(), request_id.1.clone()),
                 },
             )
             .await;
@@ -1533,9 +1499,9 @@ impl<TPlat: Platform> Background<TPlat> {
         if stop_message_received.is_err() {
             self.requests_subscriptions
                 .respond(
-                    state_machine_request_id,
+                    request_id.1,
                     methods::Response::state_unsubscribeRuntimeVersion(false)
-                        .to_json_response(request_id),
+                        .to_json_response(request_id.0),
                 )
                 .await;
         }
@@ -1544,8 +1510,7 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::state_unsubscribeStorage`].
     pub(super) async fn state_unsubscribe_storage(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         subscription: &str,
     ) {
         // Stopping the subscription is done by sending a message to it.
@@ -1554,11 +1519,10 @@ impl<TPlat: Platform> Background<TPlat> {
         let stop_message_received = self
             .requests_subscriptions
             .subscription_send(
-                state_machine_request_id,
+                request_id.1,
                 subscription,
                 SubscriptionMessage::StopIfStorage {
-                    stop_state_machine_request_id: state_machine_request_id.clone(),
-                    stop_request_id: request_id.to_owned(),
+                    stop_request_id: (request_id.0.to_owned(), request_id.1.clone()),
                 },
             )
             .await;
@@ -1569,8 +1533,9 @@ impl<TPlat: Platform> Background<TPlat> {
         if stop_message_received.is_err() {
             self.requests_subscriptions
                 .respond(
-                    state_machine_request_id,
-                    methods::Response::state_unsubscribeStorage(false).to_json_response(request_id),
+                    request_id.1,
+                    methods::Response::state_unsubscribeStorage(false)
+                        .to_json_response(request_id.0),
                 )
                 .await;
         }
@@ -1579,22 +1544,21 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::state_subscribeStorage`].
     async fn subscribe_storage(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         list: Vec<methods::HexString>,
     ) {
         let (subscription_id, mut messages_rx, subscription_start) = match self
             .requests_subscriptions
-            .start_subscription(state_machine_request_id, 1)
+            .start_subscription(request_id.1, 1)
             .await
         {
             Ok(v) => v,
             Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
                 self.requests_subscriptions
                     .respond(
-                        state_machine_request_id,
+                        request_id.1,
                         json_rpc::parse::build_error_response(
-                            request_id,
+                            request_id.0,
                             json_rpc::parse::ErrorResponse::ServerError(
                                 -32000,
                                 "Too many active subscriptions",
@@ -1707,15 +1671,14 @@ impl<TPlat: Platform> Background<TPlat> {
 
         subscription_start.start({
             let me = self.clone();
-            let request_id = request_id.to_owned();
-            let state_machine_request_id = state_machine_request_id.clone();
+            let request_id = (request_id.0.to_owned(), request_id.1.clone());
 
             async move {
                 me.requests_subscriptions
                     .respond(
-                        &state_machine_request_id,
+                        &request_id.1,
                         methods::Response::state_subscribeStorage((&subscription_id).into())
-                            .to_json_response(&request_id),
+                            .to_json_response(&request_id.0),
                     )
                     .await;
 
@@ -1730,7 +1693,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         future::Either::Left((Some(changes), _)) => {
                             me.requests_subscriptions
                                 .set_queued_notification(
-                                    &state_machine_request_id,
+                                    &request_id.1,
                                     &subscription_id,
                                     0,
                                     methods::ServerToClient::state_storage {
@@ -1746,19 +1709,16 @@ impl<TPlat: Platform> Background<TPlat> {
                         }
                         future::Either::Right((
                             Some((
-                                SubscriptionMessage::StopIfStorage {
-                                    stop_state_machine_request_id,
-                                    stop_request_id,
-                                },
+                                SubscriptionMessage::StopIfStorage { stop_request_id },
                                 confirmation_sender,
                             )),
                             _,
                         )) => {
                             me.requests_subscriptions
                                 .respond(
-                                    &stop_state_machine_request_id,
+                                    &stop_request_id.1,
                                     methods::Response::state_unsubscribeStorage(true)
-                                        .to_json_response(&stop_request_id),
+                                        .to_json_response(&stop_request_id.0),
                                 )
                                 .await;
 
