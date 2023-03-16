@@ -1231,7 +1231,7 @@ struct ClientInnerGuarded<TSubMsg> {
     notification_messages_popped_or_dead: event_listener::Event,
 
     /// List of active subscriptions. In other words, subscriptions that have been started but
-    /// having been stopped with [`RequestsSubscriptions::stop_subscription`] yet.
+    /// whose task haven't stopped yet.
     ///
     /// This doesn't include subscriptions that have been stopped but still have some entries in
     /// the list of messages.
