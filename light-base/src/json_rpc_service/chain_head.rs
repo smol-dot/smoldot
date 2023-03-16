@@ -31,7 +31,6 @@ use alloc::{
 use core::{
     cmp, iter,
     num::{NonZeroU32, NonZeroUsize},
-    sync::atomic,
     time::Duration,
 };
 use futures::prelude::*;

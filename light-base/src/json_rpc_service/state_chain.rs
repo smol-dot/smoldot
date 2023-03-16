@@ -32,7 +32,6 @@ use alloc::{
 use core::{
     iter,
     num::{NonZeroU32, NonZeroUsize},
-    sync::atomic,
     time::Duration,
 };
 use futures::{lock::MutexGuard, prelude::*};

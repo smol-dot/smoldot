@@ -128,7 +128,6 @@ pub fn service(config: Config) -> (Frontend, ServicePrototype) {
         background_abort_registration,
         log_target,
         requests_subscriptions,
-        max_subscriptions: config.max_subscriptions,
     };
 
     (frontend, prototype)
@@ -249,9 +248,6 @@ pub struct ServicePrototype {
     log_target: String,
 
     background_abort_registration: future::AbortRegistration,
-
-    /// Same as [`Config::max_subscriptions`].
-    max_subscriptions: u32,
 }
 
 /// Configuration for a JSON-RPC service.
