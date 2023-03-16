@@ -340,6 +340,8 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
             removed
         };
 
+        // TODO: how to abort subscription tasks?!
+
         // Note that `self.clients` is no longer locked here.
 
         removed.dead.store(true, Ordering::SeqCst);
