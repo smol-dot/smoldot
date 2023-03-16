@@ -90,14 +90,13 @@ impl TasksQueue {
                             QueuedTask::PutToSleep(task, waker) => {
                                 // Prepare to store `NotPolling(task_index)` in `waker.state`.
                                 let task_index = sleeping_tasks_lock.insert(task);
-                                let task_index_u64 = u64::try_from(task_index).unwrap();
-                                debug_assert_ne!(task_index_u64, POLLING);
-                                debug_assert_ne!(task_index_u64, WOKE_UP);
+                                debug_assert_ne!(task_index, POLLING);
+                                debug_assert_ne!(task_index, WOKE_UP);
 
                                 // Store `NotPolling` if equal to `Polling`.
                                 match waker.state.compare_exchange(
                                     POLLING,
-                                    task_index_u64,
+                                    task_index,
                                     atomic::Ordering::Relaxed,
                                     atomic::Ordering::Relaxed,
                                 ) {
@@ -135,7 +134,7 @@ impl TasksQueue {
         let waker = Arc::new(Waker {
             tasks_queue: Arc::downgrade(self),
             // Initialize `state` to `Polling`.
-            state: atomic::AtomicU64::new(POLLING),
+            state: atomic::AtomicUsize::new(POLLING),
         });
 
         match Pin::new(&mut task).poll(&mut task::Context::from_waker(&waker.clone().into())) {
@@ -159,7 +158,7 @@ struct Waker {
     /// A `Weak` is used in order to avoid cyclic references.
     tasks_queue: Weak<TasksQueue>,
 
-    /// The `AtomicU64` in this field is equivalent to the following enum:
+    /// The `AtomicUsize` in this field is equivalent to the following enum:
     /// ```
     /// enum State {
     ///     Polling,
@@ -177,13 +176,18 @@ struct Waker {
     /// `QueuedTask::PutToSleep`) the task.
     /// `NotPolling` means that the task hasn't been woken up yet, and that the task is in the
     /// sleeping tasks list at the given index.
-    state: atomic::AtomicU64,
+    ///
+    /// Because the value in `NotPolling` is an index within a slab, and that the values in the
+    /// slab are more than 1 byte in size, the index can't ever reach `usize::max_value()`. It
+    /// is therefore safe to use `-1` and `-2` are dummy values (and even if it wasn't, we'd have
+    /// a logic error and not an undefined behaviour).
+    state: atomic::AtomicUsize,
 }
 
 /// See [`Waker::state`].
-const WOKE_UP: u64 = u64::max_value();
+const WOKE_UP: usize = usize::max_value();
 /// See [`Waker::state`].
-const POLLING: u64 = u64::max_value() - 1;
+const POLLING: usize = usize::max_value() - 1;
 
 impl alloc::task::Wake for Waker {
     fn wake(self: Arc<Self>) {
@@ -215,9 +219,9 @@ mod tests {
         // counter. We check, at the end, that the counter has the expected value.
         async_std::task::block_on(async move {
             let queue = super::TasksQueue::new();
-            let counter = Arc::new(atomic::AtomicU64::new(0));
+            let counter = Arc::new(atomic::AtomicUsize::new(0));
 
-            const NUM_TASKS: u64 = 100000;
+            const NUM_TASKS: usize = 100000;
 
             // Spawn background tasks that will run the futures.
             // A message is sent on `finished_tx` as soon as one executor detects that the
