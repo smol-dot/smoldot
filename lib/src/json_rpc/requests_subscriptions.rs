@@ -317,9 +317,8 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
     ///
     /// Note however that functions such as [`RequestsSubscriptions::respond`] and
     /// [`RequestsSubscriptions::push_notification`] intentionally have no effect if you pass an
-    /// invalid [`RequestId`] or [`SubscriptionId`]. There is therefore no need to cancel any
-    /// parallel task that might currently be responding to requests or pushing notification
-    /// messages.
+    /// invalid [`ClientId`]. There is therefore no need to cancel any parallel task that might
+    /// currently be responding to requests or pushing notification messages.
     pub async fn remove_client(&self, client: &ClientId) -> Option<(Vec<RequestId>, Vec<String>)> {
         // Try remove the client from the list. Returns if it doesn't exist.
         let removed = {
@@ -693,7 +692,7 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
     /// per client.
     ///
     /// If the given [`RequestId`] is stale or invalid, this function always succeeds and returns
-    /// a stale [`SubscriptionId`].
+    /// a stale subscription.
     ///
     /// The [`SubscriptionStart`] object returned by this function on success must be used in order
     /// to provide a background task associated with the given subscription. The subscription is
@@ -791,9 +790,9 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
     /// waits until the subscription has sent back a confirmation that it has processed the
     /// message.
     ///
-    /// An error is returned if the [`SubscriptionId`] is stale or invalid, or if the subscription
-    /// silently drops the confirmation sender. This can happen intentionally or if the
-    /// subscription has shut down.
+    /// An error is returned if the [`ClientId`] or [`RequestId`] is stale or invalid, or if the
+    /// subscription silently drops the confirmation sender. This can happen intentionally or if
+    /// the subscription has shut down.
     ///
     /// This asynchronous function performs two steps: delivering a message, then waiting for a
     /// confirmation. Cancelling the function in its confirmation waiting phase doesn't
@@ -863,7 +862,7 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
     /// to either push notifications one behind the other, or track which notification queue index
     /// corresponds to what, but not both at the same time.
     ///
-    /// Has no effect if the [`SubscriptionId`] is stale or invalid.
+    /// Has no effect if the [`ClientId`] or [`RequestId`] is stale or invalid.
     ///
     /// # Panic
     ///
@@ -929,8 +928,8 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
     /// to either push notifications one behind the other, or track which notification queue index
     /// corresponds to what, but not both at the same time.
     ///
-    /// Has no effect and silently discards the message if the [`SubscriptionId`] is stale or
-    /// invalid.
+    /// Has no effect and silently discards the message if the [`ClientId`] or [`RequestId`] is
+    /// stale or invalid.
     pub async fn push_notification<'a>(
         &self,
         client: impl Into<ClientOrRequestIdRef<'a>>,
@@ -957,8 +956,8 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
     /// Note that notifications are not provided to [`RequestsSubscriptions::next_response`]
     /// in the order of their index, but in the order in which they entered the queue.
     ///
-    /// Returns `Ok` and silently discards the message if the [`SubscriptionId`] is stale or
-    /// invalid.
+    /// Returns `Ok` and silently discards the message if the [`ClientId`] or [`RequestId`] is
+    /// stale or invalid.
     pub async fn try_push_notification<'a>(
         &self,
         client: impl Into<ClientOrRequestIdRef<'a>>,
