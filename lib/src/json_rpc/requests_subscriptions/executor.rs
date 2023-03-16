@@ -46,6 +46,7 @@ pub struct TasksQueue {
 enum QueuedTask {
     Task(BoxFuture<'static, ()>),
     InSlab(usize),
+    PutToSleep(BoxFuture<'static, ()>, Arc<Waker>),
 }
 
 impl TasksQueue {
@@ -76,12 +77,42 @@ impl TasksQueue {
             let mut listener = None;
 
             loop {
-                if let Some(task) = self.queue.pop() {
-                    break match task {
-                        QueuedTask::Task(t) => t,
-                        // TODO: future cancellation issue /!\ what if this await is cancelled after we've extracted an item from the queue
-                        QueuedTask::InSlab(index) => self.sleeping_tasks.lock().await.remove(index),
-                    };
+                {
+                    // We need to lock the mutex *before* popping from the queue, as otherwise
+                    // the user could cancel the locking future and the popped item would be
+                    // thrown away.
+                    let mut sleeping_tasks_lock = self.sleeping_tasks.lock().await;
+
+                    if let Some(task) = self.queue.pop() {
+                        match task {
+                            QueuedTask::Task(t) => break t,
+                            QueuedTask::InSlab(index) => break sleeping_tasks_lock.remove(index),
+                            QueuedTask::PutToSleep(task, waker) => {
+                                // Prepare to store `NotPolling(task_index)` in `waker.state`.
+                                let task_index = sleeping_tasks_lock.insert(task);
+                                let task_index_u64 = u64::try_from(task_index).unwrap();
+                                debug_assert_ne!(task_index_u64, POLLING);
+                                debug_assert_ne!(task_index_u64, WOKE_UP);
+
+                                // Store `NotPolling` if equal to `Polling`.
+                                match waker.state.compare_exchange(
+                                    POLLING,
+                                    task_index_u64,
+                                    atomic::Ordering::Relaxed,
+                                    atomic::Ordering::Relaxed,
+                                ) {
+                                    Ok(_) => continue,
+                                    Err(_actual_val) => {
+                                        // The only way we could reach here is if `Waker::wake()`
+                                        // has been called, in which case it has replaced `Polling`
+                                        // with `WokeUp`. In that case, use the task immediately.
+                                        debug_assert_eq!(_actual_val, WOKE_UP);
+                                        break sleeping_tasks_lock.remove(task_index);
+                                    }
+                                }
+                            }
+                        };
+                    }
                 }
 
                 match listener.take() {
@@ -92,57 +123,15 @@ impl TasksQueue {
         };
 
         // Poll it.
-        self.run_inner(task).await;
+        // Importantly, after the task has been extracted we no longer perform any asynchronous
+        // operation, as otherwise this asynchronous operation could be cancelled and the task
+        // silently thrown away.
+        self.run_inner(task);
     }
 
     /// Polls a future with a `Waker` that pushes back the future to the back of the queue once
     /// ready to be polled again.
-    async fn run_inner(self: &Arc<Self>, mut task: BoxFuture<'static, ()>) {
-        struct Waker {
-            tasks_queue: Weak<TasksQueue>,
-
-            // The `AtomicU64` in this field is equivalent to the following enum:
-            // ```
-            // enum State {
-            //     Polling,
-            //     NotPolling(usize),
-            //     WokeUp,
-            // }
-            // ```
-            //
-            // The state `WokeUp` is represented as `-1`, the state `Polling` is represented as
-            // `-2`, and any other value represents `NotPolling`.
-            //
-            // `WokeUp` means that the task has already woken up successfully.
-            // `Polling` means that the task hasn't been woken up yet, and that we are currently
-            // (or have just finished) polling the task.
-            // `NotPolling` means that the task hasn't been woken up yet, and that we are no
-            // longer polling the task.
-            //
-            // The distinction between `Polling` and `NotPolling` is necessary because we can't
-            // store the task in the waker while it is still being polled.
-            state: atomic::AtomicU64,
-        }
-
-        const WOKE_UP: u64 = u64::max_value();
-        const POLLING: u64 = u64::max_value() - 1;
-
-        impl alloc::task::Wake for Waker {
-            fn wake(self: Arc<Self>) {
-                // Store `WokeUp` in `state`, and examine what is inside.
-                match self.state.swap(WOKE_UP, atomic::Ordering::Relaxed) {
-                    val if val == WOKE_UP || val == POLLING => {}
-                    idx => {
-                        // Any other value represents a valid task.
-                        // If the state is `NotPolling`, push this task back to the queue.
-                        let Some(tasks_queue) = self.tasks_queue.upgrade() else { return };
-                        tasks_queue.queue.push(QueuedTask::InSlab(idx as usize));
-                        tasks_queue.item_pushed_to_queue.notify_additional(1);
-                    }
-                }
-            }
-        }
-
+    fn run_inner(self: &Arc<Self>, mut task: BoxFuture<'static, ()>) {
         let waker = Arc::new(Waker {
             tasks_queue: Arc::downgrade(self),
             // Initialize `state` to `Polling`.
@@ -152,30 +141,8 @@ impl TasksQueue {
         match Pin::new(&mut task).poll(&mut task::Context::from_waker(&waker.clone().into())) {
             task::Poll::Ready(()) => {}
             task::Poll::Pending => {
-                // Prepare to store `NotPolling(task_index)` in `state`.
-                // TODO: future cancellation issue /!\ what if this await is cancelled and task is thrown away?
-                let task_index = self.sleeping_tasks.lock().await.insert(task);
-                let task_index_u64 = u64::try_from(task_index).unwrap();
-                debug_assert_ne!(task_index_u64, POLLING);
-                debug_assert_ne!(task_index_u64, WOKE_UP);
-
-                // Store `NotPolling` if equal to `Polling`.
-                match waker.state.compare_exchange(
-                    POLLING,
-                    task_index_u64,
-                    atomic::Ordering::Relaxed,
-                    atomic::Ordering::Relaxed,
-                ) {
-                    Ok(_) => {}
-                    Err(_actual_val) => {
-                        // The only way we could reach here is if `wake()` has been called,
-                        // in which case it has replaced `Polling` with `WokeUp`.
-                        // In that case, push the task to the back of the queue.
-                        debug_assert_eq!(_actual_val, WOKE_UP);
-                        self.queue.push(QueuedTask::InSlab(task_index));
-                        self.item_pushed_to_queue.notify_additional(1);
-                    }
-                }
+                self.queue.push(QueuedTask::PutToSleep(task, waker));
+                self.item_pushed_to_queue.notify_additional(1);
             }
         }
     }
@@ -184,6 +151,55 @@ impl TasksQueue {
 impl fmt::Debug for TasksQueue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("TasksQueue").finish()
+    }
+}
+
+/// Waker that it used when polling tasks.
+struct Waker {
+    /// A `Weak` is used in order to avoid cyclic references.
+    tasks_queue: Weak<TasksQueue>,
+
+    /// The `AtomicU64` in this field is equivalent to the following enum:
+    /// ```
+    /// enum State {
+    ///     Polling,
+    ///     NotPolling(usize),
+    ///     WokeUp,
+    /// }
+    /// ```
+    ///
+    /// The state `WokeUp` is represented as `-1`, the state `Polling` is represented as
+    /// `-2`, and any other value represents `NotPolling`.
+    ///
+    /// `WokeUp` means that the task has already woken up successfully.
+    /// `Polling` means that the task hasn't been woken up yet, and that we are currently
+    /// polling or have just finished polling (in which case the task is in
+    /// `QueuedTask::PutToSleep`) the task.
+    /// `NotPolling` means that the task hasn't been woken up yet, and that the task is in the
+    /// sleeping tasks list at the given index.
+    state: atomic::AtomicU64,
+}
+
+/// See [`Waker::state`].
+const WOKE_UP: u64 = u64::max_value();
+/// See [`Waker::state`].
+const POLLING: u64 = u64::max_value() - 1;
+
+impl alloc::task::Wake for Waker {
+    fn wake(self: Arc<Self>) {
+        // Store `WokeUp` in `state`, and examine what is inside.
+        match self.state.swap(WOKE_UP, atomic::Ordering::Relaxed) {
+            val if val == WOKE_UP || val == POLLING => {}
+            idx => {
+                // Any value other than `WOKE_UP` or `POLLING` represents a sleeping task.
+                // Note that the `Arc` containing `tasks_queue` is normally supposed to be alive,
+                // but it is possible that it is not in the niche situation where a task get woken
+                // up while the queue is currently being destroyed.
+                let Some(tasks_queue) = self.tasks_queue.upgrade() else { return };
+                tasks_queue.queue.push(QueuedTask::InSlab(idx as usize));
+                tasks_queue.item_pushed_to_queue.notify_additional(1);
+            }
+        }
     }
 }
 
