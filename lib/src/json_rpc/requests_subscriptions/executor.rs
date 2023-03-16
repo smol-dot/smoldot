@@ -154,7 +154,7 @@ impl fmt::Debug for TasksQueue {
     }
 }
 
-/// Waker that it used when polling tasks.
+/// `Waker` that it used when polling tasks.
 struct Waker {
     /// A `Weak` is used in order to avoid cyclic references.
     tasks_queue: Weak<TasksQueue>,
