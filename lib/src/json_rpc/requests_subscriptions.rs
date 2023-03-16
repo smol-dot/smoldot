@@ -158,7 +158,7 @@ pub struct Config {
 
 pub struct RequestsSubscriptions<TSubMsg> {
     /// List of all clients of the state machine. Locked only when adding and removing clients.
-    clients: Mutex<Clients>,
+    clients: Mutex<Clients<TSubMsg>>,
 
     /// List of requests sent by a client and not yet pulled by
     /// [`RequestsSubscriptions::next_request`].
@@ -169,7 +169,7 @@ pub struct RequestsSubscriptions<TSubMsg> {
     /// using [`RequestsSubscriptions::set_max_clients`], in which case it would be impossible
     /// to update the size of this list.
     // TODO: what about entries of obsolete clients clogging the queue? how do we deal with this?
-    unpulled_requests: crossbeam_queue::SegQueue<(String, Weak<ClientInner>)>,
+    unpulled_requests: crossbeam_queue::SegQueue<(String, Weak<ClientInner<TSubMsg>>)>,
 
     /// Event notified whenever an element is pushed to [`RequestsSubscriptions::unpulled_requests`].
     new_unpulled_request: event_listener::Event,
@@ -200,11 +200,9 @@ pub struct RequestsSubscriptions<TSubMsg> {
     /// Maximum number of subscriptions each client can have active before new subscriptions are
     /// rejected.
     max_subscriptions_per_client: usize,
-
-    _dummy_phantom: core::marker::PhantomData<TSubMsg>,
 }
 
-impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
+impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
     /// Creates a new empty state machine.
     pub fn new(config: Config) -> Self {
         // The fields in the config are `u32`s rather than `usize`s so that they can be the same
@@ -230,7 +228,6 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
             max_clients: AtomicUsize::new(max_clients),
             max_requests_per_client,
             max_subscriptions_per_client,
-            _dummy_phantom: core::marker::PhantomData,
         }
     }
 
@@ -271,7 +268,7 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
         self.add_client_inner(&mut *clients)
     }
 
-    fn add_client_inner(&self, clients: &mut Clients) -> Result<ClientId, AddClientError> {
+    fn add_client_inner(&self, clients: &mut Clients<TSubMsg>) -> Result<ClientId, AddClientError> {
         // `clients.list.len()` can realistically be superior to `max_clients` since `max_clients`
         // can be updated at runtime by the API user.
         if clients.list.len() >= self.max_clients.load(Ordering::Relaxed) {
@@ -296,6 +293,7 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
                     Default::default(),
                 ),
                 num_inactive_alive_subscriptions: 0,
+                _dummy_phantom: core::marker::PhantomData,
             }),
         });
 
@@ -388,7 +386,7 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
             let client = match client
                 .1
                 .upgrade()
-                .and_then(|c| Arc::downcast::<ClientInner>(c).ok())
+                .and_then(|c| Arc::downcast::<ClientInner<TSubMsg>>(c).ok())
             {
                 Some(c) => c,
                 None => {
@@ -474,7 +472,7 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
         let client = match client
             .1
             .upgrade()
-            .and_then(|c| Arc::downcast::<ClientInner>(c).ok())
+            .and_then(|c| Arc::downcast::<ClientInner<TSubMsg>>(c).ok())
         {
             Some(c) => c,
             None => return,
@@ -551,7 +549,7 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
         let client = match client
             .1
             .upgrade()
-            .and_then(|c| Arc::downcast::<ClientInner>(c).ok())
+            .and_then(|c| Arc::downcast::<ClientInner<TSubMsg>>(c).ok())
         {
             Some(c) => c,
             None => return Ok(()),
@@ -659,7 +657,7 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
         let client = match request
             .1
             .upgrade()
-            .and_then(|c| Arc::downcast::<ClientInner>(c).ok())
+            .and_then(|c| Arc::downcast::<ClientInner<TSubMsg>>(c).ok())
         {
             Some(c) => c,
             None => return,
@@ -732,7 +730,7 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
         let client_arc = match client
             .1
             .upgrade()
-            .and_then(|c| Arc::downcast::<ClientInner>(c).ok())
+            .and_then(|c| Arc::downcast::<ClientInner<TSubMsg>>(c).ok())
         {
             Some(c) => c,
             None => {
@@ -803,7 +801,7 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
         let client_arc = match subscription
             .1
             .upgrade()
-            .and_then(|c| Arc::downcast::<ClientInner>(c).ok())
+            .and_then(|c| Arc::downcast::<ClientInner<TSubMsg>>(c).ok())
         {
             Some(c) => c,
             None => return,
@@ -872,7 +870,7 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
         let client_arc = match subscription
             .1
             .upgrade()
-            .and_then(|c| Arc::downcast::<ClientInner>(c).ok())
+            .and_then(|c| Arc::downcast::<ClientInner<TSubMsg>>(c).ok())
         {
             Some(c) => c,
             None => return,
@@ -962,7 +960,7 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
         let client_arc = match subscription
             .1
             .upgrade()
-            .and_then(|c| Arc::downcast::<ClientInner>(c).ok())
+            .and_then(|c| Arc::downcast::<ClientInner<TSubMsg>>(c).ok())
         {
             Some(c) => c,
             None => return Ok(()),
@@ -1081,17 +1079,17 @@ pub enum StartSubscriptionError {
     LimitReached,
 }
 
-struct Clients {
+struct Clients<TSubMsg> {
     /// Actual list of all the clients currently part of the state machine.
-    list: hashbrown::HashMap<u64, Arc<ClientInner>, fnv::FnvBuildHasher>,
+    list: hashbrown::HashMap<u64, Arc<ClientInner<TSubMsg>>, fnv::FnvBuildHasher>,
 
     /// Identifier to assign to the next client. Always increasing. Ids are never reused.
     next_id: u64,
 }
 
-struct ClientInner {
+struct ClientInner<TSubMsg> {
     /// Fields that are behind a `Mutex`.
-    guarded: Mutex<ClientInnerGuarded>,
+    guarded: Mutex<ClientInnerGuarded<TSubMsg>>,
 
     /// Set to `true` whenever the client is removed.
     dead: AtomicBool,
@@ -1115,7 +1113,7 @@ struct ClientInner {
     total_requests_in_fly_dec_or_dead: event_listener::Event,
 }
 
-struct ClientInnerGuarded {
+struct ClientInnerGuarded<TSubMsg> {
     /// List of requests that have been pulled by [`RequestsSubscriptions::next_request`] and
     /// waiting to be responded.
     ///
@@ -1169,6 +1167,8 @@ struct ClientInnerGuarded {
     /// entry in [`ClientInnerGuarded::notification_messages`] (and thus also in
     /// [`ClientInnerGuarded::responses_send_back`]).
     num_inactive_alive_subscriptions: usize,
+
+    _dummy_phantom: core::marker::PhantomData<TSubMsg>,
 }
 
 enum ResponseSendBack {
