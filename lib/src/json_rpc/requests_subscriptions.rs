@@ -718,7 +718,6 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
     ) -> Result<
         (
             SubscriptionId,
-            mpsc::Sender<(TSubMsg, oneshot::Sender<()>)>,
             mpsc::Receiver<(TSubMsg, oneshot::Sender<()>)>,
             SubscriptionStart<'_, TSubMsg>,
         ),
@@ -741,7 +740,6 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
                         // to be `Sized` for some reason.
                         Arc::downgrade(&(Arc::new(()) as Arc<_>))
                     }),
-                    messages_tx,
                     messages_rx,
                     SubscriptionStart {
                         requests_subscriptions: self,
@@ -771,10 +769,9 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
             new_subscription_num,
             Subscription {
                 notifications_capacity,
-                messages_tx: messages_tx.clone(),
+                messages_tx,
             },
         );
-        // TODO: don't clone messages_tx ^
         debug_assert!(_prev_value.is_none());
 
         drop(lock);
@@ -784,12 +781,63 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
                 new_subscription_num,
                 Arc::downgrade(&(client_arc as Arc<_>)),
             ),
-            messages_tx,
             messages_rx,
             SubscriptionStart {
                 requests_subscriptions: self,
             },
         ))
+    }
+
+    /// Sends a message to the receiver that was provided when this subscription was created, and
+    /// waits until the subscription has sent back a confirmation that it has processed the
+    /// message.
+    ///
+    /// An error is returned if the [`SubscriptionId`] is stale or invalid, or if the subscription
+    /// silently drops the confirmation sender. This can happen intentionally or if the
+    /// subscription has shut down.
+    ///
+    /// This asynchronous function performs two steps: delivering a message, then waiting for a
+    /// confirmation. Cancelling the function in its confirmation waiting phase doesn't
+    /// "un-deliver" the message. This function doesn't allow to deliver a message without
+    /// waiting for a confirmation.
+    pub async fn subscription_send(
+        &self,
+        subscription: &SubscriptionId,
+        message: TSubMsg,
+    ) -> Result<(), ()> {
+        let confirmation_rx = {
+            let client_arc = match subscription
+                .1
+                .upgrade()
+                .and_then(|c| Arc::downcast::<ClientInner<TSubMsg>>(c).ok())
+            {
+                Some(c) => c,
+                None => return Err(()),
+            };
+
+            let (confirmation_tx, confirmation_rx) = oneshot::channel();
+
+            let mut lock = client_arc.guarded.lock().await;
+
+            let subscription = lock
+                .active_subscriptions
+                .get_mut(&subscription.0)
+                .ok_or(())?;
+
+            // TODO: keeping the lock while sending the message doesn't seem great as it could potentially deadlock
+            let _ =
+                futures::SinkExt::send(&mut subscription.messages_tx, (message, confirmation_tx))
+                    .await;
+
+            confirmation_rx
+        };
+
+        // Note that no lock nor `Arc` is held at this point (except for `confirmation_rx`).
+        if confirmation_rx.await.is_err() {
+            return Err(());
+        }
+
+        Ok(())
     }
 
     /// Destroys the given subscription.

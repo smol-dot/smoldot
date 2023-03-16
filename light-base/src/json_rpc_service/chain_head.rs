@@ -34,11 +34,7 @@ use core::{
     sync::atomic,
     time::Duration,
 };
-use futures::{
-    channel::{mpsc, oneshot},
-    lock::Mutex,
-    prelude::*,
-};
+use futures::prelude::*;
 use hashbrown::HashMap;
 use smoldot::{
     chain::fork_tree,
@@ -70,19 +66,17 @@ impl<TPlat: Platform> Background<TPlat> {
         // The task dedicated to this subscription will receive the message and send a response to
         // the JSON-RPC client.
         let message_received = {
-            let sender = self
+            let state_machine_sub_id = self
                 .subscriptions
                 .lock()
                 .await
                 .get(follow_subscription)
-                .map(|(tx, _)| tx.clone());
+                .cloned();
 
-            if let Some(sender) = sender {
-                let (tx, rx) = oneshot::channel();
-                let _ = sender
-                    .lock()
-                    .await
-                    .send((
+            if let Some(state_machine_sub_id) = state_machine_sub_id {
+                self.requests_subscriptions
+                    .subscription_send(
+                        &state_machine_sub_id,
                         SubscriptionMessage::ChainHeadCall {
                             get_state_machine_request_id: state_machine_request_id.clone(),
                             get_request_id: request_id.to_owned(),
@@ -91,10 +85,9 @@ impl<TPlat: Platform> Background<TPlat> {
                             function_to_call,
                             network_config,
                         },
-                        tx,
-                    ))
-                    .await;
-                rx.await.is_ok()
+                    )
+                    .await
+                    .is_ok()
             } else {
                 false
             }
@@ -125,30 +118,29 @@ impl<TPlat: Platform> Background<TPlat> {
         pre_runtime_call: Option<runtime_service::RuntimeLock<TPlat>>,
         network_config: methods::NetworkConfig,
     ) {
-        let (state_machine_subscription, messages_tx, mut messages_rx, subscription_start) =
-            match self
-                .requests_subscriptions
-                .start_subscription(&state_machine_request_id, 1)
-                .await
-            {
-                Ok(v) => v,
-                Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
-                    self.requests_subscriptions
-                        .respond(
-                            &state_machine_request_id,
-                            json_rpc::parse::build_error_response(
-                                &request_id,
-                                json_rpc::parse::ErrorResponse::ServerError(
-                                    -32000,
-                                    "Too many active subscriptions",
-                                ),
-                                None,
+        let (state_machine_subscription, mut messages_rx, subscription_start) = match self
+            .requests_subscriptions
+            .start_subscription(&state_machine_request_id, 1)
+            .await
+        {
+            Ok(v) => v,
+            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
+                self.requests_subscriptions
+                    .respond(
+                        &state_machine_request_id,
+                        json_rpc::parse::build_error_response(
+                            &request_id,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                "Too many active subscriptions",
                             ),
-                        )
-                        .await;
-                    return;
-                }
-            };
+                            None,
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
 
         subscription_start.start({
             let me = self.clone();
@@ -163,10 +155,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 me.subscriptions.lock().await.insert(
                     subscription_id.clone(),
-                    (
-                        Arc::new(Mutex::new(messages_tx)),
                         state_machine_subscription.clone(),
-                    ),
                 );
 
                 me.requests_subscriptions
@@ -415,30 +404,29 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         runtime_updates: bool,
     ) {
-        let (state_machine_subscription, messages_tx, mut messages_rx, subscription_start) =
-            match self
-                .requests_subscriptions
-                .start_subscription(state_machine_request_id, 16)
-                .await
-            {
-                Ok(v) => v,
-                Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
-                    self.requests_subscriptions
-                        .respond(
-                            state_machine_request_id,
-                            json_rpc::parse::build_error_response(
-                                request_id,
-                                json_rpc::parse::ErrorResponse::ServerError(
-                                    -32000,
-                                    "Too many active subscriptions",
-                                ),
-                                None,
+        let (state_machine_subscription, mut messages_rx, subscription_start) = match self
+            .requests_subscriptions
+            .start_subscription(state_machine_request_id, 16)
+            .await
+        {
+            Ok(v) => v,
+            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
+                self.requests_subscriptions
+                    .respond(
+                        state_machine_request_id,
+                        json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                "Too many active subscriptions",
                             ),
-                        )
-                        .await;
-                    return;
-                }
-            };
+                            None,
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
 
         let (mut subscribe_all, runtime_subscribe_all) = if runtime_updates {
             let subscribe_all = self
@@ -612,13 +600,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
             let mut lock = self.subscriptions.lock().await;
 
-            lock.insert(
-                subscription_id.clone(),
-                (
-                    Arc::new(Mutex::new(messages_tx)),
-                    state_machine_subscription.clone(),
-                ),
-            );
+            lock.insert(subscription_id.clone(), state_machine_subscription.clone());
 
             let subscription_state = FollowSubscription {
                 non_finalized_blocks,
@@ -1185,19 +1167,17 @@ impl<TPlat: Platform> Background<TPlat> {
         // The task dedicated to this subscription will receive the message and send a response to
         // the JSON-RPC client.
         let message_received = {
-            let sender = self
+            let state_machine_sub_id = self
                 .subscriptions
                 .lock()
                 .await
                 .get(follow_subscription)
-                .map(|(tx, _)| tx.clone());
+                .cloned();
 
-            if let Some(sender) = sender {
-                let (tx, rx) = oneshot::channel();
-                let _ = sender
-                    .lock()
-                    .await
-                    .send((
+            if let Some(state_machine_sub_id) = state_machine_sub_id {
+                self.requests_subscriptions
+                    .subscription_send(
+                        &state_machine_sub_id,
                         SubscriptionMessage::ChainHeadStorage {
                             get_state_machine_request_id: state_machine_request_id.clone(),
                             get_request_id: request_id.to_owned(),
@@ -1206,10 +1186,9 @@ impl<TPlat: Platform> Background<TPlat> {
                             child_key,
                             network_config,
                         },
-                        tx,
-                    ))
-                    .await;
-                rx.await.is_ok()
+                    )
+                    .await
+                    .is_ok()
             } else {
                 false
             }
@@ -1263,43 +1242,39 @@ impl<TPlat: Platform> Background<TPlat> {
             return;
         }
 
-        let (state_machine_subscription, messages_tx, mut messages_rx, subscription_start) =
-            match self
-                .requests_subscriptions
-                .start_subscription(state_machine_request_id, 1)
-                .await
-            {
-                Ok(v) => v,
-                Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
-                    self.requests_subscriptions
-                        .respond(
-                            state_machine_request_id,
-                            json_rpc::parse::build_error_response(
-                                request_id,
-                                json_rpc::parse::ErrorResponse::ServerError(
-                                    -32000,
-                                    "Too many active subscriptions",
-                                ),
-                                None,
+        let (state_machine_subscription, mut messages_rx, subscription_start) = match self
+            .requests_subscriptions
+            .start_subscription(state_machine_request_id, 1)
+            .await
+        {
+            Ok(v) => v,
+            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
+                self.requests_subscriptions
+                    .respond(
+                        state_machine_request_id,
+                        json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                "Too many active subscriptions",
                             ),
-                        )
-                        .await;
-                    return;
-                }
-            };
+                            None,
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
 
         let subscription_id = self
             .next_subscription_id
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
 
-        self.subscriptions.lock().await.insert(
-            subscription_id.clone(),
-            (
-                Arc::new(Mutex::new(messages_tx)),
-                state_machine_subscription.clone(),
-            ),
-        );
+        self.subscriptions
+            .lock()
+            .await
+            .insert(subscription_id.clone(), state_machine_subscription.clone());
 
         subscription_start.start({
             let me = self.clone();
@@ -1441,29 +1416,26 @@ impl<TPlat: Platform> Background<TPlat> {
         // The task dedicated to this subscription will receive the message and send a response to
         // the JSON-RPC client.
         let message_received = {
-            let sender = self
+            let state_machine_sub_id = self
                 .subscriptions
                 .lock()
                 .await
                 .get(follow_subscription)
-                .map(|(tx, _)| tx.clone());
+                .cloned();
 
-            if let Some(sender) = sender {
-                let (tx, rx) = oneshot::channel();
-                let _ = sender
-                    .lock()
-                    .await
-                    .send((
+            if let Some(state_machine_sub_id) = state_machine_sub_id {
+                self.requests_subscriptions
+                    .subscription_send(
+                        &state_machine_sub_id,
                         SubscriptionMessage::ChainHeadBody {
                             get_state_machine_request_id: state_machine_request_id.clone(),
                             get_request_id: request_id.to_owned(),
                             hash,
                             network_config,
                         },
-                        tx,
-                    ))
-                    .await;
-                rx.await.is_ok()
+                    )
+                    .await
+                    .is_ok()
             } else {
                 false
             }
@@ -1493,43 +1465,39 @@ impl<TPlat: Platform> Background<TPlat> {
         network_config: methods::NetworkConfig,
         block_number: Option<u64>,
     ) {
-        let (state_machine_subscription, messages_tx, mut messages_rx, subscription_start) =
-            match self
-                .requests_subscriptions
-                .start_subscription(&state_machine_request_id, 1)
-                .await
-            {
-                Ok(v) => v,
-                Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
-                    self.requests_subscriptions
-                        .respond(
-                            state_machine_request_id,
-                            json_rpc::parse::build_error_response(
-                                request_id,
-                                json_rpc::parse::ErrorResponse::ServerError(
-                                    -32000,
-                                    "Too many active subscriptions",
-                                ),
-                                None,
+        let (state_machine_subscription, mut messages_rx, subscription_start) = match self
+            .requests_subscriptions
+            .start_subscription(&state_machine_request_id, 1)
+            .await
+        {
+            Ok(v) => v,
+            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
+                self.requests_subscriptions
+                    .respond(
+                        state_machine_request_id,
+                        json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                "Too many active subscriptions",
                             ),
-                        )
-                        .await;
-                    return;
-                }
-            };
+                            None,
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
 
         let subscription_id = self
             .next_subscription_id
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
 
-        self.subscriptions.lock().await.insert(
-            subscription_id.clone(),
-            (
-                Arc::new(Mutex::new(messages_tx)),
-                state_machine_subscription.clone(),
-            ),
-        );
+        self.subscriptions
+            .lock()
+            .await
+            .insert(subscription_id.clone(), state_machine_subscription.clone());
 
         subscription_start.start({
             let me = self.clone();
@@ -1656,28 +1624,25 @@ impl<TPlat: Platform> Background<TPlat> {
         // The task dedicated to this subscription will receive the message and send a response to
         // the JSON-RPC client.
         let message_received = {
-            let sender = self
+            let state_machine_sub_id = self
                 .subscriptions
                 .lock()
                 .await
                 .get(follow_subscription)
-                .map(|(tx, _)| tx.clone());
+                .cloned();
 
-            if let Some(sender) = sender {
-                let (tx, rx) = oneshot::channel();
-                let _ = sender
-                    .lock()
-                    .await
-                    .send((
+            if let Some(state_machine_sub_id) = state_machine_sub_id {
+                self.requests_subscriptions
+                    .subscription_send(
+                        &state_machine_sub_id,
                         SubscriptionMessage::ChainHeadHeader {
                             get_state_machine_request_id: state_machine_request_id.clone(),
                             get_request_id: request_id.to_owned(),
                             hash,
                         },
-                        tx,
-                    ))
-                    .await;
-                rx.await.is_ok()
+                    )
+                    .await
+                    .is_ok()
             } else {
                 false
             }
@@ -1710,27 +1675,24 @@ impl<TPlat: Platform> Background<TPlat> {
         // The task dedicated to this subscription will receive the message, send a response to
         // the JSON-RPC client, then shut down.
         let stop_message_received = {
-            let sender = self
+            let state_machine_sub_id = self
                 .subscriptions
                 .lock()
                 .await
                 .get(subscription_id)
-                .map(|(tx, _)| tx.clone());
+                .cloned();
 
-            if let Some(sender) = sender {
-                let (tx, rx) = oneshot::channel();
-                let _ = sender
-                    .lock()
-                    .await
-                    .send((
+            if let Some(state_machine_sub_id) = state_machine_sub_id {
+                self.requests_subscriptions
+                    .subscription_send(
+                        &state_machine_sub_id,
                         SubscriptionMessage::StopIfChainHeadBody {
                             stop_state_machine_request_id: state_machine_request_id.clone(),
                             stop_request_id: request_id.to_owned(),
                         },
-                        tx,
-                    ))
-                    .await;
-                rx.await.is_ok()
+                    )
+                    .await
+                    .is_ok()
             } else {
                 false
             }
@@ -1760,27 +1722,24 @@ impl<TPlat: Platform> Background<TPlat> {
         // The task dedicated to this subscription will receive the message, send a response to
         // the JSON-RPC client, then shut down.
         let stop_message_received = {
-            let sender = self
+            let state_machine_sub_id = self
                 .subscriptions
                 .lock()
                 .await
                 .get(subscription_id)
-                .map(|(tx, _)| tx.clone());
+                .cloned();
 
-            if let Some(sender) = sender {
-                let (tx, rx) = oneshot::channel();
-                let _ = sender
-                    .lock()
-                    .await
-                    .send((
+            if let Some(state_machine_sub_id) = state_machine_sub_id {
+                self.requests_subscriptions
+                    .subscription_send(
+                        &state_machine_sub_id,
                         SubscriptionMessage::StopIfChainHeadCall {
                             stop_state_machine_request_id: state_machine_request_id.clone(),
                             stop_request_id: request_id.to_owned(),
                         },
-                        tx,
-                    ))
-                    .await;
-                rx.await.is_ok()
+                    )
+                    .await
+                    .is_ok()
             } else {
                 false
             }
@@ -1810,27 +1769,24 @@ impl<TPlat: Platform> Background<TPlat> {
         // The task dedicated to this subscription will receive the message, send a response to
         // the JSON-RPC client, then shut down.
         let stop_message_received = {
-            let sender = self
+            let state_machine_sub_id = self
                 .subscriptions
                 .lock()
                 .await
                 .get(subscription_id)
-                .map(|(tx, _)| tx.clone());
+                .cloned();
 
-            if let Some(sender) = sender {
-                let (tx, rx) = oneshot::channel();
-                let _ = sender
-                    .lock()
-                    .await
-                    .send((
+            if let Some(state_machine_sub_id) = state_machine_sub_id {
+                self.requests_subscriptions
+                    .subscription_send(
+                        &state_machine_sub_id,
                         SubscriptionMessage::StopIfChainHeadStorage {
                             stop_state_machine_request_id: state_machine_request_id.clone(),
                             stop_request_id: request_id.to_owned(),
                         },
-                        tx,
-                    ))
-                    .await;
-                rx.await.is_ok()
+                    )
+                    .await
+                    .is_ok()
             } else {
                 false
             }
@@ -1861,27 +1817,24 @@ impl<TPlat: Platform> Background<TPlat> {
         // The task dedicated to this subscription will receive the message, send a response to
         // the JSON-RPC client, then shut down.
         let stop_message_received = {
-            let sender = self
+            let state_machine_sub_id = self
                 .subscriptions
                 .lock()
                 .await
                 .get(follow_subscription)
-                .map(|(tx, _)| tx.clone());
+                .cloned();
 
-            if let Some(sender) = sender {
-                let (tx, rx) = oneshot::channel();
-                let _ = sender
-                    .lock()
-                    .await
-                    .send((
+            if let Some(state_machine_sub_id) = state_machine_sub_id {
+                self.requests_subscriptions
+                    .subscription_send(
+                        &state_machine_sub_id,
                         SubscriptionMessage::StopIfChainHeadFollow {
                             stop_state_machine_request_id: state_machine_request_id.clone(),
                             stop_request_id: request_id.to_owned(),
                         },
-                        tx,
-                    ))
-                    .await;
-                rx.await.is_ok()
+                    )
+                    .await
+                    .is_ok()
             } else {
                 false
             }
@@ -1912,28 +1865,25 @@ impl<TPlat: Platform> Background<TPlat> {
         // The task dedicated to this subscription will receive the message and send a response to
         // the JSON-RPC client.
         let message_received = {
-            let sender = self
+            let state_machine_sub_id = self
                 .subscriptions
                 .lock()
                 .await
                 .get(follow_subscription)
-                .map(|(tx, _)| tx.clone());
+                .cloned();
 
-            if let Some(sender) = sender {
-                let (tx, rx) = oneshot::channel();
-                let _ = sender
-                    .lock()
-                    .await
-                    .send((
+            if let Some(state_machine_sub_id) = state_machine_sub_id {
+                self.requests_subscriptions
+                    .subscription_send(
+                        &state_machine_sub_id,
                         SubscriptionMessage::ChainHeadFollowUnpin {
                             unpin_state_machine_request_id: state_machine_request_id.clone(),
                             unpin_request_id: request_id.to_owned(),
                             hash,
                         },
-                        tx,
-                    ))
-                    .await;
-                rx.await.is_ok()
+                    )
+                    .await
+                    .is_ok()
             } else {
                 false
             }

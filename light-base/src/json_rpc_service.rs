@@ -61,11 +61,7 @@ use core::{
     sync::atomic,
     time::Duration,
 };
-use futures::{
-    channel::{mpsc, oneshot},
-    lock::Mutex,
-    prelude::*,
-};
+use futures::{lock::Mutex, prelude::*};
 use hashbrown::HashMap;
 use smoldot::{
     chain::fork_tree,
@@ -470,19 +466,9 @@ struct Background<TPlat: Platform> {
     /// connected.
     next_subscription_id: atomic::AtomicU64,
 
-    /// For each active subscription (the key), an abort handle and the id of the subscription in
-    /// the state machine. The abort handle is linked to the task dedicated to handling that
-    /// subscription.
-    subscriptions: Mutex<
-        HashMap<
-            String,
-            (
-                Arc<Mutex<mpsc::Sender<(SubscriptionMessage, oneshot::Sender<()>)>>>,
-                requests_subscriptions::SubscriptionId,
-            ),
-            fnv::FnvBuildHasher,
-        >,
-    >,
+    /// For each active subscription (the key), the id of the subscription in the state machine.
+    subscriptions:
+        Mutex<HashMap<String, requests_subscriptions::SubscriptionId, fnv::FnvBuildHasher>>,
 
     /// If `true`, we have already printed a warning about usage of the legacy JSON-RPC API. This
     /// flag prevents printing this message multiple times.
