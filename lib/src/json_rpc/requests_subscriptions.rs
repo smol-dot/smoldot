@@ -293,7 +293,6 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
                     Default::default(),
                 ),
                 num_inactive_alive_subscriptions: 0,
-                _dummy_phantom: core::marker::PhantomData,
             }),
         });
 
@@ -698,9 +697,9 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
     /// to provide a background task associated with the given subscription. The subscription is
     /// automatically cleaned up when the task finishes.
     ///
-    /// # About the messages capacity
+    /// # About the notifications capacity
     ///
-    /// The `messages_capacity` parameter contains the number of notifications related to this
+    /// The `notifications_capacity` parameter contains the number of notifications related to this
     /// notification that can be queued for send back simultaneously.
     ///
     /// This value is one of the parameters that bound the total memory usage of this state
@@ -715,7 +714,7 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
     pub async fn start_subscription(
         &'_ self,
         client: &RequestId,
-        messages_capacity: usize,
+        notifications_capacity: usize,
     ) -> Result<
         (
             SubscriptionId,
@@ -768,9 +767,14 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
         }
 
         let new_subscription_num = self.next_subscription_id.fetch_add(1, Ordering::Relaxed);
-        let _prev_value = lock
-            .active_subscriptions
-            .insert(new_subscription_num, messages_capacity);
+        let _prev_value = lock.active_subscriptions.insert(
+            new_subscription_num,
+            Subscription {
+                notifications_capacity,
+                messages_tx: messages_tx.clone(),
+            },
+        );
+        // TODO: don't clone messages_tx ^
         debug_assert!(_prev_value.is_none());
 
         drop(lock);
@@ -880,13 +884,13 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
 
         // Two in one: check whether this subscription is indeed valid, and at the same time get
         // the messages capacity.
-        let messages_capacity = match lock.active_subscriptions.get(&subscription.0) {
-            Some(l) => *l,
+        let notifications_capacity = match lock.active_subscriptions.get(&subscription.0) {
+            Some(l) => l.notifications_capacity,
             None => return,
         };
 
         // As documented.
-        assert!(index < messages_capacity);
+        assert!(index < notifications_capacity);
 
         // Inserts or replaces the current value under the key `(subscription, index)`.
         let previous_message = lock
@@ -979,8 +983,8 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
                 // time get the messages capacity.
                 // This is done at each iteration, to check whether the subscription is still
                 // valid.
-                let messages_capacity = match lock.active_subscriptions.get(&subscription.0) {
-                    Some(l) => *l,
+                let notifications_capacity = match lock.active_subscriptions.get(&subscription.0) {
+                    Some(l) => l.notifications_capacity,
                     None => return Ok(()),
                 };
 
@@ -999,10 +1003,10 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
                     });
                 match control_flow {
                     ops::ControlFlow::Break(idx) => {
-                        debug_assert!(idx < messages_capacity);
+                        debug_assert!(idx < notifications_capacity);
                         break (idx, lock);
                     }
-                    ops::ControlFlow::Continue(idx) if idx < messages_capacity => {
+                    ops::ControlFlow::Continue(idx) if idx < notifications_capacity => {
                         break (idx, lock)
                     }
                     ops::ControlFlow::Continue(_) if try_only => return Err(()),
@@ -1161,14 +1165,12 @@ struct ClientInnerGuarded<TSubMsg> {
     /// at the same time for this subscription.
     ///
     /// A FNV hasher is used because the keys of this map are allocated locally.
-    active_subscriptions: hashbrown::HashMap<u64, usize, fnv::FnvBuildHasher>,
+    active_subscriptions: hashbrown::HashMap<u64, Subscription<TSubMsg>, fnv::FnvBuildHasher>,
 
     /// Returns the number of subscriptions that have been stopped but still have at least one
     /// entry in [`ClientInnerGuarded::notification_messages`] (and thus also in
     /// [`ClientInnerGuarded::responses_send_back`]).
     num_inactive_alive_subscriptions: usize,
-
-    _dummy_phantom: core::marker::PhantomData<TSubMsg>,
 }
 
 enum ResponseSendBack {
@@ -1179,6 +1181,15 @@ enum ResponseSendBack {
     /// Message to send back is a subscription notification. It can be found in
     /// [`ClientInnerGuarded::notification_messages`] at the given key.
     SubscriptionMessage(u64, usize),
+}
+
+struct Subscription<TSubMsg> {
+    /// Maximum number of notifications towards the client queued at any given time.
+    notifications_capacity: usize,
+
+    /// Sender for messages towards the subscription task. Connected to the receiver that was
+    /// provided to the API user when the subscription was created.
+    messages_tx: mpsc::Sender<(TSubMsg, oneshot::Sender<()>)>,
 }
 
 // Common traits derivation on the id types.
