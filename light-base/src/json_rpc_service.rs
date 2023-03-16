@@ -313,18 +313,20 @@ pub struct StartConfig<'a, TPlat: Platform> {
     /// This parameter is necessary in order to prevent users from using up too much memory within
     /// the client.
     pub max_parallel_requests: NonZeroU32,
+
+    /// Maximum number of subscriptions that can be processed simultaneously.
+    ///
+    /// In combination with [`StartConfig::max_parallel_requests`], this can increase or decrease
+    /// the priority of updating subscriptions compared to answering requests.
+    pub max_parallel_subscription_updates: NonZeroU32,
 }
 
 impl ServicePrototype {
     /// Consumes this prototype and starts the service through [`StartConfig::tasks_executor`].
     pub fn start<TPlat: Platform>(self, mut config: StartConfig<'_, TPlat>) {
-        // Channel used in the background in order to spawn new tasks scoped to the background.
-        let (new_child_tasks_tx, new_child_tasks_rx) = mpsc::unbounded();
-
         let background = Arc::new(Background {
             log_target: self.log_target.clone(),
             requests_subscriptions: self.requests_subscriptions,
-            new_child_tasks_tx: Mutex::new(new_child_tasks_tx),
             chain_name: config.chain_spec.name().to_owned(),
             chain_ty: config.chain_spec.chain_type().to_owned(),
             chain_is_live: config.chain_spec.has_live_network(),
@@ -360,10 +362,11 @@ impl ServicePrototype {
         // This background task is abortable through the `background_abort` handle.
         (config.tasks_executor)(self.log_target, {
             let max_parallel_requests = config.max_parallel_requests;
+            let max_parallel_subscription_updates = config.max_parallel_subscription_updates;
             future::Abortable::new(
                 async move {
                     background
-                        .run(new_child_tasks_rx, max_parallel_requests)
+                        .run(max_parallel_requests, max_parallel_subscription_updates)
                         .await
                 },
                 self.background_abort_registration,
@@ -424,9 +427,6 @@ struct Background<TPlat: Platform> {
     /// Only requests that are valid JSON-RPC are insert into the state machine. However, requests
     /// can try to call an unknown method, or have invalid parameters.
     requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions>,
-
-    /// Whenever a task is sent on this channel, an executor runs it to completion.
-    new_child_tasks_tx: Mutex<mpsc::UnboundedSender<future::BoxFuture<'static, ()>>>,
 
     /// Name of the chain, as found in the chain specification.
     chain_name: String,
@@ -627,8 +627,8 @@ impl<TPlat: Platform> Background<TPlat> {
     /// This should only ever be called once for each service.
     async fn run(
         self: Arc<Self>,
-        mut new_child_tasks_rx: mpsc::UnboundedReceiver<future::BoxFuture<'static, ()>>,
         max_parallel_requests: NonZeroU32,
+        max_parallel_subscription_updates: NonZeroU32,
     ) -> ! {
         // The body of this function consists in building a list of tasks, then running them.
         let mut tasks = stream::FuturesUnordered::new();
@@ -643,6 +643,24 @@ impl<TPlat: Platform> Background<TPlat> {
                 async move {
                     loop {
                         me.handle_request().await;
+
+                        // We yield once between each request in order to politely let other tasks
+                        // do some work and not monopolize the CPU.
+                        TPlat::yield_after_cpu_intensive().await;
+                    }
+                }
+                .boxed(),
+            );
+        }
+
+        // A certain number of tasks (`max_parallel_subscription_updates`) are dedicated to
+        // processing subscriptions-related tasks after they wake up.
+        for _ in 0..max_parallel_subscription_updates.get() {
+            let me = self.clone();
+            tasks.push(
+                async move {
+                    loop {
+                        me.requests_subscriptions.run_subscription_task().await;
 
                         // We yield once between each request in order to politely let other tasks
                         // do some work and not monopolize the CPU.
@@ -739,17 +757,8 @@ impl<TPlat: Platform> Background<TPlat> {
         });
 
         // Now that `tasks` is full, we start running them forever.
-        // The `new_child_tasks_rx` channel is also polled, in order to be able to spawn new
-        // tasks.
-        // TODO: consider removing this `new_child_tasks_rx` mechanism, in order to be guaranteed a fixed number of tasks
         loop {
-            futures::select! {
-                () = tasks.select_next_some() => {},
-                task = new_child_tasks_rx.next() => {
-                    let task = task.unwrap();
-                    tasks.push(task);
-                }
-            }
+            tasks.next().await;
         }
     }
 

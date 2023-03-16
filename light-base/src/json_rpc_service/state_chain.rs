@@ -23,7 +23,6 @@ use crate::runtime_service;
 
 use alloc::{
     borrow::ToOwned as _,
-    boxed::Box,
     format,
     string::{String, ToString as _},
     sync::Arc,
@@ -556,11 +555,7 @@ impl<TPlat: Platform> Background<TPlat> {
             }
         };
 
-        self.new_child_tasks_tx
-            .lock()
-            .await
-            .unbounded_send(Box::pin(task))
-            .unwrap();
+        self.requests_subscriptions.add_subscription_task(task);
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeFinalizedHeads`].
@@ -699,11 +694,7 @@ impl<TPlat: Platform> Background<TPlat> {
             }
         };
 
-        self.new_child_tasks_tx
-            .lock()
-            .await
-            .unbounded_send(Box::pin(task))
-            .unwrap();
+        self.requests_subscriptions.add_subscription_task(task);
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeNewHeads`].
@@ -842,11 +833,7 @@ impl<TPlat: Platform> Background<TPlat> {
             }
         };
 
-        self.new_child_tasks_tx
-            .lock()
-            .await
-            .unbounded_send(Box::pin(task))
-            .unwrap();
+        self.requests_subscriptions.add_subscription_task(task);
     }
 
     /// Handles a call to [`methods::MethodCall::chain_unsubscribeAllHeads`].
@@ -1607,11 +1594,7 @@ impl<TPlat: Platform> Background<TPlat> {
             }
         };
 
-        self.new_child_tasks_tx
-            .lock()
-            .await
-            .unbounded_send(Box::pin(task))
-            .unwrap();
+        self.requests_subscriptions.add_subscription_task(task);
     }
 
     /// Handles a call to [`methods::MethodCall::state_subscribeStorage`].
@@ -1959,10 +1942,6 @@ impl<TPlat: Platform> Background<TPlat> {
             }
         };
 
-        self.new_child_tasks_tx
-            .lock()
-            .await
-            .unbounded_send(Box::pin(task))
-            .unwrap();
+        self.requests_subscriptions.add_subscription_task(task);
     }
 }
