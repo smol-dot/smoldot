@@ -180,7 +180,7 @@ struct Waker {
     /// Because the value in `NotPolling` is an index within a slab, and that the values in the
     /// slab are more than 1 byte in size, the index can't ever reach `usize::max_value()`. It
     /// is therefore safe to use `-1` and `-2` are dummy values (and even if it wasn't, we'd have
-    /// a logic error and not an undefined behaviour).
+    /// a logic error and not an undefined behavior).
     state: atomic::AtomicUsize,
 }
 
