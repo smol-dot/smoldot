@@ -346,11 +346,6 @@ impl ServicePrototype {
                 ),
             }),
             genesis_block_hash: config.genesis_block_hash,
-            next_subscription_id: atomic::AtomicU64::new(0),
-            subscriptions: Mutex::new(HashMap::with_capacity_and_hasher(
-                usize::try_from(self.max_subscriptions).unwrap_or(usize::max_value()),
-                Default::default(),
-            )),
             printed_legacy_json_rpc_warning: atomic::AtomicBool::new(false),
         });
 
@@ -457,18 +452,6 @@ struct Background<TPlat: Platform> {
     /// Keeping the genesis block is important, as the genesis block hash is included in
     /// transaction signatures, and must therefore be queried by upper-level UIs.
     genesis_block_hash: [u8; 32],
-
-    /// Identifier to use for the next subscription.
-    ///
-    /// Note that this is reasonable because we only have one single JSON-RPC client. In case of
-    /// multiple clients, it might be unwise to have a linearly increasing counter shared between
-    /// all clients, as it could leak to clients the information as to how many other clients are
-    /// connected.
-    next_subscription_id: atomic::AtomicU64,
-
-    /// For each active subscription (the key), the id of the subscription in the state machine.
-    subscriptions:
-        Mutex<HashMap<String, requests_subscriptions::SubscriptionId, fnv::FnvBuildHasher>>,
 
     /// If `true`, we have already printed a warning about usage of the legacy JSON-RPC API. This
     /// flag prevents printing this message multiple times.

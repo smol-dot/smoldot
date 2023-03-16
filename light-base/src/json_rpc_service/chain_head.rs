@@ -65,37 +65,25 @@ impl<TPlat: Platform> Background<TPlat> {
         // This is implemented by sending a message to the notifications task.
         // The task dedicated to this subscription will receive the message and send a response to
         // the JSON-RPC client.
-        let message_received = {
-            let state_machine_sub_id = self
-                .subscriptions
-                .lock()
-                .await
-                .get(follow_subscription)
-                .cloned();
-
-            if let Some(state_machine_sub_id) = state_machine_sub_id {
-                self.requests_subscriptions
-                    .subscription_send(
-                        &state_machine_sub_id,
-                        SubscriptionMessage::ChainHeadCall {
-                            get_state_machine_request_id: state_machine_request_id.clone(),
-                            get_request_id: request_id.to_owned(),
-                            hash,
-                            call_parameters,
-                            function_to_call,
-                            network_config,
-                        },
-                    )
-                    .await
-                    .is_ok()
-            } else {
-                false
-            }
-        };
+        let message_received = self
+            .requests_subscriptions
+            .subscription_send(
+                state_machine_request_id,
+                follow_subscription,
+                SubscriptionMessage::ChainHeadCall {
+                    get_state_machine_request_id: state_machine_request_id.clone(),
+                    get_request_id: request_id.to_owned(),
+                    hash,
+                    call_parameters,
+                    function_to_call,
+                    network_config,
+                },
+            )
+            .await;
 
         // Send back a response manually if the task doesn't exist, or has discarded the message,
         // which happens if the block isn't pinned.
-        if !message_received {
+        if message_received.is_err() {
             self.requests_subscriptions
                 .respond(
                     state_machine_request_id,
@@ -118,9 +106,9 @@ impl<TPlat: Platform> Background<TPlat> {
         pre_runtime_call: Option<runtime_service::RuntimeLock<TPlat>>,
         network_config: methods::NetworkConfig,
     ) {
-        let (state_machine_subscription, mut messages_rx, subscription_start) = match self
+        let (subscription_id, mut messages_rx, subscription_start) = match self
             .requests_subscriptions
-            .start_subscription(&state_machine_request_id, 1)
+            .start_subscription(state_machine_request_id, 1)
             .await
         {
             Ok(v) => v,
@@ -148,16 +136,6 @@ impl<TPlat: Platform> Background<TPlat> {
             let function_to_call = function_to_call.to_owned();
             let state_machine_request_id = state_machine_request_id.clone();
             async move {
-                let subscription_id = me
-                    .next_subscription_id
-                    .fetch_add(1, atomic::Ordering::Relaxed)
-                    .to_string();
-
-                me.subscriptions.lock().await.insert(
-                    subscription_id.clone(),
-                        state_machine_subscription.clone(),
-                );
-
                 me.requests_subscriptions
                     .respond(
                         &state_machine_request_id,
@@ -383,9 +361,9 @@ impl<TPlat: Platform> Background<TPlat> {
                 };
 
                 me.requests_subscriptions
-                    .push_notification(&state_machine_subscription, final_notif)
+                    .push_notification(&state_machine_request_id,
+                        &subscription_id, final_notif)
                     .await;
-                let _ = me.subscriptions.lock().await.remove(&subscription_id);
             }
         });
     }
@@ -397,7 +375,7 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         runtime_updates: bool,
     ) {
-        let (state_machine_subscription, mut messages_rx, subscription_start) = match self
+        let (subscription_id, mut messages_rx, subscription_start) = match self
             .requests_subscriptions
             .start_subscription(state_machine_request_id, 16)
             .await
@@ -436,11 +414,6 @@ impl<TPlat: Platform> Background<TPlat> {
         };
 
         let (subscription_id, initial_notifications, mut subscription_state) = {
-            let subscription_id = self
-                .next_subscription_id
-                .fetch_add(1, atomic::Ordering::Relaxed)
-                .to_string();
-
             let mut initial_notifications = Vec::with_capacity(match &subscribe_all {
                 either::Left(sa) => 1 + sa.non_finalized_blocks_ancestry_order.len(),
                 either::Right(sa) => 1 + sa.non_finalized_blocks_ancestry_order.len(),
@@ -591,10 +564,6 @@ impl<TPlat: Platform> Background<TPlat> {
                 }
             }
 
-            let mut lock = self.subscriptions.lock().await;
-
-            lock.insert(subscription_id.clone(), state_machine_subscription.clone());
-
             let subscription_state = FollowSubscription {
                 non_finalized_blocks,
                 pinned_blocks_headers,
@@ -621,7 +590,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 // Send back to the user the initial notifications.
                 for notif in initial_notifications {
                     me.requests_subscriptions
-                        .push_notification(&state_machine_subscription, notif)
+                        .push_notification(&state_machine_request_id, &subscription_id, notif)
                         .await;
                 }
 
@@ -678,7 +647,8 @@ impl<TPlat: Platform> Background<TPlat> {
                             if me
                                 .requests_subscriptions
                                 .try_push_notification(
-                                    &state_machine_subscription,
+                                    &state_machine_request_id,
+                                    &subscription_id,
                                     methods::ServerToClient::chainHead_unstable_followEvent {
                                         subscription: (&subscription_id).into(),
                                         result: methods::FollowEvent::BestBlockChanged {
@@ -698,7 +668,8 @@ impl<TPlat: Platform> Background<TPlat> {
                             if me
                                 .requests_subscriptions
                                 .try_push_notification(
-                                    &state_machine_subscription,
+                                    &state_machine_request_id,
+                                    &subscription_id,
                                     methods::ServerToClient::chainHead_unstable_followEvent {
                                         subscription: (&subscription_id).into(),
                                         result: methods::FollowEvent::Finalized {
@@ -726,7 +697,8 @@ impl<TPlat: Platform> Background<TPlat> {
                             let _ = me
                                 .requests_subscriptions
                                 .try_push_notification(
-                                    &state_machine_subscription,
+                                    &state_machine_request_id,
+                                    &subscription_id,
                                     methods::ServerToClient::chainHead_unstable_followEvent {
                                         subscription: (&subscription_id).into(),
                                         result: methods::FollowEvent::BestBlockChanged {
@@ -761,7 +733,8 @@ impl<TPlat: Platform> Background<TPlat> {
                             if me
                                 .requests_subscriptions
                                 .try_push_notification(
-                                    &state_machine_subscription,
+                                    &state_machine_request_id,
+                                    &subscription_id,
                                     methods::ServerToClient::chainHead_unstable_followEvent {
                                         subscription: (&subscription_id).into(),
                                         result: methods::FollowEvent::NewBlock {
@@ -790,7 +763,8 @@ impl<TPlat: Platform> Background<TPlat> {
                                 if me
                                     .requests_subscriptions
                                     .try_push_notification(
-                                        &state_machine_subscription,
+                                        &state_machine_request_id,
+                                        &subscription_id,
                                         methods::ServerToClient::chainHead_unstable_followEvent {
                                             subscription: (&subscription_id).into(),
                                             result: methods::FollowEvent::BestBlockChanged {
@@ -830,7 +804,8 @@ impl<TPlat: Platform> Background<TPlat> {
                             if me
                                 .requests_subscriptions
                                 .try_push_notification(
-                                    &state_machine_subscription,
+                                    &state_machine_request_id,
+                                    &subscription_id,
                                     methods::ServerToClient::chainHead_unstable_followEvent {
                                         subscription: (&subscription_id).into(),
                                         result: methods::FollowEvent::NewBlock {
@@ -853,7 +828,8 @@ impl<TPlat: Platform> Background<TPlat> {
                                 if me
                                     .requests_subscriptions
                                     .try_push_notification(
-                                        &state_machine_subscription,
+                                        &state_machine_request_id,
+                                        &subscription_id,
                                         methods::ServerToClient::chainHead_unstable_followEvent {
                                             subscription: (&subscription_id).into(),
                                             result: methods::FollowEvent::BestBlockChanged {
@@ -1117,10 +1093,10 @@ impl<TPlat: Platform> Background<TPlat> {
                     }
                 }
 
-                let _ = me.subscriptions.lock().await.remove(&subscription_id);
                 me.requests_subscriptions
                     .push_notification(
-                        &state_machine_subscription,
+                        &state_machine_request_id,
+                        &subscription_id,
                         methods::ServerToClient::chainHead_unstable_followEvent {
                             subscription: (&subscription_id).into(),
                             result: methods::FollowEvent::Stop {},
@@ -1152,37 +1128,25 @@ impl<TPlat: Platform> Background<TPlat> {
         // This is implemented by sending a message to the notifications task.
         // The task dedicated to this subscription will receive the message and send a response to
         // the JSON-RPC client.
-        let message_received = {
-            let state_machine_sub_id = self
-                .subscriptions
-                .lock()
-                .await
-                .get(follow_subscription)
-                .cloned();
-
-            if let Some(state_machine_sub_id) = state_machine_sub_id {
-                self.requests_subscriptions
-                    .subscription_send(
-                        &state_machine_sub_id,
-                        SubscriptionMessage::ChainHeadStorage {
-                            get_state_machine_request_id: state_machine_request_id.clone(),
-                            get_request_id: request_id.to_owned(),
-                            hash,
-                            key,
-                            child_key,
-                            network_config,
-                        },
-                    )
-                    .await
-                    .is_ok()
-            } else {
-                false
-            }
-        };
+        let message_received = self
+            .requests_subscriptions
+            .subscription_send(
+                state_machine_request_id,
+                follow_subscription,
+                SubscriptionMessage::ChainHeadStorage {
+                    get_state_machine_request_id: state_machine_request_id.clone(),
+                    get_request_id: request_id.to_owned(),
+                    hash,
+                    key,
+                    child_key,
+                    network_config,
+                },
+            )
+            .await;
 
         // Send back a response manually if the task doesn't exist, or has discarded the message,
         // which happens if the block isn't pinned.
-        if !message_received {
+        if message_received.is_err() {
             self.requests_subscriptions
                 .respond(
                     state_machine_request_id,
@@ -1228,7 +1192,7 @@ impl<TPlat: Platform> Background<TPlat> {
             return;
         }
 
-        let (state_machine_subscription, mut messages_rx, subscription_start) = match self
+        let (subscription_id, mut messages_rx, subscription_start) = match self
             .requests_subscriptions
             .start_subscription(state_machine_request_id, 1)
             .await
@@ -1251,16 +1215,6 @@ impl<TPlat: Platform> Background<TPlat> {
                 return;
             }
         };
-
-        let subscription_id = self
-            .next_subscription_id
-            .fetch_add(1, atomic::Ordering::Relaxed)
-            .to_string();
-
-        self.subscriptions
-            .lock()
-            .await
-            .insert(subscription_id.clone(), state_machine_subscription.clone());
 
         subscription_start.start({
             let me = self.clone();
@@ -1369,9 +1323,13 @@ impl<TPlat: Platform> Background<TPlat> {
                 };
 
                 me.requests_subscriptions
-                    .set_queued_notification(&state_machine_subscription, 0, response)
+                    .set_queued_notification(
+                        &state_machine_request_id,
+                        &subscription_id,
+                        0,
+                        response,
+                    )
                     .await;
-                let _ = me.subscriptions.lock().await.remove(&subscription_id);
             }
         });
     }
@@ -1394,35 +1352,23 @@ impl<TPlat: Platform> Background<TPlat> {
         // This is implemented by sending a message to the notifications task.
         // The task dedicated to this subscription will receive the message and send a response to
         // the JSON-RPC client.
-        let message_received = {
-            let state_machine_sub_id = self
-                .subscriptions
-                .lock()
-                .await
-                .get(follow_subscription)
-                .cloned();
-
-            if let Some(state_machine_sub_id) = state_machine_sub_id {
-                self.requests_subscriptions
-                    .subscription_send(
-                        &state_machine_sub_id,
-                        SubscriptionMessage::ChainHeadBody {
-                            get_state_machine_request_id: state_machine_request_id.clone(),
-                            get_request_id: request_id.to_owned(),
-                            hash,
-                            network_config,
-                        },
-                    )
-                    .await
-                    .is_ok()
-            } else {
-                false
-            }
-        };
+        let message_received = self
+            .requests_subscriptions
+            .subscription_send(
+                state_machine_request_id,
+                follow_subscription,
+                SubscriptionMessage::ChainHeadBody {
+                    get_state_machine_request_id: state_machine_request_id.clone(),
+                    get_request_id: request_id.to_owned(),
+                    hash,
+                    network_config,
+                },
+            )
+            .await;
 
         // Send back a response manually if the task doesn't exist, or has discarded the message,
         // which happens if the block isn't pinned.
-        if !message_received {
+        if message_received.is_err() {
             self.requests_subscriptions
                 .respond(
                     state_machine_request_id,
@@ -1444,9 +1390,9 @@ impl<TPlat: Platform> Background<TPlat> {
         network_config: methods::NetworkConfig,
         block_number: Option<u64>,
     ) {
-        let (state_machine_subscription, mut messages_rx, subscription_start) = match self
+        let (subscription_id, mut messages_rx, subscription_start) = match self
             .requests_subscriptions
-            .start_subscription(&state_machine_request_id, 1)
+            .start_subscription(state_machine_request_id, 1)
             .await
         {
             Ok(v) => v,
@@ -1467,16 +1413,6 @@ impl<TPlat: Platform> Background<TPlat> {
                 return;
             }
         };
-
-        let subscription_id = self
-            .next_subscription_id
-            .fetch_add(1, atomic::Ordering::Relaxed)
-            .to_string();
-
-        self.subscriptions
-            .lock()
-            .await
-            .insert(subscription_id.clone(), state_machine_subscription.clone());
 
         subscription_start.start({
             let me = self.clone();
@@ -1577,9 +1513,13 @@ impl<TPlat: Platform> Background<TPlat> {
                 };
 
                 me.requests_subscriptions
-                    .set_queued_notification(&state_machine_subscription, 0, response)
+                    .set_queued_notification(
+                        &state_machine_request_id,
+                        &subscription_id,
+                        0,
+                        response,
+                    )
                     .await;
-                let _ = me.subscriptions.lock().await.remove(&subscription_id);
             }
         });
     }
@@ -1595,34 +1535,22 @@ impl<TPlat: Platform> Background<TPlat> {
         // This is implemented by sending a message to the notifications task.
         // The task dedicated to this subscription will receive the message and send a response to
         // the JSON-RPC client.
-        let message_received = {
-            let state_machine_sub_id = self
-                .subscriptions
-                .lock()
-                .await
-                .get(follow_subscription)
-                .cloned();
-
-            if let Some(state_machine_sub_id) = state_machine_sub_id {
-                self.requests_subscriptions
-                    .subscription_send(
-                        &state_machine_sub_id,
-                        SubscriptionMessage::ChainHeadHeader {
-                            get_state_machine_request_id: state_machine_request_id.clone(),
-                            get_request_id: request_id.to_owned(),
-                            hash,
-                        },
-                    )
-                    .await
-                    .is_ok()
-            } else {
-                false
-            }
-        };
+        let message_received = self
+            .requests_subscriptions
+            .subscription_send(
+                state_machine_request_id,
+                follow_subscription,
+                SubscriptionMessage::ChainHeadHeader {
+                    get_state_machine_request_id: state_machine_request_id.clone(),
+                    get_request_id: request_id.to_owned(),
+                    hash,
+                },
+            )
+            .await;
 
         // Send back a response manually if the task doesn't exist, or has discarded the message,
         // which happens if the block isn't pinned.
-        if !message_received {
+        if message_received.is_err() {
             self.requests_subscriptions
                 .respond(
                     state_machine_request_id,
@@ -1646,34 +1574,22 @@ impl<TPlat: Platform> Background<TPlat> {
         // Stopping the subscription is done by sending a message to it.
         // The task dedicated to this subscription will receive the message, send a response to
         // the JSON-RPC client, then shut down.
-        let stop_message_received = {
-            let state_machine_sub_id = self
-                .subscriptions
-                .lock()
-                .await
-                .get(subscription_id)
-                .cloned();
-
-            if let Some(state_machine_sub_id) = state_machine_sub_id {
-                self.requests_subscriptions
-                    .subscription_send(
-                        &state_machine_sub_id,
-                        SubscriptionMessage::StopIfChainHeadBody {
-                            stop_state_machine_request_id: state_machine_request_id.clone(),
-                            stop_request_id: request_id.to_owned(),
-                        },
-                    )
-                    .await
-                    .is_ok()
-            } else {
-                false
-            }
-        };
+        let stop_message_received = self
+            .requests_subscriptions
+            .subscription_send(
+                state_machine_request_id,
+                subscription_id,
+                SubscriptionMessage::StopIfChainHeadBody {
+                    stop_state_machine_request_id: state_machine_request_id.clone(),
+                    stop_request_id: request_id.to_owned(),
+                },
+            )
+            .await;
 
         // Send back a response manually if the task doesn't exist, or has discarded the message,
         // which could happen for example because there was already a stop message earlier in its
         // queue or because it was the wrong type of subscription.
-        if !stop_message_received {
+        if stop_message_received.is_err() {
             self.requests_subscriptions
                 .respond(
                     state_machine_request_id,
@@ -1693,34 +1609,22 @@ impl<TPlat: Platform> Background<TPlat> {
         // Stopping the subscription is done by sending a message to it.
         // The task dedicated to this subscription will receive the message, send a response to
         // the JSON-RPC client, then shut down.
-        let stop_message_received = {
-            let state_machine_sub_id = self
-                .subscriptions
-                .lock()
-                .await
-                .get(subscription_id)
-                .cloned();
-
-            if let Some(state_machine_sub_id) = state_machine_sub_id {
-                self.requests_subscriptions
-                    .subscription_send(
-                        &state_machine_sub_id,
-                        SubscriptionMessage::StopIfChainHeadCall {
-                            stop_state_machine_request_id: state_machine_request_id.clone(),
-                            stop_request_id: request_id.to_owned(),
-                        },
-                    )
-                    .await
-                    .is_ok()
-            } else {
-                false
-            }
-        };
+        let stop_message_received = self
+            .requests_subscriptions
+            .subscription_send(
+                state_machine_request_id,
+                subscription_id,
+                SubscriptionMessage::StopIfChainHeadCall {
+                    stop_state_machine_request_id: state_machine_request_id.clone(),
+                    stop_request_id: request_id.to_owned(),
+                },
+            )
+            .await;
 
         // Send back a response manually if the task doesn't exist, or has discarded the message,
         // which could happen for example because there was already a stop message earlier in its
         // queue or because it was the wrong type of subscription.
-        if !stop_message_received {
+        if stop_message_received.is_err() {
             self.requests_subscriptions
                 .respond(
                     state_machine_request_id,
@@ -1740,34 +1644,22 @@ impl<TPlat: Platform> Background<TPlat> {
         // Stopping the subscription is done by sending a message to it.
         // The task dedicated to this subscription will receive the message, send a response to
         // the JSON-RPC client, then shut down.
-        let stop_message_received = {
-            let state_machine_sub_id = self
-                .subscriptions
-                .lock()
-                .await
-                .get(subscription_id)
-                .cloned();
-
-            if let Some(state_machine_sub_id) = state_machine_sub_id {
-                self.requests_subscriptions
-                    .subscription_send(
-                        &state_machine_sub_id,
-                        SubscriptionMessage::StopIfChainHeadStorage {
-                            stop_state_machine_request_id: state_machine_request_id.clone(),
-                            stop_request_id: request_id.to_owned(),
-                        },
-                    )
-                    .await
-                    .is_ok()
-            } else {
-                false
-            }
-        };
+        let stop_message_received = self
+            .requests_subscriptions
+            .subscription_send(
+                state_machine_request_id,
+                subscription_id,
+                SubscriptionMessage::StopIfChainHeadStorage {
+                    stop_state_machine_request_id: state_machine_request_id.clone(),
+                    stop_request_id: request_id.to_owned(),
+                },
+            )
+            .await;
 
         // Send back a response manually if the task doesn't exist, or has discarded the message,
         // which could happen for example because there was already a stop message earlier in its
         // queue or because it was the wrong type of subscription.
-        if !stop_message_received {
+        if stop_message_received.is_err() {
             self.requests_subscriptions
                 .respond(
                     state_machine_request_id,
@@ -1788,34 +1680,22 @@ impl<TPlat: Platform> Background<TPlat> {
         // Stopping the subscription is done by sending a message to it.
         // The task dedicated to this subscription will receive the message, send a response to
         // the JSON-RPC client, then shut down.
-        let stop_message_received = {
-            let state_machine_sub_id = self
-                .subscriptions
-                .lock()
-                .await
-                .get(follow_subscription)
-                .cloned();
-
-            if let Some(state_machine_sub_id) = state_machine_sub_id {
-                self.requests_subscriptions
-                    .subscription_send(
-                        &state_machine_sub_id,
-                        SubscriptionMessage::StopIfChainHeadFollow {
-                            stop_state_machine_request_id: state_machine_request_id.clone(),
-                            stop_request_id: request_id.to_owned(),
-                        },
-                    )
-                    .await
-                    .is_ok()
-            } else {
-                false
-            }
-        };
+        let stop_message_received = self
+            .requests_subscriptions
+            .subscription_send(
+                state_machine_request_id,
+                follow_subscription,
+                SubscriptionMessage::StopIfChainHeadFollow {
+                    stop_state_machine_request_id: state_machine_request_id.clone(),
+                    stop_request_id: request_id.to_owned(),
+                },
+            )
+            .await;
 
         // Send back a response manually if the task doesn't exist, or has discarded the message,
         // which could happen for example because there was already a stop message earlier in its
         // queue or because it was the wrong type of subscription.
-        if !stop_message_received {
+        if stop_message_received.is_err() {
             self.requests_subscriptions
                 .respond(
                     state_machine_request_id,
@@ -1836,34 +1716,22 @@ impl<TPlat: Platform> Background<TPlat> {
         // This is implemented by sending a message to the notifications task.
         // The task dedicated to this subscription will receive the message and send a response to
         // the JSON-RPC client.
-        let message_received = {
-            let state_machine_sub_id = self
-                .subscriptions
-                .lock()
-                .await
-                .get(follow_subscription)
-                .cloned();
-
-            if let Some(state_machine_sub_id) = state_machine_sub_id {
-                self.requests_subscriptions
-                    .subscription_send(
-                        &state_machine_sub_id,
-                        SubscriptionMessage::ChainHeadFollowUnpin {
-                            unpin_state_machine_request_id: state_machine_request_id.clone(),
-                            unpin_request_id: request_id.to_owned(),
-                            hash,
-                        },
-                    )
-                    .await
-                    .is_ok()
-            } else {
-                false
-            }
-        };
+        let message_received = self
+            .requests_subscriptions
+            .subscription_send(
+                state_machine_request_id,
+                follow_subscription,
+                SubscriptionMessage::ChainHeadFollowUnpin {
+                    unpin_state_machine_request_id: state_machine_request_id.clone(),
+                    unpin_request_id: request_id.to_owned(),
+                    hash,
+                },
+            )
+            .await;
 
         // Send back a response manually if the task doesn't exist, or has discarded the message,
         // which happens if the block to unpin isn't valid.
-        if !message_received {
+        if message_received.is_err() {
             self.requests_subscriptions
                 .respond(
                     state_machine_request_id,

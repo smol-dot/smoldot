@@ -93,24 +93,16 @@
 //! If a client-sent request requires starting a subscription, one of the
 //! requests-pulling-dedicated tasks should call [`RequestsSubscriptions::start_subscription`].
 //!
-//! It is the responsibility of the higher-level code to generate the JSON-RPC-client-facing
-//! identifier of the subscription.
-//!
-//! When a subscription is started, the higher-level code should spawn a new task dedicated to
+//! When a subscription is started, the higher-level code spawns a new task dedicated to
 //! sending back notifications to the client using [`RequestsSubscriptions::push_notification`],
 //! [`RequestsSubscriptions::try_push_notification`], or
 //! [`RequestsSubscriptions::set_queued_notification`].
-//!
-//! The code on top should maintain a map of `JSON-RPC-client-facing identifier` to
-//! [`SubscriptionId`]. When the JSON-RPC client wants to unsubscribe, call
-//! [`RequestsSubscriptions::stop_subscription`]. This map should also contain a way to abort
-//! the task dedicated to that subscription.
 //!
 
 use alloc::{
     boxed::Box,
     collections::{BTreeMap, VecDeque},
-    string::String,
+    string::{String, ToString as _},
     sync::{Arc, Weak},
     vec::Vec,
 };
@@ -136,8 +128,20 @@ pub struct ClientId(u64, Weak<dyn Any + Send + Sync>);
 #[derive(Clone)]
 pub struct RequestId(u64, Weak<dyn Any + Send + Sync>);
 
-#[derive(Clone)]
-pub struct SubscriptionId(u64, Weak<dyn Any + Send + Sync>);
+#[derive(Debug, Clone, derive_more::From)]
+pub enum ClientOrRequestIdRef<'a> {
+    ClientId(&'a ClientId),
+    RequestId(&'a RequestId),
+}
+
+impl<'a> ClientOrRequestIdRef<'a> {
+    fn client_weak(self) -> &'a Weak<dyn Any + Send + Sync> {
+        match self {
+            ClientOrRequestIdRef::ClientId(c) => &c.1,
+            ClientOrRequestIdRef::RequestId(r) => &r.1,
+        }
+    }
+}
 
 pub mod executor;
 
@@ -309,18 +313,14 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
     /// Returns `None` if this [`ClientId`] is stale or invalid.
     ///
     /// This function invalidates all active requests and subscriptions that relate to this
-    /// client. The concerned [`RequestId`]s and [`SubscriptionId`]s are returned by this
-    /// function.
+    /// client. The concerned [`RequestId`]s and subscriptions are returned by this function.
     ///
     /// Note however that functions such as [`RequestsSubscriptions::respond`] and
     /// [`RequestsSubscriptions::push_notification`] intentionally have no effect if you pass an
     /// invalid [`RequestId`] or [`SubscriptionId`]. There is therefore no need to cancel any
     /// parallel task that might currently be responding to requests or pushing notification
     /// messages.
-    pub async fn remove_client(
-        &self,
-        client: &ClientId,
-    ) -> Option<(Vec<RequestId>, Vec<SubscriptionId>)> {
+    pub async fn remove_client(&self, client: &ClientId) -> Option<(Vec<RequestId>, Vec<String>)> {
         // Try remove the client from the list. Returns if it doesn't exist.
         let removed = {
             let mut clients = self.clients.lock().await;
@@ -354,7 +354,7 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
         let subscriptions_list = guarded_lock
             .active_subscriptions
             .keys()
-            .map(|n| SubscriptionId(*n, client.1.clone()))
+            .map(|n| n.to_string()) // TODO: a bit dangerous in case the mapping is modified? extract to own function?
             .collect();
 
         guarded_lock
@@ -693,7 +693,7 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
     /// If the given [`RequestId`] is stale or invalid, this function always succeeds and returns
     /// a stale [`SubscriptionId`].
     ///
-    /// The [`SubscriptionStart`] object returne by this function on success must be used in order
+    /// The [`SubscriptionStart`] object returned by this function on success must be used in order
     /// to provide a background task associated with the given subscription. The subscription is
     /// automatically cleaned up when the task finishes.
     ///
@@ -711,13 +711,14 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
     ///
     /// For some JSON-RPC functions, the value of this constant can easily be deduced from the
     /// logic of the function. For other functions, the value of this constant should be hard coded.
-    pub async fn start_subscription(
-        &'_ self,
-        client: &RequestId,
+    // TODO: return a struct instead of a tuple
+    pub async fn start_subscription<'a, 'b>(
+        &'a self,
+        client_or_request: impl Into<ClientOrRequestIdRef<'b>>,
         notifications_capacity: usize,
     ) -> Result<
         (
-            SubscriptionId,
+            String,
             mpsc::Receiver<(TSubMsg, oneshot::Sender<()>)>,
             SubscriptionStart<'_, TSubMsg>,
         ),
@@ -725,25 +726,23 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
     > {
         let (messages_tx, messages_rx) = mpsc::channel(0);
 
-        let client_arc = match client
-            .1
+        let subscription_id_num = self.next_subscription_id.fetch_add(1, Ordering::Relaxed);
+        let subscription_id_string = subscription_id_num.to_string();
+
+        let client_arc = match client_or_request
+            .into()
+            .client_weak()
             .upgrade()
             .and_then(|c| Arc::downcast::<ClientInner<TSubMsg>>(c).ok())
         {
             Some(c) => c,
             None => {
-                let new_subscription_num =
-                    self.next_subscription_id.fetch_add(1, Ordering::Relaxed);
                 return Ok((
-                    SubscriptionId(new_subscription_num, {
-                        // As of the time of writing of this comment, `Weak::new()` requires `T`
-                        // to be `Sized` for some reason.
-                        Arc::downgrade(&(Arc::new(()) as Arc<_>))
-                    }),
+                    subscription_id_string,
                     messages_rx,
                     SubscriptionStart {
                         requests_subscriptions: self,
-                        subscription_id: None,
+                        client_subscription: None,
                     },
                 ));
             }
@@ -765,9 +764,8 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
             return Err(StartSubscriptionError::LimitReached);
         }
 
-        let new_subscription_num = self.next_subscription_id.fetch_add(1, Ordering::Relaxed);
         let _prev_value = lock.active_subscriptions.insert(
-            new_subscription_num,
+            subscription_id_num,
             Subscription {
                 notifications_capacity,
                 messages_tx,
@@ -777,17 +775,12 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
 
         drop(lock);
 
-        let subscription_id = SubscriptionId(
-            new_subscription_num,
-            Arc::downgrade(&(client_arc as Arc<_>)),
-        );
-
         Ok((
-            subscription_id.clone(),
+            subscription_id_string,
             messages_rx,
             SubscriptionStart {
                 requests_subscriptions: self,
-                subscription_id: Some(subscription_id),
+                client_subscription: Some((client_arc, subscription_id_num)),
             },
         ))
     }
@@ -804,14 +797,18 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
     /// confirmation. Cancelling the function in its confirmation waiting phase doesn't
     /// "un-deliver" the message. This function doesn't allow to deliver a message without
     /// waiting for a confirmation.
-    pub async fn subscription_send(
-        &self,
-        subscription: &SubscriptionId,
+    pub async fn subscription_send<'a, 'b>(
+        &'a self,
+        client_or_request: impl Into<ClientOrRequestIdRef<'b>>,
+        subscription: &str,
         message: TSubMsg,
     ) -> Result<(), ()> {
+        let subscription_as_num: u64 = subscription.parse().map_err(|_| ())?;
+
         let confirmation_rx = {
-            let client_arc = match subscription
-                .1
+            let client_arc = match client_or_request
+                .into()
+                .client_weak()
                 .upgrade()
                 .and_then(|c| Arc::downcast::<ClientInner<TSubMsg>>(c).ok())
             {
@@ -825,7 +822,7 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
 
             let subscription = lock
                 .active_subscriptions
-                .get_mut(&subscription.0)
+                .get_mut(&subscription_as_num)
                 .ok_or(())?;
 
             // TODO: keeping the lock while sending the message doesn't seem great as it could potentially deadlock
@@ -871,14 +868,18 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
     /// Panics if the `index` is superior or equal to the `messages_capacity` that was passed to
     /// [`RequestsSubscriptions::start_subscription`].
     ///
-    pub async fn set_queued_notification(
-        &self,
-        subscription: &SubscriptionId,
+    pub async fn set_queued_notification<'a, 'b>(
+        &'a self,
+        client_or_request: impl Into<ClientOrRequestIdRef<'b>>,
+        subscription: &str,
         index: usize,
         message: String,
     ) {
-        let client_arc = match subscription
-            .1
+        let Ok(subscription_as_num): Result<u64, _> = subscription.parse() else { return };
+
+        let client_arc = match client_or_request
+            .into()
+            .client_weak()
             .upgrade()
             .and_then(|c| Arc::downcast::<ClientInner<TSubMsg>>(c).ok())
         {
@@ -890,7 +891,7 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
 
         // Two in one: check whether this subscription is indeed valid, and at the same time get
         // the messages capacity.
-        let notifications_capacity = match lock.active_subscriptions.get(&subscription.0) {
+        let notifications_capacity = match lock.active_subscriptions.get(&subscription_as_num) {
             Some(l) => l.notifications_capacity,
             None => return,
         };
@@ -901,12 +902,15 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
         // Inserts or replaces the current value under the key `(subscription, index)`.
         let previous_message = lock
             .notification_messages
-            .insert((subscription.0, index), message);
+            .insert((subscription_as_num, index), message);
 
         // Add an entry in `responses_send_back`, or skip this step if not necessary.
         if previous_message.is_none() {
             lock.responses_send_back
-                .push_back(ResponseSendBack::SubscriptionMessage(subscription.0, index));
+                .push_back(ResponseSendBack::SubscriptionMessage(
+                    subscription_as_num,
+                    index,
+                ));
             lock.responses_send_back_pushed_or_dead.notify_additional(1);
         }
     }
@@ -925,9 +929,14 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
     ///
     /// Has no effect and silently discards the message if the [`SubscriptionId`] is stale or
     /// invalid.
-    pub async fn push_notification(&self, subscription: &SubscriptionId, message: String) {
+    pub async fn push_notification<'a>(
+        &self,
+        client: impl Into<ClientOrRequestIdRef<'a>>,
+        subscription: &str,
+        message: String,
+    ) {
         let _result = self
-            .try_push_notification_inner(subscription, message, false)
+            .try_push_notification_inner(client, subscription, message, false)
             .await;
         debug_assert!(_result.is_ok());
     }
@@ -948,12 +957,13 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
     ///
     /// Returns `Ok` and silently discards the message if the [`SubscriptionId`] is stale or
     /// invalid.
-    pub async fn try_push_notification(
+    pub async fn try_push_notification<'a>(
         &self,
-        subscription: &SubscriptionId,
+        client: impl Into<ClientOrRequestIdRef<'a>>,
+        subscription: &str,
         message: String,
     ) -> Result<(), ()> {
-        self.try_push_notification_inner(subscription, message, true)
+        self.try_push_notification_inner(client, subscription, message, true)
             .await
     }
 
@@ -961,20 +971,24 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
     ///
     /// If `try_only` is `false`, then this function waits for a slot to be available and always
     /// succeeds.
-    async fn try_push_notification_inner(
+    async fn try_push_notification_inner<'a>(
         &self,
-        subscription: &SubscriptionId,
+        client: impl Into<ClientOrRequestIdRef<'a>>,
+        subscription: &str,
         message: String,
         try_only: bool,
     ) -> Result<(), ()> {
-        let client_arc = match subscription
-            .1
+        let client_arc = match client
+            .into()
+            .client_weak()
             .upgrade()
             .and_then(|c| Arc::downcast::<ClientInner<TSubMsg>>(c).ok())
         {
             Some(c) => c,
             None => return Ok(()),
         };
+
+        let subscription_as_num: u64 = subscription.parse().map_err(|_| ())?;
 
         // TODO: this is O(n)
         let (index, mut lock) = loop {
@@ -989,15 +1003,17 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
                 // time get the messages capacity.
                 // This is done at each iteration, to check whether the subscription is still
                 // valid.
-                let notifications_capacity = match lock.active_subscriptions.get(&subscription.0) {
-                    Some(l) => l.notifications_capacity,
-                    None => return Ok(()),
-                };
+                let notifications_capacity =
+                    match lock.active_subscriptions.get(&subscription_as_num) {
+                        Some(l) => l.notifications_capacity,
+                        None => return Ok(()),
+                    };
 
                 let control_flow = lock
                     .notification_messages
                     .range(
-                        (subscription.0, usize::min_value())..=(subscription.0, usize::max_value()),
+                        (subscription_as_num, usize::min_value())
+                            ..=(subscription_as_num, usize::max_value()),
                     )
                     .map(|((_, idx), _)| *idx)
                     .try_fold(0, |maybe_free_index, index| {
@@ -1028,12 +1044,15 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
         // Inserts or replaces the current value under the key `(subscription, index)`.
         let _previous_message = lock
             .notification_messages
-            .insert((subscription.0, index), message);
+            .insert((subscription_as_num, index), message);
         debug_assert!(_previous_message.is_none());
 
         // Add an entry in `responses_send_back`.
         lock.responses_send_back
-            .push_back(ResponseSendBack::SubscriptionMessage(subscription.0, index));
+            .push_back(ResponseSendBack::SubscriptionMessage(
+                subscription_as_num,
+                index,
+            ));
         lock.responses_send_back_pushed_or_dead.notify_additional(1);
 
         Ok(())
@@ -1047,9 +1066,9 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
 pub struct SubscriptionStart<'a, TSubMsg> {
     requests_subscriptions: &'a RequestsSubscriptions<TSubMsg>,
 
-    /// Allocated identifier of the subscription. `None` if this is a dummy and no subscription
-    /// should actually be started because the client is no longer valid.
-    subscription_id: Option<SubscriptionId>,
+    /// Allocated identifier of the client and subscription. `None` if this is a dummy and no
+    /// subscription should actually be started because the client is no longer valid.
+    client_subscription: Option<(Arc<ClientInner<TSubMsg>>, u64)>,
 }
 
 impl<'a, TSubMsg: Send + Sync + 'static> SubscriptionStart<'a, TSubMsg> {
@@ -1058,7 +1077,7 @@ impl<'a, TSubMsg: Send + Sync + 'static> SubscriptionStart<'a, TSubMsg> {
     /// Note that the task doesn't run automatically. Instead,
     /// [`RequestsSubscriptions::run_subscription_task`] must be called.
     pub fn start(self, task: impl Future<Output = ()> + Send + 'static) {
-        let Some(subscription_id) = self.subscription_id else { return };
+        let Some((client_arc, subscription_id)) = self.client_subscription else { return };
 
         // Augment the task by adding at the end some code that cleans up this subscription from
         // the state machine.
@@ -1072,30 +1091,17 @@ impl<'a, TSubMsg: Send + Sync + 'static> SubscriptionStart<'a, TSubMsg> {
                 task.await;
 
                 // TODO: review this code now that subscription shut down gracefully instead of abruptly
-                let client_arc = match subscription_id
-                    .1
-                    .upgrade()
-                    .and_then(|c| Arc::downcast::<ClientInner<TSubMsg>>(c).ok())
-                {
-                    Some(c) => c,
-                    None => return,
-                };
-
                 let mut lock = client_arc.guarded.lock().await;
 
-                if lock
-                    .active_subscriptions
-                    .remove(&subscription_id.0)
-                    .is_none()
-                {
+                if lock.active_subscriptions.remove(&subscription_id).is_none() {
                     return;
                 }
 
                 if lock
                     .notification_messages
                     .range(
-                        (subscription_id.0, usize::min_value())
-                            ..=(subscription_id.0, usize::max_value()),
+                        (subscription_id, usize::min_value())
+                            ..=(subscription_id, usize::max_value()),
                     )
                     .next()
                     .is_some()
@@ -1302,4 +1308,3 @@ macro_rules! traits_impl {
 
 traits_impl!(ClientId);
 traits_impl!(RequestId);
-traits_impl!(SubscriptionId);
