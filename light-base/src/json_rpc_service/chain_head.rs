@@ -200,10 +200,6 @@ impl<TPlat: Platform> Background<TPlat> {
                                 confirmation_sender,
                             ))) => {
                                 me.requests_subscriptions
-                                    .stop_subscription(&state_machine_subscription)
-                                    .await;
-
-                                me.requests_subscriptions
                                     .respond(
                                         &stop_state_machine_request_id,
                                         methods::Response::chainHead_unstable_stopCall(())
@@ -388,9 +384,6 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 me.requests_subscriptions
                     .push_notification(&state_machine_subscription, final_notif)
-                    .await;
-                me.requests_subscriptions
-                    .stop_subscription(&state_machine_subscription)
                     .await;
                 let _ = me.subscriptions.lock().await.remove(&subscription_id);
             }
@@ -890,10 +883,6 @@ impl<TPlat: Platform> Background<TPlat> {
                             _,
                         )) => {
                             me.requests_subscriptions
-                                .stop_subscription(&state_machine_subscription)
-                                .await;
-
-                            me.requests_subscriptions
                                 .respond(
                                     &stop_state_machine_request_id,
                                     methods::Response::chainHead_unstable_unfollow(())
@@ -1139,9 +1128,6 @@ impl<TPlat: Platform> Background<TPlat> {
                         .to_json_call_object_parameters(None),
                     )
                     .await;
-                me.requests_subscriptions
-                    .stop_subscription(&state_machine_subscription)
-                    .await;
             }
         });
     }
@@ -1351,10 +1337,6 @@ impl<TPlat: Platform> Background<TPlat> {
                                     confirmation_sender,
                                 ))) => {
                                     me.requests_subscriptions
-                                        .stop_subscription(&state_machine_subscription)
-                                        .await;
-
-                                    me.requests_subscriptions
                                         .respond(
                                             &stop_state_machine_request_id,
                                             methods::Response::chainHead_unstable_stopBody(())
@@ -1388,9 +1370,6 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 me.requests_subscriptions
                     .set_queued_notification(&state_machine_subscription, 0, response)
-                    .await;
-                me.requests_subscriptions
-                    .stop_subscription(&state_machine_subscription)
                     .await;
                 let _ = me.subscriptions.lock().await.remove(&subscription_id);
             }
@@ -1573,10 +1552,6 @@ impl<TPlat: Platform> Background<TPlat> {
                                 confirmation_sender,
                             ))) => {
                                 me.requests_subscriptions
-                                    .stop_subscription(&state_machine_subscription)
-                                    .await;
-
-                                me.requests_subscriptions
                                     .respond(
                                         &stop_state_machine_request_id,
                                         methods::Response::chainHead_unstable_stopBody(())
@@ -1603,9 +1578,6 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 me.requests_subscriptions
                     .set_queued_notification(&state_machine_subscription, 0, response)
-                    .await;
-                me.requests_subscriptions
-                    .stop_subscription(&state_machine_subscription)
                     .await;
                 let _ = me.subscriptions.lock().await.remove(&subscription_id);
             }

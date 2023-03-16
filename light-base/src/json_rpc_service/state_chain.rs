@@ -524,10 +524,6 @@ impl<TPlat: Platform> Background<TPlat> {
                                 confirmation_sender,
                             ))) => {
                                 me.requests_subscriptions
-                                    .stop_subscription(&state_machine_subscription)
-                                    .await;
-
-                                me.requests_subscriptions
                                     .respond(
                                         &stop_state_machine_request_id,
                                         methods::Response::chain_unsubscribeAllHeads(true)
@@ -659,10 +655,6 @@ impl<TPlat: Platform> Background<TPlat> {
                             _,
                         )) => {
                             me.requests_subscriptions
-                                .stop_subscription(&state_machine_subscription)
-                                .await;
-
-                            me.requests_subscriptions
                                 .respond(
                                     &stop_state_machine_request_id,
                                     methods::Response::chain_unsubscribeFinalizedHeads(true)
@@ -792,10 +784,6 @@ impl<TPlat: Platform> Background<TPlat> {
                             )),
                             _,
                         )) => {
-                            me.requests_subscriptions
-                                .stop_subscription(&state_machine_subscription)
-                                .await;
-
                             me.requests_subscriptions
                                 .respond(
                                     &stop_state_machine_request_id,
@@ -1525,10 +1513,6 @@ impl<TPlat: Platform> Background<TPlat> {
                             _,
                         )) => {
                             me.requests_subscriptions
-                                .stop_subscription(&state_machine_subscription)
-                                .await;
-
-                            me.requests_subscriptions
                                 .respond(
                                     &stop_state_machine_request_id,
                                     methods::Response::state_unsubscribeRuntimeVersion(true)
@@ -1851,10 +1835,6 @@ impl<TPlat: Platform> Background<TPlat> {
                             )),
                             _,
                         )) => {
-                            me.requests_subscriptions
-                                .stop_subscription(&state_machine_subscription)
-                                .await;
-
                             me.requests_subscriptions
                                 .respond(
                                     &stop_state_machine_request_id,

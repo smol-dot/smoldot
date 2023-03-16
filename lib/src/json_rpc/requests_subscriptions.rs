@@ -743,6 +743,7 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
                     messages_rx,
                     SubscriptionStart {
                         requests_subscriptions: self,
+                        subscription_id: None,
                     },
                 ));
             }
@@ -776,14 +777,17 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
 
         drop(lock);
 
+        let subscription_id = SubscriptionId(
+            new_subscription_num,
+            Arc::downgrade(&(client_arc as Arc<_>)),
+        );
+
         Ok((
-            SubscriptionId(
-                new_subscription_num,
-                Arc::downgrade(&(client_arc as Arc<_>)),
-            ),
+            subscription_id.clone(),
             messages_rx,
             SubscriptionStart {
                 requests_subscriptions: self,
+                subscription_id: Some(subscription_id),
             },
         ))
     }
@@ -838,52 +842,6 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
         }
 
         Ok(())
-    }
-
-    /// Destroys the given subscription.
-    ///
-    /// All messages already queued will still be available through
-    /// [`RequestsSubscriptions::next_response`], but no new subscription message can be pushed.
-    ///
-    /// This function should be seen as a way to clean up the internal state of the state machine
-    /// and prevent new notifications from being pushed.
-    ///
-    /// Has no effect if the [`SubscriptionId`] is stale or invalid.
-    pub async fn stop_subscription(&self, subscription: &SubscriptionId) {
-        let client_arc = match subscription
-            .1
-            .upgrade()
-            .and_then(|c| Arc::downcast::<ClientInner<TSubMsg>>(c).ok())
-        {
-            Some(c) => c,
-            None => return,
-        };
-
-        let mut lock = client_arc.guarded.lock().await;
-
-        if lock.active_subscriptions.remove(&subscription.0).is_none() {
-            return;
-        }
-
-        if lock
-            .notification_messages
-            .range((subscription.0, usize::min_value())..=(subscription.0, usize::max_value()))
-            .next()
-            .is_some()
-        {
-            lock.num_inactive_alive_subscriptions += 1;
-            debug_assert!(
-                lock.num_inactive_alive_subscriptions <= self.max_subscriptions_per_client
-            );
-        }
-
-        lock.notification_messages_popped_or_dead
-            .notify_relaxed(usize::max_value());
-
-        debug_assert!(
-            lock.active_subscriptions.len() + lock.num_inactive_alive_subscriptions
-                <= self.max_subscriptions_per_client
-        );
     }
 
     /// Overwrites the notification whose index is `index` in the queue of notifications destined
@@ -1088,17 +1046,79 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
 #[must_use = "Subscriptions don't start until a task has been registered"]
 pub struct SubscriptionStart<'a, TSubMsg> {
     requests_subscriptions: &'a RequestsSubscriptions<TSubMsg>,
+
+    /// Allocated identifier of the subscription. `None` if this is a dummy and no subscription
+    /// should actually be started because the client is no longer valid.
+    subscription_id: Option<SubscriptionId>,
 }
 
-impl<'a, TSubMsg> SubscriptionStart<'a, TSubMsg> {
+impl<'a, TSubMsg: Send + Sync + 'static> SubscriptionStart<'a, TSubMsg> {
     /// Starts the subscription.
     ///
     /// Note that the task doesn't run automatically. Instead,
     /// [`RequestsSubscriptions::run_subscription_task`] must be called.
     pub fn start(self, task: impl Future<Output = ()> + Send + 'static) {
+        let Some(subscription_id) = self.subscription_id else { return };
+
+        // Augment the task by adding at the end some code that cleans up this subscription from
+        // the state machine.
+        // Note that there is no future cancellation concerns here, as the task is always
+        // guaranteed to be resumed at some point (unless the whole state machine is destroyed).
+        let wrapped_task = {
+            let max_subscriptions_per_client =
+                self.requests_subscriptions.max_subscriptions_per_client;
+
+            async move {
+                task.await;
+
+                // TODO: review this code now that subscription shut down gracefully instead of abruptly
+                let client_arc = match subscription_id
+                    .1
+                    .upgrade()
+                    .and_then(|c| Arc::downcast::<ClientInner<TSubMsg>>(c).ok())
+                {
+                    Some(c) => c,
+                    None => return,
+                };
+
+                let mut lock = client_arc.guarded.lock().await;
+
+                if lock
+                    .active_subscriptions
+                    .remove(&subscription_id.0)
+                    .is_none()
+                {
+                    return;
+                }
+
+                if lock
+                    .notification_messages
+                    .range(
+                        (subscription_id.0, usize::min_value())
+                            ..=(subscription_id.0, usize::max_value()),
+                    )
+                    .next()
+                    .is_some()
+                {
+                    lock.num_inactive_alive_subscriptions += 1;
+                    debug_assert!(
+                        lock.num_inactive_alive_subscriptions <= max_subscriptions_per_client
+                    );
+                }
+
+                lock.notification_messages_popped_or_dead
+                    .notify_relaxed(usize::max_value());
+
+                debug_assert!(
+                    lock.active_subscriptions.len() + lock.num_inactive_alive_subscriptions
+                        <= max_subscriptions_per_client
+                );
+            }
+        };
+
         self.requests_subscriptions
             .subscriptions_tasks
-            .push(Box::pin(task));
+            .push(Box::pin(wrapped_task));
     }
 }
 

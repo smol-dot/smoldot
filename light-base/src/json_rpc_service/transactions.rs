@@ -228,10 +228,6 @@ impl<TPlat: Platform> Background<TPlat> {
                                         confirmation_sender,
                                     )) => {
                                         me.requests_subscriptions
-                                            .stop_subscription(&state_machine_subscription)
-                                            .await;
-
-                                        me.requests_subscriptions
                                             .respond(
                                                 &stop_state_machine_request_id,
                                                 methods::Response::author_unwatchExtrinsic(true)
@@ -259,10 +255,6 @@ impl<TPlat: Platform> Background<TPlat> {
                             _,
                         )) if !is_legacy => {
                             me.requests_subscriptions
-                                .stop_subscription(&state_machine_subscription)
-                                .await;
-
-                            me.requests_subscriptions
                                 .respond(
                                     &stop_state_machine_request_id,
                                     methods::Response::transaction_unstable_unwatch(())
@@ -283,10 +275,6 @@ impl<TPlat: Platform> Background<TPlat> {
                             )),
                             _,
                         )) if is_legacy => {
-                            me.requests_subscriptions
-                                .stop_subscription(&state_machine_subscription)
-                                .await;
-
                             me.requests_subscriptions
                                 .respond(
                                     &stop_state_machine_request_id,
