@@ -116,7 +116,7 @@ impl InterpreterPrototype {
     fn from_base_components(base_components: BaseComponents) -> Result<Self, NewErr> {
         let mut store = wasmi::Store::new(base_components.module.engine(), ());
 
-        let mut linker = wasmi::Linker::<()>::new();
+        let mut linker = wasmi::Linker::<()>::new(&base_components.module.engine());
         let mut import_memory = None;
 
         for (module_import, resolved_function) in base_components
@@ -179,19 +179,20 @@ impl InterpreterPrototype {
             .ensure_no_start(&mut store)
             .map_err(|_| NewErr::StartFunctionNotSupported)?;
 
-        let memory =
-            if let Some(wasmi::Extern::Memory(import_memory)) = linker.resolve("env", "memory") {
-                if instance.get_memory(&store, "memory").is_some() {
-                    return Err(NewErr::TwoMemories);
-                }
+        let memory = if let Some(wasmi::Extern::Memory(import_memory)) =
+            linker.get(&store, "env", "memory")
+        {
+            if instance.get_memory(&store, "memory").is_some() {
+                return Err(NewErr::TwoMemories);
+            }
 
-                import_memory
-            } else if let Some(mem) = instance.get_memory(&store, "memory") {
-                // TODO: we don't detect NewErr::MemoryIsntMemory
-                mem
-            } else {
-                return Err(NewErr::NoMemory);
-            };
+            import_memory
+        } else if let Some(mem) = instance.get_memory(&store, "memory") {
+            // TODO: we don't detect NewErr::MemoryIsntMemory
+            mem
+        } else {
+            return Err(NewErr::NoMemory);
+        };
 
         Ok(InterpreterPrototype {
             base_components,
