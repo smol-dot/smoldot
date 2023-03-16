@@ -371,29 +371,30 @@ impl<TPlat: Platform> Background<TPlat> {
         request_id: &str,
         state_machine_request_id: &requests_subscriptions::RequestId,
     ) {
-        let (state_machine_subscription, messages_tx, mut messages_rx) = match self
-            .requests_subscriptions
-            .start_subscription(state_machine_request_id, 16)
-            .await
-        {
-            Ok(v) => v,
-            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
-                self.requests_subscriptions
-                    .respond(
-                        state_machine_request_id,
-                        json_rpc::parse::build_error_response(
-                            request_id,
-                            json_rpc::parse::ErrorResponse::ServerError(
-                                -32000,
-                                "Too many active subscriptions",
+        let (state_machine_subscription, messages_tx, mut messages_rx, subscription_start) =
+            match self
+                .requests_subscriptions
+                .start_subscription(state_machine_request_id, 16)
+                .await
+            {
+                Ok(v) => v,
+                Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
+                    self.requests_subscriptions
+                        .respond(
+                            state_machine_request_id,
+                            json_rpc::parse::build_error_response(
+                                request_id,
+                                json_rpc::parse::ErrorResponse::ServerError(
+                                    -32000,
+                                    "Too many active subscriptions",
+                                ),
+                                None,
                             ),
-                            None,
-                        ),
-                    )
-                    .await;
-                return;
-            }
-        };
+                        )
+                        .await;
+                    return;
+                }
+            };
 
         let subscription_id = self
             .next_subscription_id
@@ -408,8 +409,7 @@ impl<TPlat: Platform> Background<TPlat> {
             ),
         );
 
-        // Spawn a separate task for the subscription.
-        let task = {
+        subscription_start.start({
             let me = self.clone();
             let request_id = request_id.to_owned();
             let state_machine_request_id = state_machine_request_id.clone();
@@ -554,9 +554,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     }
                 }
             }
-        };
-
-        self.requests_subscriptions.add_subscription_task(task);
+        });
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeFinalizedHeads`].
@@ -565,29 +563,30 @@ impl<TPlat: Platform> Background<TPlat> {
         request_id: &str,
         state_machine_request_id: &requests_subscriptions::RequestId,
     ) {
-        let (state_machine_subscription, messages_tx, mut messages_rx) = match self
-            .requests_subscriptions
-            .start_subscription(state_machine_request_id, 1)
-            .await
-        {
-            Ok(v) => v,
-            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
-                self.requests_subscriptions
-                    .respond(
-                        state_machine_request_id,
-                        json_rpc::parse::build_error_response(
-                            request_id,
-                            json_rpc::parse::ErrorResponse::ServerError(
-                                -32000,
-                                "Too many active subscriptions",
+        let (state_machine_subscription, messages_tx, mut messages_rx, subscription_start) =
+            match self
+                .requests_subscriptions
+                .start_subscription(state_machine_request_id, 1)
+                .await
+            {
+                Ok(v) => v,
+                Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
+                    self.requests_subscriptions
+                        .respond(
+                            state_machine_request_id,
+                            json_rpc::parse::build_error_response(
+                                request_id,
+                                json_rpc::parse::ErrorResponse::ServerError(
+                                    -32000,
+                                    "Too many active subscriptions",
+                                ),
+                                None,
                             ),
-                            None,
-                        ),
-                    )
-                    .await;
-                return;
-            }
-        };
+                        )
+                        .await;
+                    return;
+                }
+            };
 
         let subscription_id = self
             .next_subscription_id
@@ -608,8 +607,7 @@ impl<TPlat: Platform> Background<TPlat> {
             stream::once(future::ready(finalized_block_header)).chain(finalized_blocks_subscription)
         };
 
-        // Spawn a separate task for the subscription.
-        let task = {
+        subscription_start.start({
             let me = self.clone();
             let request_id = request_id.to_owned();
             let state_machine_request_id = state_machine_request_id.clone();
@@ -694,9 +692,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     }
                 }
             }
-        };
-
-        self.requests_subscriptions.add_subscription_task(task);
+        });
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeNewHeads`].
@@ -705,29 +701,30 @@ impl<TPlat: Platform> Background<TPlat> {
         request_id: &str,
         state_machine_request_id: &requests_subscriptions::RequestId,
     ) {
-        let (state_machine_subscription, messages_tx, mut messages_rx) = match self
-            .requests_subscriptions
-            .start_subscription(state_machine_request_id, 1)
-            .await
-        {
-            Ok(v) => v,
-            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
-                self.requests_subscriptions
-                    .respond(
-                        state_machine_request_id,
-                        json_rpc::parse::build_error_response(
-                            request_id,
-                            json_rpc::parse::ErrorResponse::ServerError(
-                                -32000,
-                                "Too many active subscriptions",
+        let (state_machine_subscription, messages_tx, mut messages_rx, subscription_start) =
+            match self
+                .requests_subscriptions
+                .start_subscription(state_machine_request_id, 1)
+                .await
+            {
+                Ok(v) => v,
+                Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
+                    self.requests_subscriptions
+                        .respond(
+                            state_machine_request_id,
+                            json_rpc::parse::build_error_response(
+                                request_id,
+                                json_rpc::parse::ErrorResponse::ServerError(
+                                    -32000,
+                                    "Too many active subscriptions",
+                                ),
+                                None,
                             ),
-                            None,
-                        ),
-                    )
-                    .await;
-                return;
-            }
-        };
+                        )
+                        .await;
+                    return;
+                }
+            };
 
         let subscription_id = self
             .next_subscription_id
@@ -748,8 +745,7 @@ impl<TPlat: Platform> Background<TPlat> {
             stream::once(future::ready(block_header)).chain(blocks_subscription)
         };
 
-        // Spawn a separate task for the subscription.
-        let task = {
+        subscription_start.start({
             let me = self.clone();
             let request_id = request_id.to_owned();
             let state_machine_request_id = state_machine_request_id.clone();
@@ -834,9 +830,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     }
                 }
             }
-        };
-
-        self.requests_subscriptions.add_subscription_task(task);
+        });
     }
 
     /// Handles a call to [`methods::MethodCall::chain_unsubscribeAllHeads`].
@@ -1451,29 +1445,30 @@ impl<TPlat: Platform> Background<TPlat> {
         request_id: &str,
         state_machine_request_id: &requests_subscriptions::RequestId,
     ) {
-        let (state_machine_subscription, messages_tx, mut messages_rx) = match self
-            .requests_subscriptions
-            .start_subscription(state_machine_request_id, 1)
-            .await
-        {
-            Ok(v) => v,
-            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
-                self.requests_subscriptions
-                    .respond(
-                        state_machine_request_id,
-                        json_rpc::parse::build_error_response(
-                            request_id,
-                            json_rpc::parse::ErrorResponse::ServerError(
-                                -32000,
-                                "Too many active subscriptions",
+        let (state_machine_subscription, messages_tx, mut messages_rx, subscription_start) =
+            match self
+                .requests_subscriptions
+                .start_subscription(state_machine_request_id, 1)
+                .await
+            {
+                Ok(v) => v,
+                Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
+                    self.requests_subscriptions
+                        .respond(
+                            state_machine_request_id,
+                            json_rpc::parse::build_error_response(
+                                request_id,
+                                json_rpc::parse::ErrorResponse::ServerError(
+                                    -32000,
+                                    "Too many active subscriptions",
+                                ),
+                                None,
                             ),
-                            None,
-                        ),
-                    )
-                    .await;
-                return;
-            }
-        };
+                        )
+                        .await;
+                    return;
+                }
+            };
 
         let subscription_id = self
             .next_subscription_id
@@ -1488,7 +1483,7 @@ impl<TPlat: Platform> Background<TPlat> {
             ),
         );
 
-        let task = {
+        subscription_start.start({
             let me = self.clone();
             let request_id = request_id.to_owned();
             let state_machine_request_id = state_machine_request_id.clone();
@@ -1595,9 +1590,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     }
                 }
             }
-        };
-
-        self.requests_subscriptions.add_subscription_task(task);
+        });
     }
 
     /// Handles a call to [`methods::MethodCall::state_subscribeStorage`].
@@ -1738,29 +1731,30 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         list: Vec<methods::HexString>,
     ) {
-        let (state_machine_subscription, messages_tx, mut messages_rx) = match self
-            .requests_subscriptions
-            .start_subscription(state_machine_request_id, 1)
-            .await
-        {
-            Ok(v) => v,
-            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
-                self.requests_subscriptions
-                    .respond(
-                        state_machine_request_id,
-                        json_rpc::parse::build_error_response(
-                            request_id,
-                            json_rpc::parse::ErrorResponse::ServerError(
-                                -32000,
-                                "Too many active subscriptions",
+        let (state_machine_subscription, messages_tx, mut messages_rx, subscription_start) =
+            match self
+                .requests_subscriptions
+                .start_subscription(state_machine_request_id, 1)
+                .await
+            {
+                Ok(v) => v,
+                Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
+                    self.requests_subscriptions
+                        .respond(
+                            state_machine_request_id,
+                            json_rpc::parse::build_error_response(
+                                request_id,
+                                json_rpc::parse::ErrorResponse::ServerError(
+                                    -32000,
+                                    "Too many active subscriptions",
+                                ),
+                                None,
                             ),
-                            None,
-                        ),
-                    )
-                    .await;
-                return;
-            }
-        };
+                        )
+                        .await;
+                    return;
+                }
+            };
 
         let subscription_id = self
             .next_subscription_id
@@ -1873,8 +1867,7 @@ impl<TPlat: Platform> Background<TPlat> {
             )
         };
 
-        // Spawn a separate task for the subscription.
-        let task = {
+        subscription_start.start({
             let me = self.clone();
             let request_id = request_id.to_owned();
             let state_machine_request_id = state_machine_request_id.clone();
@@ -1944,8 +1937,6 @@ impl<TPlat: Platform> Background<TPlat> {
                     }
                 }
             }
-        };
-
-        self.requests_subscriptions.add_subscription_task(task);
+        });
     }
 }

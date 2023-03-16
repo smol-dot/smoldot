@@ -658,16 +658,6 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
         }
     }
 
-    /// Adds a subscription task to the state machine.
-    ///
-    /// The task doesn't run automatically. Instead,
-    /// [`RequestsSubscriptions::run_subscription_task`] must be called.
-    // TODO: it is planned to merge this into `start_subscription`
-    pub fn add_subscription_task(&self, task: impl Future<Output = ()> + Send + 'static) {
-        // TODO: it is planned to tweak task a bit, in which case accepting an impl Future makes sense, but if task isn't tweaked, then a BoxFuture makes more sense
-        self.subscriptions_tasks.push(Box::pin(task));
-    }
-
     /// Waits until a subscription task is ready to be polled, and polls it.
     ///
     /// The subscription tasks do not run unless this function is called.
@@ -686,6 +676,10 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
     /// If the given [`RequestId`] is stale or invalid, this function always succeeds and returns
     /// a stale [`SubscriptionId`].
     ///
+    /// The [`SubscriptionStart`] object returne by this function on success must be used in order
+    /// to provide a background task associated with the given subscription. The subscription is
+    /// automatically cleaned up when the task finishes.
+    ///
     /// # About the messages capacity
     ///
     /// The `messages_capacity` parameter contains the number of notifications related to this
@@ -701,7 +695,7 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
     /// For some JSON-RPC functions, the value of this constant can easily be deduced from the
     /// logic of the function. For other functions, the value of this constant should be hard coded.
     pub async fn start_subscription(
-        &self,
+        &'_ self,
         client: &RequestId,
         messages_capacity: usize,
     ) -> Result<
@@ -709,6 +703,7 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
             SubscriptionId,
             mpsc::Sender<(TSubMsg, oneshot::Sender<()>)>,
             mpsc::Receiver<(TSubMsg, oneshot::Sender<()>)>,
+            SubscriptionStart<'_, TSubMsg>,
         ),
         StartSubscriptionError,
     > {
@@ -723,6 +718,9 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
                     SubscriptionId(new_subscription_num, Weak::new()),
                     messages_tx,
                     messages_rx,
+                    SubscriptionStart {
+                        requests_subscriptions: self,
+                    },
                 ));
             }
         };
@@ -753,6 +751,9 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
             SubscriptionId(new_subscription_num, Arc::downgrade(&client_arc)),
             messages_tx,
             messages_rx,
+            SubscriptionStart {
+                requests_subscriptions: self,
+            },
         ))
     }
 
@@ -983,6 +984,32 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
         lock.responses_send_back_pushed_or_dead.notify_additional(1);
 
         Ok(())
+    }
+}
+
+/// Returned by [`RequestsSubscriptions::start_subscription`] when a subscription is ready to be
+/// started.
+// TODO: cancel the subscription if the object is dropped before start() is called
+#[must_use = "Subscriptions don't start until a task has been registered"]
+pub struct SubscriptionStart<'a, TSubMsg> {
+    requests_subscriptions: &'a RequestsSubscriptions<TSubMsg>,
+}
+
+impl<'a, TSubMsg> SubscriptionStart<'a, TSubMsg> {
+    /// Starts the subscription.
+    ///
+    /// Note that the task doesn't run automatically. Instead,
+    /// [`RequestsSubscriptions::run_subscription_task`] must be called.
+    pub fn start(self, task: impl Future<Output = ()> + Send + 'static) {
+        self.requests_subscriptions
+            .subscriptions_tasks
+            .push(Box::pin(task));
+    }
+}
+
+impl<'a, TSubMsg> fmt::Debug for SubscriptionStart<'a, TSubMsg> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("SubscriptionStart").finish()
     }
 }
 

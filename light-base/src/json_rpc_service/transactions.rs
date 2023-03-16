@@ -145,29 +145,30 @@ impl<TPlat: Platform> Background<TPlat> {
         transaction: methods::HexString,
         is_legacy: bool,
     ) {
-        let (state_machine_subscription, messages_tx, mut messages_rx) = match self
-            .requests_subscriptions
-            .start_subscription(state_machine_request_id, 16)
-            .await
-        {
-            Ok(v) => v,
-            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
-                self.requests_subscriptions
-                    .respond(
-                        state_machine_request_id,
-                        json_rpc::parse::build_error_response(
-                            request_id,
-                            json_rpc::parse::ErrorResponse::ServerError(
-                                -32000,
-                                "Too many active subscriptions",
+        let (state_machine_subscription, messages_tx, mut messages_rx, subscription_start) =
+            match self
+                .requests_subscriptions
+                .start_subscription(state_machine_request_id, 16)
+                .await
+            {
+                Ok(v) => v,
+                Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
+                    self.requests_subscriptions
+                        .respond(
+                            state_machine_request_id,
+                            json_rpc::parse::build_error_response(
+                                request_id,
+                                json_rpc::parse::ErrorResponse::ServerError(
+                                    -32000,
+                                    "Too many active subscriptions",
+                                ),
+                                None,
                             ),
-                            None,
-                        ),
-                    )
-                    .await;
-                return;
-            }
-        };
+                        )
+                        .await;
+                    return;
+                }
+            };
 
         let subscription_id = self
             .next_subscription_id
@@ -182,8 +183,7 @@ impl<TPlat: Platform> Background<TPlat> {
             ),
         );
 
-        // Spawn a separate task for the transaction updates.
-        let task = {
+        subscription_start.start({
             let mut transaction_updates = self
                 .transactions_service
                 .submit_and_watch_transaction(transaction.0, 16)
@@ -521,9 +521,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         .await;
                 }
             }
-        };
-
-        self.requests_subscriptions.add_subscription_task(task);
+        });
     }
 
     /// Handles a call to [`methods::MethodCall::transaction_unstable_unwatch`].
