@@ -23,7 +23,7 @@ use core::num::NonZeroU32;
 #[test]
 fn clients_limit_adjustement() {
     futures::executor::block_on(async move {
-        let req_sub = RequestsSubscriptions::new(Config {
+        let req_sub = RequestsSubscriptions::<()>::new(Config {
             max_clients: 2,
             max_requests_per_client: NonZeroU32::new(5).unwrap(),
             max_subscriptions_per_client: 5,

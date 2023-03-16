@@ -131,7 +131,7 @@ impl<TPlat: Platform> Background<TPlat> {
             let function_to_call = function_to_call.to_owned();
             let state_machine_request_id = state_machine_request_id.clone();
             async move {
-                let state_machine_subscription = match me
+                let (state_machine_subscription, messages_tx, mut messages_rx) = match me
                     .requests_subscriptions
                     .start_subscription(&state_machine_request_id, 1)
                     .await
@@ -159,8 +159,6 @@ impl<TPlat: Platform> Background<TPlat> {
                     .next_subscription_id
                     .fetch_add(1, atomic::Ordering::Relaxed)
                     .to_string();
-
-                let (messages_tx, mut messages_rx) = mpsc::channel(0);
 
                 me.subscriptions.lock().await.insert(
                     subscription_id.clone(),
@@ -418,7 +416,7 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         runtime_updates: bool,
     ) {
-        let state_machine_subscription = match self
+        let (state_machine_subscription, messages_tx, mut messages_rx) = match self
             .requests_subscriptions
             .start_subscription(state_machine_request_id, 16)
             .await
@@ -455,8 +453,6 @@ impl<TPlat: Platform> Background<TPlat> {
                 None,
             )
         };
-
-        let (messages_tx, mut messages_rx) = mpsc::channel(0);
 
         let (subscription_id, initial_notifications, mut subscription_state) = {
             let subscription_id = self
@@ -1270,7 +1266,7 @@ impl<TPlat: Platform> Background<TPlat> {
             return;
         }
 
-        let state_machine_subscription = match self
+        let (state_machine_subscription, messages_tx, mut messages_rx) = match self
             .requests_subscriptions
             .start_subscription(state_machine_request_id, 1)
             .await
@@ -1298,8 +1294,6 @@ impl<TPlat: Platform> Background<TPlat> {
             .next_subscription_id
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
-
-        let (messages_tx, mut messages_rx) = mpsc::channel(0);
 
         self.subscriptions.lock().await.insert(
             subscription_id.clone(),
@@ -1503,7 +1497,7 @@ impl<TPlat: Platform> Background<TPlat> {
         network_config: methods::NetworkConfig,
         block_number: Option<u64>,
     ) {
-        let state_machine_subscription = match self
+        let (state_machine_subscription, messages_tx, mut messages_rx) = match self
             .requests_subscriptions
             .start_subscription(&state_machine_request_id, 1)
             .await
@@ -1531,8 +1525,6 @@ impl<TPlat: Platform> Background<TPlat> {
             .next_subscription_id
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
-
-        let (messages_tx, mut messages_rx) = mpsc::channel(0);
 
         self.subscriptions.lock().await.insert(
             subscription_id.clone(),

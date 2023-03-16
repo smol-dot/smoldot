@@ -122,7 +122,10 @@ use core::{
     ops,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use futures::lock::Mutex;
+use futures::{
+    channel::{mpsc, oneshot},
+    lock::Mutex,
+};
 
 mod tests;
 
@@ -152,7 +155,7 @@ pub struct Config {
     pub max_clients: u32,
 }
 
-pub struct RequestsSubscriptions {
+pub struct RequestsSubscriptions<TSubMsg> {
     /// List of all clients of the state machine. Locked only when adding and removing clients.
     clients: Mutex<Clients>,
 
@@ -196,9 +199,11 @@ pub struct RequestsSubscriptions {
     /// Maximum number of subscriptions each client can have active before new subscriptions are
     /// rejected.
     max_subscriptions_per_client: usize,
+
+    _dummy_phantom: core::marker::PhantomData<TSubMsg>,
 }
 
-impl RequestsSubscriptions {
+impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
     /// Creates a new empty state machine.
     pub fn new(config: Config) -> Self {
         // The fields in the config are `u32`s rather than `usize`s so that they can be the same
@@ -224,6 +229,7 @@ impl RequestsSubscriptions {
             max_clients: AtomicUsize::new(max_clients),
             max_requests_per_client,
             max_subscriptions_per_client,
+            _dummy_phantom: core::marker::PhantomData,
         }
     }
 
@@ -698,13 +704,26 @@ impl RequestsSubscriptions {
         &self,
         client: &RequestId,
         messages_capacity: usize,
-    ) -> Result<SubscriptionId, StartSubscriptionError> {
+    ) -> Result<
+        (
+            SubscriptionId,
+            mpsc::Sender<(TSubMsg, oneshot::Sender<()>)>,
+            mpsc::Receiver<(TSubMsg, oneshot::Sender<()>)>,
+        ),
+        StartSubscriptionError,
+    > {
+        let (messages_tx, messages_rx) = mpsc::channel(0);
+
         let client_arc = match client.1.upgrade() {
             Some(c) => c,
             None => {
                 let new_subscription_num =
                     self.next_subscription_id.fetch_add(1, Ordering::Relaxed);
-                return Ok(SubscriptionId(new_subscription_num, Weak::new()));
+                return Ok((
+                    SubscriptionId(new_subscription_num, Weak::new()),
+                    messages_tx,
+                    messages_rx,
+                ));
             }
         };
 
@@ -730,9 +749,10 @@ impl RequestsSubscriptions {
             .insert(new_subscription_num, messages_capacity);
         debug_assert!(_prev_value.is_none());
 
-        Ok(SubscriptionId(
-            new_subscription_num,
-            Arc::downgrade(&client_arc),
+        Ok((
+            SubscriptionId(new_subscription_num, Arc::downgrade(&client_arc)),
+            messages_tx,
+            messages_rx,
         ))
     }
 

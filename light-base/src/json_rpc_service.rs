@@ -149,7 +149,7 @@ pub struct Frontend {
     /// State machine holding all the clients, requests, and subscriptions.
     ///
     /// Shared with the [`Background`].
-    requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions>,
+    requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>>,
 
     /// Identifier of the unique client within the [`Frontend::requests_subscriptions`].
     client_id: requests_subscriptions::ClientId,
@@ -247,7 +247,7 @@ pub struct ServicePrototype {
     /// State machine holding all the clients, requests, and subscriptions.
     ///
     /// Shared with the [`Background`].
-    requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions>,
+    requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>>,
 
     /// Target to use when emitting logs.
     log_target: String,
@@ -426,7 +426,7 @@ struct Background<TPlat: Platform> {
     ///
     /// Only requests that are valid JSON-RPC are insert into the state machine. However, requests
     /// can try to call an unknown method, or have invalid parameters.
-    requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions>,
+    requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>>,
 
     /// Name of the chain, as found in the chain specification.
     chain_name: String,

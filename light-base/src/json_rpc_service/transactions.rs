@@ -145,7 +145,7 @@ impl<TPlat: Platform> Background<TPlat> {
         transaction: methods::HexString,
         is_legacy: bool,
     ) {
-        let state_machine_subscription = match self
+        let (state_machine_subscription, messages_tx, mut messages_rx) = match self
             .requests_subscriptions
             .start_subscription(state_machine_request_id, 16)
             .await
@@ -173,8 +173,6 @@ impl<TPlat: Platform> Background<TPlat> {
             .next_subscription_id
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
-
-        let (messages_tx, mut messages_rx) = mpsc::channel(0);
 
         self.subscriptions.lock().await.insert(
             subscription_id.clone(),
