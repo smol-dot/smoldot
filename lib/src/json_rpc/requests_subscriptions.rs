@@ -115,6 +115,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{
+    any::Any,
     cmp, fmt,
     future::Future,
     hash,
@@ -130,13 +131,13 @@ use futures::{
 mod tests;
 
 #[derive(Clone)]
-pub struct ClientId(u64, Weak<ClientInner>);
+pub struct ClientId(u64, Weak<dyn Any + Send + Sync>);
 
 #[derive(Clone)]
-pub struct RequestId(u64, Weak<ClientInner>);
+pub struct RequestId(u64, Weak<dyn Any + Send + Sync>);
 
 #[derive(Clone)]
-pub struct SubscriptionId(u64, Weak<ClientInner>);
+pub struct SubscriptionId(u64, Weak<dyn Any + Send + Sync>);
 
 pub mod executor;
 
@@ -301,7 +302,7 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
         let new_client_id = clients.next_id;
         clients.next_id += 1;
 
-        let ret = ClientId(new_client_id, Arc::downgrade(&arc));
+        let ret = ClientId(new_client_id, Arc::downgrade(&(arc.clone() as Arc<_>)));
         clients.list.insert(new_client_id, arc);
         Ok(ret)
     }
@@ -328,7 +329,10 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
             let mut clients = self.clients.lock().await;
 
             let removed = clients.list.remove(&client.0)?;
-            debug_assert!(Arc::ptr_eq(&removed, &client.1.upgrade().unwrap()));
+            debug_assert!(Arc::ptr_eq(
+                &(removed.clone() as Arc<_>),
+                &client.1.upgrade().unwrap()
+            ));
 
             // Shrink `clients.list` in order to potentially reclaim memory after a potential
             // spike in number of clients.
@@ -381,7 +385,11 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
     /// function or to interrupt a pending function call with a stale [`ClientId`].
     pub async fn next_response(&self, client: &ClientId) -> String {
         loop {
-            let client = match client.1.upgrade() {
+            let client = match client
+                .1
+                .upgrade()
+                .and_then(|c| Arc::downcast::<ClientInner>(c).ok())
+            {
                 Some(c) => c,
                 None => {
                     // Freeze forever.
@@ -463,7 +471,11 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
     ///
     /// Has no effect if the [`ClientId`] is stale or invalid.
     pub async fn queue_client_request(&self, client: &ClientId, request: String) {
-        let client = match client.1.upgrade() {
+        let client = match client
+            .1
+            .upgrade()
+            .and_then(|c| Arc::downcast::<ClientInner>(c).ok())
+        {
             Some(c) => c,
             None => return,
         };
@@ -536,7 +548,11 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
         client: &ClientId,
         request: String,
     ) -> Result<(), TryQueueClientRequestError> {
-        let client = match client.1.upgrade() {
+        let client = match client
+            .1
+            .upgrade()
+            .and_then(|c| Arc::downcast::<ClientInner>(c).ok())
+        {
             Some(c) => c,
             None => return Ok(()),
         };
@@ -630,7 +646,7 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
         }
 
         // Success.
-        let request_id = RequestId(request_id_num, Arc::downgrade(&client));
+        let request_id = RequestId(request_id_num, Arc::downgrade(&(client as Arc<_>)));
         (request_message, request_id)
     }
 
@@ -640,7 +656,11 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
     /// Has no effect if the [`RequestId`] is invalid, for example if it has already been
     /// responded or if the client has been removed.
     pub async fn respond(&self, request: &RequestId, response: String) {
-        let client = match request.1.upgrade() {
+        let client = match request
+            .1
+            .upgrade()
+            .and_then(|c| Arc::downcast::<ClientInner>(c).ok())
+        {
             Some(c) => c,
             None => return,
         };
@@ -709,13 +729,21 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
     > {
         let (messages_tx, messages_rx) = mpsc::channel(0);
 
-        let client_arc = match client.1.upgrade() {
+        let client_arc = match client
+            .1
+            .upgrade()
+            .and_then(|c| Arc::downcast::<ClientInner>(c).ok())
+        {
             Some(c) => c,
             None => {
                 let new_subscription_num =
                     self.next_subscription_id.fetch_add(1, Ordering::Relaxed);
                 return Ok((
-                    SubscriptionId(new_subscription_num, Weak::new()),
+                    SubscriptionId(new_subscription_num, {
+                        // As of the time of writing of this comment, `Weak::new()` requires `T`
+                        // to be `Sized` for some reason.
+                        Arc::downgrade(&(Arc::new(()) as Arc<_>))
+                    }),
                     messages_tx,
                     messages_rx,
                     SubscriptionStart {
@@ -747,8 +775,13 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
             .insert(new_subscription_num, messages_capacity);
         debug_assert!(_prev_value.is_none());
 
+        drop(lock);
+
         Ok((
-            SubscriptionId(new_subscription_num, Arc::downgrade(&client_arc)),
+            SubscriptionId(
+                new_subscription_num,
+                Arc::downgrade(&(client_arc as Arc<_>)),
+            ),
             messages_tx,
             messages_rx,
             SubscriptionStart {
@@ -767,7 +800,11 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
     ///
     /// Has no effect if the [`SubscriptionId`] is stale or invalid.
     pub async fn stop_subscription(&self, subscription: &SubscriptionId) {
-        let client_arc = match subscription.1.upgrade() {
+        let client_arc = match subscription
+            .1
+            .upgrade()
+            .and_then(|c| Arc::downcast::<ClientInner>(c).ok())
+        {
             Some(c) => c,
             None => return,
         };
@@ -832,7 +869,11 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
         index: usize,
         message: String,
     ) {
-        let client_arc = match subscription.1.upgrade() {
+        let client_arc = match subscription
+            .1
+            .upgrade()
+            .and_then(|c| Arc::downcast::<ClientInner>(c).ok())
+        {
             Some(c) => c,
             None => return,
         };
@@ -918,7 +959,11 @@ impl<TSubMsg> RequestsSubscriptions<TSubMsg> {
         message: String,
         try_only: bool,
     ) -> Result<(), ()> {
-        let client_arc = match subscription.1.upgrade() {
+        let client_arc = match subscription
+            .1
+            .upgrade()
+            .and_then(|c| Arc::downcast::<ClientInner>(c).ok())
+        {
             Some(c) => c,
             None => return Ok(()),
         };
