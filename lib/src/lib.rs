@@ -214,21 +214,3 @@ pub mod trie;
 pub mod verify;
 
 mod util;
-
-/// Removes the length prefix at the beginning of `metadata`. Returns an error if there is no
-/// valid length prefix.
-///
-/// See the module-level documentation for more information.
-// TODO: it is unclear where to put this function; it has to be in the smoldot crate because it uses `crate::util`, so at the moment it is public but hidden
-#[doc(hidden)]
-pub fn remove_metadata_length_prefix(metadata: &[u8]) -> Result<&[u8], ()> {
-    let (after_prefix, length) = crate::util::nom_scale_compact_usize(metadata)
-        .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| ())?;
-
-    // Verify that the length prefix indeed matches the metadata's length.
-    if length != after_prefix.len() {
-        return Err(());
-    }
-
-    Ok(after_prefix)
-}
