@@ -199,14 +199,8 @@ pub fn verify(config: Config) -> Result<Success, Error> {
     match config.finality {
         ConfigFinality::Grandpa => {}
         ConfigFinality::Outsourced => {
-            // TODO: we iterate through the log items, which is O(n), is it worth optimizing this?
-            for item in config.block_header.digest.logs() {
-                match item {
-                    header::DigestItemRef::GrandpaConsensus(_) => {
-                        return Err(Error::FinalityEngineMismatch)
-                    }
-                    _ => {}
-                }
+            if config.block_header.digest.has_any_grandpa() {
+                return Err(Error::FinalityEngineMismatch);
             }
         }
     }

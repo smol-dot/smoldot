@@ -404,13 +404,24 @@ impl<'a> DigestRef<'a> {
     }
 
     /// Returns true if the list has any item that belong to the Aura consensus engine.
+    ///
+    /// This function is `O(n)` over the number of log items.
     pub fn has_any_aura(&self) -> bool {
         self.logs().any(|l| l.is_aura())
     }
 
     /// Returns true if the list has any item that belong to the Babe consensus engine.
+    ///
+    /// This function is `O(n)` over the number of log items.
     pub fn has_any_babe(&self) -> bool {
         self.logs().any(|l| l.is_babe())
+    }
+
+    /// Returns true if the list has any item that belong to the Grandpa finality engine.
+    ///
+    /// This function is `O(n)` over the number of log items.
+    pub fn has_any_grandpa(&self) -> bool {
+        self.logs().any(|l| l.is_grandpa())
     }
 
     /// Returns the Aura seal digest item, if any.
@@ -1051,6 +1062,11 @@ impl<'a> DigestItemRef<'a> {
                 | DigestItemRef::BabeConsensus(_)
                 | DigestItemRef::BabeSeal(_)
         )
+    }
+
+    /// True if the item is relevant to the Grandpa finality engine.
+    pub fn is_grandpa(&self) -> bool {
+        matches!(self, DigestItemRef::GrandpaConsensus(_))
     }
 
     /// Returns an iterator to list of buffers which, when concatenated, produces the SCALE
