@@ -103,7 +103,7 @@ impl KeyNamespace {
 pub struct Keystore {
     keys_directory: Option<path::PathBuf>,
     guarded: Mutex<Guarded>,
-    /// Cached base signing context cloned when signing with sr25519.
+    /// Cached base signing context cloned when signing with `sr25519`.
     sr25519_signing_context: schnorrkel::context::SigningContext,
 }
 
