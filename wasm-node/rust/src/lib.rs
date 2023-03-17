@@ -221,8 +221,7 @@ fn add_chain(
                     .as_ref()
                     .unwrap()
                     .chains
-                    .get(usize::try_from(c).unwrap())
-                // TODO: don't unwrap here
+                    .get(usize::try_from(c).ok()?)
                 {
                     Some(*smoldot_chain_id)
                 } else {
