@@ -61,8 +61,6 @@ impl Delay {
     }
 
     fn new_inner(when: Instant, now: Instant) -> Self {
-        // TODO: what if `now` contains infinite?
-
         // Small optimization because sleeps of 0 seconds are frequent.
         if when <= now {
             return Delay { timer_id: None };

@@ -61,10 +61,12 @@ pub struct Instant {
 
 impl PartialEq for Instant {
     fn eq(&self, other: &Instant) -> bool {
+        debug_assert!(self.inner.is_finite());
         self.inner == other.inner
     }
 }
 
+// This trait is ok to implement because `self.inner` is always finite.
 impl Eq for Instant {}
 
 impl PartialOrd for Instant {
@@ -75,15 +77,16 @@ impl PartialOrd for Instant {
 
 impl Ord for Instant {
     fn cmp(&self, other: &Self) -> Ordering {
+        debug_assert!(self.inner.is_finite());
         self.inner.partial_cmp(&other.inner).unwrap()
     }
 }
 
 impl Instant {
     pub fn now() -> Instant {
-        Instant {
-            inner: unsafe { bindings::monotonic_clock_ms() },
-        }
+        let value = unsafe { bindings::monotonic_clock_ms() };
+        debug_assert!(value.is_finite());
+        Instant { inner: value }
     }
 }
 
@@ -92,6 +95,9 @@ impl Add<Duration> for Instant {
 
     fn add(self, other: Duration) -> Instant {
         let new_val = self.inner + other.as_millis() as f64;
+        // Just like the `Add` implementation of the actual `Instant`, we panic if the value can't
+        // be represented.
+        assert!(new_val.is_finite());
         Instant { inner: new_val }
     }
 }
@@ -101,6 +107,9 @@ impl Sub<Duration> for Instant {
 
     fn sub(self, other: Duration) -> Instant {
         let new_val = self.inner - other.as_millis() as f64;
+        // Just like the `Sub` implementation of the actual `Instant`, we panic if the value can't
+        // be represented.
+        assert!(new_val.is_finite());
         Instant { inner: new_val }
     }
 }

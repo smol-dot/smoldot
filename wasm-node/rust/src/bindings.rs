@@ -118,6 +118,8 @@ extern "C" {
     /// Must return the number of milliseconds that have passed since the UNIX epoch, ignoring
     /// leap seconds.
     ///
+    /// Must never return NaN or infinite.
+    ///
     /// This is typically implemented by calling `Date.now()`.
     ///
     /// See <https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/now>
@@ -129,6 +131,8 @@ extern "C" {
     pub fn unix_time_ms() -> f64;
 
     /// Must return the number of milliseconds that have passed since an arbitrary point in time.
+    ///
+    /// Must never return NaN or infinite.
     ///
     /// Contrary to [`unix_time_ms`], the returned value must never be inferior to a value
     /// previously returned. Consequently, this must not be implemented using `Date.now()`, whose
@@ -154,6 +158,8 @@ extern "C" {
     /// by at least the given number of `milliseconds`.
     ///
     /// If `milliseconds` is 0, [`timer_finished`] should be called as soon as possible.
+    ///
+    /// `milliseconds` never contains a negative number, NaN or infinite.
     pub fn start_timer(id: u32, milliseconds: f64);
 
     /// Must initialize a new connection that tries to connect to the given multiaddress.

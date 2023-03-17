@@ -63,7 +63,15 @@ impl smoldot_light::platform::Platform for Platform {
     >;
 
     fn now_from_unix_epoch() -> Duration {
-        Duration::from_secs_f64(unsafe { bindings::unix_time_ms() } / 1000.0)
+        let value = unsafe { bindings::unix_time_ms() };
+        debug_assert!(value.is_finite());
+        // The documentation of `now_from_unix_epoch()` mentions that it's ok to panic if we're
+        // before the UNIX epoch.
+        assert!(
+            value >= 0.0,
+            "running before the UNIX epoch isn't supported"
+        );
+        Duration::from_secs_f64(value / 1000.0)
     }
 
     fn now() -> Self::Instant {
