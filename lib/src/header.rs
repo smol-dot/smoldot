@@ -1059,8 +1059,7 @@ impl<'a> DigestItemRef<'a> {
         &self,
         block_number_bytes: usize,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
-        // TODO: don't use Vecs?
-        match *self {
+        let (item1, item2) = match *self {
             DigestItemRef::AuraPreDigest(ref aura_pre_digest) => {
                 let encoded = aura_pre_digest
                     .scale_encoding()
@@ -1069,20 +1068,18 @@ impl<'a> DigestItemRef<'a> {
                         a
                     });
 
-                let mut ret = vec![6];
+                let mut ret = Vec::with_capacity(12);
+                ret.push(6);
                 ret.extend_from_slice(b"aura");
                 ret.extend_from_slice(util::encode_scale_compact_usize(encoded.len()).as_ref());
-                ret.extend_from_slice(&encoded);
-                iter::once(ret)
+                (ret, either::Left(encoded))
             }
             DigestItemRef::AuraSeal(seal) => {
-                assert_eq!(seal.len(), 64);
-
-                let mut ret = vec![5];
+                let mut ret = Vec::with_capacity(12);
+                ret.push(5);
                 ret.extend_from_slice(b"aura");
                 ret.extend_from_slice(util::encode_scale_compact_usize(64).as_ref());
-                ret.extend_from_slice(seal);
-                iter::once(ret)
+                (ret, either::Right(&seal[..]))
             }
             DigestItemRef::AuraConsensus(ref aura_consensus) => {
                 let encoded = aura_consensus
@@ -1092,11 +1089,11 @@ impl<'a> DigestItemRef<'a> {
                         a
                     });
 
-                let mut ret = vec![4];
+                let mut ret = Vec::with_capacity(12);
+                ret.push(4);
                 ret.extend_from_slice(b"aura");
                 ret.extend_from_slice(util::encode_scale_compact_usize(encoded.len()).as_ref());
-                ret.extend_from_slice(&encoded);
-                iter::once(ret)
+                (ret, either::Left(encoded))
             }
             DigestItemRef::BabePreDigest(ref babe_pre_digest) => {
                 let encoded = babe_pre_digest
@@ -1106,11 +1103,11 @@ impl<'a> DigestItemRef<'a> {
                         a
                     });
 
-                let mut ret = vec![6];
+                let mut ret = Vec::with_capacity(12);
+                ret.push(6);
                 ret.extend_from_slice(b"BABE");
                 ret.extend_from_slice(util::encode_scale_compact_usize(encoded.len()).as_ref());
-                ret.extend_from_slice(&encoded);
-                iter::once(ret)
+                (ret, either::Left(encoded))
             }
             DigestItemRef::BabeConsensus(ref babe_consensus) => {
                 let encoded = babe_consensus
@@ -1120,11 +1117,11 @@ impl<'a> DigestItemRef<'a> {
                         a
                     });
 
-                let mut ret = vec![4];
+                let mut ret = Vec::with_capacity(12);
+                ret.push(4);
                 ret.extend_from_slice(b"BABE");
                 ret.extend_from_slice(util::encode_scale_compact_usize(encoded.len()).as_ref());
-                ret.extend_from_slice(&encoded);
-                iter::once(ret)
+                (ret, either::Left(encoded))
             }
             DigestItemRef::GrandpaConsensus(ref gp_consensus) => {
                 let encoded =
@@ -1135,50 +1132,50 @@ impl<'a> DigestItemRef<'a> {
                             a
                         });
 
-                let mut ret = vec![4];
+                let mut ret = Vec::with_capacity(12);
+                ret.push(4);
                 ret.extend_from_slice(b"FRNK");
                 ret.extend_from_slice(util::encode_scale_compact_usize(encoded.len()).as_ref());
-                ret.extend_from_slice(&encoded);
-                iter::once(ret)
+                (ret, either::Left(encoded))
             }
             DigestItemRef::BabeSeal(seal) => {
-                assert_eq!(seal.len(), 64);
-
-                let mut ret = vec![5];
+                let mut ret = Vec::with_capacity(12);
+                ret.push(5);
                 ret.extend_from_slice(b"BABE");
                 ret.extend_from_slice(util::encode_scale_compact_usize(64).as_ref());
-                ret.extend_from_slice(seal);
-                iter::once(ret)
+                (ret, either::Right(&seal[..]))
             }
             DigestItemRef::UnknownConsensus { engine, opaque } => {
-                let mut ret = vec![4];
+                let mut ret = Vec::with_capacity(12);
+                ret.push(4);
                 ret.extend_from_slice(&engine);
                 ret.extend_from_slice(util::encode_scale_compact_usize(opaque.len()).as_ref());
-                ret.extend_from_slice(opaque);
-                iter::once(ret)
+                (ret, either::Right(opaque))
             }
             DigestItemRef::UnknownSeal { engine, opaque } => {
-                let mut ret = vec![5];
+                let mut ret = Vec::with_capacity(12);
+                ret.push(5);
                 ret.extend_from_slice(&engine);
                 ret.extend_from_slice(util::encode_scale_compact_usize(opaque.len()).as_ref());
-                ret.extend_from_slice(opaque);
-                iter::once(ret)
+                (ret, either::Right(opaque))
             }
             DigestItemRef::UnknownPreRuntime { engine, opaque } => {
-                let mut ret = vec![6];
+                let mut ret = Vec::with_capacity(12);
+                ret.push(6);
                 ret.extend_from_slice(&engine);
                 ret.extend_from_slice(util::encode_scale_compact_usize(opaque.len()).as_ref());
-                ret.extend_from_slice(opaque);
-                iter::once(ret)
+                (ret, either::Right(opaque))
             }
             DigestItemRef::Other(raw) => {
-                let mut ret = vec![0];
+                let mut ret = Vec::with_capacity(12);
+                ret.push(0);
                 ret.extend_from_slice(util::encode_scale_compact_usize(raw.len()).as_ref());
-                ret.extend_from_slice(raw);
-                iter::once(ret)
+                (ret, either::Right(raw))
             }
-            DigestItemRef::RuntimeEnvironmentUpdated => iter::once(vec![8]),
-        }
+            DigestItemRef::RuntimeEnvironmentUpdated => (vec![8], either::Right(&[][..])),
+        };
+
+        [either::Left(item1), item2].into_iter()
     }
 }
 
