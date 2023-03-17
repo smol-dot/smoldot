@@ -103,6 +103,8 @@ impl KeyNamespace {
 pub struct Keystore {
     keys_directory: Option<path::PathBuf>,
     guarded: Mutex<Guarded>,
+    /// Cached base signing context cloned when signing with sr25519.
+    sr25519_signing_context: schnorrkel::context::SigningContext,
 }
 
 impl Keystore {
@@ -216,6 +218,7 @@ impl Keystore {
         Ok(Keystore {
             keys_directory,
             guarded: Mutex::new(Guarded { gen_rng, keys }),
+            sr25519_signing_context: schnorrkel::signing_context(b"substrate"),
         })
     }
 
@@ -382,11 +385,9 @@ impl Keystore {
                     }
                 }
             }
-            PrivateKey::MemorySr25519(key) => {
-                // TODO: is creating the signing context expensive?
-                let context = schnorrkel::signing_context(b"substrate");
-                Ok(key.sign(context.bytes(payload)).to_bytes())
-            }
+            PrivateKey::MemorySr25519(key) => Ok(key
+                .sign(self.sr25519_signing_context.bytes(payload))
+                .to_bytes()),
             PrivateKey::FileSr25519 => {
                 match Self::load_sr25519_from_file(
                     self.path_of_key_sr25519(key_namespace, public_key).unwrap(),
@@ -395,9 +396,9 @@ impl Keystore {
                 {
                     Ok(key) => {
                         drop(guarded);
-                        // TODO: is creating the signing context expensive?
-                        let context = schnorrkel::signing_context(b"substrate");
-                        Ok(key.sign(context.bytes(payload)).to_bytes())
+                        Ok(key
+                            .sign(self.sr25519_signing_context.bytes(payload))
+                            .to_bytes())
                     }
                     Err(err) => {
                         guarded.keys.remove(&(key_namespace, *public_key));
