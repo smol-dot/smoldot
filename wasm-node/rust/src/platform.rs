@@ -53,7 +53,7 @@ impl smoldot_light::platform::Platform for Platform {
             ConnectError,
         >,
     >;
-    type StreamDataFuture<'a> = future::BoxFuture<'a, ()>;
+    type StreamUpdateFuture<'a> = future::BoxFuture<'a, ()>;
     type NextSubstreamFuture<'a> = future::BoxFuture<
         'a,
         Option<(
@@ -273,9 +273,9 @@ impl smoldot_light::platform::Platform for Platform {
         }
     }
 
-    fn wait_more_data(
+    fn update_stream(
         StreamWrapper(stream_id, read_buffer): &'_ mut Self::Stream,
-    ) -> Self::StreamDataFuture<'_> {
+    ) -> Self::StreamUpdateFuture<'_> {
         if read_buffer.buffer_first_offset < read_buffer.buffer.len() {
             return async move {}.boxed();
         }
@@ -355,6 +355,11 @@ impl smoldot_light::platform::Platform for Platform {
         }
     }
 
+    fn writable_bytes(_stream: &mut Self::Stream) -> usize {
+        // TODO: implement properly
+        usize::max_value()
+    }
+
     fn send(StreamWrapper((connection_id, stream_id), _): &mut Self::Stream, data: &[u8]) {
         let mut lock = STATE.try_lock().unwrap();
         let stream = lock.streams.get_mut(&(*connection_id, *stream_id)).unwrap();
@@ -374,6 +379,10 @@ impl smoldot_light::platform::Platform for Platform {
                 u32::try_from(data.len()).unwrap(),
             );
         }
+    }
+
+    fn close_send(_stream: &mut Self::Stream) {
+        // TODO: implement
     }
 }
 

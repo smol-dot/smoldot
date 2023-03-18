@@ -47,7 +47,7 @@ impl Platform for AsyncStdTcpWebSocket {
         'static,
         Result<PlatformConnection<Self::Stream, Self::Connection>, ConnectError>,
     >;
-    type StreamDataFuture<'a> = future::BoxFuture<'a, ()>;
+    type StreamUpdateFuture<'a> = future::BoxFuture<'a, ()>;
     type NextSubstreamFuture<'a> =
         future::Pending<Option<(Self::Stream, PlatformSubstreamDirection)>>;
 
@@ -278,7 +278,7 @@ impl Platform for AsyncStdTcpWebSocket {
         match *c {}
     }
 
-    fn wait_more_data(stream: &'_ mut Self::Stream) -> Self::StreamDataFuture<'_> {
+    fn update_stream(stream: &'_ mut Self::Stream) -> Self::StreamUpdateFuture<'_> {
         if stream.read_buffer.as_ref().map_or(true, |b| !b.is_empty()) {
             return Box::pin(future::ready(()));
         }
@@ -317,11 +317,20 @@ impl Platform for AsyncStdTcpWebSocket {
         }
     }
 
+    fn writable_bytes(_stream: &mut Self::Stream) -> usize {
+        // TODO: implement properly
+        usize::max_value()
+    }
+
     fn send(stream: &mut Self::Stream, data: &[u8]) {
         let mut lock = stream.shared.guarded.lock();
         lock.write_queue.reserve(data.len());
         lock.write_queue.extend(data.iter().copied());
         stream.shared.write_queue_pushed.notify(usize::max_value());
+    }
+
+    fn close_send(_stream: &mut Self::Stream) {
+        // TODO: implement
     }
 }
 

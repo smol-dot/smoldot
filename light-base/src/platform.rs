@@ -42,12 +42,18 @@ pub trait Platform: Send + 'static {
     /// the `Connection` and all its associated substream objects ([`Platform::Stream`]) have
     /// been dropped.
     type Connection: Send + Sync + 'static;
+    /// Opaque object representing either a single-stream connection or a substream in a
+    /// multi-stream connection.
+    ///
+    /// If this object is abruptly dropped, the underlying single stream connection or substream
+    /// should be abruptly dropped (i.e. RST) as well, unless its reading and writing sides
+    /// have been gracefully closed in the past.
     type Stream: Send + 'static;
     type ConnectFuture: Future<Output = Result<PlatformConnection<Self::Stream, Self::Connection>, ConnectError>>
         + Unpin
         + Send
         + 'static;
-    type StreamDataFuture<'a>: Future<Output = ()> + Unpin + Send + 'a;
+    type StreamUpdateFuture<'a>: Future<Output = ()> + Unpin + Send + 'a;
     type NextSubstreamFuture<'a>: Future<Output = Option<(Self::Stream, PlatformSubstreamDirection)>>
         + Unpin
         + Send
@@ -106,18 +112,27 @@ pub trait Platform: Send + 'static {
     /// all its associated `Stream`s as soon as possible.
     fn next_substream(connection: &'_ mut Self::Connection) -> Self::NextSubstreamFuture<'_>;
 
-    /// Returns a future that becomes ready when either the read buffer of the given stream
-    /// contains data, or the remote has closed their sending side.
+    /// Synchronizes the stream with the "actual" stream.
     ///
-    /// The future is immediately ready if data is already available or the remote has already
-    /// closed their sending side.
-    fn wait_more_data(stream: &'_ mut Self::Stream) -> Self::StreamDataFuture<'_>;
+    /// Returns a future that becomes ready when data has been added to the read buffer of the
+    /// given stream , or the remote closes their sending side, or the number of writable bytes
+    /// (see [`Platform::writable_bytes`]) increases.
+    ///
+    /// This function should also flush any outgoing data if necessary.
+    ///
+    /// In order to avoid race conditions, the state of the read buffer and the writable bytes
+    /// shouldn't be updated unless this function is called.
+    /// In other words, calling this function switches the stream from a state to another, and
+    /// this state transition should only happen when this function is called and not otherwise.
+    fn update_stream(stream: &'_ mut Self::Stream) -> Self::StreamUpdateFuture<'_>;
 
     /// Gives access to the content of the read buffer of the given stream.
     fn read_buffer(stream: &mut Self::Stream) -> ReadBuffer;
 
-    /// Discards the first `bytes` bytes of the read buffer of this stream. This makes it
-    /// possible for the remote to send more data.
+    /// Discards the first `bytes` bytes of the read buffer of this stream.
+    ///
+    /// This makes it possible for more data to be received when [`Platform::update_stream`] is
+    /// called.
     ///
     /// # Panic
     ///
@@ -125,16 +140,42 @@ pub trait Platform: Send + 'static {
     ///
     fn advance_read_cursor(stream: &mut Self::Stream, bytes: usize);
 
-    /// Queues the given bytes to be sent out on the given connection.
+    /// Returns the maximum size of the buffer that can be passed to [`Platform::send`].
+    ///
+    /// Must return 0 if [`Platform::close_send`] has previously been called, or if the stream
+    /// has been reset by the remote.
+    ///
+    /// If [`Platform::send`] is called, the number of writable bytes must decrease by exactly
+    /// the size of the buffer that was provided.
+    /// The number of writable bytes should never change unless [`Platform::update_stream`] is
+    /// called.
+    fn writable_bytes(stream: &mut Self::Stream) -> usize;
+
+    /// Queues the given bytes to be sent out on the given stream.
     ///
     /// > **Note**: In the case of [`PlatformConnection::MultiStreamWebRtc`], be aware that there
-    /// >           exists a limit to the amount of data to send at once. The `data` parameter
-    /// >           is guaranteed to fit within that limit. Due to the existence of this limit,
-    /// >           the implementation of this function shouldn't attempt to save function calls
-    /// >           by performing internal buffering and batching multiple calls into one.
-    // TODO: back-pressure
-    // TODO: allow closing sending side
+    /// >           exists a limit to the amount of data to send in a single packet. The `data`
+    /// >           parameter is guaranteed to fit within that limit. Due to the existence of this
+    /// >           limit, the implementation of this function shouldn't attempt to save function
+    /// >           calls by performing internal buffering and batching multiple calls into one.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `data.len()` is superior to the value returned by [`Platform::writable_bytes`].
+    /// Panics if [`Platform::close_send`] has been called before on this stream.
+    ///
     fn send(stream: &mut Self::Stream, data: &[u8]);
+
+    /// Closes the sending side of the given stream.
+    ///
+    /// > **Note**: In situations where this isn't possible, such as with the WebSocket protocol,
+    /// >           this is a no-op.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`Platform::close_send`] has already been called on this stream.
+    ///
+    fn close_send(stream: &mut Self::Stream);
 }
 
 /// Type of opened connection. See [`Platform::connect`].

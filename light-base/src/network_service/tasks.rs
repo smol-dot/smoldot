@@ -19,7 +19,7 @@ use super::Shared;
 use crate::platform::{Platform, PlatformConnection, PlatformSubstreamDirection, ReadBuffer};
 
 use alloc::{string::ToString as _, sync::Arc, vec, vec::Vec};
-use core::{iter, pin::Pin};
+use core::{cmp, iter, pin::Pin};
 use futures::{channel::mpsc, prelude::*};
 use smoldot::{
     libp2p::{collection::SubstreamFate, read_write::ReadWrite},
@@ -211,7 +211,8 @@ async fn single_stream_connection_task<TPlat: Platform>(
     // from this slice the data to send. Consequently, the write buffer is held locally. This is
     // suboptimal compared to writing to a write buffer provided by the platform, but it is easier
     // to implement it this way.
-    let mut write_buffer = vec![0; 4096];
+    // Switched to `None` after the connection closes its writing side.
+    let mut write_buffer = Some(vec![0; 4096]);
 
     // The main loop is as follows:
     // - Update the state machine.
@@ -229,55 +230,66 @@ async fn single_stream_connection_task<TPlat: Platform>(
 
         let now = TPlat::now();
 
-        let (read_bytes, read_buffer_has_data, read_buffer_closed, written_bytes, wake_up_after) =
-            if !connection_task.is_reset_called() {
-                let incoming_buffer = match TPlat::read_buffer(&mut connection) {
-                    ReadBuffer::Reset => {
-                        connection_task.reset();
-                        continue;
-                    }
-                    ReadBuffer::Open(b) => Some(b),
-                    ReadBuffer::Closed => None,
-                };
+        let (read_bytes, written_bytes, wake_up_after) = if !connection_task.is_reset_called() {
+            let write_side_was_open = write_buffer.is_some();
+            let writable_bytes = cmp::min(
+                TPlat::writable_bytes(&mut connection),
+                write_buffer.as_ref().map_or(0, |b| b.len()),
+            );
 
-                // Perform a read-write. This updates the internal state of the connection task.
-                let mut read_write = ReadWrite {
-                    now: now.clone(),
-                    incoming_buffer,
-                    outgoing_buffer: Some((&mut write_buffer, &mut [])), // TODO: this should be None if a previous read_write() produced None
-                    read_bytes: 0,
-                    written_bytes: 0,
-                    wake_up_after: None,
-                };
-                connection_task.read_write(&mut read_write);
-
-                // Because the `read_write` object borrows the connection, we need to drop it before we
-                // can modify the connection. Before dropping the `read_write`, clone some important
-                // information from it.
-                let read_buffer_has_data =
-                    read_write.incoming_buffer.map_or(false, |b| !b.is_empty());
-                let read_buffer_closed = read_write.incoming_buffer.is_none();
-                let read_bytes = read_write.read_bytes;
-                let written_bytes = read_write.written_bytes;
-                let wake_up_after = read_write.wake_up_after.clone();
-                drop(read_write);
-
-                // Now update the connection.
-                if written_bytes != 0 {
-                    TPlat::send(&mut connection, &write_buffer[..written_bytes]);
+            let incoming_buffer = match TPlat::read_buffer(&mut connection) {
+                ReadBuffer::Reset => {
+                    connection_task.reset();
+                    continue;
                 }
-                TPlat::advance_read_cursor(&mut connection, read_bytes);
-
-                (
-                    read_bytes,
-                    read_buffer_has_data,
-                    read_buffer_closed,
-                    written_bytes,
-                    wake_up_after,
-                )
-            } else {
-                (0, false, true, 0, None)
+                ReadBuffer::Open(b) => Some(b),
+                ReadBuffer::Closed => None,
             };
+
+            // Perform a read-write. This updates the internal state of the connection task.
+            let mut read_write = ReadWrite {
+                now: now.clone(),
+                incoming_buffer,
+                outgoing_buffer: if let Some(write_buffer) = write_buffer.as_mut() {
+                    Some((&mut write_buffer[..writable_bytes], &mut []))
+                } else {
+                    None
+                },
+                read_bytes: 0,
+                written_bytes: 0,
+                wake_up_after: None,
+            };
+            connection_task.read_write(&mut read_write);
+
+            // Because the `read_write` object borrows the connection, we need to drop it before we
+            // can modify the connection. Before dropping the `read_write`, clone some important
+            // information from it.
+            let read_bytes = read_write.read_bytes;
+            let write_size_closed = write_side_was_open && read_write.outgoing_buffer.is_none();
+            let written_bytes = read_write.written_bytes;
+            let wake_up_after = read_write.wake_up_after.clone();
+            drop(read_write);
+
+            // Now update the connection.
+            if written_bytes != 0 {
+                // `written_bytes`non-zero when the writing side has been closed before
+                // doesn't make sense and would indicate a bug in the networking code
+                TPlat::send(
+                    &mut connection,
+                    &write_buffer.as_mut().unwrap()[..written_bytes],
+                );
+            }
+            if write_size_closed {
+                TPlat::close_send(&mut connection);
+                debug_assert!(write_buffer.is_some());
+                write_buffer = None;
+            }
+            TPlat::advance_read_cursor(&mut connection, read_bytes);
+
+            (read_bytes, written_bytes, wake_up_after)
+        } else {
+            (0, 0, None)
+        };
 
         // Try pull message to send to the coordinator.
 
@@ -358,23 +370,15 @@ async fn single_stream_connection_task<TPlat: Platform>(
             future::Either::Right(future::pending())
         }
         .fuse();
-
-        // Future that is woken up when new data is ready on the socket.
-        let read_buffer_ready = if !(read_buffer_has_data && read_bytes == 0) && !read_buffer_closed
-        {
-            future::Either::Left(TPlat::wait_more_data(&mut connection))
-        } else {
-            future::Either::Right(future::pending())
-        };
-
+        // Future that is woken up when new data is ready on the socket or more data is writable.
+        let stream_update = TPlat::update_stream(&mut connection);
         // Future that is woken up when a new message is coming from the coordinator.
         let message_from_coordinator = Pin::new(&mut coordinator_to_connection).peek();
 
-        // Wait until either some data is ready on the socket, or the connection state machine
-        // has requested to be polled again, or a message is coming from the coordinator.
-        futures::pin_mut!(read_buffer_ready);
+        // Combines the three futures above into one.
+        futures::pin_mut!(stream_update);
         future::select(
-            future::select(read_buffer_ready, message_from_coordinator),
+            future::select(stream_update, message_from_coordinator),
             poll_after,
         )
         .await;
@@ -408,10 +412,11 @@ async fn webrtc_multi_stream_connection_task<TPlat: Platform>(
     // Newly-open substream that has just been yielded by the connection.
     let mut newly_open_substream = None;
     // `true` if the remote has force-closed our connection.
-    let mut has_reset = false;
+    let mut remote_has_reset = false;
     // List of all currently open substreams. The index (as a `usize`) corresponds to the id
     // of this substream within the `connection_task` state machine.
-    let mut open_substreams = slab::Slab::<TPlat::Stream>::with_capacity(16);
+    // For each stream, a boolean indicates whether the local writing side is closed.
+    let mut open_substreams = slab::Slab::<(TPlat::Stream, bool)>::with_capacity(16);
 
     // In order to write data on a stream, we simply pass a slice, and the platform will copy
     // from this slice the data to send. Consequently, the write buffer is held locally. This is
@@ -438,7 +443,7 @@ async fn webrtc_multi_stream_connection_task<TPlat: Platform>(
                 PlatformSubstreamDirection::Outbound => true,
                 PlatformSubstreamDirection::Inbound => false,
             };
-            let id = open_substreams.insert(stream);
+            let id = open_substreams.insert((stream, true));
             connection_task.add_substream(id, outbound);
             if outbound {
                 pending_opening_out_substreams -= 1;
@@ -464,7 +469,9 @@ async fn webrtc_multi_stream_connection_task<TPlat: Platform>(
         // TODO: trying to read/write every single substream every single time is suboptimal, but making this not suboptimal is very complicated
         for substream_id in open_substreams.iter().map(|(id, _)| id).collect::<Vec<_>>() {
             loop {
-                let substream = &mut open_substreams[substream_id];
+                let (substream, write_side_was_open) = &mut open_substreams[substream_id];
+
+                let writable_bytes = cmp::min(TPlat::writable_bytes(substream), write_buffer.len());
 
                 let incoming_buffer = match TPlat::read_buffer(substream) {
                     ReadBuffer::Open(buf) => buf,
@@ -480,7 +487,11 @@ async fn webrtc_multi_stream_connection_task<TPlat: Platform>(
                 let mut read_write = ReadWrite {
                     now: now.clone(),
                     incoming_buffer: Some(incoming_buffer),
-                    outgoing_buffer: Some((&mut write_buffer, &mut [])),
+                    outgoing_buffer: if *write_side_was_open {
+                        Some((&mut write_buffer[..writable_bytes], &mut []))
+                    } else {
+                        None
+                    },
                     read_bytes: 0,
                     written_bytes: 0,
                     wake_up_after,
@@ -496,12 +507,18 @@ async fn webrtc_multi_stream_connection_task<TPlat: Platform>(
                 // information from it.
                 let read_bytes = read_write.read_bytes;
                 let written_bytes = read_write.written_bytes;
+                let must_close_writing_side =
+                    *write_side_was_open && read_write.outgoing_buffer.is_none();
                 wake_up_after = read_write.wake_up_after.take();
                 drop(read_write);
 
                 // Now update the connection.
                 if written_bytes != 0 {
                     TPlat::send(substream, &write_buffer[..written_bytes]);
+                }
+                if must_close_writing_side {
+                    TPlat::close_send(substream);
+                    *write_side_was_open = false;
                 }
                 TPlat::advance_read_cursor(substream, read_bytes);
 
@@ -598,13 +615,11 @@ async fn webrtc_multi_stream_connection_task<TPlat: Platform>(
         .fuse();
 
         // Future that is woken up when new data is ready on any of the streams.
-        // TODO: very suboptimal
-        // TODO: will loop infinitely if the remote closes its writing side because `wait_more_data` is immediately ready when that is the case
-        let data_ready = iter::once(future::Either::Right(future::pending()))
+        let streams_updated = iter::once(future::Either::Right(future::pending()))
             .chain(
                 open_substreams
                     .iter_mut()
-                    .map(|(_, stream)| future::Either::Left(TPlat::wait_more_data(stream))),
+                    .map(|(_, (stream, _))| future::Either::Left(TPlat::update_stream(stream))),
             )
             .collect::<future::SelectAll<_>>();
 
@@ -615,18 +630,18 @@ async fn webrtc_multi_stream_connection_task<TPlat: Platform>(
         debug_assert!(newly_open_substream.is_none());
         futures::select! {
             _ = message_from_coordinator => {}
-            substream = if has_reset { either::Right(future::pending()) } else { either::Left(TPlat::next_substream(&mut connection)) }.fuse() => {
+            substream = if remote_has_reset { either::Right(future::pending()) } else { either::Left(TPlat::next_substream(&mut connection)) }.fuse() => {
                 match substream {
                     Some(s) => newly_open_substream = Some(s),
                     None => {
                         // `None` is returned if the remote has force-closed the connection.
                         connection_task.reset();
-                        has_reset = true;
+                        remote_has_reset = true;
                     }
                 }
             }
             _ = poll_after => {}
-            _ = data_ready.fuse() => {}
+            _ = streams_updated.fuse() => {}
         }
     }
 }
