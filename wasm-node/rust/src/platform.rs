@@ -312,6 +312,7 @@ impl smoldot_light::platform::Platform for Platform {
 
         // Move the next buffer from `STATE` into `read_buffer`.
         if let Some(msg) = stream.messages_queue.pop_front() {
+            stream.messages_queue_total_size -= msg.len();
             read_buffer.buffer = msg;
             read_buffer.buffer_first_offset = 0;
             smoldot_light::platform::ReadBuffer::Open(&read_buffer.buffer[..])
@@ -345,6 +346,7 @@ impl smoldot_light::platform::Platform for Platform {
             let mut lock = STATE.try_lock().unwrap();
             let stream = lock.streams.get_mut(stream_id).unwrap();
             if let Some(msg) = stream.messages_queue.pop_front() {
+                stream.messages_queue_total_size -= msg.len();
                 read_buffer.buffer = msg;
                 read_buffer.buffer_first_offset = 0;
             } else {
@@ -538,6 +540,8 @@ struct Stream {
     /// List of messages received through [`bindings::stream_message`]. Must never contain
     /// empty messages.
     messages_queue: VecDeque<Box<[u8]>>,
+    /// Total size of all the messages stored in [`Stream::messages_queue`].
+    messages_queue_total_size: usize,
     /// Event notified whenever one of the fields above is modified, such as a new message being
     /// queued.
     something_happened: event_listener::Event,
@@ -568,6 +572,7 @@ pub(crate) fn connection_open_single_stream(connection_id: u32, handshake_ty: u3
         Stream {
             reset: false,
             messages_queue: VecDeque::with_capacity(8),
+            messages_queue_total_size: 0,
             something_happened: event_listener::Event::new(),
         },
     );
@@ -666,7 +671,27 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, len: 
         return;
     }
 
-    // TODO: add some limit to `messages_queue`, to avoid DoS attacks?
+    // There is unfortunately no way to instruct the browser to back-pressure connections to
+    // remotes.
+    // In order to avoid DoS attacks, we refuse to buffer more than a certain amount of data per
+    // connection. This limit is completely arbitrary, and this is in no way a robust solution
+    // because this limit isn't in sync with any other part of the code. In other words, it could
+    // be legitimate for the remote to buffer a large amount of data.
+    // This corner case is handled by discarding the messages that would go over the limit. While
+    // this is not a great solution, going over that limit can be considered as a fault from the
+    // remote, the same way as it would be a fault from the remote to forget to send some bytes,
+    // and thus should be handled in a similar way by the higher level code.
+    // A better way to handle this would be to kill the connection abruptly. However, this would
+    // add a lot of complex code in this module, and the effort is clearly not worth it for this
+    // niche situation.
+    // See <https://github.com/smol-dot/smoldot/issues/109>.
+    // TODO: do this properly eventually ^
+    // TODO: move this limit check in the browser-specific code so that NodeJS and Deno don't suffer from it?
+    if stream.messages_queue_total_size >= 25 * 1024 * 1024 {
+        return;
+    }
+
+    stream.messages_queue_total_size += message.len();
     stream.messages_queue.push_back(message);
     stream.something_happened.notify(usize::max_value());
 }
@@ -686,6 +711,7 @@ pub(crate) fn connection_stream_opened(connection_id: u32, stream_id: u32, outbo
             Stream {
                 reset: false,
                 messages_queue: VecDeque::with_capacity(8),
+                messages_queue_total_size: 0,
                 something_happened: event_listener::Event::new(),
             },
         );
