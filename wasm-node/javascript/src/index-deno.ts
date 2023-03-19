@@ -71,7 +71,7 @@ export function start(options?: ClientOptions): Client {
             return concatenated;
         },
         registerShouldPeriodicallyYield: (_callback) => {
-          return [true, () => {}]
+            return [true, () => { }]
         },
         performanceNow: () => {
             return performance.now()
@@ -93,7 +93,7 @@ export function start(options?: ClientOptions): Client {
  *
  * The input is assumed to be correct.
  */
- function trustedBase64Decode(base64: string): Uint8Array {
+function trustedBase64Decode(base64: string): Uint8Array {
     // This code is a bit sketchy due to the fact that we decode into a string, but it seems to
     // work.
     const binaryString = atob(base64);
@@ -112,8 +112,6 @@ export function start(options?: ClientOptions): Client {
  * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
  */
 function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean, forbidNonLocalWs: boolean, forbidWss: boolean): Connection {
-    let connection: TcpWrapped | WebSocketWrapped;
-
     // Attempt to parse the multiaddress.
     // TODO: remove support for `/wss` in a long time (https://github.com/paritytech/smoldot/issues/1940)
     const wsParsed = config.address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)\/(ws|wss|tls\/ws)$/);
@@ -133,21 +131,41 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             (proto + "://[" + wsParsed[2] + "]:" + wsParsed[3]) :
             (proto + "://" + wsParsed[2] + ":" + wsParsed[3]);
 
-        connection = {
-            ty: 'websocket',
-            socket: new WebSocket(url)
-        };
-        connection.socket.binaryType = 'arraybuffer';
+        const socket = new WebSocket(url);
+        socket.binaryType = 'arraybuffer';
 
-        connection.socket.onopen = () => {
+        socket.onopen = () => {
             config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux' });
         };
-        connection.socket.onclose = (event) => {
+        socket.onclose = (event) => {
             const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
             config.onConnectionReset(message);
         };
-        connection.socket.onmessage = (msg) => {
+        socket.onmessage = (msg) => {
             config.onMessage(new Uint8Array(msg.data as ArrayBuffer));
+        };
+
+        return {
+            reset: (): void => {
+                // We can't set these fields to null because the TypeScript definitions don't
+                // allow it, but we can set them to dummy values.
+                socket.onopen = () => { };
+                socket.onclose = () => { };
+                socket.onmessage = () => { };
+                socket.onerror = () => { };
+                socket.close();
+            },
+            send: (data: Uint8Array): void => {
+                // The WebSocket library that we use seems to spontaneously transition connections
+                // to the "closed" state but not call the `onclosed` callback immediately. Calling
+                // `send` on that object throws an exception. In order to avoid panicking smoldot,
+                // we thus absorb any exception thrown here.
+                // See also <https://github.com/paritytech/smoldot/issues/2937>.
+                try {
+                    socket.send(data);
+                } catch (_error) { }
+            },
+            openOutSubstream: () => { throw new Error('Wrong connection type') }
         };
 
     } else if (tcpParsed != null) {
@@ -167,8 +185,6 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
                 return null;
             })
         };
-
-        connection = { ty: 'tcp', socket };
 
         socket.inner = socket.inner.then((established) => {
             // TODO: at the time of writing of this comment, `setNoDelay` is still unstable
@@ -210,45 +226,16 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             return established;
         });
 
-    } else {
-        throw new ConnectionError('Unrecognized multiaddr format');
-    }
+        return {
+            reset: (): void => {
+                socket.destroyed = true;
+                socket.inner.then((connec) => connec!.close());
+            },
 
-    return {
-        reset: (): void => {
-            if (connection.ty == 'websocket') {
-                // WebSocket
-                // We can't set these fields to null because the TypeScript definitions don't
-                // allow it, but we can set them to dummy values.
-                connection.socket.onopen = () => { };
-                connection.socket.onclose = () => { };
-                connection.socket.onmessage = () => { };
-                connection.socket.onerror = () => { };
-                connection.socket.close();
-            } else {
-                // TCP
-                connection.socket.destroyed = true;
-                connection.socket.inner.then((connec) => connec!.close());
-            }
-        },
-
-        send: (data: Uint8Array): void => {
-            if (connection.ty == 'websocket') {
-                // WebSocket
-                // The WebSocket library that we use seems to spontaneously transition connections
-                // to the "closed" state but not call the `onclosed` callback immediately. Calling
-                // `send` on that object throws an exception. In order to avoid panicking smoldot,
-                // we thus absorb any exception thrown here.
-                // See also <https://github.com/paritytech/smoldot/issues/2937>.
-                try {
-                    connection.socket.send(data);
-                } catch(_error) {}
-            } else {
-                // TCP
+            send: (data: Uint8Array): void => {
                 // TODO: at the moment, sending data doesn't have any back-pressure mechanism; as such, we just buffer data indefinitely
                 let dataCopy = Uint8Array.from(data)  // Deep copy of the data
-                const socket = connection.socket;
-                connection.socket.inner = connection.socket.inner.then(async (c) => {
+                socket.inner = socket.inner.then(async (c) => {
                     while (dataCopy.length > 0) {
                         if (socket.destroyed || c === null)
                             return c;
@@ -273,29 +260,14 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
                     }
                     return c;
                 });
-            }
-        },
+            },
 
-        openOutSubstream: () => { throw new Error('Wrong connection type') }
-    };
-}
+            openOutSubstream: () => { throw new Error('Wrong connection type') }
+        };
 
-interface TcpWrapped {
-    ty: 'tcp',
-    socket: TcpConnection,
-}
-
-interface WebSocketWrapped {
-    ty: 'websocket',
-    socket: WebSocket,
-}
-
-interface TcpConnection {
-    // `Promise` that resolves when the connection is ready to accept more data to send, or when
-    // the connection is closed. Check `destroyed` in order to know whether the connection
-    // is closed.
-    inner: Promise<Deno.TcpConn | null>,
-    destroyed: boolean,
+    } else {
+        throw new ConnectionError('Unrecognized multiaddr format');
+    }
 }
 
 
