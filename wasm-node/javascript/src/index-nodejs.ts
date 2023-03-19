@@ -151,11 +151,17 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             port: parseInt(tcpParsed[3]!, 10),
         });
 
+        // Number of bytes queued using `socket.write` and where `write` has returned false.
+        const drainingBytes = { num: 0 };
+
         socket.setNoDelay();
 
         socket.on('connect', () => {
             if (socket.destroyed) return;
-            config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux' });
+            config.onOpen({
+                type: 'single-stream', handshake: 'multistream-select-noise-yamux',
+                initialWritableBytes: socket.writableHighWaterMark
+            });
         });
         socket.on('close', (hasError) => {
             if (socket.destroyed) return;
@@ -169,13 +175,29 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             if (socket.destroyed) return;
             config.onMessage(new Uint8Array(message.buffer));
         });
+        socket.on('drain', () => {
+            // The bytes queued using `socket.write` and where `write` has returned false have now
+            // been sent. Notify the API that it can write more data.
+            if (socket.destroyed) return;
+            config.onWritableBytes(drainingBytes.num);
+            drainingBytes.num = 0;
+        });
 
         return {
             reset: (): void => {
                 socket.destroy();
             },
             send: (data: Uint8Array): void => {
-                socket.write(data);
+                const dataLen = data.length;
+                const allWritten = socket.write(data);
+                if (allWritten) {
+                    setImmediate(() => {
+                        if (socket.destroyed) return;
+                        config.onWritableBytes(dataLen)
+                    });
+                } else {
+                    drainingBytes.num += dataLen;
+                }
             },
             openOutSubstream: () => { throw new Error('Wrong connection type') }
         };
