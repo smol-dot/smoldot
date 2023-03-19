@@ -64,7 +64,7 @@ export function start(options?: ClientOptions): Client {
         return performance.now()
     },
     getRandomValues: (buffer) => {
-      if (buffer.length >= 65536)
+      if (buffer.length >= 1024 * 1024)
         throw new Error('getRandomValues buffer too large')
       randomFillSync(buffer)
     },
@@ -120,7 +120,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
         };
 
         socket.onopen = () => {
-            config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: 65536 });
+            config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: 1024 * 1024 });
         };
         socket.onclose = (event) => {
             const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");

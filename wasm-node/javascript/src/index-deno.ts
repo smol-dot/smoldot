@@ -151,7 +151,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
         };
 
         socket.onopen = () => {
-            config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: 65536 });
+            config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: 1024 * 1024 });
         };
         socket.onclose = (event) => {
             const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
@@ -212,7 +212,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
 
             if (socket.destroyed)
                 return established;
-            config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: 65536 });
+            config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: 1024 * 1024 });
 
             // Spawns an asynchronous task that continuously reads from the socket.
             // Every time data is read, the task re-executes itself in order to continue reading.
