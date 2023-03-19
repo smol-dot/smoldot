@@ -102,8 +102,25 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
 
         const socket = new WebSocket(url);
         socket.binaryType = 'arraybuffer';
+
+        const bufferedAmountCheck = { quenedUnreportedBytes: 0, nextTimeout: 10 };
+        const checkBufferedAmount = () => {
+            if (socket.readyState != 1)
+                return;
+            const bufferedAmount = socket.bufferedAmount;
+            const wasSent = bufferedAmountCheck.quenedUnreportedBytes - bufferedAmount;
+            config.onWritableBytes(wasSent);
+            bufferedAmountCheck.quenedUnreportedBytes = bufferedAmount;
+            if (bufferedAmount != 0) {
+            setTimeout(checkBufferedAmount, bufferedAmountCheck.nextTimeout);
+            bufferedAmountCheck.nextTimeout *= 2;
+            if (bufferedAmountCheck.nextTimeout > 500)
+                bufferedAmountCheck.nextTimeout = 500;
+            }
+        };
+
         socket.onopen = () => {
-            config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux' });
+            config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: 65536 });
         };
         socket.onclose = (event) => {
             const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
@@ -136,6 +153,11 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             },
             send: (data: Uint8Array): void => {
                 socket.send(data);
+                if (bufferedAmountCheck.quenedUnreportedBytes == 0) {
+                  bufferedAmountCheck.nextTimeout = 10;
+                  setTimeout(checkBufferedAmount, 10);
+                }
+                bufferedAmountCheck.quenedUnreportedBytes += data.length;
             },
             openOutSubstream: () => { throw new Error('Wrong connection type') }
         };
