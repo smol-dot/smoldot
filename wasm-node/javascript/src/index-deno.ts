@@ -134,8 +134,24 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
         const socket = new WebSocket(url);
         socket.binaryType = 'arraybuffer';
 
+        const bufferedAmountCheck = { quenedUnreportedBytes: 0, nextTimeout: 10 };
+        const checkBufferedAmount = () => {
+            if (socket.readyState != 1)
+                return;
+            const bufferedAmount = socket.bufferedAmount;
+            const wasSent = bufferedAmountCheck.quenedUnreportedBytes - bufferedAmount;
+            config.onWritableBytes(wasSent);
+            bufferedAmountCheck.quenedUnreportedBytes = bufferedAmount;
+            if (bufferedAmount != 0) {
+            setTimeout(checkBufferedAmount, bufferedAmountCheck.nextTimeout);
+            bufferedAmountCheck.nextTimeout *= 2;
+            if (bufferedAmountCheck.nextTimeout > 500)
+                bufferedAmountCheck.nextTimeout = 500;
+            }
+        };
+
         socket.onopen = () => {
-            config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux' });
+            config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: 65536 });
         };
         socket.onclose = (event) => {
             const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
@@ -163,13 +179,17 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
                 // See also <https://github.com/paritytech/smoldot/issues/2937>.
                 try {
                     socket.send(data);
+                    if (bufferedAmountCheck.quenedUnreportedBytes == 0) {
+                      bufferedAmountCheck.nextTimeout = 10;
+                      setTimeout(checkBufferedAmount, 10);
+                    }
+                    bufferedAmountCheck.quenedUnreportedBytes += data.length;
                 } catch (_error) { }
             },
             openOutSubstream: () => { throw new Error('Wrong connection type') }
         };
 
     } else if (tcpParsed != null) {
-        // `net` module will be missing when we're not in NodeJS.
         if (forbidTcp) {
             throw new ConnectionError('TCP connections not available');
         }
@@ -192,7 +212,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
 
             if (socket.destroyed)
                 return established;
-            config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux' });
+            config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: 65536 });
 
             // Spawns an asynchronous task that continuously reads from the socket.
             // Every time data is read, the task re-executes itself in order to continue reading.
@@ -233,7 +253,6 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             },
 
             send: (data: Uint8Array): void => {
-                // TODO: at the moment, sending data doesn't have any back-pressure mechanism; as such, we just buffer data indefinitely
                 let dataCopy = Uint8Array.from(data)  // Deep copy of the data
                 socket.inner = socket.inner.then(async (c) => {
                     while (dataCopy.length > 0) {
@@ -242,6 +261,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
                         let outcome: number | string;
                         try {
                             outcome = await c.write(dataCopy);
+                            config.onWritableBytes(dataCopy.length);
                         } catch (error) {
                             // The type of `error` is unclear, but we assume that it implements `Error`
                             outcome = (error as Error).toString()
