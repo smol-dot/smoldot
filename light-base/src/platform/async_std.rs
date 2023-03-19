@@ -36,7 +36,6 @@ use std::{
 /// and WebSocket connections.
 pub struct AsyncStdTcpWebSocket;
 
-// TODO: this trait implementation was written before GATs were stable in Rust; now that the associated types have lifetimes, it should be possible to considerably simplify this code
 impl Platform for AsyncStdTcpWebSocket {
     type Delay = future::BoxFuture<'static, ()>;
     type Yield = future::Ready<()>;
