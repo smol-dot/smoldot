@@ -90,8 +90,6 @@ export function start(options?: ClientOptions): Client {
   const webRTCParsed = config.address.match(/^\/(ip4|ip6)\/(.*?)\/udp\/(.*?)\/webrtc\/certhash\/(.*?)$/);
 
   if (wsParsed != null) {
-      let connection: WebSocket;
-
       const proto = (wsParsed[4] == 'ws') ? 'ws' : 'wss';
       if (
           (proto == 'ws' && forbidWs) ||
@@ -105,11 +103,30 @@ export function start(options?: ClientOptions): Client {
           (proto + "://[" + wsParsed[2] + "]:" + wsParsed[3]) :
           (proto + "://" + wsParsed[2] + ":" + wsParsed[3]);
 
-      connection = new WebSocket(url);
+      const connection = new WebSocket(url);
       connection.binaryType = 'arraybuffer';
 
+      const bufferedAmountCheck = { quenedUnreportedBytes: 0, nextTimeout: 10 };
+      const checkBufferedAmount = () => {
+        if (connection.readyState != 1)
+          return;
+        const bufferedAmount = connection.bufferedAmount;
+        const wasSent = bufferedAmountCheck.quenedUnreportedBytes - bufferedAmount;
+        config.onWritableBytes(wasSent);
+        bufferedAmountCheck.quenedUnreportedBytes = bufferedAmount;
+        if (bufferedAmount != 0) {
+          setTimeout(checkBufferedAmount, bufferedAmountCheck.nextTimeout);
+          bufferedAmountCheck.nextTimeout *= 2;
+          if (bufferedAmountCheck.nextTimeout > 500)
+            bufferedAmountCheck.nextTimeout = 500;
+        }
+      };
+
       connection.onopen = () => {
-          config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux' });
+          config.onOpen({
+              type: 'single-stream', handshake: 'multistream-select-noise-yamux',
+              initialWritableBytes: 65536
+          });
       };
       connection.onclose = (event) => {
           const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
@@ -130,6 +147,11 @@ export function start(options?: ClientOptions): Client {
 
         send: (data: Uint8Array): void => {
             connection.send(data);
+            if (bufferedAmountCheck.quenedUnreportedBytes == 0) {
+              bufferedAmountCheck.nextTimeout = 10;
+              setTimeout(checkBufferedAmount, 10);
+            }
+            bufferedAmountCheck.quenedUnreportedBytes += data.length;
         },
 
         openOutSubstream: () => { throw new Error('Wrong connection type') }
