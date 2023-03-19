@@ -118,6 +118,9 @@ pub trait Platform: Send + 'static {
     /// given stream , or the remote closes their sending side, or the number of writable bytes
     /// (see [`Platform::writable_bytes`]) increases.
     ///
+    /// Note that this function might add data to the read buffer nor mark it as closed unless it
+    /// has been emptied beforehand using [`Platform::advance_read_cursor`].
+    ///
     /// This function should also flush any outgoing data if necessary.
     ///
     /// In order to avoid race conditions, the state of the read buffer and the writable bytes
@@ -161,6 +164,7 @@ pub trait Platform: Send + 'static {
     ///
     /// # Panic
     ///
+    /// Panics if `data.is_empty()`.
     /// Panics if `data.len()` is superior to the value returned by [`Platform::writable_bytes`].
     /// Panics if [`Platform::close_send`] has been called before on this stream.
     ///

@@ -20,15 +20,15 @@
 
 use super::{ConnectError, Platform, PlatformConnection, PlatformSubstreamDirection, ReadBuffer};
 
-use alloc::{collections::VecDeque, sync::Arc};
+use alloc::collections::VecDeque;
 use core::{pin::Pin, str, task::Poll, time::Duration};
-use futures::{channel::mpsc, prelude::*};
+use futures::prelude::*;
 use smoldot::libp2p::{
     multiaddr::{Multiaddr, ProtocolRef},
     websocket,
 };
 use std::{
-    io::IoSlice,
+    io::{IoSlice, IoSliceMut},
     net::{IpAddr, SocketAddr},
 };
 
@@ -158,7 +158,7 @@ impl Platform for AsyncStdTcpWebSocket {
                 let _ = tcp_socket.set_nodelay(true);
             }
 
-            let mut socket = match (tcp_socket, host_if_websocket) {
+            let socket: TcpOrWs = match (tcp_socket, host_if_websocket) {
                 (Ok(tcp_socket), Some(host)) => future::Either::Right(
                     websocket::websocket_client_handshake(websocket::Config {
                         tcp_socket,
@@ -180,87 +180,19 @@ impl Platform for AsyncStdTcpWebSocket {
                 }
             };
 
-            let shared = Arc::new(StreamShared {
-                guarded: parking_lot::Mutex::new(StreamSharedGuarded {
-                    write_queue: VecDeque::with_capacity(1024),
-                }),
-                write_queue_pushed: event_listener::Event::new(),
-            });
-            let shared_clone = shared.clone();
-
-            let (mut read_data_tx, read_data_rx) = mpsc::channel(2);
-            let mut read_buffer = vec![0; 4096];
-            let mut write_queue_pushed_listener = shared.write_queue_pushed.listen();
-
-            // TODO: this whole code is a mess, but the Platform trait must be modified to fix it
-            // TODO: spawning a task per connection is necessary because the Platform trait isn't suitable for better strategies
-            async_std::task::spawn(future::poll_fn(move |cx| {
-                let mut lock = shared.guarded.lock();
-
-                loop {
-                    match Pin::new(&mut read_data_tx).poll_ready(cx) {
-                        Poll::Ready(Ok(())) => {
-                            match Pin::new(&mut socket).poll_read(cx, &mut read_buffer) {
-                                Poll::Pending => break,
-                                Poll::Ready(result) => {
-                                    match result {
-                                        Ok(0) | Err(_) => return Poll::Ready(()), // End the task
-                                        Ok(bytes) => {
-                                            let _ = read_data_tx
-                                                .try_send(read_buffer[..bytes].to_vec());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Poll::Ready(Err(_)) => return Poll::Ready(()), // End the task
-                        Poll::Pending => break,
-                    }
-                }
-
-                loop {
-                    if lock.write_queue.is_empty() {
-                        if let Poll::Ready(Err(_)) = Pin::new(&mut socket).poll_flush(cx) {
-                            // End the task
-                            return Poll::Ready(());
-                        }
-
-                        break;
-                    } else {
-                        let write_queue_slices = lock.write_queue.as_slices();
-                        if let Poll::Ready(result) = Pin::new(&mut socket).poll_write_vectored(
-                            cx,
-                            &[
-                                IoSlice::new(write_queue_slices.0),
-                                IoSlice::new(write_queue_slices.1),
-                            ],
-                        ) {
-                            match result {
-                                Ok(bytes) => {
-                                    for _ in 0..bytes {
-                                        lock.write_queue.pop_front();
-                                    }
-                                }
-                                Err(_) => return Poll::Ready(()), // End the task
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                }
-
-                while let Poll::Ready(()) = Pin::new(&mut write_queue_pushed_listener).poll(cx) {
-                    write_queue_pushed_listener = shared.write_queue_pushed.listen();
-                }
-
-                Poll::Pending
-            }));
-
             Ok(PlatformConnection::SingleStreamMultistreamSelectNoiseYamux(
                 Stream {
-                    shared: shared_clone,
-                    read_data_rx: Arc::new(parking_lot::Mutex::new(read_data_rx.peekable())),
-                    read_buffer: Some(Vec::with_capacity(4096)),
+                    socket,
+                    buffers: Some((
+                        StreamReadBuffer::Open {
+                            buffer: VecDeque::with_capacity(16384),
+                            is_api_available: true,
+                        },
+                        StreamWriteBuffer::Open {
+                            buffer: VecDeque::with_capacity(16384),
+                            must_flush: false,
+                        },
+                    )),
                 },
             ))
         })
@@ -279,73 +211,238 @@ impl Platform for AsyncStdTcpWebSocket {
     }
 
     fn update_stream(stream: &'_ mut Self::Stream) -> Self::StreamUpdateFuture<'_> {
-        if stream.read_buffer.as_ref().map_or(true, |b| !b.is_empty()) {
-            return Box::pin(future::ready(()));
-        }
+        Box::pin(future::poll_fn(|cx| {
+            let Some((read_buffer, write_buffer)) = stream.buffers.as_mut() else { return Poll::Pending };
 
-        let read_data_rx = stream.read_data_rx.clone();
-        Box::pin(future::poll_fn(move |cx| {
-            let mut lock = read_data_rx.lock();
-            Pin::new(&mut *lock).poll_peek(cx).map(|_| ())
+            // Whether the future returned by `update_stream` should return `Ready` or `Pending`.
+            let mut update_stream_future_ready = false;
+
+            if let StreamReadBuffer::Open {
+                buffer: ref mut buf,
+                is_api_available,
+            } = read_buffer
+            {
+                // If `is_api_available` is `false`, we set it to `true` and pretend that more data
+                // has arrived.
+                if !*is_api_available {
+                    *is_api_available = true;
+                    if !buf.is_empty() {
+                        update_stream_future_ready = true;
+                    }
+                }
+
+                let data_in_buf_before_read = buf.len();
+
+                // Only try to read if there is space available in the buffer.
+                if data_in_buf_before_read < buf.capacity() {
+                    buf.resize(buf.capacity(), 0);
+
+                    let buf_as_slices = {
+                        let slices = buf.as_mut_slices();
+                        if slices.0.len() > data_in_buf_before_read {
+                            (&mut slices.0[data_in_buf_before_read..], slices.1)
+                        } else {
+                            (
+                                &mut slices.1[data_in_buf_before_read - slices.0.len()..],
+                                &mut [][..],
+                            )
+                        }
+                    };
+
+                    debug_assert!(!buf_as_slices.0.is_empty());
+
+                    if let Poll::Ready(result) = Pin::new(&mut stream.socket).poll_read_vectored(
+                        cx,
+                        &mut [
+                            IoSliceMut::new(buf_as_slices.0),
+                            IoSliceMut::new(buf_as_slices.1),
+                        ],
+                    ) {
+                        update_stream_future_ready = true;
+                        match result {
+                            Err(_) => {
+                                // End the stream.
+                                stream.buffers = None;
+                                return Poll::Ready(());
+                            }
+                            Ok(0) => {
+                                // EOF.
+                                *read_buffer = StreamReadBuffer::Closed;
+                            }
+                            Ok(bytes) => {
+                                buf.truncate(data_in_buf_before_read + bytes);
+                            }
+                        }
+                    } else {
+                        buf.truncate(data_in_buf_before_read);
+                    }
+                }
+            }
+
+            if let StreamWriteBuffer::Open {
+                buffer: ref mut buf,
+                must_flush,
+            } = write_buffer
+            {
+                if !buf.is_empty() {
+                    let write_queue_slices = buf.as_slices();
+                    if let Poll::Ready(result) = Pin::new(&mut stream.socket).poll_write_vectored(
+                        cx,
+                        &[
+                            IoSlice::new(write_queue_slices.0),
+                            IoSlice::new(write_queue_slices.1),
+                        ],
+                    ) {
+                        update_stream_future_ready = true;
+                        match result {
+                            Err(_) => {
+                                // End the stream.
+                                stream.buffers = None;
+                                return Poll::Ready(());
+                            }
+                            Ok(bytes) => {
+                                *must_flush = true;
+                                for _ in 0..bytes {
+                                    buf.pop_front();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if *must_flush {
+                    if let Poll::Ready(result) = Pin::new(&mut stream.socket).poll_flush(cx) {
+                        update_stream_future_ready = true;
+                        match result {
+                            Err(_) => {
+                                // End the stream.
+                                stream.buffers = None;
+                                return Poll::Ready(());
+                            }
+                            Ok(()) => {
+                                *must_flush = false;
+                            }
+                        }
+                    }
+                }
+            } else if let StreamWriteBuffer::MustClose = write_buffer {
+                if let Poll::Ready(result) = Pin::new(&mut stream.socket).poll_close(cx) {
+                    update_stream_future_ready = true;
+                    match result {
+                        Err(_) => {
+                            // End the stream.
+                            stream.buffers = None;
+                            return Poll::Ready(());
+                        }
+                        Ok(()) => {
+                            *write_buffer = StreamWriteBuffer::Closed;
+                        }
+                    }
+                }
+            }
+
+            if update_stream_future_ready {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
         }))
     }
 
     fn read_buffer(stream: &mut Self::Stream) -> ReadBuffer {
-        if stream.read_buffer.is_none() {
-            // TODO: the implementation doesn't let us differentiate between Closed and Reset
-            return ReadBuffer::Reset;
+        match stream.buffers.as_ref().map(|(r, _)| r) {
+            None => ReadBuffer::Reset,
+            Some(StreamReadBuffer::Closed) => ReadBuffer::Closed,
+            Some(StreamReadBuffer::Open {
+                buffer,
+                is_api_available: true,
+            }) => ReadBuffer::Open(buffer.as_slices().0),
+            Some(StreamReadBuffer::Open {
+                is_api_available: false,
+                ..
+            }) => ReadBuffer::Open(&[][..]),
         }
-
-        let mut lock = stream.read_data_rx.lock();
-        while let Some(buf) = lock.next().now_or_never() {
-            match buf {
-                Some(b) => stream.read_buffer.as_mut().unwrap().extend(b),
-                None => {
-                    stream.read_buffer = None;
-                    return ReadBuffer::Reset;
-                }
-            }
-        }
-
-        ReadBuffer::Open(stream.read_buffer.as_ref().unwrap())
     }
 
     fn advance_read_cursor(stream: &mut Self::Stream, bytes: usize) {
-        if let Some(read_buffer) = &mut stream.read_buffer {
-            // TODO: meh for copying
-            *read_buffer = read_buffer[bytes..].to_vec();
+        let Some(StreamReadBuffer::Open { ref mut buffer, is_api_available }) =
+            stream.buffers.as_mut().map(|(r, _)| r)
+        else {
+            assert_eq!(bytes, 0);
+            return
+        };
+
+        // Since `read_buffer` only returns `buffer.as_slices().0`, we want to prevent the user
+        // from accessing `buffer.as_slices().1`. As such, if the user advances the read cursor
+        // at the end of `buffer.as_slices().0` we set `is_api_available` to `false` which
+        // pretends that the read buffer is now empty.
+
+        assert!(bytes <= buffer.as_slices().0.len());
+        if bytes == buffer.as_slices().0.len() {
+            *is_api_available = false;
+        }
+
+        for _ in 0..bytes {
+            buffer.pop_front().unwrap();
         }
     }
 
-    fn writable_bytes(_stream: &mut Self::Stream) -> usize {
-        // TODO: implement properly
-        usize::max_value()
+    fn writable_bytes(stream: &mut Self::Stream) -> usize {
+        let Some(StreamWriteBuffer::Open { ref mut buffer, ..}) =
+            stream.buffers.as_mut().map(|(_, w)| w) else { return 0 };
+        buffer.capacity() - buffer.len()
     }
 
     fn send(stream: &mut Self::Stream, data: &[u8]) {
-        let mut lock = stream.shared.guarded.lock();
-        lock.write_queue.reserve(data.len());
-        lock.write_queue.extend(data.iter().copied());
-        stream.shared.write_queue_pushed.notify(usize::max_value());
+        debug_assert!(!data.is_empty());
+
+        // Because `writable_bytes` returns 0 if the writing side is closed, and because `data`
+        // must always have a size inferior or equal to `writable_bytes`, we know for sure that
+        // the writing side isn't closed.
+        let Some(StreamWriteBuffer::Open { ref mut buffer, .. } )=
+            stream.buffers.as_mut().map(|(_, w)| w) else { panic!() };
+        buffer.reserve(data.len());
+        buffer.extend(data.iter().copied());
     }
 
-    fn close_send(_stream: &mut Self::Stream) {
-        // TODO: implement
+    fn close_send(stream: &mut Self::Stream) {
+        // It is not illegal to call this on an already-reset stream.
+        let Some((_, write_buffer)) = stream.buffers.as_mut() else { return };
+        // However, it is illegal to call this on a stream that was already close-attempted.
+        assert!(matches!(write_buffer, StreamWriteBuffer::Open { .. }));
+        *write_buffer = StreamWriteBuffer::MustClose;
     }
 }
 
 /// Implementation detail of [`AsyncStdTcpWebSocket`].
 pub struct Stream {
-    shared: Arc<StreamShared>,
-    read_data_rx: Arc<parking_lot::Mutex<stream::Peekable<mpsc::Receiver<Vec<u8>>>>>,
-    read_buffer: Option<Vec<u8>>,
+    socket: TcpOrWs,
+    /// Read and write buffers of the connection, or `None` if the socket has been reset.
+    buffers: Option<(StreamReadBuffer, StreamWriteBuffer)>,
 }
 
-struct StreamShared {
-    guarded: parking_lot::Mutex<StreamSharedGuarded>,
-    write_queue_pushed: event_listener::Event,
+enum StreamReadBuffer {
+    Open {
+        buffer: VecDeque<u8>,
+        /// The API of the platform trait only allow providing one slice of read buffer to the
+        /// user. Unfortunately, the actual read buffer consists of two slices.
+        /// In order to solve that problem, we pretend in the API that the read buffer only
+        /// consists either in `buffer.as_slices().0` (if `is_api_available` is `true`) or
+        /// is empty (if `is_api_available` is `false`).
+        /// The `update_stream` function sets `is_api_available` to `true` if necessary.
+        is_api_available: bool,
+    },
+    Closed,
 }
 
-struct StreamSharedGuarded {
-    write_queue: VecDeque<u8>,
+enum StreamWriteBuffer {
+    Open {
+        buffer: VecDeque<u8>,
+        must_flush: bool,
+    },
+    MustClose,
+    Closed,
 }
+
+type TcpOrWs =
+    future::Either<async_std::net::TcpStream, websocket::Connection<async_std::net::TcpStream>>;
