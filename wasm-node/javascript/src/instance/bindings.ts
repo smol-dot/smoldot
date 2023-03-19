@@ -36,10 +36,11 @@ export interface SmoldotWasmExports extends WebAssembly.Exports {
     json_rpc_responses_peek: (chainId: number) => number,
     json_rpc_responses_pop: (chainId: number) => void,
     timer_finished: (timerId: number) => void,
-    connection_open_single_stream: (connectionId: number, handshakeTy: number) => void,
+    connection_open_single_stream: (connectionId: number, handshakeTy: number, initialWritableBytes: number) => void,
     connection_open_multi_stream: (connectionId: number, handshakeTyPtr: number, handshakeTyLen: number) => void,
+    stream_writable_bytes: (connectionId: number, streamId: number, numBytes: number) => void,
     stream_message: (connectionId: number, streamId: number, ptr: number, len: number) => void,
-    connection_stream_opened: (connectionId: number, streamId: number, outbound: number) => void,
+    connection_stream_opened: (connectionId: number, streamId: number, outbound: number, initialWritableBytes: number) => void,
     connection_reset: (connectionId: number, ptr: number, len: number) => void,
     stream_reset: (connectionId: number, streamId: number) => void,
 }

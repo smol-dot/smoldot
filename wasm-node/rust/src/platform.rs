@@ -565,7 +565,11 @@ struct ReadBuffer {
     buffer_first_offset: usize,
 }
 
-pub(crate) fn connection_open_single_stream(connection_id: u32, handshake_ty: u32) {
+pub(crate) fn connection_open_single_stream(
+    connection_id: u32,
+    handshake_ty: u32,
+    initial_writable_bytes: u32,
+) {
     assert_eq!(handshake_ty, 0);
 
     let mut lock = STATE.try_lock().unwrap();
@@ -648,6 +652,10 @@ pub(crate) fn connection_open_multi_stream(
     connection.something_happened.notify(usize::max_value());
 }
 
+pub(crate) fn stream_writable_bytes(connection_id: u32, stream_id: u32, bytes: u32) {
+    // TODO:
+}
+
 pub(crate) fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, len: u32) {
     let mut lock = STATE.try_lock().unwrap();
 
@@ -705,7 +713,12 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, len: 
     stream.something_happened.notify(usize::max_value());
 }
 
-pub(crate) fn connection_stream_opened(connection_id: u32, stream_id: u32, outbound: u32) {
+pub(crate) fn connection_stream_opened(
+    connection_id: u32,
+    stream_id: u32,
+    outbound: u32,
+    initial_writable_bytes: u32,
+) {
     let mut lock = STATE.try_lock().unwrap();
     let lock = &mut *lock;
 

@@ -250,6 +250,9 @@ extern "C" {
     /// The connection associated with that stream (and, in the case of a multi-stream connection,
     /// the stream itself must currently be in the `Open` state. See the documentation of
     /// [`connection_new`] for details.
+    ///
+    /// The size of the buffer must not exceed the number of writable bytes of the given stream.
+    /// Use [`stream_writable_bytes`] to notify that more data can be sent on the stream.
     pub fn stream_send(connection_id: u32, stream_id: u32, ptr: u32, len: u32);
 
     /// Called when the Wasm execution enters the context of a certain task. This is useful for
@@ -535,8 +538,16 @@ pub extern "C" fn timer_finished(timer_id: u32) {
 /// The `handshake_ty` parameter indicates the type of handshake. It must always be 0 at the
 /// moment, indicating a multistream-select+Noise+Yamux handshake.
 #[no_mangle]
-pub extern "C" fn connection_open_single_stream(connection_id: u32, handshake_ty: u32) {
-    crate::platform::connection_open_single_stream(connection_id, handshake_ty);
+pub extern "C" fn connection_open_single_stream(
+    connection_id: u32,
+    handshake_ty: u32,
+    initial_writable_bytes: u32,
+) {
+    crate::platform::connection_open_single_stream(
+        connection_id,
+        handshake_ty,
+        initial_writable_bytes,
+    );
     super::advance_execution();
 }
 
@@ -587,6 +598,19 @@ pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, l
     super::advance_execution();
 }
 
+/// Notify that extra bytes can be written onto the stream. The connection associated with that
+/// stream (and, in the case of a multi-stream connection, the stream itself) must be in the
+/// `Open` state.
+///
+/// If `connection_id` is a single-stream connection, then the value of `stream_id` is ignored.
+/// If `connection_id` is a multi-stream connection, then `stream_id` corresponds to the stream
+/// on which the data was received, as was provided to [`connection_stream_opened`].
+#[no_mangle]
+pub extern "C" fn stream_writable_bytes(connection_id: u32, stream_id: u32, num_bytes: u32) {
+    crate::platform::stream_writable_bytes(connection_id, stream_id, num_bytes);
+    super::advance_execution();
+}
+
 /// Called by the JavaScript code when the given multi-stream connection has a new substream.
 ///
 /// `connection_id` *must* be a multi-stream connection.
@@ -598,8 +622,18 @@ pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, l
 /// value other than `0` if the substream has been opened in response to a call to
 /// [`connection_stream_open`].
 #[no_mangle]
-pub extern "C" fn connection_stream_opened(connection_id: u32, stream_id: u32, outbound: u32) {
-    crate::platform::connection_stream_opened(connection_id, stream_id, outbound);
+pub extern "C" fn connection_stream_opened(
+    connection_id: u32,
+    stream_id: u32,
+    outbound: u32,
+    initial_writable_bytes: u32,
+) {
+    crate::platform::connection_stream_opened(
+        connection_id,
+        stream_id,
+        outbound,
+        initial_writable_bytes,
+    );
     super::advance_execution();
 }
 
