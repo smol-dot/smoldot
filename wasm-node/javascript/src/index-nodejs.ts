@@ -27,7 +27,6 @@ import { inflate } from 'pako';
 
 import { performance } from 'node:perf_hooks';
 import { createConnection as nodeCreateConnection } from 'node:net';
-import type { Socket as TcpSocket } from 'node:net';
 import { randomFillSync } from 'node:crypto';
 
 export {
@@ -184,14 +183,4 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
     } else {
         throw new ConnectionError('Unrecognized multiaddr format');
     }
-}
-
-interface TcpWrapped {
-    ty: 'tcp',
-    socket: TcpSocket,
-}
-
-interface WebSocketWrapped {
-    ty: 'websocket',
-    socket: WebSocket,
 }
