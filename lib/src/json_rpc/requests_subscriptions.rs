@@ -698,6 +698,10 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
     /// to provide a background task associated with the given subscription. The subscription is
     /// automatically cleaned up when the task finishes.
     ///
+    /// The provided [`MessagesReceiver`] can be used to receive the messages that were sent using
+    /// [`RequestsSubscriptions::subscription_send`]. It is meant to be used only within the task
+    /// that is provided to [`SubscriptionStart::start`]
+    ///
     /// # About the notifications capacity
     ///
     /// The `notifications_capacity` parameter contains the number of notifications related to this
@@ -720,7 +724,7 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
     ) -> Result<
         (
             String,
-            mpsc::Receiver<(TSubMsg, oneshot::Sender<()>)>,
+            MessagesReceiver<TSubMsg>,
             SubscriptionStart<'_, TSubMsg>,
         ),
         StartSubscriptionError,
@@ -740,7 +744,7 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
             None => {
                 return Ok((
                     subscription_id_string,
-                    messages_rx,
+                    MessagesReceiver { rx: messages_rx },
                     SubscriptionStart {
                         requests_subscriptions: self,
                         client_subscription: None,
@@ -778,7 +782,7 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
 
         Ok((
             subscription_id_string,
-            messages_rx,
+            MessagesReceiver { rx: messages_rx },
             SubscriptionStart {
                 requests_subscriptions: self,
                 client_subscription: Some((client_arc, subscription_id_num)),
@@ -1132,6 +1136,62 @@ impl<'a, TSubMsg: Send + Sync + 'static> SubscriptionStart<'a, TSubMsg> {
 impl<'a, TSubMsg> fmt::Debug for SubscriptionStart<'a, TSubMsg> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("SubscriptionStart").finish()
+    }
+}
+
+/// Provided when a subscription is started. Allows receiving the messages that were sent using
+/// [`RequestsSubscriptions::subscription_send`].
+pub struct MessagesReceiver<TSubMsg> {
+    rx: mpsc::Receiver<(TSubMsg, oneshot::Sender<()>)>,
+}
+
+impl<TSubMsg> MessagesReceiver<TSubMsg> {
+    /// Waits for the next message to be available.
+    ///
+    /// A [`ConfirmationSend`] is provided alongside with the message.
+    /// If [`ConfirmationSend::send`] is called, then [`RequestsSubscriptions::subscription_send`]
+    /// will return `Ok`. If, however, the object is dropped without [`ConfirmationSend::send`]
+    /// being called, then it will return an `Err`.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the task corresponding to the subscription has ended. This can never happen if
+    /// you use the [`MessagesReceiver`] within the subscription's task, as is intended.
+    ///
+    pub async fn next(&mut self) -> (TSubMsg, ConfirmationSend) {
+        // The channel can never be closed in normal situations, as the sender is kept in the list
+        // of subscriptions and this list of subscriptions is only cleaned up.
+        let (msg, tx) = futures::StreamExt::next(&mut self.rx).await.unwrap();
+        (msg, ConfirmationSend { tx })
+    }
+}
+
+impl<TSubMsg> fmt::Debug for MessagesReceiver<TSubMsg> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("MessagesReceiver").finish()
+    }
+}
+
+/// Provided by the [`MessagesReceiver`] in the context of a subscription receiving a message.
+///
+/// If [`ConfirmationSend::send`] is called, then [`RequestsSubscriptions::subscription_send`]
+/// will return `Ok`. If, however, the object is dropped without [`ConfirmationSend::send`] being
+/// called, then it will return an `Err`.
+#[must_use]
+pub struct ConfirmationSend {
+    tx: oneshot::Sender<()>,
+}
+
+impl ConfirmationSend {
+    /// Sends the confirmation.
+    pub fn send(self) {
+        let _ = self.tx.send(());
+    }
+}
+
+impl fmt::Debug for ConfirmationSend {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("ConfirmationSend").finish()
     }
 }
 

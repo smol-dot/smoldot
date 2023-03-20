@@ -155,7 +155,9 @@ impl<TPlat: Platform> Background<TPlat> {
 
                     loop {
                         let outcome = {
-                            match future::select(&mut call_future, messages_rx.next()).await {
+                            let next_message = messages_rx.next();
+                            futures::pin_mut!(next_message);
+                            match future::select(&mut call_future, next_message).await {
                                 future::Either::Left((v, _)) => either::Left(v),
                                 future::Either::Right((v, _)) => either::Right(v),
                             }
@@ -163,15 +165,12 @@ impl<TPlat: Platform> Background<TPlat> {
 
                         match outcome {
                             either::Left(outcome) => break Some(outcome),
-                            either::Right(None) => {
-                                unreachable!()
-                            }
-                            either::Right(Some((
+                            either::Right((
                                 SubscriptionMessage::StopIfChainHeadCall {
                                     stop_request_id,
                                 },
                                 confirmation_sender,
-                            ))) => {
+                            )) => {
                                 me.requests_subscriptions
                                     .respond(
                                         &stop_request_id.1,
@@ -180,10 +179,10 @@ impl<TPlat: Platform> Background<TPlat> {
                                     )
                                     .await;
 
-                                let _ = confirmation_sender.send(());
+                                confirmation_sender.send();
                                 return;
                             }
-                            either::Right(Some(_)) => {
+                            either::Right(_) => {
                                 // Any other message.
                                 // Silently discard the confirmation sender.
                             }
@@ -596,10 +595,12 @@ impl<TPlat: Platform> Background<TPlat> {
                             subscribe_all.new_blocks.next().map(either::Right),
                         ),
                     };
+                    let next_message = messages_rx.next();
+                    futures::pin_mut!(next_message);
                     futures::pin_mut!(next_block);
 
                     // TODO: doesn't enforce any maximum number of pinned blocks
-                    match future::select(next_block, messages_rx.next()).await {
+                    match future::select(next_block, next_message).await {
                         future::Either::Left((either::Left(None) | either::Right(None), _)) => {
                             // TODO: clear queue of notifications?
                             break;
@@ -838,14 +839,11 @@ impl<TPlat: Platform> Background<TPlat> {
                                 }
                             }
                         }
-                        future::Either::Right((None, _)) => {
-                            unreachable!()
-                        }
                         future::Either::Right((
-                            Some((
+                            (
                                 SubscriptionMessage::StopIfChainHeadFollow { stop_request_id },
                                 confirmation_sender,
-                            )),
+                            ),
                             _,
                         )) => {
                             me.requests_subscriptions
@@ -856,18 +854,18 @@ impl<TPlat: Platform> Background<TPlat> {
                                 )
                                 .await;
 
-                            let _ = confirmation_sender.send(());
+                            confirmation_sender.send();
                             break;
                         }
                         future::Either::Right((
-                            Some((
+                            (
                                 SubscriptionMessage::ChainHeadBody {
                                     hash,
                                     get_request_id,
                                     network_config,
                                 },
                                 confirmation_sender,
-                            )),
+                            ),
                             _,
                         )) => {
                             // Determine whether the requested block hash is valid, and if yes its number.
@@ -893,10 +891,10 @@ impl<TPlat: Platform> Background<TPlat> {
                                 block_number,
                             )
                             .await;
-                            let _ = confirmation_sender.send(());
+                            confirmation_sender.send();
                         }
                         future::Either::Right((
-                            Some((
+                            (
                                 SubscriptionMessage::ChainHeadStorage {
                                     hash,
                                     get_request_id,
@@ -905,7 +903,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                     child_key,
                                 },
                                 confirmation_sender,
-                            )),
+                            ),
                             _,
                         )) => {
                             // Obtain the header of the requested block.
@@ -929,10 +927,10 @@ impl<TPlat: Platform> Background<TPlat> {
                                 block_scale_encoded_header,
                             )
                             .await;
-                            let _ = confirmation_sender.send(());
+                            confirmation_sender.send();
                         }
                         future::Either::Right((
-                            Some((
+                            (
                                 SubscriptionMessage::ChainHeadCall {
                                     hash,
                                     get_request_id,
@@ -941,7 +939,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                     call_parameters,
                                 },
                                 confirmation_sender,
-                            )),
+                            ),
                             _,
                         )) => {
                             // Determine whether the requested block hash is valid and start the call.
@@ -998,17 +996,17 @@ impl<TPlat: Platform> Background<TPlat> {
                                 network_config,
                             )
                             .await;
-                            let _ = confirmation_sender.send(());
+                            confirmation_sender.send();
                         }
                         future::Either::Right((
-                            Some((
+                            (
                                 SubscriptionMessage::ChainHeadHeader {
                                     hash,
 
                                     get_request_id,
                                 },
                                 confirmation_sender,
-                            )),
+                            ),
                             _,
                         )) => {
                             let response = {
@@ -1027,16 +1025,16 @@ impl<TPlat: Platform> Background<TPlat> {
                                     .to_json_response(&get_request_id.0),
                                 )
                                 .await;
-                            let _ = confirmation_sender.send(());
+                            confirmation_sender.send();
                         }
                         future::Either::Right((
-                            Some((
+                            (
                                 SubscriptionMessage::ChainHeadFollowUnpin {
                                     hash,
                                     unpin_request_id,
                                 },
                                 confirmation_sender,
-                            )),
+                            ),
                             _,
                         )) => {
                             let valid = {
@@ -1066,10 +1064,10 @@ impl<TPlat: Platform> Background<TPlat> {
                                             .to_json_response(&unpin_request_id.0),
                                     )
                                     .await;
-                                let _ = confirmation_sender.send(());
+                                confirmation_sender.send();
                             }
                         }
-                        future::Either::Right((Some(_), _)) => {
+                        future::Either::Right((_, _)) => {
                             // Any other message.
                             // Silently discard the confirmation sender.
                         }
@@ -1230,7 +1228,9 @@ impl<TPlat: Platform> Background<TPlat> {
 
                         loop {
                             let outcome = {
-                                match future::select(&mut future, messages_rx.next()).await {
+                                let next_message = messages_rx.next();
+                                futures::pin_mut!(next_message);
+                                match future::select(&mut future, next_message).await {
                                     future::Either::Left((v, _)) => either::Left(v),
                                     future::Either::Right((v, _)) => either::Right(v),
                                 }
@@ -1259,15 +1259,12 @@ impl<TPlat: Platform> Background<TPlat> {
                                     }
                                     .to_json_call_object_parameters(None)
                                 }
-                                either::Right(None) => {
-                                    unreachable!()
-                                }
-                                either::Right(Some((
+                                either::Right((
                                     SubscriptionMessage::StopIfChainHeadBody {
                                         stop_request_id,
                                     },
                                     confirmation_sender,
-                                ))) => {
+                                )) => {
                                     me.requests_subscriptions
                                         .respond(
                                             &stop_request_id.1,
@@ -1276,10 +1273,10 @@ impl<TPlat: Platform> Background<TPlat> {
                                         )
                                         .await;
 
-                                    let _ = confirmation_sender.send(());
+                                    confirmation_sender.send();
                                     return;
                                 }
-                                either::Right(Some(_)) => {
+                                either::Right(_) => {
                                     // Any other message.
                                     // Silently discard the confirmation sender.
                                 }
@@ -1418,7 +1415,9 @@ impl<TPlat: Platform> Background<TPlat> {
 
                     loop {
                         let outcome = {
-                            match future::select(&mut future, messages_rx.next()).await {
+                            let next_message = messages_rx.next();
+                            futures::pin_mut!(next_message);
+                            match future::select(&mut future, next_message).await {
                                 future::Either::Left((v, _)) => either::Left(v),
                                 future::Either::Right((v, _)) => either::Right(v),
                             }
@@ -1446,13 +1445,10 @@ impl<TPlat: Platform> Background<TPlat> {
                                 }
                                 .to_json_call_object_parameters(None)
                             }
-                            either::Right(None) => {
-                                unreachable!()
-                            }
-                            either::Right(Some((
+                            either::Right((
                                 SubscriptionMessage::StopIfChainHeadStorage { stop_request_id },
                                 confirmation_sender,
-                            ))) => {
+                            )) => {
                                 me.requests_subscriptions
                                     .respond(
                                         &stop_request_id.1,
@@ -1461,10 +1457,10 @@ impl<TPlat: Platform> Background<TPlat> {
                                     )
                                     .await;
 
-                                let _ = confirmation_sender.send(());
+                                confirmation_sender.send();
                                 return;
                             }
-                            either::Right(Some(_)) => {
+                            either::Right(_) => {
                                 // Any other message.
                                 // Silently discard the confirmation sender.
                             }

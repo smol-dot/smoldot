@@ -177,32 +177,39 @@ impl<TPlat: Platform> Background<TPlat> {
                 // TODO: doesn't reported `validated` events
 
                 loop {
-                    let status_update = match future::select(
+                    let status_update = match {
+                        let next_message = messages_rx.next();
+                        futures::pin_mut!(next_message);
+                        match future::select(
                         transaction_updates.next(),
-                        messages_rx.next(),
-                    )
-                    .await
+                        next_message,
+                    ).await {
+                            future::Either::Left((v, _)) => either::Left(v),
+                            future::Either::Right((v, _)) => either::Right(v)
+                    }}
                     {
-                        future::Either::Left((Some(status), _)) => status,
-                        future::Either::Left((None, _)) if !is_legacy => {
+                        either::Left(Some(status)) => status,
+                        either::Left(None) if !is_legacy => {
                             // Channel from the transactions service has been closed.
                             // Stop the task.
                             break;
                         }
-                        future::Either::Left((None, _)) => {
+                        either::Left(None) => {
                             // Channel from the transactions service has been closed.
                             // Stop the task.
                             // There is nothing more that can be done except hope that the
                             // client understands that no new notification is expected and
                             // unsubscribes.
                             break loop {
-                                match messages_rx.next().await {
-                                    Some((
+                                let next_message = messages_rx.next();
+                                futures::pin_mut!(next_message);
+                                match next_message.await {
+                                    (
                                         SubscriptionMessage::StopIfTransactionLegacy {
                                             stop_request_id,
                                         },
                                         confirmation_sender,
-                                    )) => {
+                                    ) => {
                                         me.requests_subscriptions
                                             .respond(
                                                 &stop_request_id.1,
@@ -211,21 +218,16 @@ impl<TPlat: Platform> Background<TPlat> {
                                             )
                                             .await;
 
-                                        let _ = confirmation_sender.send(());
+                                        confirmation_sender.send();
                                         break;
                                     }
-                                    Some(_) => {}
-                                    None => unreachable!(),
+                                    _ => {}
                                 }
                             };
                         }
-                        future::Either::Right((None, _)) => unreachable!(),
-                        future::Either::Right((
-                            Some((
-                                SubscriptionMessage::StopIfTransaction { stop_request_id },
-                                confirmation_sender,
-                            )),
-                            _,
+                        either::Right((
+                            SubscriptionMessage::StopIfTransaction { stop_request_id },
+                            confirmation_sender,
                         )) if !is_legacy => {
                             me.requests_subscriptions
                                 .respond(
@@ -235,15 +237,12 @@ impl<TPlat: Platform> Background<TPlat> {
                                 )
                                 .await;
 
-                            let _ = confirmation_sender.send(());
+                            confirmation_sender.send();
                             break;
                         }
-                        future::Either::Right((
-                            Some((
-                                SubscriptionMessage::StopIfTransactionLegacy { stop_request_id },
-                                confirmation_sender,
-                            )),
-                            _,
+                        either::Right((
+                            SubscriptionMessage::StopIfTransactionLegacy { stop_request_id },
+                            confirmation_sender,
                         )) if is_legacy => {
                             me.requests_subscriptions
                                 .respond(
@@ -253,10 +252,10 @@ impl<TPlat: Platform> Background<TPlat> {
                                 )
                                 .await;
 
-                            let _ = confirmation_sender.send(());
+                            confirmation_sender.send();
                             break;
                         }
-                        future::Either::Right((Some(_), _)) => {
+                        either::Right(_) => {
                             // Silently discard the message.
                             continue;
                         }

@@ -437,8 +437,9 @@ impl<TPlat: Platform> Background<TPlat> {
                     loop {
                         let message = {
                             let next_new_block = new_blocks.next();
-                            futures::pin_mut!(next_new_block);
-                            match future::select(next_new_block, messages_rx.next()).await {
+                            let next_message = messages_rx.next();
+                            futures::pin_mut!(next_message, next_new_block);
+                            match future::select(next_new_block, next_message).await {
                                 future::Either::Left((v, _)) => either::Left(v),
                                 future::Either::Right((v, _)) => either::Right(v),
                             }
@@ -497,15 +498,12 @@ impl<TPlat: Platform> Background<TPlat> {
                             | either::Left(Some(runtime_service::Notification::Finalized {
                                 ..
                             })) => {}
-                            either::Right(None) => {
-                                unreachable!()
-                            }
-                            either::Right(Some((
+                            either::Right((
                                 SubscriptionMessage::StopIfAllHeads {
                                     stop_request_id,
                                 },
                                 confirmation_sender,
-                            ))) => {
+                            )) => {
                                 me.requests_subscriptions
                                     .respond(
                                         &stop_request_id.1,
@@ -514,10 +512,10 @@ impl<TPlat: Platform> Background<TPlat> {
                                     )
                                     .await;
 
-                                let _ = confirmation_sender.send(());
+                                confirmation_sender.send();
                                 break 'main_sub_loop;
                             }
-                            either::Right(Some(_)) => {
+                            either::Right(_) => {
                                 // Any other message.
                                 // Silently discard the confirmation sender.
                             }
@@ -577,7 +575,9 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
 
                 loop {
-                    match future::select(blocks_list.next(), messages_rx.next()).await {
+                    let next_message = messages_rx.next();
+                    futures::pin_mut!(next_message);
+                    match future::select(blocks_list.next(), next_message).await {
                         future::Either::Left((None, _)) => {
                             // Stream returned by `subscribe_finalized` is always unlimited.
                             unreachable!()
@@ -613,16 +613,13 @@ impl<TPlat: Platform> Background<TPlat> {
                                 )
                                 .await;
                         }
-                        future::Either::Right((None, _)) => {
-                            unreachable!()
-                        }
                         future::Either::Right((
-                            Some((
+                            (
                                 SubscriptionMessage::StopIfFinalizedHeads {
                                     stop_request_id,
                                 },
                                 confirmation_sender,
-                            )),
+                            ),
                             _,
                         )) => {
                             me.requests_subscriptions
@@ -633,10 +630,10 @@ impl<TPlat: Platform> Background<TPlat> {
                                 )
                                 .await;
 
-                            let _ = confirmation_sender.send(());
+                            confirmation_sender.send();
                             break;
                         }
-                        future::Either::Right((Some(_), _)) => {
+                        future::Either::Right((_, _)) => {
                             // Any other message.
                             // Silently discard the confirmation sender.
                         }
@@ -695,7 +692,9 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
 
                 loop {
-                    match future::select(blocks_list.next(), messages_rx.next()).await {
+                    let next_message = messages_rx.next();
+                    futures::pin_mut!(next_message);
+                    match future::select(blocks_list.next(), next_message).await {
                         future::Either::Left((None, _)) => {
                             // Stream returned by `subscribe_best` is always unlimited.
                             unreachable!()
@@ -731,16 +730,13 @@ impl<TPlat: Platform> Background<TPlat> {
                                 )
                                 .await;
                         }
-                        future::Either::Right((None, _)) => {
-                            unreachable!()
-                        }
                         future::Either::Right((
-                            Some((
+                            (
                                 SubscriptionMessage::StopIfNewHeads {
                                     stop_request_id,
                                 },
                                 confirmation_sender,
-                            )),
+                            ),
                             _,
                         )) => {
                             me.requests_subscriptions
@@ -751,10 +747,10 @@ impl<TPlat: Platform> Background<TPlat> {
                                 )
                                 .await;
 
-                            let _ = confirmation_sender.send(());
+                            confirmation_sender.send();
                             break;
                         }
-                        future::Either::Right((Some(_), _)) => {
+                        future::Either::Right((_, _)) => {
                             // Any other message.
                             // Silently discard the confirmation sender.
                         }
@@ -1360,7 +1356,9 @@ impl<TPlat: Platform> Background<TPlat> {
                 futures::pin_mut!(spec_changes);
 
                 loop {
-                    match future::select(spec_changes.next(), messages_rx.next()).await {
+                    let next_message = messages_rx.next();
+                    futures::pin_mut!(next_message);
+                    match future::select(spec_changes.next(), next_message).await {
                         future::Either::Left((None, _)) => {
                             // Stream returned by `subscribe_runtime_version` is always unlimited.
                             unreachable!()
@@ -1414,14 +1412,11 @@ impl<TPlat: Platform> Background<TPlat> {
                                 )
                                 .await;
                         }
-                        future::Either::Right((None, _)) => {
-                            unreachable!()
-                        }
                         future::Either::Right((
-                            Some((
+                            (
                                 SubscriptionMessage::StopIfRuntimeSpec { stop_request_id },
                                 confirmation_sender,
-                            )),
+                            ),
                             _,
                         )) => {
                             me.requests_subscriptions
@@ -1432,10 +1427,10 @@ impl<TPlat: Platform> Background<TPlat> {
                                 )
                                 .await;
 
-                            let _ = confirmation_sender.send(());
+                            confirmation_sender.send();
                             break;
                         }
-                        future::Either::Right((Some(_), _)) => {
+                        future::Either::Right((_, _)) => {
                             // Any other message.
                             // Silently discard the confirmation sender.
                         }
@@ -1685,7 +1680,9 @@ impl<TPlat: Platform> Background<TPlat> {
                 futures::pin_mut!(storage_updates);
 
                 loop {
-                    match future::select(storage_updates.next(), messages_rx.next()).await {
+                    let next_message = messages_rx.next();
+                    futures::pin_mut!(next_message);
+                    match future::select(storage_updates.next(), next_message).await {
                         future::Either::Left((None, _)) => {
                             // Stream created above is always unlimited.
                             unreachable!()
@@ -1704,14 +1701,11 @@ impl<TPlat: Platform> Background<TPlat> {
                                 )
                                 .await;
                         }
-                        future::Either::Right((None, _)) => {
-                            unreachable!()
-                        }
                         future::Either::Right((
-                            Some((
+                            (
                                 SubscriptionMessage::StopIfStorage { stop_request_id },
                                 confirmation_sender,
-                            )),
+                            ),
                             _,
                         )) => {
                             me.requests_subscriptions
@@ -1722,10 +1716,10 @@ impl<TPlat: Platform> Background<TPlat> {
                                 )
                                 .await;
 
-                            let _ = confirmation_sender.send(());
+                            confirmation_sender.send();
                             break;
                         }
-                        future::Either::Right((Some(_), _)) => {
+                        future::Either::Right((_, _)) => {
                             // Any other message.
                             // Silently discard the confirmation sender.
                         }
