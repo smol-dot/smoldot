@@ -100,6 +100,8 @@ export interface Config {
      *
      * The `streamId` must be provided if and only if the connection is of type "multi-stream".
      * It indicates which substream to send the data on.
+     *
+     * Must not be called after `closeSend` has been called.
      */
     send(data: Uint8Array, streamId?: number): void;
 
@@ -115,6 +117,8 @@ export interface Config {
      *
      * The `streamId` must be provided if and only if the connection is of type "multi-stream".
      * It indicates which substream to send the data on.
+     *
+     * Must only be called once per stream.
      */
     closeSend(streamId?: number): void;
 
