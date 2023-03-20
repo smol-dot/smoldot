@@ -597,7 +597,7 @@ where
         protocol_index: usize,
         request_data: impl Into<Vec<u8>>,
         timeout: TNow,
-    ) -> SubstreamId {
+    ) -> Result<SubstreamId, StartRequestError> {
         let connection = match self.connections.get(&target) {
             Some(c) => c,
             None => panic!(),
@@ -607,10 +607,21 @@ where
             InnerConnectionState::Established
         ));
 
-        assert!(self
-            .request_response_protocols
-            .get(protocol_index)
-            .is_some());
+        let request_data = request_data.into();
+
+        // We check the size limit before sending the message. This size limit is the only reason
+        // why start a request can fail. By checking it here, we are guaranteed that the request
+        // start will succeed in the background.
+        if request_data.len()
+            > self
+                .request_response_protocols
+                .get(protocol_index)
+                .unwrap_or_else(|| panic!())
+                .inbound_config
+                .max_size()
+        {
+            return Err(StartRequestError::RequestTooLarge);
+        }
 
         let substream_id = self.next_substream_id;
         self.next_substream_id.0 += 1;
@@ -622,13 +633,13 @@ where
             target,
             CoordinatorToConnectionInner::StartRequest {
                 protocol_index,
-                request_data: request_data.into(),
+                request_data,
                 timeout,
                 substream_id,
             },
         ));
 
-        substream_id
+        Ok(substream_id)
     }
 
     /// Start opening a notifications substream.
@@ -1493,6 +1504,13 @@ impl<TConn, TNow> ops::IndexMut<ConnectionId> for Network<TConn, TNow> {
     }
 }
 
+/// Error potentially returned when starting a request.
+#[derive(Debug, Clone, derive_more::Display)]
+pub enum StartRequestError {
+    /// Size of the request is over maximum allowed by the protocol.
+    RequestTooLarge,
+}
+
 /// See [`Network::connection_state`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ConnectionState {
@@ -1619,6 +1637,7 @@ enum CoordinatorToConnectionInner<TNow> {
 
     StartRequest {
         protocol_index: usize,
+        /// The size of the data is guaranteed to fit in the maximum allowed.
         request_data: Vec<u8>,
         timeout: TNow,
         /// Id of the substream assigned by the coordinator.

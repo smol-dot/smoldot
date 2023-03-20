@@ -61,7 +61,8 @@ pub use collection::{
     ConfigRequestResponse, ConfigRequestResponseIn, ConnectionId, ConnectionToCoordinator,
     CoordinatorToConnection, MultiStreamConnectionTask, MultiStreamHandshakeKind,
     NotificationProtocolConfig, NotificationsInClosedErr, NotificationsOutErr, ReadWrite,
-    RequestError, SingleStreamConnectionTask, SingleStreamHandshakeKind, SubstreamId,
+    RequestError, SingleStreamConnectionTask, SingleStreamHandshakeKind, StartRequestError,
+    SubstreamId,
 };
 
 /// Configuration for a [`Peers`].
@@ -1758,18 +1759,18 @@ where
         protocol_index: usize,
         request_data: Vec<u8>,
         timeout: TNow,
-    ) -> OutRequestId {
+    ) -> Result<OutRequestId, StartRequestError> {
         let target_connection_id = match self.connection_id_for_peer(target) {
             Some(id) => id,
             None => panic!(), // As documented.
         };
 
-        OutRequestId(self.inner.start_request(
+        Ok(OutRequestId(self.inner.start_request(
             target_connection_id,
             protocol_index,
             request_data,
             timeout,
-        ))
+        )?))
     }
 
     /// Returns `true` if if it possible to send requests (i.e. through [`Peers::start_request`])

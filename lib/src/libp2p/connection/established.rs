@@ -242,6 +242,18 @@ pub enum ConfigRequestResponseIn {
     },
 }
 
+impl ConfigRequestResponseIn {
+    /// Returns the maximum allowed size of a request.
+    ///
+    /// Returns `0` for [`ConfigRequestResponseIn::Empty`].
+    pub fn max_size(&self) -> usize {
+        match self {
+            ConfigRequestResponseIn::Empty => 0,
+            ConfigRequestResponseIn::Payload { max_size } => *max_size,
+        }
+    }
+}
+
 /// Configuration for a notifications protocol.
 #[derive(Debug, Clone)]
 pub struct ConfigNotifications {
@@ -253,4 +265,11 @@ pub struct ConfigNotifications {
 
     /// Maximum size, in bytes, of a notification that can be received.
     pub max_notification_size: usize,
+}
+
+/// Error potentially returned when starting a request.
+#[derive(Debug, Clone, derive_more::Display)]
+pub enum AddRequestError {
+    /// Size of the request is over maximum allowed by the protocol.
+    RequestTooLarge,
 }

@@ -18,7 +18,7 @@
 // TODO: needs docs
 
 use super::{
-    super::super::read_write::ReadWrite, substream, Config, ConfigNotifications,
+    super::super::read_write::ReadWrite, substream, AddRequestError, Config, ConfigNotifications,
     ConfigRequestResponse, ConfigRequestResponseIn, Event, SubstreamId, SubstreamIdInner,
 };
 use crate::util::{self, protobuf};
@@ -700,16 +700,18 @@ where
         request: Vec<u8>,
         timeout: TNow,
         user_data: TRqUd,
-    ) -> SubstreamId {
+    ) -> Result<SubstreamId, AddRequestError> {
         let has_length_prefix = match self.request_protocols[protocol_index].inbound_config {
             ConfigRequestResponseIn::Payload { max_size } => {
-                // TODO: turn this assert into something that can't panic?
-                assert!(request.len() <= max_size);
+                if request.len() > max_size {
+                    return Err(AddRequestError::RequestTooLarge);
+                }
                 true
             }
             ConfigRequestResponseIn::Empty => {
-                // TODO: turn this assert into something that can't panic?
-                assert!(request.is_empty());
+                if !request.is_empty() {
+                    return Err(AddRequestError::RequestTooLarge);
+                }
                 false
             }
         };
@@ -738,7 +740,7 @@ where
 
         // TODO: ? do this? substream.reserve_window(128 * 1024 * 1024 + 128); // TODO: proper max size
 
-        SubstreamId(SubstreamIdInner::MultiStream(substream_id))
+        Ok(SubstreamId(SubstreamIdInner::MultiStream(substream_id)))
     }
 
     /// Returns the user data associated to a notifications substream.

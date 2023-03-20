@@ -604,13 +604,19 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                 HashDisplay(&config.block_hash)
             );
 
-            let request_id = guarded.network.start_storage_proof_request(
+            let request_id = match guarded.network.start_storage_proof_request(
                 TPlat::now(),
                 &target,
                 chain_index,
                 config,
                 timeout,
-            );
+            ) {
+                Ok(r) => r,
+                Err(service::StartRequestError::RequestTooLarge) => {
+                    // TODO: consider dealing with the problem of requests too large internally by sending multiple requests
+                    return Err(StorageProofRequestError::RequestTooLarge);
+                }
+            };
 
             self.shared.wake_up_main_background_task.notify(1);
 
@@ -674,13 +680,18 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                 config.method
             );
 
-            let request_id = guarded.network.start_call_proof_request(
+            let request_id = match guarded.network.start_call_proof_request(
                 TPlat::now(),
                 &target,
                 chain_index,
                 config,
                 timeout,
-            );
+            ) {
+                Ok(r) => r,
+                Err(service::StartRequestError::RequestTooLarge) => {
+                    return Err(CallProofRequestError::RequestTooLarge)
+                }
+            };
 
             self.shared.wake_up_main_background_task.notify(1);
 
@@ -908,6 +919,8 @@ pub enum GrandpaWarpSyncRequestError {
 pub enum StorageProofRequestError {
     /// No established connection with the target.
     NoConnection,
+    /// Storage proof request is too large and can't be sent.
+    RequestTooLarge,
     /// Error during the request.
     #[display(fmt = "{_0}")]
     Request(service::StorageProofRequestError),
@@ -918,6 +931,8 @@ pub enum StorageProofRequestError {
 pub enum CallProofRequestError {
     /// No established connection with the target.
     NoConnection,
+    /// Call proof request is too large and can't be sent.
+    RequestTooLarge,
     /// Error during the request.
     #[display(fmt = "{_0}")]
     Request(service::CallProofRequestError),
@@ -929,6 +944,7 @@ impl CallProofRequestError {
     pub fn is_network_problem(&self) -> bool {
         match self {
             CallProofRequestError::Request(err) => err.is_network_problem(),
+            CallProofRequestError::RequestTooLarge => false,
             CallProofRequestError::NoConnection => true,
         }
     }
