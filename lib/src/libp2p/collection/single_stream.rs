@@ -244,8 +244,16 @@ where
                     ..
                 },
             ) => {
-                let inner_substream_id =
-                    established.add_request(protocol_index, request_data, timeout, substream_id);
+                let inner_substream_id = match established.add_request(
+                    protocol_index,
+                    request_data,
+                    timeout,
+                    substream_id,
+                ) {
+                    Ok(s) => s,
+                    // The maximum request size is checked before sending the message.
+                    Err(established::AddRequestError::RequestTooLarge) => unreachable!(),
+                };
                 let _prev_value = outbound_substreams_map.insert(substream_id, inner_substream_id);
                 debug_assert!(_prev_value.is_none());
                 let _prev_value =

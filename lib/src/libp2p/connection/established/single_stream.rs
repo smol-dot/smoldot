@@ -53,8 +53,8 @@
 use super::{
     super::{super::read_write::ReadWrite, noise, yamux},
     substream::{self, RespondInRequestError},
-    Config, ConfigNotifications, ConfigRequestResponse, ConfigRequestResponseIn, Event,
-    SubstreamId, SubstreamIdInner,
+    AddRequestError, Config, ConfigNotifications, ConfigRequestResponse, ConfigRequestResponseIn,
+    Event, SubstreamId, SubstreamIdInner,
 };
 
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
@@ -794,16 +794,18 @@ where
         request: Vec<u8>,
         timeout: TNow,
         user_data: TRqUd,
-    ) -> SubstreamId {
+    ) -> Result<SubstreamId, AddRequestError> {
         let has_length_prefix = match self.inner.request_protocols[protocol_index].inbound_config {
             ConfigRequestResponseIn::Payload { max_size } => {
-                // TODO: turn this assert into something that can't panic?
-                assert!(request.len() <= max_size);
+                if request.len() > max_size {
+                    return Err(AddRequestError::RequestTooLarge);
+                }
                 true
             }
             ConfigRequestResponseIn::Empty => {
-                // TODO: turn this assert into something that can't panic?
-                assert!(request.is_empty());
+                if !request.is_empty() {
+                    return Err(AddRequestError::RequestTooLarge);
+                }
                 false
             }
         };
@@ -830,7 +832,7 @@ where
                 .saturating_add(64),
         );
 
-        SubstreamId(SubstreamIdInner::SingleStream(substream.id()))
+        Ok(SubstreamId(SubstreamIdInner::SingleStream(substream.id())))
     }
 
     /// Returns the user data associated to a notifications substream.

@@ -607,10 +607,18 @@ where
             InnerConnectionState::Established
         ));
 
-        assert!(self
-            .request_response_protocols
-            .get(protocol_index)
-            .is_some());
+        let request_data = request_data.into();
+
+        // TODO: don't panic here!
+        assert!(
+            request_data.len()
+                <= self
+                    .request_response_protocols
+                    .get(protocol_index)
+                    .unwrap_or_else(|| panic!())
+                    .inbound_config
+                    .max_size()
+        );
 
         let substream_id = self.next_substream_id;
         self.next_substream_id.0 += 1;
@@ -622,7 +630,7 @@ where
             target,
             CoordinatorToConnectionInner::StartRequest {
                 protocol_index,
-                request_data: request_data.into(),
+                request_data,
                 timeout,
                 substream_id,
             },
@@ -1619,6 +1627,7 @@ enum CoordinatorToConnectionInner<TNow> {
 
     StartRequest {
         protocol_index: usize,
+        /// The size of the data is guaranteed to fit in the maximum allowed.
         request_data: Vec<u8>,
         timeout: TNow,
         /// Id of the substream assigned by the coordinator.
