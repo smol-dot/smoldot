@@ -31,8 +31,7 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::chain_getFinalizedHead`].
     pub(super) async fn chain_get_finalized_head(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
     ) {
         // TODO: maybe optimize?
         let response = methods::Response::chain_getFinalizedHead(methods::HashHexString(
@@ -44,26 +43,25 @@ impl<TPlat: Platform> Background<TPlat> {
                     .finalized_block_scale_encoded_header,
             ),
         ))
-        .to_json_response(request_id);
+        .to_json_response(request_id.0);
 
         self.requests_subscriptions
-            .respond(state_machine_request_id, response)
+            .respond(request_id.1, response)
             .await;
     }
 
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_genesisHash`].
     pub(super) async fn chain_head_unstable_genesis_hash(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
     ) {
         self.requests_subscriptions
             .respond(
-                state_machine_request_id,
+                request_id.1,
                 methods::Response::chainHead_unstable_genesisHash(methods::HashHexString(
                     self.genesis_block_hash,
                 ))
-                .to_json_response(request_id),
+                .to_json_response(request_id.0),
             )
             .await;
     }
@@ -71,14 +69,13 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::chainSpec_unstable_chainName`].
     pub(super) async fn chain_spec_unstable_chain_name(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
     ) {
         self.requests_subscriptions
             .respond(
-                state_machine_request_id,
+                request_id.1,
                 methods::Response::chainSpec_unstable_chainName((&self.chain_name).into())
-                    .to_json_response(request_id),
+                    .to_json_response(request_id.0),
             )
             .await;
     }
@@ -86,16 +83,15 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::chainSpec_unstable_genesisHash`].
     pub(super) async fn chain_spec_unstable_genesis_hash(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
     ) {
         self.requests_subscriptions
             .respond(
-                state_machine_request_id,
+                request_id.1,
                 methods::Response::chainSpec_unstable_genesisHash(methods::HashHexString(
                     self.genesis_block_hash,
                 ))
-                .to_json_response(request_id),
+                .to_json_response(request_id.0),
             )
             .await;
     }
@@ -103,16 +99,15 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::chainSpec_unstable_properties`].
     pub(super) async fn chain_spec_unstable_properties(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
     ) {
         self.requests_subscriptions
             .respond(
-                state_machine_request_id,
+                request_id.1,
                 methods::Response::chainSpec_unstable_properties(
                     serde_json::from_str(&self.chain_properties_json).unwrap(),
                 )
-                .to_json_response(request_id),
+                .to_json_response(request_id.0),
             )
             .await;
     }
@@ -120,18 +115,17 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::rpc_methods`].
     pub(super) async fn rpc_methods(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
     ) {
         self.requests_subscriptions
             .respond(
-                state_machine_request_id,
+                request_id.1,
                 methods::Response::rpc_methods(methods::RpcMethods {
                     methods: methods::MethodCall::method_names()
                         .map(|n| n.into())
                         .collect(),
                 })
-                .to_json_response(request_id),
+                .to_json_response(request_id.0),
             )
             .await;
     }
@@ -139,16 +133,15 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::sudo_unstable_version`].
     pub(super) async fn sudo_unstable_version(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
     ) {
         self.requests_subscriptions
             .respond(
-                state_machine_request_id,
+                request_id.1,
                 methods::Response::sudo_unstable_version(
                     format!("{} {}", self.system_name, self.system_version).into(),
                 )
-                .to_json_response(request_id),
+                .to_json_response(request_id.0),
             )
             .await;
     }
@@ -156,14 +149,13 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::system_chain`].
     pub(super) async fn system_chain(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
     ) {
         self.requests_subscriptions
             .respond(
-                state_machine_request_id,
+                request_id.1,
                 methods::Response::system_chain((&self.chain_name).into())
-                    .to_json_response(request_id),
+                    .to_json_response(request_id.0),
             )
             .await;
     }
@@ -171,14 +163,13 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::system_chainType`].
     pub(super) async fn system_chain_type(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
     ) {
         self.requests_subscriptions
             .respond(
-                state_machine_request_id,
+                request_id.1,
                 methods::Response::system_chainType((&self.chain_ty).into())
-                    .to_json_response(request_id),
+                    .to_json_response(request_id.0),
             )
             .await;
     }
@@ -186,8 +177,7 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::system_health`].
     pub(super) async fn system_health(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
     ) {
         let response = methods::Response::system_health(methods::SystemHealth {
             // In smoldot, `is_syncing` equal to `false` means that GrandPa warp sync
@@ -198,24 +188,23 @@ impl<TPlat: Platform> Background<TPlat> {
                 .unwrap_or(u64::max_value()),
             should_have_peers: self.chain_is_live,
         })
-        .to_json_response(request_id);
+        .to_json_response(request_id.0);
         self.requests_subscriptions
-            .respond(state_machine_request_id, response)
+            .respond(request_id.1, response)
             .await;
     }
 
     /// Handles a call to [`methods::MethodCall::system_localListenAddresses`].
     pub(super) async fn system_local_listen_addresses(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
     ) {
         // Wasm node never listens on any address.
         self.requests_subscriptions
             .respond(
-                state_machine_request_id,
+                request_id.1,
                 methods::Response::system_localListenAddresses(Vec::new())
-                    .to_json_response(request_id),
+                    .to_json_response(request_id.0),
             )
             .await;
     }
@@ -223,14 +212,13 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::system_localPeerId`].
     pub(super) async fn system_local_peer_id(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
     ) {
         self.requests_subscriptions
             .respond(
-                state_machine_request_id,
+                request_id.1,
                 methods::Response::system_localPeerId((&self.peer_id_base58).into())
-                    .to_json_response(request_id),
+                    .to_json_response(request_id.0),
             )
             .await;
     }
@@ -238,14 +226,13 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::system_name`].
     pub(super) async fn system_name(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
     ) {
         self.requests_subscriptions
             .respond(
-                state_machine_request_id,
+                request_id.1,
                 methods::Response::system_name((&self.system_name).into())
-                    .to_json_response(request_id),
+                    .to_json_response(request_id.0),
             )
             .await;
     }
@@ -253,14 +240,13 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::system_nodeRoles`].
     pub(super) async fn system_node_roles(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
     ) {
         self.requests_subscriptions
             .respond(
-                state_machine_request_id,
+                request_id.1,
                 methods::Response::system_nodeRoles(Cow::Borrowed(&[methods::NodeRole::Light]))
-                    .to_json_response(request_id),
+                    .to_json_response(request_id.0),
             )
             .await;
     }
@@ -268,8 +254,7 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::system_peers`].
     pub(super) async fn system_peers(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
     ) {
         let response = methods::Response::system_peers(
             self.sync_service
@@ -289,25 +274,24 @@ impl<TPlat: Platform> Background<TPlat> {
                 )
                 .collect(),
         )
-        .to_json_response(request_id);
+        .to_json_response(request_id.0);
         self.requests_subscriptions
-            .respond(state_machine_request_id, response)
+            .respond(request_id.1, response)
             .await;
     }
 
     /// Handles a call to [`methods::MethodCall::system_properties`].
     pub(super) async fn system_properties(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
     ) {
         self.requests_subscriptions
             .respond(
-                state_machine_request_id,
+                request_id.1,
                 methods::Response::system_properties(
                     serde_json::from_str(&self.chain_properties_json).unwrap(),
                 )
-                .to_json_response(request_id),
+                .to_json_response(request_id.0),
             )
             .await;
     }
@@ -315,14 +299,13 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::system_version`].
     pub(super) async fn system_version(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
     ) {
         self.requests_subscriptions
             .respond(
-                state_machine_request_id,
+                request_id.1,
                 methods::Response::system_version((&self.system_version).into())
-                    .to_json_response(request_id),
+                    .to_json_response(request_id.0),
             )
             .await;
     }

@@ -22,20 +22,14 @@ use super::{Background, Platform, SubscriptionMessage};
 use crate::transactions_service;
 
 use alloc::{borrow::ToOwned as _, str, string::ToString as _, sync::Arc, vec::Vec};
-use core::sync::atomic;
-use futures::{
-    channel::{mpsc, oneshot},
-    lock::Mutex,
-    prelude::*,
-};
+use futures::prelude::*;
 use smoldot::json_rpc::{self, methods, requests_subscriptions};
 
 impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::author_pendingExtrinsics`].
     pub(super) async fn author_pending_extrinsics(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
     ) {
         // Because multiple different chains ("chain" in the context of the public API of smoldot)
         // might share the same transactions service, it could be possible for chain A to submit
@@ -46,9 +40,9 @@ impl<TPlat: Platform> Background<TPlat> {
         // return an empty list of pending extrinsics.
         self.requests_subscriptions
             .respond(
-                state_machine_request_id,
+                request_id.1,
                 methods::Response::author_pendingExtrinsics(Vec::new())
-                    .to_json_response(request_id),
+                    .to_json_response(request_id.0),
             )
             .await;
     }
@@ -56,8 +50,7 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::author_submitExtrinsic`].
     pub(super) async fn author_submit_extrinsic(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         transaction: methods::HexString,
     ) {
         // Note that this function is misnamed. It should really be called
@@ -78,9 +71,9 @@ impl<TPlat: Platform> Background<TPlat> {
             .await;
         self.requests_subscriptions
             .respond(
-                state_machine_request_id,
+                request_id.1,
                 methods::Response::author_submitExtrinsic(methods::HashHexString(transaction_hash))
-                    .to_json_response(request_id),
+                    .to_json_response(request_id.0),
             )
             .await;
     }
@@ -88,48 +81,32 @@ impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::author_unwatchExtrinsic`].
     pub(super) async fn author_unwatch_extrinsic(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         subscription: &str,
     ) {
         // Stopping the subscription is done by sending a message to it.
         // The task dedicated to this subscription will receive the message, send a response to
         // the JSON-RPC client, then shut down.
-        let stop_message_received = {
-            let sender = self
-                .subscriptions
-                .lock()
-                .await
-                .get(subscription)
-                .map(|(tx, _)| tx.clone());
-
-            if let Some(sender) = sender {
-                let (tx, rx) = oneshot::channel();
-                let _ = sender
-                    .lock()
-                    .await
-                    .send((
-                        SubscriptionMessage::StopIfTransactionLegacy {
-                            stop_state_machine_request_id: state_machine_request_id.clone(),
-                            stop_request_id: request_id.to_owned(),
-                        },
-                        tx,
-                    ))
-                    .await;
-                rx.await.is_ok()
-            } else {
-                false
-            }
-        };
+        let stop_message_received = self
+            .requests_subscriptions
+            .subscription_send(
+                request_id.1,
+                subscription,
+                SubscriptionMessage::StopIfTransactionLegacy {
+                    stop_request_id: (request_id.0.to_owned(), request_id.1.clone()),
+                },
+            )
+            .await;
 
         // Send back a response manually if the task doesn't exist, or has discarded the message,
         // which could happen for example because there was already a stop message earlier in its
         // queue or because it was the wrong type of subscription.
-        if !stop_message_received {
+        if stop_message_received.is_err() {
             self.requests_subscriptions
                 .respond(
-                    state_machine_request_id,
-                    methods::Response::author_unwatchExtrinsic(false).to_json_response(request_id),
+                    request_id.1,
+                    methods::Response::author_unwatchExtrinsic(false)
+                        .to_json_response(request_id.0),
                 )
                 .await;
         }
@@ -140,23 +117,22 @@ impl<TPlat: Platform> Background<TPlat> {
     /// `is_legacy` is `false`).
     pub(super) async fn submit_and_watch_transaction(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         transaction: methods::HexString,
         is_legacy: bool,
     ) {
-        let state_machine_subscription = match self
+        let (subscription_id, mut messages_rx, subscription_start) = match self
             .requests_subscriptions
-            .start_subscription(state_machine_request_id, 16)
+            .start_subscription(request_id.1, 16)
             .await
         {
             Ok(v) => v,
             Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
                 self.requests_subscriptions
                     .respond(
-                        state_machine_request_id,
+                        request_id.1,
                         json_rpc::parse::build_error_response(
-                            request_id,
+                            request_id.0,
                             json_rpc::parse::ErrorResponse::ServerError(
                                 -32000,
                                 "Too many active subscriptions",
@@ -169,149 +145,114 @@ impl<TPlat: Platform> Background<TPlat> {
             }
         };
 
-        let subscription_id = self
-            .next_subscription_id
-            .fetch_add(1, atomic::Ordering::Relaxed)
-            .to_string();
-
-        let (messages_tx, mut messages_rx) = mpsc::channel(0);
-
-        self.subscriptions.lock().await.insert(
-            subscription_id.clone(),
-            (
-                Arc::new(Mutex::new(messages_tx)),
-                state_machine_subscription.clone(),
-            ),
-        );
-
-        self.requests_subscriptions
-            .respond(
-                state_machine_request_id,
-                if is_legacy {
-                    methods::Response::author_submitAndWatchExtrinsic((&subscription_id).into())
-                        .to_json_response(request_id)
-                } else {
-                    methods::Response::transaction_unstable_submitAndWatch(
-                        (&subscription_id).into(),
-                    )
-                    .to_json_response(request_id)
-                },
-            )
-            .await;
-
-        // Spawn a separate task for the transaction updates.
-        let task = {
+        subscription_start.start({
             let mut transaction_updates = self
                 .transactions_service
                 .submit_and_watch_transaction(transaction.0, 16)
                 .await;
             let me = self.clone();
+            let request_id = (request_id.0.to_owned(), request_id.1.clone());
+
             async move {
+                me.requests_subscriptions
+                    .respond(
+                        &request_id.1,
+                        if is_legacy {
+                            methods::Response::author_submitAndWatchExtrinsic(
+                                (&subscription_id).into(),
+                            )
+                            .to_json_response(&request_id.0)
+                        } else {
+                            methods::Response::transaction_unstable_submitAndWatch(
+                                (&subscription_id).into(),
+                            )
+                            .to_json_response(&request_id.0)
+                        },
+                    )
+                    .await;
+
                 let mut included_block = None;
                 let mut num_broadcasted_peers = 0;
 
                 // TODO: doesn't reported `validated` events
 
                 loop {
-                    let status_update = match future::select(
-                        transaction_updates.next(),
-                        messages_rx.next(),
-                    )
-                    .await
-                    {
-                        future::Either::Left((Some(status), _)) => status,
-                        future::Either::Left((None, _)) if !is_legacy => {
+                    let status_update = match {
+                        let next_message = messages_rx.next();
+                        futures::pin_mut!(next_message);
+                        match future::select(transaction_updates.next(), next_message).await {
+                            future::Either::Left((v, _)) => either::Left(v),
+                            future::Either::Right((v, _)) => either::Right(v),
+                        }
+                    } {
+                        either::Left(Some(status)) => status,
+                        either::Left(None) if !is_legacy => {
                             // Channel from the transactions service has been closed.
                             // Stop the task.
                             break;
                         }
-                        future::Either::Left((None, _)) => {
+                        either::Left(None) => {
                             // Channel from the transactions service has been closed.
                             // Stop the task.
                             // There is nothing more that can be done except hope that the
                             // client understands that no new notification is expected and
                             // unsubscribes.
                             break loop {
-                                match messages_rx.next().await {
-                                    Some((
+                                let next_message = messages_rx.next();
+                                futures::pin_mut!(next_message);
+                                match next_message.await {
+                                    (
                                         SubscriptionMessage::StopIfTransactionLegacy {
-                                            stop_state_machine_request_id,
                                             stop_request_id,
                                         },
                                         confirmation_sender,
-                                    )) => {
-                                        me.requests_subscriptions
-                                            .stop_subscription(&state_machine_subscription)
-                                            .await;
-
+                                    ) => {
                                         me.requests_subscriptions
                                             .respond(
-                                                &stop_state_machine_request_id,
+                                                &stop_request_id.1,
                                                 methods::Response::author_unwatchExtrinsic(true)
-                                                    .to_json_response(&stop_request_id),
+                                                    .to_json_response(&stop_request_id.0),
                                             )
                                             .await;
 
-                                        let _ = confirmation_sender.send(());
+                                        confirmation_sender.send();
                                         break;
                                     }
-                                    Some(_) => {}
-                                    None => unreachable!(),
+                                    _ => {}
                                 }
                             };
                         }
-                        future::Either::Right((None, _)) => unreachable!(),
-                        future::Either::Right((
-                            Some((
-                                SubscriptionMessage::StopIfTransaction {
-                                    stop_state_machine_request_id,
-                                    stop_request_id,
-                                },
-                                confirmation_sender,
-                            )),
-                            _,
+                        either::Right((
+                            SubscriptionMessage::StopIfTransaction { stop_request_id },
+                            confirmation_sender,
                         )) if !is_legacy => {
                             me.requests_subscriptions
-                                .stop_subscription(&state_machine_subscription)
-                                .await;
-
-                            me.requests_subscriptions
                                 .respond(
-                                    &stop_state_machine_request_id,
+                                    &stop_request_id.1,
                                     methods::Response::transaction_unstable_unwatch(())
-                                        .to_json_response(&stop_request_id),
+                                        .to_json_response(&stop_request_id.0),
                                 )
                                 .await;
 
-                            let _ = confirmation_sender.send(());
+                            confirmation_sender.send();
                             break;
                         }
-                        future::Either::Right((
-                            Some((
-                                SubscriptionMessage::StopIfTransactionLegacy {
-                                    stop_state_machine_request_id,
-                                    stop_request_id,
-                                },
-                                confirmation_sender,
-                            )),
-                            _,
+                        either::Right((
+                            SubscriptionMessage::StopIfTransactionLegacy { stop_request_id },
+                            confirmation_sender,
                         )) if is_legacy => {
                             me.requests_subscriptions
-                                .stop_subscription(&state_machine_subscription)
-                                .await;
-
-                            me.requests_subscriptions
                                 .respond(
-                                    &stop_state_machine_request_id,
+                                    &stop_request_id.1,
                                     methods::Response::author_unwatchExtrinsic(true)
-                                        .to_json_response(&stop_request_id),
+                                        .to_json_response(&stop_request_id.0),
                                 )
                                 .await;
 
-                            let _ = confirmation_sender.send(());
+                            confirmation_sender.send();
                             break;
                         }
-                        future::Either::Right((Some(_), _)) => {
+                        either::Right(_) => {
                             // Silently discard the message.
                             continue;
                         }
@@ -514,61 +455,42 @@ impl<TPlat: Platform> Background<TPlat> {
                     // TODO: handle situation where buffer is full
                     let _ = me
                         .requests_subscriptions
-                        .try_push_notification(&state_machine_subscription, update)
+                        .try_push_notification(&request_id.1, &subscription_id, update)
                         .await;
                 }
             }
-        };
-
-        self.requests_subscriptions.add_subscription_task(task);
+        });
     }
 
     /// Handles a call to [`methods::MethodCall::transaction_unstable_unwatch`].
     pub(super) async fn transaction_unstable_unwatch(
         self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
+        request_id: (&str, &requests_subscriptions::RequestId),
         subscription: &str,
     ) {
         // Stopping the subscription is done by sending a message to it.
         // The task dedicated to this subscription will receive the message, send a response to
         // the JSON-RPC client, then shut down.
-        let stop_message_received = {
-            let sender = self
-                .subscriptions
-                .lock()
-                .await
-                .get(subscription)
-                .map(|(tx, _)| tx.clone());
-
-            if let Some(sender) = sender {
-                let (tx, rx) = oneshot::channel();
-                let _ = sender
-                    .lock()
-                    .await
-                    .send((
-                        SubscriptionMessage::StopIfTransaction {
-                            stop_state_machine_request_id: state_machine_request_id.clone(),
-                            stop_request_id: request_id.to_owned(),
-                        },
-                        tx,
-                    ))
-                    .await;
-                rx.await.is_ok()
-            } else {
-                false
-            }
-        };
+        let stop_message_received = self
+            .requests_subscriptions
+            .subscription_send(
+                request_id.1,
+                subscription,
+                SubscriptionMessage::StopIfTransaction {
+                    stop_request_id: (request_id.0.to_owned(), request_id.1.clone()),
+                },
+            )
+            .await;
 
         // Send back a response manually if the task doesn't exist, or has discarded the message,
         // which could happen for example because there was already a stop message earlier in its
         // queue or because it was the wrong type of subscription.
-        if !stop_message_received {
+        if stop_message_received.is_err() {
             self.requests_subscriptions
                 .respond(
-                    state_machine_request_id,
+                    request_id.1,
                     methods::Response::transaction_unstable_unwatch(())
-                        .to_json_response(request_id),
+                        .to_json_response(request_id.0),
                 )
                 .await;
         }
