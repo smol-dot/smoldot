@@ -578,6 +578,34 @@ impl<'a> serde::Deserialize<'a> for HashHexString {
     }
 }
 
+/// Removes the length prefix at the beginning of `metadata`. Used for the `Metadata_metadata`
+/// JSON-RPC request. Returns an error if there is no valid length prefix.
+pub fn remove_metadata_length_prefix(
+    metadata: &[u8],
+) -> Result<&[u8], RemoveMetadataLengthPrefixError> {
+    let (after_prefix, length) = crate::util::nom_scale_compact_usize(metadata).map_err(
+        |_: nom::Err<nom::error::Error<&[u8]>>| {
+            RemoveMetadataLengthPrefixError::InvalidLengthPrefix
+        },
+    )?;
+
+    // Verify that the length prefix indeed matches the metadata's length.
+    if length != after_prefix.len() {
+        return Err(RemoveMetadataLengthPrefixError::LengthMismatch);
+    }
+
+    Ok(after_prefix)
+}
+
+/// Error potentially returned by [`remove_metadata_length_prefix`].
+#[derive(Debug, Clone, derive_more::Display)]
+pub enum RemoveMetadataLengthPrefixError {
+    /// The length prefix at the beginning of the metadata is invalid.
+    InvalidLengthPrefix,
+    /// Length indicated by the length prefix doesn't match the size of the metadata.
+    LengthMismatch,
+}
+
 /// Contains the public key of an account.
 ///
 /// The deserialization involves decoding an SS58 address into this public key.

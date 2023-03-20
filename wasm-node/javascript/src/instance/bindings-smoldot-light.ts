@@ -267,7 +267,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
             // In browsers, `setTimeout` works as expected when `ms` equals 0. However, NodeJS
             // requires a minimum of 1 millisecond (if `0` is passed, it is automatically replaced
             // with `1`) and wants you to use `setImmediate` instead.
-            if (ms == 0 && typeof setImmediate === "function") {
+            if (ms < 1 && typeof setImmediate === "function") {
                 setImmediate(() => {
                     if (killedTracked.killed) return;
                     try {

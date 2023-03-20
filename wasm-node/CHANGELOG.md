@@ -2,11 +2,15 @@
 
 ## Unreleased
 
+### Changed
+
+- Add an arbitrary limit to the size of unprocessed networking packets, in order to avoid DoS attacks. This limit is necessary in order to bypass limitations in the networking APIs exposed by browsers. ([#312](https://github.com/smol-dot/smoldot/pull/312))
+
 ## 1.0.0 - 2022-03-12
 
 ### Fixed
 
-- Fix Deno throwing an exception when failing to connect to an unreachable node through a TCP/IP multiaddr. (([#246]https://github.com/smol-dot/smoldot/pull/246))
+- Fix Deno throwing an exception when failing to connect to an unreachable node through a TCP/IP multiaddr. ([#246](https://github.com/smol-dot/smoldot/pull/246))
 
 ## 0.7.13 - 2022-03-03
 

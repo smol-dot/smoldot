@@ -27,7 +27,6 @@ import { inflate } from 'pako';
 
 import { performance } from 'node:perf_hooks';
 import { createConnection as nodeCreateConnection } from 'node:net';
-import type { Socket as TcpSocket } from 'node:net';
 import { randomFillSync } from 'node:crypto';
 
 export {
@@ -82,8 +81,6 @@ export function start(options?: ClientOptions): Client {
  * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
  */
 function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean, forbidNonLocalWs: boolean, forbidWss: boolean): Connection {
-    let connection: TcpWrapped | WebSocketWrapped;
-
     // Attempt to parse the multiaddress.
     // TODO: remove support for `/wss` in a long time (https://github.com/paritytech/smoldot/issues/1940)
     const wsParsed = config.address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)\/(ws|wss|tls\/ws)$/);
@@ -127,7 +124,21 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             config.onMessage(new Uint8Array(msg.data as ArrayBuffer));
         };
 
-        connection = { ty: 'websocket', socket };
+        return {
+            reset: (): void => {
+                // We can't set these fields to null because the TypeScript definitions don't
+                // allow it, but we can set them to dummy values.
+                socket.onopen = () => { };
+                socket.onclose = () => { };
+                socket.onmessage = () => { };
+                socket.onerror = () => { };
+                socket.close();
+            },
+            send: (data: Uint8Array): void => {
+                socket.send(data);
+            },
+            openOutSubstream: () => { throw new Error('Wrong connection type') }
+        };
 
     } else if (tcpParsed != null) {
         // `net` module will be missing when we're not in NodeJS.
@@ -140,67 +151,36 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             port: parseInt(tcpParsed[3]!, 10),
         });
 
-        connection = { ty: 'tcp', socket };
-        connection.socket.setNoDelay();
+        socket.setNoDelay();
 
-        connection.socket.on('connect', () => {
+        socket.on('connect', () => {
             if (socket.destroyed) return;
             config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux' });
         });
-        connection.socket.on('close', (hasError) => {
+        socket.on('close', (hasError) => {
             if (socket.destroyed) return;
             // NodeJS doesn't provide a reason why the closing happened, but only
             // whether it was caused by an error.
             const message = hasError ? "Error" : "Closed gracefully";
             config.onConnectionReset(message);
         });
-        connection.socket.on('error', () => { });
-        connection.socket.on('data', (message) => {
+        socket.on('error', () => { });
+        socket.on('data', (message) => {
             if (socket.destroyed) return;
             config.onMessage(new Uint8Array(message.buffer));
         });
 
+        return {
+            reset: (): void => {
+                socket.destroy();
+            },
+            send: (data: Uint8Array): void => {
+                socket.write(data);
+            },
+            openOutSubstream: () => { throw new Error('Wrong connection type') }
+        };
+
     } else {
         throw new ConnectionError('Unrecognized multiaddr format');
     }
-
-    return {
-        reset: (): void => {
-            if (connection.ty == 'websocket') {
-                // WebSocket
-                // We can't set these fields to null because the TypeScript definitions don't
-                // allow it, but we can set them to dummy values.
-                connection.socket.onopen = () => { };
-                connection.socket.onclose = () => { };
-                connection.socket.onmessage = () => { };
-                connection.socket.onerror = () => { };
-                connection.socket.close();
-            } else {
-                // TCP
-                connection.socket.destroy();
-            }
-        },
-
-        send: (data: Uint8Array): void => {
-            if (connection.ty == 'websocket') {
-                // WebSocket
-                connection.socket.send(data);
-            } else {
-                // TCP
-                connection.socket.write(data);
-            }
-        },
-
-        openOutSubstream: () => { throw new Error('Wrong connection type') }
-    };
-}
-
-interface TcpWrapped {
-    ty: 'tcp',
-    socket: TcpSocket,
-}
-
-interface WebSocketWrapped {
-    ty: 'websocket',
-    socket: WebSocket,
 }

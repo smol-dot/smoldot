@@ -40,7 +40,6 @@ use smoldot::{
     informant::HashDisplay,
     json_rpc::{self, methods, requests_subscriptions},
     network::protocol,
-    remove_metadata_length_prefix,
 };
 
 mod sub_utils;
@@ -1140,18 +1139,18 @@ impl<TPlat: Platform> Background<TPlat> {
             .await;
         let result = result
             .as_ref()
-            .map(|output| remove_metadata_length_prefix(&output.return_value));
+            .map(|output| methods::remove_metadata_length_prefix(&output.return_value));
 
         let response = match result {
             Ok(Ok(metadata)) => {
                 methods::Response::state_getMetadata(methods::HexString(metadata.to_vec()))
                     .to_json_response(request_id.0)
             }
-            Ok(Err(())) => json_rpc::parse::build_error_response(
+            Ok(Err(error)) => json_rpc::parse::build_error_response(
                 request_id.0,
                 json_rpc::parse::ErrorResponse::ServerError(
                     -32000,
-                    "Failed to decode metadata from runtime",
+                    &format!("Failed to decode metadata from runtime. Error: {}", error),
                 ),
                 None,
             ),
