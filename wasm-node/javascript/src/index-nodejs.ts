@@ -159,6 +159,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
                 }
                 bufferedAmountCheck.quenedUnreportedBytes += data.length;
             },
+            closeSend: (): void => { throw new Error('Wrong connection type') },
             openOutSubstream: () => { throw new Error('Wrong connection type') }
         };
 
@@ -214,12 +215,15 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
                 const allWritten = socket.write(data);
                 if (allWritten) {
                     setImmediate(() => {
-                        if (socket.destroyed) return;
+                        if (!socket.writable) return;
                         config.onWritableBytes(dataLen)
                     });
                 } else {
                     drainingBytes.num += dataLen;
                 }
+            },
+            closeSend: (): void => {
+                socket.end();
             },
             openOutSubstream: () => { throw new Error('Wrong connection type') }
         };

@@ -154,6 +154,7 @@ export function start(options?: ClientOptions): Client {
             bufferedAmountCheck.quenedUnreportedBytes += data.length;
         },
 
+        closeSend: (): void => { throw new Error('Wrong connection type') },
         openOutSubstream: () => { throw new Error('Wrong connection type') }
       };
   } else if (webRTCParsed != null) {
@@ -499,6 +500,8 @@ export function start(options?: ClientOptions): Client {
         channel.channel.send(data);
         channel.bufferedBytes += data.length;
       },
+
+      closeSend: (): void => { throw new Error('Wrong connection type') },
 
       openOutSubstream: () => {
         // `openOutSubstream` can only be called after we have called `config.onOpen`, therefore

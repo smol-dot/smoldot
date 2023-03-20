@@ -186,6 +186,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
                     bufferedAmountCheck.quenedUnreportedBytes += data.length;
                 } catch (_error) { }
             },
+            closeSend: (): void => { throw new Error('Wrong connection type') },
             openOutSubstream: () => { throw new Error('Wrong connection type') }
         };
 
@@ -278,6 +279,13 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
                         // we have to do is try writing again.
                         dataCopy = dataCopy.slice(outcome);
                     }
+                    return c;
+                });
+            },
+
+            closeSend: (): void => {
+                socket.inner = socket.inner.then(async (c) => {
+                    await c?.closeWrite();
                     return c;
                 });
             },

@@ -240,7 +240,7 @@ extern "C" {
     pub fn connection_stream_reset(connection_id: u32, stream_id: u32);
 
     /// Queues data on the given stream. The data is found in the memory of the WebAssembly
-    /// virtual machine, at the given pointer. The data must be sent as a binary frame.
+    /// virtual machine, at the given pointer.
     ///
     /// If `connection_id` is a single-stream connection, then the value of `stream_id` should
     /// be ignored. If `connection_id` is a multi-stream connection, then the value of `stream_id`
@@ -254,6 +254,21 @@ extern "C" {
     /// The size of the buffer must not exceed the number of writable bytes of the given stream.
     /// Use [`stream_writable_bytes`] to notify that more data can be sent on the stream.
     pub fn stream_send(connection_id: u32, stream_id: u32, ptr: u32, len: u32);
+
+    /// Close the sending side of the given stream of the given connection.
+    ///
+    /// Never called for connection types where this isn't possible to implement (i.e. WebSocket
+    /// and WebRTC at the moment).
+    ///
+    /// If `connection_id` is a single-stream connection, then the value of `stream_id` should
+    /// be ignored. If `connection_id` is a multi-stream connection, then the value of `stream_id`
+    /// contains the identifier of the stream whose sending side should be closed, as was provided
+    /// to [`connection_stream_opened`].
+    ///
+    /// The connection associated with that stream (and, in the case of a multi-stream connection,
+    /// the stream itself must currently be in the `Open` state. See the documentation of
+    /// [`connection_new`] for details.
+    pub fn stream_send_close(connection_id: u32, stream_id: u32);
 
     /// Called when the Wasm execution enters the context of a certain task. This is useful for
     /// debugging purposes.

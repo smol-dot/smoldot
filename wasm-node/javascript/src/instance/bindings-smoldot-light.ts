@@ -93,7 +93,7 @@ export interface Config {
     /**
      * Queues data to be sent on the given connection.
      *
-     * The connection must currently be in the `Open` state.
+     * The connection and stream must currently be in the `Open` state.
      *
      * The number of bytes most never exceed the number of "writable bytes" of the stream.
      * `onWritableBytes` can be used in order to notify that more writable bytes are available.
@@ -102,6 +102,21 @@ export interface Config {
      * It indicates which substream to send the data on.
      */
     send(data: Uint8Array, streamId?: number): void;
+
+    /**
+     * Closes the writing side of the given stream of the given connection.
+     *
+     * Never called for connection types where this isn't possible to implement (i.e. WebSocket
+     * and WebRTC at the moment).
+     *
+     * The connection and stream must currently be in the `Open` state.
+     *
+     * Implicitly sets the "writable bytes" of the stream to zero.
+     *
+     * The `streamId` must be provided if and only if the connection is of type "multi-stream".
+     * It indicates which substream to send the data on.
+     */
+    closeSend(streamId?: number): void;
 
     /**
      * Start opening an additional outbound substream on the given connection.
@@ -174,6 +189,8 @@ export interface ConnectionConfig {
      * Callback called when more data can be written on the stream.
      *
      * Can only happen while the connection is in the `Open` state.
+     *
+     * This callback must not be called after `closeSend` has been called.
      *
      * The `streamId` parameter must be provided if and only if the connection is of type
      * "multi-stream".
@@ -441,6 +458,13 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
             const data = new Uint8Array(instance.exports.memory.buffer).slice(ptr, ptr + len);
             const connection = connections[connectionId]!;
             connection.send(data, streamId);  // TODO: docs says the streamId is provided only for multi-stream connections, but here it's always provided
+        },
+
+        stream_send_close: (connectionId: number, streamId: number) => {
+            if (killedTracked.killed) return;
+    
+            const connection = connections[connectionId]!;
+            connection.closeSend(streamId);  // TODO: docs says the streamId is provided only for multi-stream connections, but here it's always provided
         },
 
         current_task_entered: (ptr: number, len: number) => {
