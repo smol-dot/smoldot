@@ -34,7 +34,7 @@ pub use crate::libp2p::{
     peers::{
         ConnectionId, ConnectionToCoordinator, CoordinatorToConnection, InRequestId, InboundError,
         MultiStreamConnectionTask, MultiStreamHandshakeKind, OutRequestId,
-        SingleStreamConnectionTask, SingleStreamHandshakeKind,
+        SingleStreamConnectionTask, SingleStreamHandshakeKind, StartRequestError,
     },
 };
 

@@ -622,7 +622,8 @@ impl StorageQueryError {
             StorageQueryErrorDetail::Network(
                 network_service::StorageProofRequestError::Request(
                     service::StorageProofRequestError::Decode(_),
-                ),
+                )
+                | network_service::StorageProofRequestError::RequestTooLarge,
             ) => false,
             StorageQueryErrorDetail::ProofVerification(_)
             | StorageQueryErrorDetail::MissingProofEntry => false,

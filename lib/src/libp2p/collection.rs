@@ -597,7 +597,7 @@ where
         protocol_index: usize,
         request_data: impl Into<Vec<u8>>,
         timeout: TNow,
-    ) -> SubstreamId {
+    ) -> Result<SubstreamId, StartRequestError> {
         let connection = match self.connections.get(&target) {
             Some(c) => c,
             None => panic!(),
@@ -609,16 +609,19 @@ where
 
         let request_data = request_data.into();
 
-        // TODO: don't panic here!
-        assert!(
-            request_data.len()
-                <= self
-                    .request_response_protocols
-                    .get(protocol_index)
-                    .unwrap_or_else(|| panic!())
-                    .inbound_config
-                    .max_size()
-        );
+        // We check the size limit befoe sending the message. This size limit is the only reason
+        // why start a request can fail. By checking it here, we are guaranteed that the request
+        // start will succeed in the background.
+        if request_data.len()
+            > self
+                .request_response_protocols
+                .get(protocol_index)
+                .unwrap_or_else(|| panic!())
+                .inbound_config
+                .max_size()
+        {
+            return Err(StartRequestError::RequestTooLarge);
+        }
 
         let substream_id = self.next_substream_id;
         self.next_substream_id.0 += 1;
@@ -636,7 +639,7 @@ where
             },
         ));
 
-        substream_id
+        Ok(substream_id)
     }
 
     /// Start opening a notifications substream.
@@ -1499,6 +1502,13 @@ impl<TConn, TNow> ops::IndexMut<ConnectionId> for Network<TConn, TNow> {
     fn index_mut(&mut self, id: ConnectionId) -> &mut TConn {
         &mut self.connections.get_mut(&id).unwrap().user_data
     }
+}
+
+/// Error potentially returned when starting a request.
+#[derive(Debug, Clone, derive_more::Display)]
+pub enum StartRequestError {
+    /// Size of the request is over maximum allowed by the protocol.
+    RequestTooLarge,
 }
 
 /// See [`Network::connection_state`].
