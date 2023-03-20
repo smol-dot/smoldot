@@ -21,14 +21,14 @@
 use super::{ConnectError, Platform, PlatformConnection, PlatformSubstreamDirection, ReadBuffer};
 
 use alloc::collections::VecDeque;
-use core::{pin::Pin, str, task::Poll, time::Duration};
+use core::{ops, pin::Pin, str, task::Poll, time::Duration};
 use futures::prelude::*;
 use smoldot::libp2p::{
     multiaddr::{Multiaddr, ProtocolRef},
     websocket,
 };
 use std::{
-    io::{IoSlice, IoSliceMut},
+    io::IoSlice,
     net::{IpAddr, SocketAddr},
 };
 
@@ -184,11 +184,12 @@ impl Platform for AsyncStdTcpWebSocket {
                     socket,
                     buffers: Some((
                         StreamReadBuffer::Open {
-                            buffer: VecDeque::with_capacity(16384),
-                            is_api_available: true,
+                            buffer: vec![0; 16384],
+                            cursor: 0..0,
                         },
                         StreamWriteBuffer::Open {
                             buffer: VecDeque::with_capacity(16384),
+                            must_close: false,
                             must_flush: false,
                         },
                     )),
@@ -218,45 +219,15 @@ impl Platform for AsyncStdTcpWebSocket {
 
             if let StreamReadBuffer::Open {
                 buffer: ref mut buf,
-                is_api_available,
+                ref mut cursor,
             } = read_buffer
             {
-                // If `is_api_available` is `false`, we set it to `true` and pretend that more data
-                // has arrived.
-                if !*is_api_available {
-                    *is_api_available = true;
-                    if !buf.is_empty() {
-                        update_stream_future_ready = true;
-                    }
-                }
-
-                let data_in_buf_before_read = buf.len();
-
-                // Only try to read if there is space available in the buffer.
-                if data_in_buf_before_read < buf.capacity() {
-                    buf.resize(buf.capacity(), 0);
-
-                    let buf_as_slices = {
-                        let slices = buf.as_mut_slices();
-                        if slices.0.len() > data_in_buf_before_read {
-                            (&mut slices.0[data_in_buf_before_read..], slices.1)
-                        } else {
-                            (
-                                &mut slices.1[data_in_buf_before_read - slices.0.len()..],
-                                &mut [][..],
-                            )
-                        }
-                    };
-
-                    debug_assert!(!buf_as_slices.0.is_empty());
-
-                    if let Poll::Ready(result) = Pin::new(&mut stream.socket).poll_read_vectored(
-                        cx,
-                        &mut [
-                            IoSliceMut::new(buf_as_slices.0),
-                            IoSliceMut::new(buf_as_slices.1),
-                        ],
-                    ) {
+                // When reading data from the socket, `poll_read` might return "EOF". In that
+                // situation, we transition to the `Closed` state, which would discard the data
+                // currently in the buffer. For this reason, we only try to read if there is no
+                // data left in the buffer.
+                if cursor.start == cursor.end {
+                    if let Poll::Ready(result) = Pin::new(&mut stream.socket).poll_read(cx, buf) {
                         update_stream_future_ready = true;
                         match result {
                             Err(_) => {
@@ -269,11 +240,9 @@ impl Platform for AsyncStdTcpWebSocket {
                                 *read_buffer = StreamReadBuffer::Closed;
                             }
                             Ok(bytes) => {
-                                buf.truncate(data_in_buf_before_read + bytes);
+                                *cursor = 0..bytes;
                             }
                         }
-                    } else {
-                        buf.truncate(data_in_buf_before_read);
                     }
                 }
             }
@@ -281,9 +250,10 @@ impl Platform for AsyncStdTcpWebSocket {
             if let StreamWriteBuffer::Open {
                 buffer: ref mut buf,
                 must_flush,
+                must_close,
             } = write_buffer
             {
-                if !buf.is_empty() {
+                while !buf.is_empty() {
                     let write_queue_slices = buf.as_slices();
                     if let Poll::Ready(result) = Pin::new(&mut stream.socket).poll_write_vectored(
                         cx,
@@ -292,7 +262,13 @@ impl Platform for AsyncStdTcpWebSocket {
                             IoSlice::new(write_queue_slices.1),
                         ],
                     ) {
-                        update_stream_future_ready = true;
+                        if !*must_close {
+                            // In the situation where the API user wants to close the writing
+                            // side, simply sending the buffered data isn't enough to justify
+                            // making the future ready.
+                            update_stream_future_ready = true;
+                        }
+
                         match result {
                             Err(_) => {
                                 // End the stream.
@@ -306,10 +282,26 @@ impl Platform for AsyncStdTcpWebSocket {
                                 }
                             }
                         }
+                    } else {
+                        break;
                     }
                 }
 
-                if *must_flush {
+                if buf.is_empty() && *must_close {
+                    if let Poll::Ready(result) = Pin::new(&mut stream.socket).poll_close(cx) {
+                        update_stream_future_ready = true;
+                        match result {
+                            Err(_) => {
+                                // End the stream.
+                                stream.buffers = None;
+                                return Poll::Ready(());
+                            }
+                            Ok(()) => {
+                                *write_buffer = StreamWriteBuffer::Closed;
+                            }
+                        }
+                    }
+                } else if *must_flush {
                     if let Poll::Ready(result) = Pin::new(&mut stream.socket).poll_flush(cx) {
                         update_stream_future_ready = true;
                         match result {
@@ -321,20 +313,6 @@ impl Platform for AsyncStdTcpWebSocket {
                             Ok(()) => {
                                 *must_flush = false;
                             }
-                        }
-                    }
-                }
-            } else if let StreamWriteBuffer::MustClose = write_buffer {
-                if let Poll::Ready(result) = Pin::new(&mut stream.socket).poll_close(cx) {
-                    update_stream_future_ready = true;
-                    match result {
-                        Err(_) => {
-                            // End the stream.
-                            stream.buffers = None;
-                            return Poll::Ready(());
-                        }
-                        Ok(()) => {
-                            *write_buffer = StreamWriteBuffer::Closed;
                         }
                     }
                 }
@@ -352,42 +330,26 @@ impl Platform for AsyncStdTcpWebSocket {
         match stream.buffers.as_ref().map(|(r, _)| r) {
             None => ReadBuffer::Reset,
             Some(StreamReadBuffer::Closed) => ReadBuffer::Closed,
-            Some(StreamReadBuffer::Open {
-                buffer,
-                is_api_available: true,
-            }) => ReadBuffer::Open(buffer.as_slices().0),
-            Some(StreamReadBuffer::Open {
-                is_api_available: false,
-                ..
-            }) => ReadBuffer::Open(&[][..]),
+            Some(StreamReadBuffer::Open { buffer, cursor }) => {
+                ReadBuffer::Open(&buffer[cursor.clone()])
+            }
         }
     }
 
-    fn advance_read_cursor(stream: &mut Self::Stream, bytes: usize) {
-        let Some(StreamReadBuffer::Open { ref mut buffer, is_api_available }) =
+    fn advance_read_cursor(stream: &mut Self::Stream, extra_bytes: usize) {
+        let Some(StreamReadBuffer::Open { ref mut cursor, .. }) =
             stream.buffers.as_mut().map(|(r, _)| r)
         else {
-            assert_eq!(bytes, 0);
+            assert_eq!(extra_bytes, 0);
             return
         };
 
-        // Since `read_buffer` only returns `buffer.as_slices().0`, we want to prevent the user
-        // from accessing `buffer.as_slices().1`. As such, if the user advances the read cursor
-        // at the end of `buffer.as_slices().0` we set `is_api_available` to `false` which
-        // pretends that the read buffer is now empty.
-
-        assert!(bytes <= buffer.as_slices().0.len());
-        if bytes == buffer.as_slices().0.len() {
-            *is_api_available = false;
-        }
-
-        for _ in 0..bytes {
-            buffer.pop_front().unwrap();
-        }
+        assert!(cursor.start + extra_bytes <= cursor.end);
+        cursor.start += extra_bytes;
     }
 
     fn writable_bytes(stream: &mut Self::Stream) -> usize {
-        let Some(StreamWriteBuffer::Open { ref mut buffer, ..}) =
+        let Some(StreamWriteBuffer::Open { ref mut buffer, must_close: false, ..}) =
             stream.buffers.as_mut().map(|(_, w)| w) else { return 0 };
         buffer.capacity() - buffer.len()
     }
@@ -407,9 +369,18 @@ impl Platform for AsyncStdTcpWebSocket {
     fn close_send(stream: &mut Self::Stream) {
         // It is not illegal to call this on an already-reset stream.
         let Some((_, write_buffer)) = stream.buffers.as_mut() else { return };
-        // However, it is illegal to call this on a stream that was already close-attempted.
-        assert!(matches!(write_buffer, StreamWriteBuffer::Open { .. }));
-        *write_buffer = StreamWriteBuffer::MustClose;
+
+        match write_buffer {
+            StreamWriteBuffer::Open {
+                must_close: must_close @ false,
+                ..
+            } => *must_close = true,
+            _ => {
+                // However, it is illegal to call this on a stream that was already close
+                // attempted.
+                panic!()
+            }
+        }
     }
 }
 
@@ -422,14 +393,8 @@ pub struct Stream {
 
 enum StreamReadBuffer {
     Open {
-        buffer: VecDeque<u8>,
-        /// The API of the platform trait only allow providing one slice of read buffer to the
-        /// user. Unfortunately, the actual read buffer consists of two slices.
-        /// In order to solve that problem, we pretend in the API that the read buffer only
-        /// consists either in `buffer.as_slices().0` (if `is_api_available` is `true`) or
-        /// is empty (if `is_api_available` is `false`).
-        /// The `update_stream` function sets `is_api_available` to `true` if necessary.
-        is_api_available: bool,
+        buffer: Vec<u8>,
+        cursor: ops::Range<usize>,
     },
     Closed,
 }
@@ -438,8 +403,8 @@ enum StreamWriteBuffer {
     Open {
         buffer: VecDeque<u8>,
         must_flush: bool,
+        must_close: bool,
     },
-    MustClose,
     Closed,
 }
 

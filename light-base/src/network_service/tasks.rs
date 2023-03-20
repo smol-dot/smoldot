@@ -346,6 +346,10 @@ async fn single_stream_connection_task<TPlat: Platform>(
         if let Some(task_update) = task_update {
             connection_task = task_update;
         } else {
+            // As documented in `update_stream`, we call this function one last time in order to
+            // give the possibility to the implementation to process closing the writing side
+            // before the connection is dropped.
+            TPlat::update_stream(&mut connection).await;
             return;
         }
 
