@@ -180,14 +180,11 @@ impl<TPlat: Platform> Background<TPlat> {
                     let status_update = match {
                         let next_message = messages_rx.next();
                         futures::pin_mut!(next_message);
-                        match future::select(
-                        transaction_updates.next(),
-                        next_message,
-                    ).await {
+                        match future::select(transaction_updates.next(), next_message).await {
                             future::Either::Left((v, _)) => either::Left(v),
-                            future::Either::Right((v, _)) => either::Right(v)
-                    }}
-                    {
+                            future::Either::Right((v, _)) => either::Right(v),
+                        }
+                    } {
                         either::Left(Some(status)) => status,
                         either::Left(None) if !is_legacy => {
                             // Channel from the transactions service has been closed.
