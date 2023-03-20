@@ -799,7 +799,7 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
     /// the subscription has shut down.
     ///
     /// This asynchronous function performs two steps: delivering a message, then waiting for a
-    /// confirmation. Cancelling the function in its confirmation waiting phase doesn't
+    /// confirmation. Canceling the function in its confirmation waiting phase doesn't
     /// "un-deliver" the message. This function doesn't allow to deliver a message without
     /// waiting for a confirmation.
     pub async fn subscription_send<'a, 'b>(
