@@ -609,7 +609,7 @@ where
 
         let request_data = request_data.into();
 
-        // We check the size limit befoe sending the message. This size limit is the only reason
+        // We check the size limit before sending the message. This size limit is the only reason
         // why start a request can fail. By checking it here, we are guaranteed that the request
         // start will succeed in the background.
         if request_data.len()

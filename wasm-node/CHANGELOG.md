@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Fix panic when a libp2p networking request exceeds the maximum size allowed by the protocol. When that happens, either a warning is printed (similar to consensus-related issues) or a JSON-RPC error is returned. ([#318](https://github.com/smol-dot/smoldot/pull/318))
+- No longer panic when a libp2p networking request emitted by smoldot exceeds the maximum size allowed by the protocol. Instead, either a warning is printed (similar to consensus-related issues) or a JSON-RPC error is returned. ([#318](https://github.com/smol-dot/smoldot/pull/318))
 - Add an arbitrary limit to the size of unprocessed networking packets, in order to avoid DoS attacks. This limit is necessary in order to bypass limitations in the networking APIs exposed by browsers. ([#312](https://github.com/smol-dot/smoldot/pull/312))
 
 ## 1.0.0 - 2022-03-12
