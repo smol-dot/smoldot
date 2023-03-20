@@ -182,7 +182,7 @@ export function start(options?: ClientOptions): Client {
     // us use the `!` operator more easily and leads to more readable code.
     let pc: RTCPeerConnection | null | undefined = undefined;
     // Contains the data channels that are open and have been reported to smoldot.
-    const dataChannels = new Map<number, RTCDataChannel>();
+    const dataChannels = new Map<number, { channel: RTCDataChannel, bufferedBytes: number }>();
     // For various reasons explained below, we open a data channel in advance without reporting it
     // to smoldot. This data channel is stored in this variable. Once it is reported to smoldot,
     // it is inserted in `dataChannels`.
@@ -209,16 +209,18 @@ export function start(options?: ClientOptions): Client {
       pc!.ondatachannel = null;
 
       for (const channel of Array.from(dataChannels.values())) {
-        channel.onopen = null;
-        channel.onerror = null;
-        channel.onclose = null;
-        channel.onmessage = null;
+        channel.channel.onopen = null;
+        channel.channel.onerror = null;
+        channel.channel.onclose = null;
+        channel.channel.onbufferedamountlow = null;
+        channel.channel.onmessage = null;
       }
       dataChannels.clear();
       if (handshakeDataChannel) {
         handshakeDataChannel.onopen = null;
         handshakeDataChannel.onerror = null;
         handshakeDataChannel.onclose = null;
+        handshakeDataChannel.onbufferedamountlow = null;
         handshakeDataChannel.onmessage = null;
       }
       handshakeDataChannel = undefined;
@@ -251,7 +253,7 @@ export function start(options?: ClientOptions): Client {
           });
         } else {
           console.assert(direction !== 'outbound' || !handshakeDataChannel, "handshakeDataChannel still defined");
-          config.onStreamOpened(dataChannelId, direction);
+          config.onStreamOpened(dataChannelId, direction, 65536);
         }
       };
 
@@ -273,6 +275,7 @@ export function start(options?: ClientOptions): Client {
           handshakeDataChannel.onopen = null;
           handshakeDataChannel.onerror = null;
           handshakeDataChannel.onclose = null;
+          handshakeDataChannel.onbufferedamountlow = null;
           handshakeDataChannel.onmessage = null;
           handshakeDataChannel = undefined;
         } else if (!isOpen) {
@@ -288,13 +291,20 @@ export function start(options?: ClientOptions): Client {
         }
       };
 
+      dataChannel.onbufferedamountlow = () => {
+        const channel = dataChannels.get(dataChannelId)!;
+        const val = channel.bufferedBytes;
+        channel.bufferedBytes = 0;
+        config.onWritableBytes(val, dataChannelId);
+      };
+
       dataChannel.onmessage = (m) => {
         // The `data` field is an `ArrayBuffer`.
         config.onMessage(new Uint8Array(m.data), dataChannelId);
       }
 
       if (direction !== 'first-outbound')
-        dataChannels.set(dataChannelId, dataChannel);
+        dataChannels.set(dataChannelId, { channel: dataChannel, bufferedBytes: 0 });
       else
         handshakeDataChannel = dataChannel
     }
@@ -474,17 +484,20 @@ export function start(options?: ClientOptions): Client {
 
         } else {
           const channel = dataChannels.get(streamId)!;
-          channel.onopen = null;
-          channel.onerror = null;
-          channel.onclose = null;
-          channel.onmessage = null;
-          channel.close();
+          channel.channel.onopen = null;
+          channel.channel.onerror = null;
+          channel.channel.onclose = null;
+          channel.channel.onbufferedamountlow = null;
+          channel.channel.onmessage = null;
+          channel.channel.close();
           dataChannels.delete(streamId);
         }
       },
 
       send: (data: Uint8Array, streamId: number): void => {
-        dataChannels.get(streamId)!.send(data);
+        const channel = dataChannels.get(streamId)!;
+        channel.channel.send(data);
+        channel.bufferedBytes += data.length;
       },
 
       openOutSubstream: () => {
@@ -498,8 +511,8 @@ export function start(options?: ClientOptions): Client {
             // We need to check again if `handshakeDataChannel` is still defined, as the
             // connection might have been closed.
             if (handshakeDataChannel) {
-              config.onStreamOpened(handshakeDataChannel.id!, 'outbound')
-              dataChannels.set(handshakeDataChannel.id!, handshakeDataChannel)
+              config.onStreamOpened(handshakeDataChannel.id!, 'outbound', 1024 * 1024)
+              dataChannels.set(handshakeDataChannel.id!, { channel: handshakeDataChannel, bufferedBytes: 0 })
               handshakeDataChannel = undefined
             }
           })()
