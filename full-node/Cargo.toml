@@ -20,7 +20,7 @@ blake2-rfc = { version = "0.2.18", default-features = false }
 clap = { version = "4.0.27", default-features = false, features = ["color", "derive", "help", "std", "suggestions", "usage"] }  # Note: enabling/disabling some features modifies the internal behavior of clap, be careful
 ctrlc = "3.2.5"
 derive_more = "0.99.17"
-directories = "4.0.1"
+directories = "5.0.0"
 either = { version = "1.8.1", default-features = false }
 env_logger = { version = "0.10.0", default-features = false, features = ["auto-color", "humantime"] }
 event-listener = { version = "2.5.3" }
