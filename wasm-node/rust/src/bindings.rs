@@ -552,16 +552,21 @@ pub extern "C" fn timer_finished(timer_id: u32) {
 ///
 /// The `handshake_ty` parameter indicates the type of handshake. It must always be 0 at the
 /// moment, indicating a multistream-select+Noise+Yamux handshake.
+///
+/// `write_closable` must be non-zero if and only if it makes sense to call [`stream_send_close`]
+/// on this connection. If zero, then [`stream_send_close`] will never be called.
 #[no_mangle]
 pub extern "C" fn connection_open_single_stream(
     connection_id: u32,
     handshake_ty: u32,
     initial_writable_bytes: u32,
+    write_closable: u32,
 ) {
     crate::platform::connection_open_single_stream(
         connection_id,
         handshake_ty,
         initial_writable_bytes,
+        write_closable,
     );
     super::advance_execution();
 }

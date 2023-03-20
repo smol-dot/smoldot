@@ -120,7 +120,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
         };
 
         socket.onopen = () => {
-            config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: 1024 * 1024 });
+            config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: 1024 * 1024, writeClosable: false });
         };
         socket.onclose = (event) => {
             const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
@@ -183,7 +183,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             if (socket.destroyed) return;
             config.onOpen({
                 type: 'single-stream', handshake: 'multistream-select-noise-yamux',
-                initialWritableBytes: socket.writableHighWaterMark
+                initialWritableBytes: socket.writableHighWaterMark, writeClosable: true
             });
         });
         socket.on('close', (hasError) => {

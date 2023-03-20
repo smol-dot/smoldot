@@ -158,7 +158,7 @@ export interface ConnectionConfig {
      */
     onOpen: (info:
         { type: 'single-stream', handshake: 'multistream-select-noise-yamux',
-            initialWritableBytes: number
+            initialWritableBytes: number, writeClosable: boolean
         } |
         { type: 'multi-stream', handshake: 'webrtc', 
             localTlsCertificateMultihash: Uint8Array,
@@ -346,7 +346,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                         try {
                             switch (info.type) {
                                 case 'single-stream': {
-                                    instance.exports.connection_open_single_stream(connectionId, 0, info.initialWritableBytes);
+                                    instance.exports.connection_open_single_stream(connectionId, 0, info.initialWritableBytes, info.writeClosable ? 1 : 0);
                                     break
                                 }
                                 case 'multi-stream': {

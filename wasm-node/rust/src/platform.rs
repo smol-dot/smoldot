@@ -569,6 +569,7 @@ pub(crate) fn connection_open_single_stream(
     connection_id: u32,
     handshake_ty: u32,
     initial_writable_bytes: u32,
+    write_closable: u32,
 ) {
     assert_eq!(handshake_ty, 0);
 
