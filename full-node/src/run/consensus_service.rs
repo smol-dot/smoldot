@@ -161,7 +161,7 @@ impl ConsensusService {
                     .unwrap()
                     .number;
                     let finalized_block_storage: Vec<(Vec<u8>, Vec<u8>, u8)> = database
-                        .finalized_block_storage_top_trie(&finalized_block_hash)
+                        .finalized_block_storage_main_trie(&finalized_block_hash)
                         .unwrap();
                     // TODO: we copy all entries; it could be more optimal to have a custom implementation of FromIterator that directly does the conversion?
                     let finalized_block_storage = finalized_block_storage
@@ -692,7 +692,7 @@ impl SyncBackground {
                         .unwrap(),
                     parent_runtime,
                     block_body_capacity: 0, // TODO: could be set to the size of the tx pool
-                    top_trie_root_calculation_cache: None, // TODO: pretty important for performances
+                    main_trie_root_calculation_cache: None, // TODO: pretty important for performances
                     max_log_level: 0,
                 })
             };
@@ -1233,7 +1233,7 @@ impl SyncBackground {
                                     .full
                                     .as_ref()
                                     .unwrap()
-                                    .storage_top_trie_changes
+                                    .storage_main_trie_changes
                                     .diff_iter_unordered()
                                 {
                                     if let Some(value) = value {
@@ -1348,7 +1348,7 @@ async fn database_blocks(
                         .full
                         .as_ref()
                         .unwrap()
-                        .storage_top_trie_changes
+                        .storage_main_trie_changes
                         .diff_iter_unordered()
                         .map(|(k, v, ())| (k, v)),
                     u8::from(block.full.as_ref().unwrap().state_trie_version),

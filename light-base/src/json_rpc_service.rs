@@ -1612,8 +1612,8 @@ impl<TPlat: Platform> Background<TPlat> {
             virtual_machine,
             function_to_call,
             parameter: call_parameters,
-            top_trie_root_calculation_cache: None,
-            storage_top_trie_changes: Default::default(),
+            main_trie_root_calculation_cache: None,
+            storage_main_trie_changes: Default::default(),
             offchain_storage_changes: Default::default(),
             max_log_level: 0,
         }) {

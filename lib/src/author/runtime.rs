@@ -86,7 +86,7 @@ pub struct Config<'a> {
 
     /// Optional cache corresponding to the storage trie root hash calculation coming from the
     /// parent block verification.
-    pub top_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
+    pub main_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
 
     /// Capacity to reserve for the number of extrinsics. Should be higher than the approximate
     /// number of extrinsics that are going to be applied.
@@ -118,15 +118,15 @@ pub struct Success {
     pub body: Vec<Vec<u8>>,
     /// Runtime that was passed by [`Config`].
     pub parent_runtime: host::HostVmPrototype,
-    /// List of changes to the storage top trie that the block performs.
-    pub storage_top_trie_changes: storage_diff::StorageDiff,
+    /// List of changes to the storage main trie that the block performs.
+    pub storage_main_trie_changes: storage_diff::StorageDiff,
     /// State trie version indicated by the runtime. All the storage changes indicated by
-    /// [`Success::storage_top_trie_changes`] should store this version alongside with them.
+    /// [`Success::storage_main_trie_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
     /// List of changes to the off-chain storage that this block performs.
     pub offchain_storage_changes: storage_diff::StorageDiff,
-    /// Cache used for calculating the top trie root of the new block.
-    pub top_trie_root_calculation_cache: calculate_root::CalculationCache,
+    /// Cache used for calculating the main trie root of the new block.
+    pub main_trie_root_calculation_cache: calculate_root::CalculationCache,
     /// Concatenation of all the log messages printed by the runtime.
     pub logs: String,
 }
@@ -190,8 +190,8 @@ pub fn build_block(config: Config) -> BlockBuild {
             }
             .scale_encoding(config.block_number_bytes)
         },
-        top_trie_root_calculation_cache: config.top_trie_root_calculation_cache,
-        storage_top_trie_changes: Default::default(),
+        main_trie_root_calculation_cache: config.main_trie_root_calculation_cache,
+        storage_main_trie_changes: Default::default(),
         offchain_storage_changes: Default::default(),
         max_log_level: config.max_log_level,
     });
@@ -295,9 +295,9 @@ impl BlockBuild {
                     return BlockBuild::InherentExtrinsics(InherentExtrinsics {
                         shared,
                         parent_runtime: success.virtual_machine.into_prototype(),
-                        storage_top_trie_changes: success.storage_top_trie_changes,
+                        storage_main_trie_changes: success.storage_main_trie_changes,
                         offchain_storage_changes: success.offchain_storage_changes,
-                        top_trie_root_calculation_cache: success.top_trie_root_calculation_cache,
+                        main_trie_root_calculation_cache: success.main_trie_root_calculation_cache,
                     });
                 }
 
@@ -327,10 +327,10 @@ impl BlockBuild {
                         virtual_machine: success.virtual_machine.into_prototype(),
                         function_to_call: "BlockBuilder_apply_extrinsic",
                         parameter: iter::once(extrinsic),
-                        top_trie_root_calculation_cache: Some(
-                            success.top_trie_root_calculation_cache,
+                        main_trie_root_calculation_cache: Some(
+                            success.main_trie_root_calculation_cache,
                         ),
-                        storage_top_trie_changes: success.storage_top_trie_changes,
+                        storage_main_trie_changes: success.storage_main_trie_changes,
                         offchain_storage_changes: success.offchain_storage_changes,
                         max_log_level: shared.max_log_level,
                     });
@@ -347,9 +347,9 @@ impl BlockBuild {
                     return BlockBuild::ApplyExtrinsic(ApplyExtrinsic {
                         shared,
                         parent_runtime: success.virtual_machine.into_prototype(),
-                        storage_top_trie_changes: success.storage_top_trie_changes,
+                        storage_main_trie_changes: success.storage_main_trie_changes,
                         offchain_storage_changes: success.offchain_storage_changes,
-                        top_trie_root_calculation_cache: success.top_trie_root_calculation_cache,
+                        main_trie_root_calculation_cache: success.main_trie_root_calculation_cache,
                     });
                 }
 
@@ -417,10 +417,10 @@ impl BlockBuild {
                         resume: ApplyExtrinsic {
                             shared,
                             parent_runtime: success.virtual_machine.into_prototype(),
-                            storage_top_trie_changes: success.storage_top_trie_changes,
+                            storage_main_trie_changes: success.storage_main_trie_changes,
                             offchain_storage_changes: success.offchain_storage_changes,
-                            top_trie_root_calculation_cache: success
-                                .top_trie_root_calculation_cache,
+                            main_trie_root_calculation_cache: success
+                                .main_trie_root_calculation_cache,
                         },
                     };
                 }
@@ -435,10 +435,10 @@ impl BlockBuild {
                         scale_encoded_header,
                         body: shared.block_body,
                         parent_runtime: success.virtual_machine.into_prototype(),
-                        storage_top_trie_changes: success.storage_top_trie_changes,
+                        storage_main_trie_changes: success.storage_main_trie_changes,
                         state_trie_version: success.state_trie_version,
                         offchain_storage_changes: success.offchain_storage_changes,
-                        top_trie_root_calculation_cache: success.top_trie_root_calculation_cache,
+                        main_trie_root_calculation_cache: success.main_trie_root_calculation_cache,
                         logs: shared.logs,
                     }));
                 }
@@ -481,9 +481,9 @@ enum Stage {
 pub struct InherentExtrinsics {
     shared: Shared,
     parent_runtime: host::HostVmPrototype,
-    storage_top_trie_changes: storage_diff::StorageDiff,
+    storage_main_trie_changes: storage_diff::StorageDiff,
     offchain_storage_changes: storage_diff::StorageDiff,
-    top_trie_root_calculation_cache: calculate_root::CalculationCache,
+    main_trie_root_calculation_cache: calculate_root::CalculationCache,
 }
 
 impl InherentExtrinsics {
@@ -525,8 +525,8 @@ impl InherentExtrinsics {
                     .map(either::Left)
                     .chain(encoded_list.map(either::Right))
             },
-            top_trie_root_calculation_cache: Some(self.top_trie_root_calculation_cache),
-            storage_top_trie_changes: self.storage_top_trie_changes,
+            main_trie_root_calculation_cache: Some(self.main_trie_root_calculation_cache),
+            storage_main_trie_changes: self.storage_main_trie_changes,
             offchain_storage_changes: self.offchain_storage_changes,
             max_log_level: self.shared.max_log_level,
         });
@@ -545,9 +545,9 @@ impl InherentExtrinsics {
 pub struct ApplyExtrinsic {
     shared: Shared,
     parent_runtime: host::HostVmPrototype,
-    storage_top_trie_changes: storage_diff::StorageDiff,
+    storage_main_trie_changes: storage_diff::StorageDiff,
     offchain_storage_changes: storage_diff::StorageDiff,
-    top_trie_root_calculation_cache: calculate_root::CalculationCache,
+    main_trie_root_calculation_cache: calculate_root::CalculationCache,
 }
 
 impl ApplyExtrinsic {
@@ -559,8 +559,8 @@ impl ApplyExtrinsic {
             virtual_machine: self.parent_runtime,
             function_to_call: "BlockBuilder_apply_extrinsic",
             parameter: iter::once(&extrinsic),
-            top_trie_root_calculation_cache: Some(self.top_trie_root_calculation_cache),
-            storage_top_trie_changes: self.storage_top_trie_changes,
+            main_trie_root_calculation_cache: Some(self.main_trie_root_calculation_cache),
+            storage_main_trie_changes: self.storage_main_trie_changes,
             offchain_storage_changes: self.offchain_storage_changes,
             max_log_level: self.shared.max_log_level,
         });
@@ -583,8 +583,8 @@ impl ApplyExtrinsic {
             virtual_machine: self.parent_runtime,
             function_to_call: "BlockBuilder_finalize_block",
             parameter: iter::empty::<&[u8]>(),
-            top_trie_root_calculation_cache: Some(self.top_trie_root_calculation_cache),
-            storage_top_trie_changes: self.storage_top_trie_changes,
+            main_trie_root_calculation_cache: Some(self.main_trie_root_calculation_cache),
+            storage_main_trie_changes: self.storage_main_trie_changes,
             offchain_storage_changes: self.offchain_storage_changes,
             max_log_level: self.shared.max_log_level,
         });
