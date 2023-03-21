@@ -22,7 +22,7 @@ use super::{
     Trap, ValueType, WasmValue,
 };
 
-use alloc::{string::ToString as _, sync::Arc, vec::Vec};
+use alloc::{borrow::ToOwned as _, string::ToString as _, sync::Arc, vec::Vec};
 use core::fmt;
 
 /// See [`super::VirtualMachinePrototype`].
