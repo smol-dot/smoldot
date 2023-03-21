@@ -332,8 +332,8 @@ pub fn validate_transaction(
                     digest: header::DigestRef::empty(),
                 }
                 .scale_encoding(config.block_number_bytes),
-                top_trie_root_calculation_cache: None,
-                storage_top_trie_changes: storage_diff::StorageDiff::empty(),
+                main_trie_root_calculation_cache: None,
+                storage_main_trie_changes: storage_diff::StorageDiff::empty(),
                 offchain_storage_changes: storage_diff::StorageDiff::empty(),
                 max_log_level: config.max_log_level,
             });
@@ -369,8 +369,8 @@ pub fn validate_transaction(
                     config.source,
                     &header::hash_from_scale_encoded_header(config.scale_encoded_header),
                 ),
-                top_trie_root_calculation_cache: None,
-                storage_top_trie_changes: storage_diff::StorageDiff::empty(),
+                main_trie_root_calculation_cache: None,
+                storage_main_trie_changes: storage_diff::StorageDiff::empty(),
                 offchain_storage_changes: storage_diff::StorageDiff::empty(),
                 max_log_level: config.max_log_level,
             });
@@ -459,10 +459,10 @@ impl Query {
                             iter::once(info.scale_encoded_transaction),
                             info.transaction_source,
                         ),
-                        storage_top_trie_changes: success.storage_top_trie_changes,
+                        storage_main_trie_changes: success.storage_main_trie_changes,
                         offchain_storage_changes: success.offchain_storage_changes,
-                        top_trie_root_calculation_cache: Some(
-                            success.top_trie_root_calculation_cache,
+                        main_trie_root_calculation_cache: Some(
+                            success.main_trie_root_calculation_cache,
                         ),
                         max_log_level: 0,
                     });

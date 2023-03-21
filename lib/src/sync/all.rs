@@ -2120,10 +2120,10 @@ pub struct BlockFull {
     pub body: Vec<Vec<u8>>,
 
     /// Changes to the storage made by this block compared to its parent.
-    pub storage_top_trie_changes: storage_diff::StorageDiff,
+    pub storage_main_trie_changes: storage_diff::StorageDiff,
 
     /// State trie version indicated by the runtime. All the storage changes indicated by
-    /// [`BlockFull::storage_top_trie_changes`] should store this version alongside with them.
+    /// [`BlockFull::storage_main_trie_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
 
     /// List of changes to the off-chain storage that this block performs.
@@ -2337,7 +2337,7 @@ impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
                                 full: b.full.map(|b| BlockFull {
                                     body: b.body,
                                     offchain_storage_changes: b.offchain_storage_changes,
-                                    storage_top_trie_changes: b.storage_top_trie_changes,
+                                    storage_main_trie_changes: b.storage_main_trie_changes,
                                     state_trie_version: b.state_trie_version,
                                 }),
                             })

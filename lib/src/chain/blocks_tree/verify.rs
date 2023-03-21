@@ -598,10 +598,10 @@ impl<T> VerifyContext<T> {
                 BodyVerifyStep2::Finished {
                     parent_runtime: success.parent_runtime,
                     new_runtime: success.new_runtime,
-                    storage_top_trie_changes: success.storage_top_trie_changes,
+                    storage_main_trie_changes: success.storage_main_trie_changes,
                     state_trie_version: success.state_trie_version,
                     offchain_storage_changes: success.offchain_storage_changes,
-                    top_trie_root_calculation_cache: success.top_trie_root_calculation_cache,
+                    main_trie_root_calculation_cache: success.main_trie_root_calculation_cache,
                     insert: BodyInsert {
                         context: self,
                         is_new_best,
@@ -731,17 +731,17 @@ impl<T> BodyVerifyRuntimeRequired<T> {
     /// `parent_runtime` must be a Wasm virtual machine containing the runtime code of the parent
     /// block.
     ///
-    /// The value of `top_trie_root_calculation_cache` can be the one provided by the
+    /// The value of `main_trie_root_calculation_cache` can be the one provided by the
     /// [`BodyVerifyStep2::Finished`] variant when the parent block has been verified. `None` can
     /// be passed if this information isn't available.
     ///
-    /// While `top_trie_root_calculation_cache` is optional, providing a value will considerably
+    /// While `main_trie_root_calculation_cache` is optional, providing a value will considerably
     /// speed up the calculation.
     pub fn resume(
         self,
         parent_runtime: host::HostVmPrototype,
         block_body: impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone,
-        top_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
+        main_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
     ) -> BodyVerifyStep2<T> {
         let parent_block_header = if let Some(parent_tree_index) = self.context.parent_tree_index {
             &self
@@ -808,7 +808,7 @@ impl<T> BodyVerifyRuntimeRequired<T> {
             block_number_bytes: self.context.chain.block_number_bytes,
             parent_block_header: parent_block_header.into(),
             block_body,
-            top_trie_root_calculation_cache,
+            main_trie_root_calculation_cache,
             max_log_level: 0,
         });
 
@@ -840,14 +840,14 @@ pub enum BodyVerifyStep2<T> {
     Finished {
         /// Value that was passed to [`BodyVerifyRuntimeRequired::resume`].
         parent_runtime: host::HostVmPrototype,
-        /// Contains `Some` if and only if [`BodyVerifyStep2::Finished::storage_top_trie_changes`]
+        /// Contains `Some` if and only if [`BodyVerifyStep2::Finished::storage_main_trie_changes`]
         /// contains a change in the `:code` or `:heappages` keys, indicating that the runtime has
         /// been modified. Contains the new runtime.
         new_runtime: Option<host::HostVmPrototype>,
-        /// List of changes to the storage top trie that the block performs.
-        storage_top_trie_changes: storage_diff::StorageDiff,
+        /// List of changes to the storage main trie that the block performs.
+        storage_main_trie_changes: storage_diff::StorageDiff,
         /// State trie version indicated by the runtime. All the storage changes indicated by
-        /// [`BodyVerifyStep2::Finished::storage_top_trie_changes`] should store this version
+        /// [`BodyVerifyStep2::Finished::storage_main_trie_changes`] should store this version
         /// alongside with them.
         state_trie_version: TrieEntryVersion,
         /// List of changes to the off-chain storage that this block performs.
@@ -855,7 +855,7 @@ pub enum BodyVerifyStep2<T> {
         /// Cache of calculation for the storage trie of the best block.
         /// Pass this value to [`BodyVerifyRuntimeRequired::resume`] when verifying a children of
         /// this block in order to considerably speed up the verification.
-        top_trie_root_calculation_cache: calculate_root::CalculationCache,
+        main_trie_root_calculation_cache: calculate_root::CalculationCache,
         /// Use to insert the block in the chain.
         insert: BodyInsert<T>,
     },

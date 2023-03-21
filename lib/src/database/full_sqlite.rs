@@ -315,7 +315,7 @@ impl SqliteFullDatabase {
         scale_encoded_header: &[u8],
         is_new_best: bool,
         body: impl ExactSizeIterator<Item = impl AsRef<[u8]>>,
-        storage_top_trie_changes: impl Iterator<Item = (impl AsRef<[u8]>, Option<impl AsRef<[u8]>>)>
+        storage_main_trie_changes: impl Iterator<Item = (impl AsRef<[u8]>, Option<impl AsRef<[u8]>>)>
             + Clone,
         trie_entries_version: u8,
     ) -> Result<(), InsertError> {
@@ -378,7 +378,7 @@ impl SqliteFullDatabase {
         let mut statement = connection
             .prepare("INSERT INTO non_finalized_changes(hash, key, value, trie_entry_version) VALUES (?, ?, ?, ?)")
             .unwrap();
-        for (key, value) in storage_top_trie_changes {
+        for (key, value) in storage_main_trie_changes {
             statement = statement
                 .bind(1, &block_hash[..])
                 .unwrap()
@@ -540,7 +540,7 @@ impl SqliteFullDatabase {
 
             let mut statement = connection
                 .prepare(
-                    "DELETE FROM finalized_storage_top_trie
+                    "DELETE FROM finalized_storage_main_trie
                 WHERE key IN (
                     SELECT key FROM non_finalized_changes WHERE hash = ? AND value IS NULL
                 );",
@@ -552,7 +552,7 @@ impl SqliteFullDatabase {
 
             let mut statement = connection
                 .prepare(
-                    "INSERT OR REPLACE INTO finalized_storage_top_trie(key, value, trie_entry_version)
+                    "INSERT OR REPLACE INTO finalized_storage_main_trie(key, value, trie_entry_version)
                 SELECT key, value, trie_entry_version
                 FROM non_finalized_changes 
                 WHERE non_finalized_changes.hash = ? AND non_finalized_changes.value IS NOT NULL",
@@ -678,7 +678,7 @@ impl SqliteFullDatabase {
     ///
     /// The return value must implement the `FromIterator` trait, being passed an iterator that
     /// produces tuples of keys, values, and trie entry version.
-    pub fn finalized_block_storage_top_trie<T: FromIterator<(Vec<u8>, Vec<u8>, u8)>>(
+    pub fn finalized_block_storage_main_trie<T: FromIterator<(Vec<u8>, Vec<u8>, u8)>>(
         &self,
         finalized_block_hash: &[u8; 32],
     ) -> Result<T, FinalizedAccessError> {
@@ -689,7 +689,7 @@ impl SqliteFullDatabase {
         }
 
         let mut statement = connection
-            .prepare(r#"SELECT key, value, trie_entry_version FROM finalized_storage_top_trie"#)
+            .prepare(r#"SELECT key, value, trie_entry_version FROM finalized_storage_main_trie"#)
             .map_err(InternalError)
             .map_err(CorruptedError::Internal)
             .map_err(AccessError::Corrupted)
@@ -725,7 +725,7 @@ impl SqliteFullDatabase {
     /// parameter. If the finalized block in the database doesn't match the hash passed as
     /// parameter, most likely because it has been updated in a parallel thread, a
     /// [`FinalizedAccessError::Obsolete`] error is returned.
-    pub fn finalized_block_storage_top_trie_get(
+    pub fn finalized_block_storage_main_trie_get(
         &self,
         finalized_block_hash: &[u8; 32],
         key: &[u8],
@@ -738,7 +738,7 @@ impl SqliteFullDatabase {
 
         let mut statement = connection
             .prepare(
-                r#"SELECT value, trie_entry_version FROM finalized_storage_top_trie WHERE key = ?"#,
+                r#"SELECT value, trie_entry_version FROM finalized_storage_main_trie WHERE key = ?"#,
             )
             .map_err(InternalError)
             .map_err(CorruptedError::Internal)
@@ -773,7 +773,7 @@ impl SqliteFullDatabase {
     /// parameter. If the finalized block in the database doesn't match the hash passed as
     /// parameter, most likely because it has been updated in a parallel thread, a
     /// [`FinalizedAccessError::Obsolete`] error is returned.
-    pub fn finalized_block_storage_top_trie_next_key(
+    pub fn finalized_block_storage_main_trie_next_key(
         &self,
         finalized_block_hash: &[u8; 32],
         key: &[u8],
@@ -785,7 +785,7 @@ impl SqliteFullDatabase {
         }
 
         let mut statement = connection
-            .prepare(r#"SELECT key FROM finalized_storage_top_trie WHERE key > ? ORDER BY key ASC LIMIT 1"#)
+            .prepare(r#"SELECT key FROM finalized_storage_main_trie WHERE key > ? ORDER BY key ASC LIMIT 1"#)
             .map_err(InternalError)
             .map_err(CorruptedError::Internal)
             .map_err(AccessError::Corrupted)
@@ -811,7 +811,7 @@ impl SqliteFullDatabase {
     /// parameter. If the finalized block in the database doesn't match the hash passed as
     /// parameter, most likely because it has been updated in a parallel thread, a
     /// [`FinalizedAccessError::Obsolete`] error is returned.
-    pub fn finalized_block_storage_top_trie_keys(
+    pub fn finalized_block_storage_main_trie_keys(
         &self,
         finalized_block_hash: &[u8; 32],
         prefix: &[u8],
@@ -823,7 +823,7 @@ impl SqliteFullDatabase {
         }
 
         let mut statement = connection
-            .prepare(r#"SELECT key FROM finalized_storage_top_trie WHERE key >= ?"#)
+            .prepare(r#"SELECT key FROM finalized_storage_main_trie WHERE key >= ?"#)
             .map_err(InternalError)
             .map_err(CorruptedError::Internal)
             .map_err(AccessError::Corrupted)

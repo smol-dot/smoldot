@@ -220,7 +220,7 @@ impl AuthoringStart {
             parent_hash: config.parent_hash,
             parent_number: config.parent_number,
             parent_runtime: config.parent_runtime,
-            top_trie_root_calculation_cache: config.top_trie_root_calculation_cache,
+            main_trie_root_calculation_cache: config.main_trie_root_calculation_cache,
             block_body_capacity: config.block_body_capacity,
             consensus_digest_log_item: match self.consensus {
                 WaitSlotConsensus::Aura(slot) => {
@@ -271,7 +271,7 @@ pub struct AuthoringStartConfig<'a> {
 
     /// Optional cache corresponding to the storage trie root hash calculation coming from the
     /// parent block verification.
-    pub top_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
+    pub main_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
 
     /// Capacity to reserve for the number of extrinsics. Should be higher than the approximate
     /// number of extrinsics that are going to be applied.

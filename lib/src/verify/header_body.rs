@@ -69,7 +69,7 @@ pub struct Config<'a, TBody> {
 
     /// Optional cache corresponding to the storage trie root hash calculation of the parent
     /// block.
-    pub top_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
+    pub main_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
 
     /// Maximum log level of the runtime.
     ///
@@ -114,7 +114,7 @@ pub struct Success {
     /// Runtime that was passed by [`Config`].
     pub parent_runtime: host::HostVmPrototype,
 
-    /// Contains `Some` if and only if [`Success::storage_top_trie_changes`] contains a change in
+    /// Contains `Some` if and only if [`Success::storage_main_trie_changes`] contains a change in
     /// the `:code` or `:heappages` keys, indicating that the runtime has been modified. Contains
     /// the new runtime.
     pub new_runtime: Option<host::HostVmPrototype>,
@@ -122,18 +122,18 @@ pub struct Success {
     /// Extra items in [`Success`] relevant to the consensus engine.
     pub consensus: SuccessConsensus,
 
-    /// List of changes to the storage top trie that the block performs.
-    pub storage_top_trie_changes: storage_diff::StorageDiff,
+    /// List of changes to the storage main trie that the block performs.
+    pub storage_main_trie_changes: storage_diff::StorageDiff,
 
     /// State trie version indicated by the runtime. All the storage changes indicated by
-    /// [`Success::storage_top_trie_changes`] should store this version alongside with them.
+    /// [`Success::storage_main_trie_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
 
     /// List of changes to the off-chain storage that this block performs.
     pub offchain_storage_changes: storage_diff::StorageDiff,
 
-    /// Cache used for calculating the top trie root.
-    pub top_trie_root_calculation_cache: calculate_root::CalculationCache,
+    /// Cache used for calculating the main trie root.
+    pub main_trie_root_calculation_cache: calculate_root::CalculationCache,
 
     /// Concatenation of all the log messages printed by the runtime.
     pub logs: String,
@@ -369,8 +369,8 @@ pub fn verify(
                     .map(either::Left)
                     .chain(encoded_list.map(either::Right))
             },
-            top_trie_root_calculation_cache: config.top_trie_root_calculation_cache,
-            storage_top_trie_changes: Default::default(),
+            main_trie_root_calculation_cache: config.main_trie_root_calculation_cache,
+            storage_main_trie_changes: Default::default(),
             offchain_storage_changes: Default::default(),
             max_log_level: config.max_log_level,
         });
@@ -447,10 +447,10 @@ impl VerifyInner {
                             virtual_machine: success.virtual_machine.into_prototype(),
                             function_to_call: "Core_execute_block",
                             parameter: iter::once(&self.execution_not_started.as_ref().unwrap()),
-                            top_trie_root_calculation_cache: Some(
-                                success.top_trie_root_calculation_cache,
+                            main_trie_root_calculation_cache: Some(
+                                success.main_trie_root_calculation_cache,
                             ),
-                            storage_top_trie_changes: success.storage_top_trie_changes,
+                            storage_main_trie_changes: success.storage_main_trie_changes,
                             offchain_storage_changes: success.offchain_storage_changes,
                             max_log_level: 0,
                         });
@@ -478,9 +478,9 @@ impl VerifyInner {
                     }
 
                     match (
-                        success.storage_top_trie_changes.diff_get(&b":code"[..]),
+                        success.storage_main_trie_changes.diff_get(&b":code"[..]),
                         success
-                            .storage_top_trie_changes
+                            .storage_main_trie_changes
                             .diff_get(&b":heappages"[..]),
                     ) {
                         (None, None) => {}
@@ -520,10 +520,10 @@ impl VerifyInner {
                                 heap_pages,
                                 logs: success.logs,
                                 offchain_storage_changes: success.offchain_storage_changes,
-                                storage_top_trie_changes: success.storage_top_trie_changes,
+                                storage_main_trie_changes: success.storage_main_trie_changes,
                                 state_trie_version: success.state_trie_version,
-                                top_trie_root_calculation_cache: success
-                                    .top_trie_root_calculation_cache,
+                                main_trie_root_calculation_cache: success
+                                    .main_trie_root_calculation_cache,
                             });
                         }
                     }
@@ -532,10 +532,10 @@ impl VerifyInner {
                         parent_runtime: success.virtual_machine.into_prototype(),
                         new_runtime: None,
                         consensus: self.consensus_success,
-                        storage_top_trie_changes: success.storage_top_trie_changes,
+                        storage_main_trie_changes: success.storage_main_trie_changes,
                         state_trie_version: success.state_trie_version,
                         offchain_storage_changes: success.offchain_storage_changes,
-                        top_trie_root_calculation_cache: success.top_trie_root_calculation_cache,
+                        main_trie_root_calculation_cache: success.main_trie_root_calculation_cache,
                         logs: success.logs,
                     }));
                 }
@@ -661,10 +661,10 @@ impl StorageNextKey {
 #[must_use]
 pub struct RuntimeCompilation {
     parent_runtime: host::HostVmPrototype,
-    storage_top_trie_changes: storage_diff::StorageDiff,
+    storage_main_trie_changes: storage_diff::StorageDiff,
     state_trie_version: TrieEntryVersion,
     offchain_storage_changes: storage_diff::StorageDiff,
-    top_trie_root_calculation_cache: calculate_root::CalculationCache,
+    main_trie_root_calculation_cache: calculate_root::CalculationCache,
     logs: String,
     heap_pages: vm::HeapPages,
     consensus_success: SuccessConsensus,
@@ -676,7 +676,7 @@ impl RuntimeCompilation {
         // A `RuntimeCompilation` object is built only if `:code` has been modified and to a
         // specific value.
         let code = self
-            .storage_top_trie_changes
+            .storage_main_trie_changes
             .diff_get(&b":code"[..])
             .unwrap()
             .0
@@ -701,10 +701,10 @@ impl RuntimeCompilation {
             parent_runtime: self.parent_runtime,
             new_runtime: Some(new_runtime),
             consensus: self.consensus_success,
-            storage_top_trie_changes: self.storage_top_trie_changes,
+            storage_main_trie_changes: self.storage_main_trie_changes,
             state_trie_version: self.state_trie_version,
             offchain_storage_changes: self.offchain_storage_changes,
-            top_trie_root_calculation_cache: self.top_trie_root_calculation_cache,
+            main_trie_root_calculation_cache: self.main_trie_root_calculation_cache,
             logs: self.logs,
         }))
     }

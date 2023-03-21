@@ -198,9 +198,9 @@ impl<TPlat: Platform> Background<TPlat> {
                             virtual_machine,
                             function_to_call: &function_to_call,
                             parameter: iter::once(&call_parameters.0),
-                            top_trie_root_calculation_cache: None,
+                            main_trie_root_calculation_cache: None,
                             offchain_storage_changes: Default::default(),
-                            storage_top_trie_changes: Default::default(),
+                            storage_main_trie_changes: Default::default(),
                             max_log_level: 0,
                         }) {
                             Err((error, prototype)) => {
