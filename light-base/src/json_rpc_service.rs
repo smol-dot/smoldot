@@ -122,7 +122,7 @@ pub fn service(config: Config) -> (Frontend, ServicePrototype) {
 pub struct Frontend {
     /// State machine holding all the clients, requests, and subscriptions.
     ///
-    /// Shared with the [`Background`].
+    /// Shared with the [`background::Background`].
     requests_subscriptions:
         Arc<requests_subscriptions::RequestsSubscriptions<background::SubscriptionMessage>>,
 
@@ -221,7 +221,7 @@ impl Drop for Frontend {
 pub struct ServicePrototype {
     /// State machine holding all the clients, requests, and subscriptions.
     ///
-    /// Shared with the [`Background`].
+    /// Shared with the [`background::Background`].
     requests_subscriptions:
         Arc<requests_subscriptions::RequestsSubscriptions<background::SubscriptionMessage>>,
 
