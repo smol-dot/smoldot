@@ -160,7 +160,7 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
     /// The `BTreeMap`'s keys are storage keys, and its values are new values or `None` if the
     /// value has been erased from the storage.
     /// Each entry is associated with the state version of the runtime at the time of the write.
-    best_to_finalized_storage_diff: storage_diff::StorageDiff<TrieEntryVersion>,
+    best_to_finalized_storage_diff: storage_diff::TrieDiff<TrieEntryVersion>,
 
     /// Compiled runtime code of the best block. `None` if it is the same as
     /// [`OptimisticSyncInner::finalized_runtime`].
@@ -267,14 +267,14 @@ pub struct BlockFull {
     pub body: Vec<Vec<u8>>,
 
     /// Changes to the storage made by this block compared to its parent.
-    pub storage_main_trie_changes: storage_diff::StorageDiff,
+    pub storage_main_trie_changes: storage_diff::TrieDiff,
 
     /// State trie version indicated by the runtime. All the storage changes indicated by
     /// [`BlockFull::storage_main_trie_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
 
     /// List of changes to the off-chain storage that this block performs.
-    pub offchain_storage_changes: storage_diff::StorageDiff,
+    pub offchain_storage_changes: storage_diff::TrieDiff,
 }
 
 impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
@@ -300,7 +300,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             inner: Box::new(OptimisticSyncInner {
                 finalized_chain_information: blocks_tree_config,
                 finalized_runtime: config.full.map(|f| f.finalized_runtime),
-                best_to_finalized_storage_diff: storage_diff::StorageDiff::empty(),
+                best_to_finalized_storage_diff: storage_diff::TrieDiff::empty(),
                 best_runtime: None,
                 main_trie_root_calculation_cache: None,
                 sources: HashMap::with_capacity_and_hasher(

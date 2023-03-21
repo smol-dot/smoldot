@@ -119,12 +119,12 @@ pub struct Success {
     /// Runtime that was passed by [`Config`].
     pub parent_runtime: host::HostVmPrototype,
     /// List of changes to the storage main trie that the block performs.
-    pub storage_main_trie_changes: storage_diff::StorageDiff,
+    pub storage_main_trie_changes: storage_diff::TrieDiff,
     /// State trie version indicated by the runtime. All the storage changes indicated by
     /// [`Success::storage_main_trie_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
     /// List of changes to the off-chain storage that this block performs.
-    pub offchain_storage_changes: storage_diff::StorageDiff,
+    pub offchain_storage_changes: storage_diff::TrieDiff,
     /// Cache used for calculating the main trie root of the new block.
     pub main_trie_root_calculation_cache: calculate_root::CalculationCache,
     /// Concatenation of all the log messages printed by the runtime.
@@ -481,8 +481,8 @@ enum Stage {
 pub struct InherentExtrinsics {
     shared: Shared,
     parent_runtime: host::HostVmPrototype,
-    storage_main_trie_changes: storage_diff::StorageDiff,
-    offchain_storage_changes: storage_diff::StorageDiff,
+    storage_main_trie_changes: storage_diff::TrieDiff,
+    offchain_storage_changes: storage_diff::TrieDiff,
     main_trie_root_calculation_cache: calculate_root::CalculationCache,
 }
 
@@ -545,8 +545,8 @@ impl InherentExtrinsics {
 pub struct ApplyExtrinsic {
     shared: Shared,
     parent_runtime: host::HostVmPrototype,
-    storage_main_trie_changes: storage_diff::StorageDiff,
-    offchain_storage_changes: storage_diff::StorageDiff,
+    storage_main_trie_changes: storage_diff::TrieDiff,
+    offchain_storage_changes: storage_diff::TrieDiff,
     main_trie_root_calculation_cache: calculate_root::CalculationCache,
 }
 

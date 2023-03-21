@@ -15,15 +15,15 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-//! "Diff" between a storage and the next.
+//! "Diff" between a trie and the next.
 //!
-//! Imagine two `HashMap<Vec<u8>, Vec<u8>>`s representing the storage of the chain. This data
+//! Imagine two `HashMap<Vec<u8>, Vec<u8>>`s representing the content of a trie. This data
 //! structure contains the difference from one to the other.
 //!
 //! This data structure can be used in a variety of circumstances, such as storing the storage
 //! differences between a block and its child or storing on-going changes while a runtime call is
-//! being performed. It can also be used to store an entire storage, by representing a diff where
-//! the base is an empty storage.
+//! being performed. It can also be used to store an entire trie, by representing a diff where
+//! the base is an empty trie.
 //!
 //! # About keys hashing
 //!
@@ -43,8 +43,8 @@ use core::{cmp, fmt, iter, ops};
 use hashbrown::HashMap;
 
 #[derive(Clone)]
-pub struct StorageDiff<T = ()> {
-    /// Contains the same entries as [`StorageDiff::hashmap`], except that values are booleans
+pub struct TrieDiff<T = ()> {
+    /// Contains the same entries as [`TrieDiff::hashmap`], except that values are booleans
     /// indicating whether the value updates (`true`) or deletes (`false`) the underlying
     /// storage item.
     btree: BTreeMap<Vec<u8>, bool>,
@@ -57,7 +57,7 @@ pub struct StorageDiff<T = ()> {
     hashmap: HashMap<Vec<u8>, (Option<Vec<u8>>, T), fnv::FnvBuildHasher>,
 }
 
-impl<T> StorageDiff<T> {
+impl<T> TrieDiff<T> {
     /// Builds a new empty diff.
     pub fn empty() -> Self {
         Self {
@@ -273,7 +273,7 @@ impl<T> StorageDiff<T> {
     }
 
     /// Applies the given diff on top of the current one.
-    pub fn merge(&mut self, other: &StorageDiff<T>)
+    pub fn merge(&mut self, other: &TrieDiff<T>)
     where
         T: Clone,
     {
@@ -283,7 +283,7 @@ impl<T> StorageDiff<T> {
     /// Applies the given diff on top of the current one.
     ///
     /// Each user data in the other diff is first passed through the map.
-    pub fn merge_map<U>(&mut self, other: &StorageDiff<U>, mut map: impl FnMut(&U) -> T) {
+    pub fn merge_map<U>(&mut self, other: &TrieDiff<U>, mut map: impl FnMut(&U) -> T) {
         // TODO: provide an alternative method that consumes `other` as well?
         for (key, (value, user_data)) in &other.hashmap {
             self.hashmap
@@ -293,7 +293,7 @@ impl<T> StorageDiff<T> {
     }
 }
 
-impl<T> fmt::Debug for StorageDiff<T>
+impl<T> fmt::Debug for TrieDiff<T>
 where
     T: fmt::Debug,
 {
@@ -305,11 +305,11 @@ where
 
 // We implement `PartialEq` manually, because deriving it would mean that both the hash map and
 // the tree are compared.
-impl<T, U> cmp::PartialEq<StorageDiff<U>> for StorageDiff<T>
+impl<T, U> cmp::PartialEq<TrieDiff<U>> for TrieDiff<T>
 where
     T: cmp::PartialEq<U>,
 {
-    fn eq(&self, other: &StorageDiff<U>) -> bool {
+    fn eq(&self, other: &TrieDiff<U>) -> bool {
         // As of the writing of this code, HashMap<K, T> doesn't implement
         // PartialEq<HashMap<K, U>> where T: PartialEq<U>, so we have to implement it manually. The
         // way this is implemented matches what the underlying implementation of HashMap does.
@@ -326,15 +326,15 @@ where
     }
 }
 
-impl<T> cmp::Eq for StorageDiff<T> where T: cmp::Eq {}
+impl<T> cmp::Eq for TrieDiff<T> where T: cmp::Eq {}
 
-impl<T> Default for StorageDiff<T> {
+impl<T> Default for TrieDiff<T> {
     fn default() -> Self {
-        StorageDiff::empty()
+        TrieDiff::empty()
     }
 }
 
-impl<T> FromIterator<(Vec<u8>, Option<Vec<u8>>, T)> for StorageDiff<T> {
+impl<T> FromIterator<(Vec<u8>, Option<Vec<u8>>, T)> for TrieDiff<T> {
     fn from_iter<I>(iter: I) -> Self
     where
         I: IntoIterator<Item = (Vec<u8>, Option<Vec<u8>>, T)>,

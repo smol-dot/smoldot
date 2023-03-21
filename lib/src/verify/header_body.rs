@@ -123,14 +123,14 @@ pub struct Success {
     pub consensus: SuccessConsensus,
 
     /// List of changes to the storage main trie that the block performs.
-    pub storage_main_trie_changes: storage_diff::StorageDiff,
+    pub storage_main_trie_changes: storage_diff::TrieDiff,
 
     /// State trie version indicated by the runtime. All the storage changes indicated by
     /// [`Success::storage_main_trie_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
 
     /// List of changes to the off-chain storage that this block performs.
-    pub offchain_storage_changes: storage_diff::StorageDiff,
+    pub offchain_storage_changes: storage_diff::TrieDiff,
 
     /// Cache used for calculating the main trie root.
     pub main_trie_root_calculation_cache: calculate_root::CalculationCache,
@@ -661,9 +661,9 @@ impl StorageNextKey {
 #[must_use]
 pub struct RuntimeCompilation {
     parent_runtime: host::HostVmPrototype,
-    storage_main_trie_changes: storage_diff::StorageDiff,
+    storage_main_trie_changes: storage_diff::TrieDiff,
     state_trie_version: TrieEntryVersion,
-    offchain_storage_changes: storage_diff::StorageDiff,
+    offchain_storage_changes: storage_diff::TrieDiff,
     main_trie_root_calculation_cache: calculate_root::CalculationCache,
     logs: String,
     heap_pages: vm::HeapPages,
