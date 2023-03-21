@@ -241,6 +241,7 @@ pub struct Config<TModule> {
 /// > **Note**: This struct implements `Clone`. Cloning a [`HostVmPrototype`] allocates memory
 /// >           necessary for the clone to run.
 // TODO: this behaviour ^ interacts with zero-ing memory when resetting from a vm to a prototype; figure out and clarify
+#[derive(Clone)]
 pub struct HostVmPrototype {
     /// Original module used to instantiate the prototype.
     ///
@@ -523,21 +524,6 @@ impl HostVmPrototype {
                 allocator,
             },
         })
-    }
-}
-
-impl Clone for HostVmPrototype {
-    fn clone(&self) -> Self {
-        // The `from_module` function returns an error if the format of the module is invalid.
-        // Since we have successfully called `from_module` with that same `module` earlier, it
-        // is assumed that errors cannot happen.
-        Self::from_module(
-            self.module.clone(),
-            self.heap_pages,
-            self.allow_unresolved_imports,
-            self.runtime_version.clone(),
-        )
-        .unwrap()
     }
 }
 
@@ -3472,6 +3458,7 @@ impl fmt::Debug for EndStorageTransaction {
     }
 }
 
+#[derive(Clone)]
 enum FunctionImport {
     Resolved(HostFunction),
     Unresolved { module: String, name: String },

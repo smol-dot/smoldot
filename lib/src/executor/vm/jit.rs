@@ -356,6 +356,20 @@ impl JitPrototype {
     }
 }
 
+impl Clone for JitPrototype {
+    fn clone(&self) -> Self {
+        // `from_base_components` is deterministic: either it errors all the time or it never
+        // errors. Since we've called it before and it didn't error, we know that it will also
+        // not error.
+        // The only exception is `NewErr::CouldntAllocateMemory`, but lack of memory is always an
+        // acceptable reason to panic.
+        JitPrototype::from_base_components(BaseComponents {
+            module: self.base_components.module.clone(),
+            resolved_imports: self.base_components.resolved_imports.clone(),
+        }).unwrap()
+    }
+}
+
 impl fmt::Debug for JitPrototype {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("JitPrototype").finish()

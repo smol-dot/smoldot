@@ -101,10 +101,14 @@ impl Module {
     }
 }
 
+/// > **Note**: This struct implements `Clone`. Cloning a [`VirtualMachinePrototype`] allocates
+/// >           memory necessary for the clone to run.
+#[derive(Clone)]
 pub struct VirtualMachinePrototype {
     inner: VirtualMachinePrototypeInner,
 }
 
+#[derive(Clone)]
 enum VirtualMachinePrototypeInner {
     #[cfg(all(target_arch = "x86_64", feature = "std"))]
     Jit(jit::JitPrototype),
