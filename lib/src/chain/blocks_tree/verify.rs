@@ -845,13 +845,13 @@ pub enum BodyVerifyStep2<T> {
         /// been modified. Contains the new runtime.
         new_runtime: Option<host::HostVmPrototype>,
         /// List of changes to the storage main trie that the block performs.
-        storage_main_trie_changes: storage_diff::StorageDiff,
+        storage_main_trie_changes: storage_diff::TrieDiff,
         /// State trie version indicated by the runtime. All the storage changes indicated by
         /// [`BodyVerifyStep2::Finished::storage_main_trie_changes`] should store this version
         /// alongside with them.
         state_trie_version: TrieEntryVersion,
         /// List of changes to the off-chain storage that this block performs.
-        offchain_storage_changes: storage_diff::StorageDiff,
+        offchain_storage_changes: storage_diff::TrieDiff,
         /// Cache of calculation for the storage trie of the best block.
         /// Pass this value to [`BodyVerifyRuntimeRequired::resume`] when verifying a children of
         /// this block in order to considerably speed up the verification.

@@ -67,11 +67,11 @@ pub struct Config<'a, TParams> {
 
     /// Initial state of [`Success::storage_main_trie_changes`]. The changes made during this
     /// execution will be pushed over the value in this field.
-    pub storage_main_trie_changes: storage_diff::StorageDiff,
+    pub storage_main_trie_changes: storage_diff::TrieDiff,
 
     /// Initial state of [`Success::offchain_storage_changes`]. The changes made during this
     /// execution will be pushed over the value in this field.
-    pub offchain_storage_changes: storage_diff::StorageDiff,
+    pub offchain_storage_changes: storage_diff::TrieDiff,
 
     /// Maximum log level of the runtime.
     ///
@@ -119,12 +119,12 @@ pub struct Success {
     /// initialization.
     pub virtual_machine: SuccessVirtualMachine,
     /// List of changes to the storage main trie that the block performs.
-    pub storage_main_trie_changes: storage_diff::StorageDiff,
+    pub storage_main_trie_changes: storage_diff::TrieDiff,
     /// State trie version indicated by the runtime. All the storage changes indicated by
     /// [`Success::storage_main_trie_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
     /// List of changes to the off-chain storage that this block performs.
-    pub offchain_storage_changes: storage_diff::StorageDiff,
+    pub offchain_storage_changes: storage_diff::TrieDiff,
     /// Cache used for calculating the main trie root.
     pub main_trie_root_calculation_cache: calculate_root::CalculationCache,
     /// Concatenation of all the log messages printed by the runtime.
@@ -613,7 +613,7 @@ struct Inner {
     vm: host::HostVm,
 
     /// Pending changes to the top storage trie that this execution performs.
-    main_trie_changes: storage_diff::StorageDiff,
+    main_trie_changes: storage_diff::TrieDiff,
 
     /// Contains pending storage reverts if and only if we're within a storage transaction.
     /// When changes are applied to [`Inner::main_trie_changes`], the reverse operation is
@@ -629,7 +629,7 @@ struct Inner {
     state_trie_version: TrieEntryVersion,
 
     /// Pending changes to the off-chain storage that this execution performs.
-    offchain_storage_changes: storage_diff::StorageDiff,
+    offchain_storage_changes: storage_diff::TrieDiff,
 
     /// Cache passed by the user. Always `Some` except when we are currently calculating the trie
     /// state root.
