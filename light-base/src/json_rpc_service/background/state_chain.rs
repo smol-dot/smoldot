@@ -1462,85 +1462,9 @@ impl<TPlat: Platform> Background<TPlat> {
                     ),
                 )
                 .await;
-        } else {
-            self.subscribe_storage(request_id, list).await;
+            return;
         }
-    }
 
-    /// Handles a call to [`methods::MethodCall::state_unsubscribeRuntimeVersion`].
-    pub(super) async fn state_unsubscribe_runtime_version(
-        self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
-        subscription: &str,
-    ) {
-        // Stopping the subscription is done by sending a message to it.
-        // The task dedicated to this subscription will receive the message, send a response to
-        // the JSON-RPC client, then shut down.
-        let stop_message_received = self
-            .requests_subscriptions
-            .subscription_send(
-                request_id.1,
-                subscription,
-                SubscriptionMessage::StopIfRuntimeSpec {
-                    stop_request_id: (request_id.0.to_owned(), request_id.1.clone()),
-                },
-            )
-            .await;
-
-        // Send back a response manually if the task doesn't exist, or has discarded the message,
-        // which could happen for example because there was already a stop message earlier in its
-        // queue or because it was the wrong type of subscription.
-        if stop_message_received.is_err() {
-            self.requests_subscriptions
-                .respond(
-                    request_id.1,
-                    methods::Response::state_unsubscribeRuntimeVersion(false)
-                        .to_json_response(request_id.0),
-                )
-                .await;
-        }
-    }
-
-    /// Handles a call to [`methods::MethodCall::state_unsubscribeStorage`].
-    pub(super) async fn state_unsubscribe_storage(
-        self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
-        subscription: &str,
-    ) {
-        // Stopping the subscription is done by sending a message to it.
-        // The task dedicated to this subscription will receive the message, send a response to
-        // the JSON-RPC client, then shut down.
-        let stop_message_received = self
-            .requests_subscriptions
-            .subscription_send(
-                request_id.1,
-                subscription,
-                SubscriptionMessage::StopIfStorage {
-                    stop_request_id: (request_id.0.to_owned(), request_id.1.clone()),
-                },
-            )
-            .await;
-
-        // Send back a response manually if the task doesn't exist, or has discarded the message,
-        // which could happen for example because there was already a stop message earlier in its
-        // queue or because it was the wrong type of subscription.
-        if stop_message_received.is_err() {
-            self.requests_subscriptions
-                .respond(
-                    request_id.1,
-                    methods::Response::state_unsubscribeStorage(false)
-                        .to_json_response(request_id.0),
-                )
-                .await;
-        }
-    }
-
-    /// Handles a call to [`methods::MethodCall::state_subscribeStorage`].
-    async fn subscribe_storage(
-        self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
-        list: Vec<methods::HexString>,
-    ) {
         let (subscription_id, mut messages_rx, subscription_start) = match self
             .requests_subscriptions
             .start_subscription(request_id.1, 1)
@@ -1726,5 +1650,73 @@ impl<TPlat: Platform> Background<TPlat> {
                 }
             }
         });
+    }
+
+    /// Handles a call to [`methods::MethodCall::state_unsubscribeRuntimeVersion`].
+    pub(super) async fn state_unsubscribe_runtime_version(
+        self: &Arc<Self>,
+        request_id: (&str, &requests_subscriptions::RequestId),
+        subscription: &str,
+    ) {
+        // Stopping the subscription is done by sending a message to it.
+        // The task dedicated to this subscription will receive the message, send a response to
+        // the JSON-RPC client, then shut down.
+        let stop_message_received = self
+            .requests_subscriptions
+            .subscription_send(
+                request_id.1,
+                subscription,
+                SubscriptionMessage::StopIfRuntimeSpec {
+                    stop_request_id: (request_id.0.to_owned(), request_id.1.clone()),
+                },
+            )
+            .await;
+
+        // Send back a response manually if the task doesn't exist, or has discarded the message,
+        // which could happen for example because there was already a stop message earlier in its
+        // queue or because it was the wrong type of subscription.
+        if stop_message_received.is_err() {
+            self.requests_subscriptions
+                .respond(
+                    request_id.1,
+                    methods::Response::state_unsubscribeRuntimeVersion(false)
+                        .to_json_response(request_id.0),
+                )
+                .await;
+        }
+    }
+
+    /// Handles a call to [`methods::MethodCall::state_unsubscribeStorage`].
+    pub(super) async fn state_unsubscribe_storage(
+        self: &Arc<Self>,
+        request_id: (&str, &requests_subscriptions::RequestId),
+        subscription: &str,
+    ) {
+        // Stopping the subscription is done by sending a message to it.
+        // The task dedicated to this subscription will receive the message, send a response to
+        // the JSON-RPC client, then shut down.
+        let stop_message_received = self
+            .requests_subscriptions
+            .subscription_send(
+                request_id.1,
+                subscription,
+                SubscriptionMessage::StopIfStorage {
+                    stop_request_id: (request_id.0.to_owned(), request_id.1.clone()),
+                },
+            )
+            .await;
+
+        // Send back a response manually if the task doesn't exist, or has discarded the message,
+        // which could happen for example because there was already a stop message earlier in its
+        // queue or because it was the wrong type of subscription.
+        if stop_message_received.is_err() {
+            self.requests_subscriptions
+                .respond(
+                    request_id.1,
+                    methods::Response::state_unsubscribeStorage(false)
+                        .to_json_response(request_id.0),
+                )
+                .await;
+        }
     }
 }
