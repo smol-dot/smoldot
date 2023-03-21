@@ -63,44 +63,6 @@ use alloc::{string::String, vec::Vec};
 use core::{fmt, iter};
 use smallvec::SmallVec;
 
-/// Compiled Wasm code.
-///
-/// > **Note**: This struct implements `Clone`. The internals are reference-counted, meaning that
-/// >           cloning is cheap.
-#[derive(Clone)]
-pub struct Module {
-    inner: ModuleInner,
-}
-
-#[derive(Clone)]
-enum ModuleInner {
-    #[cfg(all(target_arch = "x86_64", feature = "std"))]
-    Jit(jit::Module),
-    Interpreter(interpreter::Module),
-}
-
-impl Module {
-    /// Compiles the given Wasm code.
-    pub fn new(module: impl AsRef<[u8]>, exec_hint: ExecHint) -> Result<Self, ModuleError> {
-        Ok(Module {
-            inner: match exec_hint {
-                #[cfg(all(target_arch = "x86_64", feature = "std"))]
-                ExecHint::CompileAheadOfTime => ModuleInner::Jit(jit::Module::new(module)?),
-                #[cfg(not(all(target_arch = "x86_64", feature = "std")))]
-                ExecHint::CompileAheadOfTime => {
-                    ModuleInner::Interpreter(interpreter::Module::new(module)?)
-                }
-                ExecHint::Oneshot | ExecHint::Untrusted | ExecHint::ForceWasmi => {
-                    ModuleInner::Interpreter(interpreter::Module::new(module)?)
-                }
-
-                #[cfg(all(target_arch = "x86_64", feature = "std"))]
-                ExecHint::ForceWasmtime => ModuleInner::Jit(jit::Module::new(module)?),
-            },
-        })
-    }
-}
-
 /// > **Note**: This struct implements `Clone`. Cloning a [`VirtualMachinePrototype`] allocates
 /// >           memory necessary for the clone to run.
 #[derive(Clone)]
@@ -126,18 +88,30 @@ impl VirtualMachinePrototype {
     ///
     /// See [the module-level documentation](..) for an explanation of the parameters.
     pub fn new(
-        module: &Module,
+        module_bytes: impl AsRef<[u8]>,
+        exec_hint: ExecHint,
         symbols: impl FnMut(&str, &str, &Signature) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
         Ok(VirtualMachinePrototype {
-            inner: match &module.inner {
-                ModuleInner::Interpreter(module) => VirtualMachinePrototypeInner::Interpreter(
-                    interpreter::InterpreterPrototype::new(module, symbols)?,
-                ),
+            inner: match exec_hint {
                 #[cfg(all(target_arch = "x86_64", feature = "std"))]
-                ModuleInner::Jit(module) => {
-                    VirtualMachinePrototypeInner::Jit(jit::JitPrototype::new(module, symbols)?)
+                ExecHint::CompileAheadOfTime => VirtualMachinePrototypeInner::Jit(
+                    jit::JitPrototype::new(module_bytes, symbols)?,
+                ),
+                #[cfg(not(all(target_arch = "x86_64", feature = "std")))]
+                ExecHint::CompileAheadOfTime => VirtualMachinePrototypeInner::Interpreter(
+                    interpreter::InterpreterPrototype::new(module_bytes, symbols)?,
+                ),
+                ExecHint::Oneshot | ExecHint::Untrusted | ExecHint::ForceWasmi => {
+                    VirtualMachinePrototypeInner::Interpreter(
+                        interpreter::InterpreterPrototype::new(module_bytes, symbols)?,
+                    )
                 }
+
+                #[cfg(all(target_arch = "x86_64", feature = "std"))]
+                ExecHint::ForceWasmtime => VirtualMachinePrototypeInner::Jit(
+                    jit::JitPrototype::new(module_bytes, symbols)?,
+                ),
             },
         })
     }
@@ -795,6 +769,11 @@ pub struct Trap(String);
 /// Error that can happen when initializing a [`VirtualMachinePrototype`].
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum NewErr {
+    /// Error while compiling the WebAssembly code.
+    ///
+    /// Contains an opaque error message.
+    #[display(fmt = "{_0}")]
+    InvalidWasm(String),
     /// Failed to resolve a function imported by the module.
     #[display(fmt = "Unresolved function `{module_name}`:`{function}`")]
     UnresolvedFunctionImport {
@@ -849,11 +828,6 @@ pub enum StartErr {
     #[display(fmt = "The types of the provided parameters don't match the signature.")]
     InvalidParameters,
 }
-
-/// Opaque error indicating an error while parsing or compiling the WebAssembly code.
-#[derive(Debug, derive_more::Display, Clone)]
-#[display(fmt = "{_0}")]
-pub struct ModuleError(String);
 
 /// Error while reading memory.
 #[derive(Debug, derive_more::Display)]

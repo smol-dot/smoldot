@@ -279,7 +279,6 @@ impl HostVmPrototype {
         let runtime_version = runtime_version::find_embedded_runtime_version(&module)
             .ok()
             .flatten(); // TODO: return error instead of using `ok()`? unclear
-        let module = vm::Module::new(module, config.exec_hint).map_err(NewErr::InvalidWasm)?;
 
         // Initialize the virtual machine.
         // Each symbol requested by the Wasm runtime will be put in `registered_functions`. Later,
@@ -288,7 +287,8 @@ impl HostVmPrototype {
         let (mut vm_proto, registered_functions) = {
             let mut registered_functions = Vec::new();
             let vm_proto = vm::VirtualMachinePrototype::new(
-                &module,
+                module,
+                config.exec_hint,
                 // This closure is called back for each function that the runtime imports.
                 |mod_name, f_name, signature| {
                     if mod_name != "env" {
@@ -3637,9 +3637,6 @@ pub enum NewErr {
     /// Error in the format of the runtime code.
     #[display(fmt = "{_0}")]
     BadFormat(ModuleFormatError),
-    /// Error while compiling the WebAssembly code.
-    #[display(fmt = "{_0}")]
-    InvalidWasm(vm::ModuleError),
     /// Error while initializing the virtual machine.
     #[display(fmt = "{_0}")]
     VirtualMachine(vm::NewErr),
