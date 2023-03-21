@@ -743,8 +743,10 @@ impl Inner {
                         .unwrap()
                         .storage_value_update(key.as_ref(), true);
 
-                    let current_value =
-                        self.main_trie_changes.diff_get(key.as_ref()).map(|(v, _)| v);
+                    let current_value = self
+                        .main_trie_changes
+                        .diff_get(key.as_ref())
+                        .map(|(v, _)| v);
                     if let Some(current_value) = current_value {
                         let mut current_value = current_value.unwrap_or_default().to_vec();
                         append_to_storage_value(&mut current_value, req.value().as_ref());
