@@ -18,8 +18,8 @@
 //! Implements the API documented [in the parent module](..).
 
 use super::{
-    ExecOutcome, GlobalValueErr, HeapPages, ModuleError, NewErr, OutOfBoundsError, RunErr,
-    Signature, StartErr, Trap, ValueType, WasmValue,
+    ExecOutcome, GlobalValueErr, HeapPages, NewErr, OutOfBoundsError, RunErr, Signature, StartErr,
+    Trap, ValueType, WasmValue,
 };
 
 use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
@@ -33,34 +33,6 @@ use core::{
 use std::sync::Mutex;
 
 use futures::{task, FutureExt as _};
-
-/// See [`super::Module`].
-#[derive(Clone)]
-pub struct Module {
-    inner: wasmtime::Module,
-}
-
-impl Module {
-    /// See [`super::Module::new`].
-    pub fn new(module_bytes: impl AsRef<[u8]>) -> Result<Self, ModuleError> {
-        let mut config = wasmtime::Config::new();
-        config.cranelift_nan_canonicalization(true);
-        config.cranelift_opt_level(wasmtime::OptLevel::Speed);
-        config.async_support(true);
-        // The default value of `wasm_backtrace_details` is `Environment`, which reads the
-        // `WASMTIME_BACKTRACE_DETAILS` environment variable to determine whether or not to keep
-        // debug info. However we don't want any of the behaviour of our code to rely on any
-        // environment variables whatsoever. Whether to use `Enable` or `Disable` below isn't
-        // very important, so long as it is not `Environment`.
-        config.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Enable);
-        let engine = wasmtime::Engine::new(&config).map_err(|err| ModuleError(err.to_string()))?;
-
-        let inner = wasmtime::Module::from_binary(&engine, module_bytes.as_ref())
-            .map_err(|err| ModuleError(err.to_string()))?;
-
-        Ok(Module { inner })
-    }
-}
 
 /// See [`super::VirtualMachinePrototype`].
 pub struct JitPrototype {
@@ -93,13 +65,29 @@ struct BaseComponents {
 impl JitPrototype {
     /// See [`super::VirtualMachinePrototype::new`].
     pub fn new(
-        module: &Module,
+        module_bytes: impl AsRef<[u8]>,
         mut symbols: impl FnMut(&str, &str, &Signature) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
+        let mut config = wasmtime::Config::new();
+        config.cranelift_nan_canonicalization(true);
+        config.cranelift_opt_level(wasmtime::OptLevel::Speed);
+        config.async_support(true);
+        // The default value of `wasm_backtrace_details` is `Environment`, which reads the
+        // `WASMTIME_BACKTRACE_DETAILS` environment variable to determine whether or not to keep
+        // debug info. However we don't want any of the behaviour of our code to rely on any
+        // environment variables whatsoever. Whether to use `Enable` or `Disable` below isn't
+        // very important, so long as it is not `Environment`.
+        config.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Enable);
+        let engine =
+            wasmtime::Engine::new(&config).map_err(|err| NewErr::InvalidWasm(err.to_string()))?;
+
+        let module = wasmtime::Module::from_binary(&engine, module_bytes.as_ref())
+            .map_err(|err| NewErr::InvalidWasm(err.to_string()))?;
+
         // Building the list of imports that the Wasm VM is able to use.
         let resolved_imports = {
-            let mut imports = Vec::with_capacity(module.inner.imports().len());
-            for import in module.inner.imports() {
+            let mut imports = Vec::with_capacity(module.imports().len());
+            for import in module.imports() {
                 match import.ty() {
                     wasmtime::ExternType::Func(func_type) => {
                         // Note that if `Signature::try_from` fails, a `UnresolvedFunctionImport` is
@@ -134,7 +122,7 @@ impl JitPrototype {
         };
 
         Self::from_base_components(BaseComponents {
-            module: module.inner.clone(),
+            module,
             resolved_imports,
         })
     }
@@ -353,6 +341,21 @@ impl JitPrototype {
     /// See [`super::VirtualMachinePrototype::prepare`].
     pub fn prepare(self) -> Prepare {
         Prepare { inner: self }
+    }
+}
+
+impl Clone for JitPrototype {
+    fn clone(&self) -> Self {
+        // `from_base_components` is deterministic: either it errors all the time or it never
+        // errors. Since we've called it before and it didn't error, we know that it will also
+        // not error.
+        // The only exception is `NewErr::CouldntAllocateMemory`, but lack of memory is always an
+        // acceptable reason to panic.
+        JitPrototype::from_base_components(BaseComponents {
+            module: self.base_components.module.clone(),
+            resolved_imports: self.base_components.resolved_imports.clone(),
+        })
+        .unwrap()
     }
 }
 

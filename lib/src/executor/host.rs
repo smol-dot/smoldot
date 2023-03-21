@@ -241,12 +241,8 @@ pub struct Config<TModule> {
 /// > **Note**: This struct implements `Clone`. Cloning a [`HostVmPrototype`] allocates memory
 /// >           necessary for the clone to run.
 // TODO: this behaviour ^ interacts with zero-ing memory when resetting from a vm to a prototype; figure out and clarify
+#[derive(Clone)]
 pub struct HostVmPrototype {
-    /// Original module used to instantiate the prototype.
-    ///
-    /// > **Note**: Cloning this object is cheap.
-    module: vm::Module,
-
     /// Runtime version of this runtime.
     ///
     /// Always `Some`, except at initialization.
@@ -269,9 +265,6 @@ pub struct HostVmPrototype {
     /// Value of `heap_pages` passed to [`HostVmPrototype::new`].
     heap_pages: HeapPages,
 
-    /// Values passed to [`HostVmPrototype::new`].
-    allow_unresolved_imports: bool,
-
     /// Total number of pages of Wasm memory. This is equal to `heap_base / 64k` (rounded up) plus
     /// `heap_pages`.
     memory_total_pages: HeapPages,
@@ -286,21 +279,7 @@ impl HostVmPrototype {
         let runtime_version = runtime_version::find_embedded_runtime_version(&module)
             .ok()
             .flatten(); // TODO: return error instead of using `ok()`? unclear
-        let module = vm::Module::new(module, config.exec_hint).map_err(NewErr::InvalidWasm)?;
-        Self::from_module(
-            module,
-            config.heap_pages,
-            config.allow_unresolved_imports,
-            runtime_version,
-        )
-    }
 
-    fn from_module(
-        module: vm::Module,
-        heap_pages: HeapPages,
-        allow_unresolved_imports: bool,
-        runtime_version: Option<CoreVersion>,
-    ) -> Result<Self, NewErr> {
         // Initialize the virtual machine.
         // Each symbol requested by the Wasm runtime will be put in `registered_functions`. Later,
         // when a function is invoked, the Wasm virtual machine will pass indices within that
@@ -308,7 +287,8 @@ impl HostVmPrototype {
         let (mut vm_proto, registered_functions) = {
             let mut registered_functions = Vec::new();
             let vm_proto = vm::VirtualMachinePrototype::new(
-                &module,
+                module,
+                config.exec_hint,
                 // This closure is called back for each function that the runtime imports.
                 |mod_name, f_name, signature| {
                     if mod_name != "env" {
@@ -318,7 +298,7 @@ impl HostVmPrototype {
                     let id = registered_functions.len();
                     registered_functions.push(match HostFunction::by_name(f_name) {
                         Some(f) if f.signature() == *signature => FunctionImport::Resolved(f),
-                        Some(_) | None if !allow_unresolved_imports => {
+                        Some(_) | None if !config.allow_unresolved_imports => {
                             // TODO: return a better error if there is a signature mismatch
                             return Err(());
                         }
@@ -341,9 +321,9 @@ impl HostVmPrototype {
             .map_err(|_| NewErr::HeapBaseNotFound)?;
 
         let memory_total_pages = if heap_base == 0 {
-            heap_pages
+            config.heap_pages
         } else {
-            HeapPages::new((heap_base - 1) / (64 * 1024)) + heap_pages + HeapPages::new(1)
+            HeapPages::new((heap_base - 1) / (64 * 1024)) + config.heap_pages + HeapPages::new(1)
         };
 
         if vm_proto
@@ -354,13 +334,11 @@ impl HostVmPrototype {
         }
 
         let mut host_vm_prototype = HostVmPrototype {
-            module,
             runtime_version,
             vm_proto,
             heap_base,
             registered_functions,
-            heap_pages,
-            allow_unresolved_imports,
+            heap_pages: config.heap_pages,
             memory_total_pages,
         };
 
@@ -511,33 +489,16 @@ impl HostVmPrototype {
         Ok(ReadyToRun {
             resume_value: None,
             inner: Inner {
-                module: self.module,
                 runtime_version: self.runtime_version,
                 vm,
                 heap_base: self.heap_base,
                 heap_pages: self.heap_pages,
-                allow_unresolved_imports: self.allow_unresolved_imports,
                 memory_total_pages: self.memory_total_pages,
                 registered_functions: self.registered_functions,
                 storage_transaction_depth: 0,
                 allocator,
             },
         })
-    }
-}
-
-impl Clone for HostVmPrototype {
-    fn clone(&self) -> Self {
-        // The `from_module` function returns an error if the format of the module is invalid.
-        // Since we have successfully called `from_module` with that same `module` earlier, it
-        // is assumed that errors cannot happen.
-        Self::from_module(
-            self.module.clone(),
-            self.heap_pages,
-            self.allow_unresolved_imports,
-            self.runtime_version.clone(),
-        )
-        .unwrap()
     }
 }
 
@@ -751,7 +712,6 @@ impl ReadyToRun {
         let host_fn = match self.inner.registered_functions.get_mut(id) {
             Some(FunctionImport::Resolved(f)) => *f,
             Some(FunctionImport::Unresolved { name, module }) => {
-                debug_assert!(self.inner.allow_unresolved_imports);
                 return HostVm::Error {
                     error: Error::UnresolvedFunctionCalled {
                         function: name.clone(),
@@ -3472,6 +3432,7 @@ impl fmt::Debug for EndStorageTransaction {
     }
 }
 
+#[derive(Clone)]
 enum FunctionImport {
     Resolved(HostFunction),
     Unresolved { module: String, name: String },
@@ -3479,9 +3440,6 @@ enum FunctionImport {
 
 /// Running virtual machine. Shared between all the variants in [`HostVm`].
 struct Inner {
-    /// See [`HostVmPrototype::module`].
-    module: vm::Module,
-
     /// See [`HostVmPrototype::runtime_version`].
     runtime_version: Option<CoreVersion>,
 
@@ -3497,9 +3455,6 @@ struct Inner {
 
     /// See [`HostVmPrototype::memory_total_pages`].
     memory_total_pages: HeapPages,
-
-    /// Value passed to [`HostVmPrototype::new`].
-    allow_unresolved_imports: bool,
 
     /// The depth of storage transaction started with `ext_storage_start_transaction_version_1`.
     storage_transaction_depth: u32,
@@ -3666,13 +3621,11 @@ impl Inner {
     /// Turns the virtual machine back into a prototype.
     fn into_prototype(self) -> HostVmPrototype {
         HostVmPrototype {
-            module: self.module,
             runtime_version: self.runtime_version,
             vm_proto: self.vm.into_prototype(),
             heap_base: self.heap_base,
             registered_functions: self.registered_functions,
             heap_pages: self.heap_pages,
-            allow_unresolved_imports: self.allow_unresolved_imports,
             memory_total_pages: self.memory_total_pages,
         }
     }
@@ -3684,9 +3637,6 @@ pub enum NewErr {
     /// Error in the format of the runtime code.
     #[display(fmt = "{_0}")]
     BadFormat(ModuleFormatError),
-    /// Error while compiling the WebAssembly code.
-    #[display(fmt = "{_0}")]
-    InvalidWasm(vm::ModuleError),
     /// Error while initializing the virtual machine.
     #[display(fmt = "{_0}")]
     VirtualMachine(vm::NewErr),

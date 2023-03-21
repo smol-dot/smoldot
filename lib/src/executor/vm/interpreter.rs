@@ -18,34 +18,12 @@
 //! Implements the API documented [in the parent module](..).
 
 use super::{
-    ExecOutcome, GlobalValueErr, HeapPages, ModuleError, NewErr, OutOfBoundsError, RunErr,
-    Signature, StartErr, Trap, ValueType, WasmValue,
+    ExecOutcome, GlobalValueErr, HeapPages, NewErr, OutOfBoundsError, RunErr, Signature, StartErr,
+    Trap, ValueType, WasmValue,
 };
 
 use alloc::{borrow::ToOwned as _, string::ToString as _, sync::Arc, vec::Vec};
 use core::fmt;
-
-/// See [`super::Module`].
-#[derive(Clone)]
-pub struct Module {
-    // Note: an `Arc` is used in order to expose the same API as wasmtime does. If in the future
-    // wasmtime happened to no longer use internal reference counting, this `Arc` should be
-    // removed.
-    inner: Arc<wasmi::Module>,
-}
-
-impl Module {
-    /// See [`super::Module::new`].
-    pub fn new(module_bytes: impl AsRef<[u8]>) -> Result<Self, ModuleError> {
-        let engine = wasmi::Engine::default(); // TODO: investigate config
-        let module = wasmi::Module::new(&engine, module_bytes.as_ref())
-            .map_err(|err| ModuleError(err.to_string()))?;
-
-        Ok(Module {
-            inner: Arc::new(module),
-        })
-    }
-}
 
 /// See [`super::VirtualMachinePrototype`].
 pub struct InterpreterPrototype {
@@ -73,11 +51,15 @@ struct BaseComponents {
 impl InterpreterPrototype {
     /// See [`super::VirtualMachinePrototype::new`].
     pub fn new(
-        module: &Module,
+        module_bytes: impl AsRef<[u8]>,
         mut symbols: impl FnMut(&str, &str, &Signature) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
-        let mut resolved_imports = Vec::with_capacity(module.inner.imports().len());
-        for import in module.inner.imports() {
+        let engine = wasmi::Engine::default(); // TODO: investigate config
+        let module = wasmi::Module::new(&engine, module_bytes.as_ref())
+            .map_err(|err| NewErr::InvalidWasm(err.to_string()))?;
+
+        let mut resolved_imports = Vec::with_capacity(module.imports().len());
+        for import in module.imports() {
             match import.ty() {
                 wasmi::ExternType::Func(func_type) => {
                     // Note that if `Signature::try_from` fails, a `UnresolvedFunctionImport` is
@@ -108,7 +90,7 @@ impl InterpreterPrototype {
         }
 
         Self::from_base_components(BaseComponents {
-            module: module.inner.clone(),
+            module: Arc::new(module),
             resolved_imports,
         })
     }
@@ -230,6 +212,21 @@ impl InterpreterPrototype {
     /// See [`super::VirtualMachinePrototype::prepare`].
     pub fn prepare(self) -> Prepare {
         Prepare { inner: self }
+    }
+}
+
+impl Clone for InterpreterPrototype {
+    fn clone(&self) -> Self {
+        // `from_base_components` is deterministic: either it errors all the time or it never
+        // errors. Since we've called it before and it didn't error, we know that it will also
+        // not error.
+        // The only exception is `NewErr::CouldntAllocateMemory`, but lack of memory is always an
+        // acceptable reason to panic.
+        InterpreterPrototype::from_base_components(BaseComponents {
+            module: self.base_components.module.clone(),
+            resolved_imports: self.base_components.resolved_imports.clone(),
+        })
+        .unwrap()
     }
 }
 
