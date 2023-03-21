@@ -210,7 +210,7 @@ pub enum ProtocolRef<'a> {
     Wss,
     // TODO: unclear what the payload is; see https://github.com/multiformats/multiaddr/issues/127
     Memory(u64),
-    WebRTC,
+    WebRtcDirect,
     /// Contains the multihash of the TLS certificate.
     Certhash(Cow<'a, [u8]>), // TODO: a bit hacky because there's no "owned" equivalent to MultihashRef
 }
@@ -280,7 +280,7 @@ impl<'a> ProtocolRef<'a> {
                         .map_err(|_| ParseError::InvalidMemoryPayload)?,
                 ))
             }
-            "webrtc" => Ok(ProtocolRef::WebRTC),
+            "webrtc-direct" => Ok(ProtocolRef::WebRtcDirect),
             "certhash" => {
                 let s = iter.next().ok_or(ParseError::UnexpectedEof)?;
                 // See <https://github.com/multiformats/multibase#multibase-table>
@@ -321,7 +321,7 @@ impl<'a> ProtocolRef<'a> {
             ProtocolRef::Ws => 477,
             ProtocolRef::Wss => 478,
             ProtocolRef::Memory(_) => 777,
-            ProtocolRef::WebRTC => 280,
+            ProtocolRef::WebRtcDirect => 280,
             ProtocolRef::Certhash(_) => 466,
         };
 
@@ -386,7 +386,7 @@ impl<'a> fmt::Display for ProtocolRef<'a> {
             ProtocolRef::Ws => write!(f, "/ws"),
             ProtocolRef::Wss => write!(f, "/wss"),
             ProtocolRef::Memory(payload) => write!(f, "/memory/{}", payload),
-            ProtocolRef::WebRTC => write!(f, "/webrtc"),
+            ProtocolRef::WebRtcDirect => write!(f, "/webrtc-direct"),
             ProtocolRef::Certhash(multihash) => {
                 write!(
                     f,
@@ -529,7 +529,7 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
             478 => Ok((bytes, ProtocolRef::Wss)),
             // TODO: unclear what the /memory payload is, see https://github.com/multiformats/multiaddr/issues/127
             777 => nom::combinator::map(nom::number::complete::be_u64, ProtocolRef::Memory)(bytes),
-            280 => Ok((bytes, ProtocolRef::WebRTC)),
+            280 => Ok((bytes, ProtocolRef::WebRtcDirect)),
             466 => nom::combinator::map(
                 nom::combinator::verify(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
@@ -580,7 +580,7 @@ mod tests {
         check_valid("/dns6//tcp/55");
         check_valid("/dnsaddr/./tcp/55");
         check_valid("/memory/1234567890");
-        check_valid("/webrtc");
+        check_valid("/webrtc-direct");
         // TODO: example valid /certhash
 
         check_invalid("/");
@@ -591,7 +591,7 @@ mod tests {
         check_invalid("/ws/1.2.3.4");
         check_invalid("/tcp/65536");
         check_invalid("/p2p/blablabla");
-        check_invalid("/webrtc/2");
+        check_invalid("/webrtc-direct/2");
         check_invalid("/certhash");
         check_invalid("/certhash/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN");
     }
