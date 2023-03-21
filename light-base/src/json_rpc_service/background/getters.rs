@@ -33,17 +33,17 @@ impl<TPlat: Platform> Background<TPlat> {
         self: &Arc<Self>,
         request_id: (&str, &requests_subscriptions::RequestId),
     ) {
-        // TODO: maybe optimize?
-        let response = methods::Response::chain_getFinalizedHead(methods::HashHexString(
-            header::hash_from_scale_encoded_header(
-                &self
-                    .runtime_service
-                    .subscribe_all("chain_getFinalizedHead", 16, NonZeroUsize::new(24).unwrap())
-                    .await
-                    .finalized_block_scale_encoded_header,
-            ),
-        ))
-        .to_json_response(request_id.0);
+        let finalized_hash = header::hash_from_scale_encoded_header(
+            &self
+                .runtime_service
+                .subscribe_all("chain_getFinalizedHead", 16, NonZeroUsize::new(24).unwrap())
+                .await
+                .finalized_block_scale_encoded_header,
+        );
+
+        let response =
+            methods::Response::chain_getFinalizedHead(methods::HashHexString(finalized_hash))
+                .to_json_response(request_id.0);
 
         self.requests_subscriptions
             .respond(request_id.1, response)
