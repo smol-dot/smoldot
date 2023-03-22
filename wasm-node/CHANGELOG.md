@@ -8,6 +8,10 @@
 - Add an arbitrary limit to the size of unprocessed networking packets, in order to avoid DoS attacks. This limit is necessary in order to bypass limitations in the networking APIs exposed by browsers. ([#312](https://github.com/smol-dot/smoldot/pull/312))
 - Rename `/webrtc` to `/webrtc-direct` in multiaddresses, in accordance with the rest of the libp2p ecosystem. ([#326](https://github.com/smol-dot/smoldot/pull/326))
 
+### Fixed
+
+- Fix runtime transactions not being handled properly when multiple transactions are stacked.
+
 ## 1.0.0 - 2022-03-12
 
 ### Fixed

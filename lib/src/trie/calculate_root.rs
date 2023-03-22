@@ -75,6 +75,7 @@ use core::{fmt, iter};
 ///
 /// If the storage's content is modified, you **must** call the appropriate methods to invalidate
 /// entries. Otherwise, the trie root calculation will yield an incorrect result.
+#[derive(Clone)]
 pub struct CalculationCache {
     /// Structure of the trie.
     /// If `Some`, the structure is either fully conforming to the trie.
@@ -82,7 +83,7 @@ pub struct CalculationCache {
 }
 
 /// Custom data stored in each node in [`CalculationCache::structure`].
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct CacheEntry {
     merkle_value: Option<trie_node::MerkleValueOutput>,
 }
