@@ -22,7 +22,7 @@ use super::{
     Trap, ValueType, WasmValue,
 };
 
-use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
     fmt, future, mem,
     pin::Pin,
@@ -187,7 +187,7 @@ impl JitPrototype {
                                         }
                                         Shared::ExecutingStart => {
                                             return Box::new(future::ready(Err(
-                                                anyhow::Error::new(
+                                                wasmtime::Error::new(
                                                     NewErr::StartFunctionNotSupported,
                                                 ),
                                             )));
@@ -594,7 +594,10 @@ enum JitInner {
         Pin<
             Box<
                 dyn future::Future<
-                        Output = (wasmtime::Store<()>, Result<Option<WasmValue>, String>),
+                        Output = (
+                            wasmtime::Store<()>,
+                            Result<Option<WasmValue>, wasmtime::Error>,
+                        ),
                     > + Send,
             >,
         >,
@@ -698,11 +701,7 @@ impl Jit {
                             (store, Ok(Some((&result[0]).try_into().unwrap())))
                         }
                         Ok(()) => (store, Ok(None)),
-                        Err(err) => {
-                            // The type of error is from the `anyhow` library. By using
-                            // `to_string()` we avoid having to deal with it.
-                            (store, Err(err.to_string()))
-                        }
+                        Err(err) => (store, Err(err)),
                     }
                 });
 
@@ -737,7 +736,7 @@ impl Jit {
             Poll::Ready((store, Err(err))) => {
                 self.inner = JitInner::Done(store);
                 Ok(ExecOutcome::Finished {
-                    return_value: Err(Trap(err)),
+                    return_value: Err(Trap(err.to_string())),
                 })
             }
             Poll::Pending => {
