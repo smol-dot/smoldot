@@ -62,6 +62,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     // Setup the logging system of the binary.
     if !matches!(cli_output, cli::Output::None) {
         let mut builder = env_logger::Builder::new();
+        builder.parse_filters("cranelift=error"); // TODO: temporary work around for https://github.com/smol-dot/smoldot/issues/263
         if matches!(cli_output, cli::Output::Informant) {
             // TODO: display infos/warnings in a nicer way ; in particular, immediately put the informant on top of warnings
             builder.filter_level(log::LevelFilter::Info);
