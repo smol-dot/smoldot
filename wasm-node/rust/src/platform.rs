@@ -487,7 +487,10 @@ impl Drop for StreamWrapper {
         let lock = &mut *lock;
 
         let connection = lock.connections.get_mut(&self.connection_id).unwrap();
-        let removed_stream = lock.streams.remove(&(self.connection_id, self.stream_id)).unwrap();
+        let removed_stream = lock
+            .streams
+            .remove(&(self.connection_id, self.stream_id))
+            .unwrap();
 
         let remove_connection = match &mut connection.inner {
             ConnectionInner::NotOpen => unreachable!(),
@@ -506,7 +509,12 @@ impl Drop for StreamWrapper {
                 ..
             } => {
                 if !removed_stream.reset {
-                    unsafe { bindings::connection_stream_reset(self.connection_id, self.stream_id.unwrap()) }
+                    unsafe {
+                        bindings::connection_stream_reset(
+                            self.connection_id,
+                            self.stream_id.unwrap(),
+                        )
+                    }
                 }
                 *connection_handles_alive -= 1;
                 let remove_connection = *connection_handles_alive == 0;
@@ -546,7 +554,9 @@ impl Drop for ConnectionWrapper {
 
         let connection = lock.connections.get_mut(&self.0).unwrap();
         let (remove_connection, reset_connection) = match &mut connection.inner {
-            ConnectionInner::NotOpen | ConnectionInner::SingleStreamMsNoiseYamux { .. } => unreachable!(),
+            ConnectionInner::NotOpen | ConnectionInner::SingleStreamMsNoiseYamux { .. } => {
+                unreachable!()
+            }
             ConnectionInner::MultiStreamWebRtc {
                 connection_handles_alive,
                 ..
@@ -897,10 +907,9 @@ pub(crate) fn connection_reset(connection_id: u32, ptr: u32, len: u32) {
 
     connection.something_happened.notify(usize::max_value());
 
-    for ((_, _), stream) in lock
-        .streams
-        .range_mut((connection_id, Some(u32::min_value()))..=(connection_id, Some(u32::max_value())))
-    {
+    for ((_, _), stream) in lock.streams.range_mut(
+        (connection_id, Some(u32::min_value()))..=(connection_id, Some(u32::max_value())),
+    ) {
         stream.reset = true;
         stream.something_happened.notify(usize::max_value());
     }
