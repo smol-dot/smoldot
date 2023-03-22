@@ -9,6 +9,8 @@
 ### Fixed
 
 - Fix JavaScript errors being thrown if a peer resets a libp2p connection abruptly. ([#315](https://github.com/smol-dot/smoldot/pull/315))
+- TCP connections are now properly closed gracefully (with a FIN flag) on NodeJS and Deno. ([#315](https://github.com/smol-dot/smoldot/pull/315))
+- Outbound data on libp2p connections is now properly back-pressured if the remote doesn't accept to receive more data. ([#315](https://github.com/smol-dot/smoldot/pull/315))
 
 ## 1.0.0 - 2022-03-12
 
