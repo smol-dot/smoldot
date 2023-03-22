@@ -10,7 +10,7 @@
 
 ### Fixed
 
-- Fix runtime transactions not being handled properly when multiple transactions are stacked.
+- Fix runtime transactions not being handled properly when multiple transactions are stacked. ([#335](https://github.com/smol-dot/smoldot/pull/335))
 
 ## 1.0.0 - 2022-03-12
 
