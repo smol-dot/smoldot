@@ -639,7 +639,7 @@ struct Stream {
     reset: bool,
     /// Sum of the writable bytes reported through [`bindings::stream_writable_bytes`] or
     /// `initial_writable_bytes` that haven't been processed yet in a call to
-    /// [`Platform::update_stream`].
+    /// `update_stream`.
     writable_bytes_extra: usize,
     /// List of messages received through [`bindings::stream_message`]. Must never contain
     /// empty messages.
