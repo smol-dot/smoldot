@@ -213,7 +213,7 @@ extern "C" {
     /// through the FFI boundary, unless the same identifier is later allocated again with
     /// [`connection_new`].
     ///
-    /// Must never be calld if [`connection_reset`] has been called on that object in the past.
+    /// Must never be called if [`connection_reset`] has been called on that object in the past.
     ///
     /// The connection must be closed in the background. The Rust code isn't interested in incoming
     /// messages from this connection anymore.
@@ -237,7 +237,7 @@ extern "C" {
     /// Abruptly closes an existing substream of a multi-stream connection. The substream must
     /// currently be in the `Open` state.
     ///
-    /// Must never be calld if [`stream_reset`] has been called on that object in the past.
+    /// Must never be called if [`stream_reset`] has been called on that object in the past.
     ///
     /// This function will only be called for multi-stream connections. The connection must
     /// currently be in the `Open` state. See the documentation of [`connection_new`] for details.
@@ -665,7 +665,7 @@ pub extern "C" fn connection_stream_opened(
 /// state.
 ///
 /// Must only be called once per connection object.
-/// Must never be calld if [`reset_connection`] has been called on that object in the past.
+/// Must never be called if [`reset_connection`] has been called on that object in the past.
 ///
 /// Must be passed a UTF-8 string indicating the reason for closing. The buffer **must** have
 /// been allocated with [`alloc`]. It is freed when this function is called.
@@ -681,7 +681,7 @@ pub extern "C" fn connection_reset(connection_id: u32, ptr: u32, len: u32) {
 /// state.
 ///
 /// Must only be called once per stream.
-/// Must never be calld if [`connection_stream_reset`] has been called on that object in the past.
+/// Must never be called if [`connection_stream_reset`] has been called on that object in the past.
 ///
 /// The `stream_id` becomes dead and can be re-used for another stream on the same connection.
 ///
