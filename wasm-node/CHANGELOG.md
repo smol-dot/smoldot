@@ -11,7 +11,7 @@
 ### Fixed
 
 - Fix runtime transactions not being handled properly when multiple transactions are stacked. ([#335](https://github.com/smol-dot/smoldot/pull/335))
-- No longer generate a JavaScript exception due to `document` being undefined when executing inside of a WebWorker.
+- No longer generate a JavaScript exception due to `document` being undefined when executing inside of a WebWorker. ([#340](https://github.com/smol-dot/smoldot/pull/340))
 
 ## 1.0.0 - 2022-03-12
 
