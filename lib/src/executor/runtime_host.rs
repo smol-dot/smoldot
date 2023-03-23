@@ -869,6 +869,7 @@ impl Inner {
                 }
 
                 host::HostVm::StartStorageTransaction(tx) => {
+                    // TODO: this cloning is very expensive, but providing a more optimized implementation is very complicated
                     self.main_trie_transaction.push((
                         self.main_trie_changes.clone(),
                         self.main_trie_root_calculation_cache
