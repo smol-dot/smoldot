@@ -384,22 +384,15 @@ impl PrefixKeys {
 
                 drop(after_overlay);
 
-                let (diff, calculation_cache) = self
-                    .inner
-                    .main_trie_transaction
-                    .last_mut()
-                    .map(|(a, b)| (a, b))
-                    .unwrap_or((
-                        &mut self.inner.main_trie_changes,
-                        self.inner
-                            .main_trie_root_calculation_cache
-                            .as_mut()
-                            .unwrap(),
-                    ));
-
                 for key in keys_to_remove {
-                    calculation_cache.storage_value_update(&key, false);
-                    diff.diff_insert_erase(key.clone(), ());
+                    self.inner
+                        .main_trie_root_calculation_cache
+                        .as_mut()
+                        .unwrap()
+                        .storage_value_update(&key, false);
+                    self.inner
+                        .main_trie_changes
+                        .diff_insert_erase(key.clone(), ());
                 }
 
                 self.inner.vm = req.resume(keys_removed_so_far, some_keys_remain);
@@ -611,10 +604,11 @@ struct Inner {
     /// Pending changes to the top storage trie that this execution performs.
     main_trie_changes: storage_diff::TrieDiff,
 
-    /// Contains pending storage changes that haven't been applied to [`Inner::main_trie_changes`]
-    /// yet.
-    /// When the storage transaction ends, either this is applied to [`Inner::main_trie_changes`],
-    /// or is entirely discarded (to revert changes).
+    /// Contains a copy of [`Inner::main_trie_changes`] and
+    /// [`Inner::main_trie_root_calculation_cache`] at the time when the transaction started.
+    /// When the storage transaction ends, either the entry is silently discarded (to commit),
+    /// or is written over [`Inner::main_trie_changes`] and
+    /// [`Inner::main_trie_root_calculation_cache`] (to rollback).
     ///
     /// Contains a `Vec` in case transactions are stacked.
     main_trie_transaction: Vec<(storage_diff::TrieDiff, calculate_root::CalculationCache)>,
@@ -695,20 +689,15 @@ impl Inner {
                 host::HostVm::ExternalStorageSet(req) => {
                     // TODO: this is a dummy implementation and child tries are not implemented properly
                     if let host::StorageKey::MainTrie { key } = req.key() {
-                        let (diff, calculation_cache) = self
-                            .main_trie_transaction
-                            .last_mut()
-                            .map(|(a, b)| (a, b))
-                            .unwrap_or((
-                                &mut self.main_trie_changes,
-                                self.main_trie_root_calculation_cache.as_mut().unwrap(),
-                            ));
-
-                        calculation_cache.storage_value_update(key.as_ref(), req.value().is_some());
+                        self.main_trie_root_calculation_cache
+                            .as_mut()
+                            .unwrap()
+                            .storage_value_update(key.as_ref(), req.value().is_some());
                         if let Some(value) = req.value() {
-                            diff.diff_insert(key.as_ref(), value.as_ref(), ());
+                            self.main_trie_changes
+                                .diff_insert(key.as_ref(), value.as_ref(), ());
                         } else {
-                            diff.diff_insert_erase(key.as_ref(), ());
+                            self.main_trie_changes.diff_insert_erase(key.as_ref(), ());
                         }
                     }
 
@@ -726,22 +715,23 @@ impl Inner {
                         }
                     };
 
-                    let (diff, calculation_cache) = self
-                        .main_trie_transaction
-                        .last_mut()
-                        .map(|(a, b)| (a, b))
-                        .unwrap_or((
-                            &mut self.main_trie_changes,
-                            self.main_trie_root_calculation_cache.as_mut().unwrap(),
-                        ));
+                    self.main_trie_root_calculation_cache
+                        .as_mut()
+                        .unwrap()
+                        .storage_value_update(key.as_ref(), true);
 
-                    calculation_cache.storage_value_update(key.as_ref(), true);
-
-                    let current_value = diff.diff_get(key.as_ref()).map(|(v, _)| v);
+                    let current_value = self
+                        .main_trie_changes
+                        .diff_get(key.as_ref())
+                        .map(|(v, _)| v);
                     if let Some(current_value) = current_value {
                         let mut current_value = current_value.unwrap_or_default().to_vec();
                         append_to_storage_value(&mut current_value, req.value().as_ref());
-                        diff.diff_insert(key.as_ref().to_vec(), current_value, ());
+                        self.main_trie_changes.diff_insert(
+                            key.as_ref().to_vec(),
+                            current_value,
+                            (),
+                        );
                         drop(key);
                         self.vm = req.resume();
                     } else {
@@ -879,8 +869,9 @@ impl Inner {
                 }
 
                 host::HostVm::StartStorageTransaction(tx) => {
+                    // TODO: this cloning is very expensive, but providing a more optimized implementation is very complicated
                     self.main_trie_transaction.push((
-                        storage_diff::TrieDiff::default(),
+                        self.main_trie_changes.clone(),
                         self.main_trie_root_calculation_cache
                             .as_ref()
                             .unwrap()
@@ -894,20 +885,11 @@ impl Inner {
                     // The inner implementation guarantees that a storage transaction can only
                     // end if it has earlier been started.
                     debug_assert!(!self.main_trie_transaction.is_empty());
-                    let (diff, cache_update) = self.main_trie_transaction.pop().unwrap();
+                    let (rollback_diff, rollback_cache) = self.main_trie_transaction.pop().unwrap();
 
-                    if !rollback {
-                        let (previous_diff, previous_calculation_cache) = self
-                            .main_trie_transaction
-                            .last_mut()
-                            .map(|(a, b)| (a, b))
-                            .unwrap_or((
-                                &mut self.main_trie_changes,
-                                self.main_trie_root_calculation_cache.as_mut().unwrap(),
-                            ));
-
-                        previous_diff.merge(&diff);
-                        *previous_calculation_cache = cache_update;
+                    if rollback {
+                        self.main_trie_changes = rollback_diff;
+                        self.main_trie_root_calculation_cache = Some(rollback_cache);
                     }
 
                     self.vm = resume.resume();
