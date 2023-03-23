@@ -51,6 +51,8 @@ export function start(options?: ClientOptions): Client {
       return Promise.resolve(inflate(classicDecode(input)))
     },
     registerShouldPeriodicallyYield: (callback) => {
+      if (!document)  // We might be in a web worker.
+        return [false, () => {}];
       const wrappedCallback = () => callback(document.visibilityState === 'visible');
       document.addEventListener('visibilitychange', wrappedCallback);
       return [document.visibilityState === 'visible', () => { document.removeEventListener('visibilitychange', wrappedCallback) }]
