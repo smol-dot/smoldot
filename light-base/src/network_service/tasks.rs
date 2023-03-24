@@ -267,6 +267,7 @@ async fn single_stream_connection_task<TPlat: Platform>(
             let read_bytes = read_write.read_bytes;
             let write_size_closed = write_side_was_open && read_write.outgoing_buffer.is_none();
             let written_bytes = read_write.written_bytes;
+            debug_assert!(written_bytes <= writable_bytes);
             let wake_up_after = read_write.wake_up_after.clone();
             drop(read_write);
 
