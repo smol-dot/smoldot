@@ -93,12 +93,34 @@ export interface Config {
     /**
      * Queues data to be sent on the given connection.
      *
-     * The connection must currently be in the `Open` state.
+     * The connection and stream must currently be in the `Open` state.
+     *
+     * The number of bytes most never exceed the number of "writable bytes" of the stream.
+     * `onWritableBytes` can be used in order to notify that more writable bytes are available.
      *
      * The `streamId` must be provided if and only if the connection is of type "multi-stream".
      * It indicates which substream to send the data on.
+     *
+     * Must not be called after `closeSend` has been called.
      */
     send(data: Uint8Array, streamId?: number): void;
+
+    /**
+     * Closes the writing side of the given stream of the given connection.
+     *
+     * Never called for connection types where this isn't possible to implement (i.e. WebSocket
+     * and WebRTC at the moment).
+     *
+     * The connection and stream must currently be in the `Open` state.
+     *
+     * Implicitly sets the "writable bytes" of the stream to zero.
+     *
+     * The `streamId` must be provided if and only if the connection is of type "multi-stream".
+     * It indicates which substream to send the data on.
+     *
+     * Must only be called once per stream.
+     */
+    closeSend(streamId?: number): void;
 
     /**
      * Start opening an additional outbound substream on the given connection.
@@ -135,7 +157,9 @@ export interface ConnectionConfig {
      * Must only be called once per connection.
      */
     onOpen: (info:
-        { type: 'single-stream', handshake: 'multistream-select-noise-yamux' } |
+        { type: 'single-stream', handshake: 'multistream-select-noise-yamux',
+            initialWritableBytes: number, writeClosable: boolean
+        } |
         { type: 'multi-stream', handshake: 'webrtc', 
             localTlsCertificateMultihash: Uint8Array,
             remoteTlsCertificateMultihash: Uint8Array,
@@ -154,7 +178,7 @@ export interface ConnectionConfig {
      *
      * This function must only be called for connections of type "multi-stream".
      */
-    onStreamOpened: (streamId: number, direction: 'inbound' | 'outbound') => void;
+    onStreamOpened: (streamId: number, direction: 'inbound' | 'outbound', initialWritableBytes: number) => void;
 
     /**
      * Callback called when a stream transitions to the `Reset` state.
@@ -164,6 +188,18 @@ export interface ConnectionConfig {
      * This function must only be called for connections of type "multi-stream".
      */
     onStreamReset: (streamId: number) => void;
+
+    /**
+     * Callback called when more data can be written on the stream.
+     *
+     * Can only happen while the connection is in the `Open` state.
+     *
+     * This callback must not be called after `closeSend` has been called.
+     *
+     * The `streamId` parameter must be provided if and only if the connection is of type
+     * "multi-stream".
+     */
+    onWritableBytes: (numExtra: number, streamId?: number) => void;
 
     /**
      * Callback called when a message sent by the remote has been received.
@@ -310,7 +346,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                         try {
                             switch (info.type) {
                                 case 'single-stream': {
-                                    instance.exports.connection_open_single_stream(connectionId, 0);
+                                    instance.exports.connection_open_single_stream(connectionId, 0, info.initialWritableBytes, info.writeClosable ? 1 : 0);
                                     break
                                 }
                                 case 'multi-stream': {
@@ -335,6 +371,16 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                             instance.exports.connection_reset(connectionId, ptr, encoded.length);
                         } catch(_error) {}
                     },
+                    onWritableBytes: (numExtra, streamId) => {
+                        if (killedTracked.killed) return;
+                        try {
+                            instance.exports.stream_writable_bytes(
+                                connectionId,
+                                streamId || 0,
+                                numExtra,
+                            );
+                        } catch(_error) {}
+                    },
                     onMessage: (message: Uint8Array, streamId?: number) => {
                         if (killedTracked.killed) return;
                         try {
@@ -343,13 +389,14 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                             instance.exports.stream_message(connectionId, streamId || 0, ptr, message.length);
                         } catch(_error) {}
                     },
-                    onStreamOpened: (streamId: number, direction: 'inbound' | 'outbound') => {
+                    onStreamOpened: (streamId: number, direction: 'inbound' | 'outbound', initialWritableBytes) => {
                         if (killedTracked.killed) return;
                         try {
                             instance.exports.connection_stream_opened(
                                 connectionId,
                                 streamId,
-                                direction === 'outbound' ? 1 : 0
+                                direction === 'outbound' ? 1 : 0,
+                                initialWritableBytes
                             );
                         } catch(_error) {}
                     },
@@ -415,6 +462,13 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
             const data = new Uint8Array(instance.exports.memory.buffer).slice(ptr, ptr + len);
             const connection = connections[connectionId]!;
             connection.send(data, streamId);  // TODO: docs says the streamId is provided only for multi-stream connections, but here it's always provided
+        },
+
+        stream_send_close: (connectionId: number, streamId: number) => {
+            if (killedTracked.killed) return;
+    
+            const connection = connections[connectionId]!;
+            connection.closeSend(streamId);  // TODO: docs says the streamId is provided only for multi-stream connections, but here it's always provided
         },
 
         current_task_entered: (ptr: number, len: number) => {

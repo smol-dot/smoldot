@@ -213,6 +213,8 @@ extern "C" {
     /// through the FFI boundary, unless the same identifier is later allocated again with
     /// [`connection_new`].
     ///
+    /// Must never be called if [`connection_reset`] has been called on that object in the past.
+    ///
     /// The connection must be closed in the background. The Rust code isn't interested in incoming
     /// messages from this connection anymore.
     ///
@@ -235,12 +237,14 @@ extern "C" {
     /// Abruptly closes an existing substream of a multi-stream connection. The substream must
     /// currently be in the `Open` state.
     ///
+    /// Must never be called if [`stream_reset`] has been called on that object in the past.
+    ///
     /// This function will only be called for multi-stream connections. The connection must
     /// currently be in the `Open` state. See the documentation of [`connection_new`] for details.
     pub fn connection_stream_reset(connection_id: u32, stream_id: u32);
 
     /// Queues data on the given stream. The data is found in the memory of the WebAssembly
-    /// virtual machine, at the given pointer. The data must be sent as a binary frame.
+    /// virtual machine, at the given pointer.
     ///
     /// If `connection_id` is a single-stream connection, then the value of `stream_id` should
     /// be ignored. If `connection_id` is a multi-stream connection, then the value of `stream_id`
@@ -250,7 +254,25 @@ extern "C" {
     /// The connection associated with that stream (and, in the case of a multi-stream connection,
     /// the stream itself must currently be in the `Open` state. See the documentation of
     /// [`connection_new`] for details.
+    ///
+    /// The size of the buffer must not exceed the number of writable bytes of the given stream.
+    /// Use [`stream_writable_bytes`] to notify that more data can be sent on the stream.
     pub fn stream_send(connection_id: u32, stream_id: u32, ptr: u32, len: u32);
+
+    /// Close the sending side of the given stream of the given connection.
+    ///
+    /// Never called for connection types where this isn't possible to implement (i.e. WebSocket
+    /// and WebRTC at the moment).
+    ///
+    /// If `connection_id` is a single-stream connection, then the value of `stream_id` should
+    /// be ignored. If `connection_id` is a multi-stream connection, then the value of `stream_id`
+    /// contains the identifier of the stream whose sending side should be closed, as was provided
+    /// to [`connection_stream_opened`].
+    ///
+    /// The connection associated with that stream (and, in the case of a multi-stream connection,
+    /// the stream itself must currently be in the `Open` state. See the documentation of
+    /// [`connection_new`] for details.
+    pub fn stream_send_close(connection_id: u32, stream_id: u32);
 
     /// Called when the Wasm execution enters the context of a certain task. This is useful for
     /// debugging purposes.
@@ -534,9 +556,22 @@ pub extern "C" fn timer_finished(timer_id: u32) {
 ///
 /// The `handshake_ty` parameter indicates the type of handshake. It must always be 0 at the
 /// moment, indicating a multistream-select+Noise+Yamux handshake.
+///
+/// `write_closable` must be non-zero if and only if it makes sense to call [`stream_send_close`]
+/// on this connection. If zero, then [`stream_send_close`] will never be called.
 #[no_mangle]
-pub extern "C" fn connection_open_single_stream(connection_id: u32, handshake_ty: u32) {
-    crate::platform::connection_open_single_stream(connection_id, handshake_ty);
+pub extern "C" fn connection_open_single_stream(
+    connection_id: u32,
+    handshake_ty: u32,
+    initial_writable_bytes: u32,
+    write_closable: u32,
+) {
+    crate::platform::connection_open_single_stream(
+        connection_id,
+        handshake_ty,
+        initial_writable_bytes,
+        write_closable,
+    );
     super::advance_execution();
 }
 
@@ -587,6 +622,19 @@ pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, l
     super::advance_execution();
 }
 
+/// Notify that extra bytes can be written onto the stream. The connection associated with that
+/// stream (and, in the case of a multi-stream connection, the stream itself) must be in the
+/// `Open` state.
+///
+/// If `connection_id` is a single-stream connection, then the value of `stream_id` is ignored.
+/// If `connection_id` is a multi-stream connection, then `stream_id` corresponds to the stream
+/// on which the data was received, as was provided to [`connection_stream_opened`].
+#[no_mangle]
+pub extern "C" fn stream_writable_bytes(connection_id: u32, stream_id: u32, num_bytes: u32) {
+    crate::platform::stream_writable_bytes(connection_id, stream_id, num_bytes);
+    super::advance_execution();
+}
+
 /// Called by the JavaScript code when the given multi-stream connection has a new substream.
 ///
 /// `connection_id` *must* be a multi-stream connection.
@@ -598,8 +646,18 @@ pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, l
 /// value other than `0` if the substream has been opened in response to a call to
 /// [`connection_stream_open`].
 #[no_mangle]
-pub extern "C" fn connection_stream_opened(connection_id: u32, stream_id: u32, outbound: u32) {
-    crate::platform::connection_stream_opened(connection_id, stream_id, outbound);
+pub extern "C" fn connection_stream_opened(
+    connection_id: u32,
+    stream_id: u32,
+    outbound: u32,
+    initial_writable_bytes: u32,
+) {
+    crate::platform::connection_stream_opened(
+        connection_id,
+        stream_id,
+        outbound,
+        initial_writable_bytes,
+    );
     super::advance_execution();
 }
 
@@ -607,6 +665,7 @@ pub extern "C" fn connection_stream_opened(connection_id: u32, stream_id: u32, o
 /// state.
 ///
 /// Must only be called once per connection object.
+/// Must never be called if [`reset_connection`] has been called on that object in the past.
 ///
 /// Must be passed a UTF-8 string indicating the reason for closing. The buffer **must** have
 /// been allocated with [`alloc`]. It is freed when this function is called.
@@ -622,6 +681,7 @@ pub extern "C" fn connection_reset(connection_id: u32, ptr: u32, len: u32) {
 /// state.
 ///
 /// Must only be called once per stream.
+/// Must never be called if [`connection_stream_reset`] has been called on that object in the past.
 ///
 /// The `stream_id` becomes dead and can be re-used for another stream on the same connection.
 ///
