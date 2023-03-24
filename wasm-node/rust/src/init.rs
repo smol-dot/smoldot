@@ -125,7 +125,18 @@ pub(crate) fn init<TPlat: smoldot_light::platform::Platform, TChain>(
                             )
                         }
                     }
+                    let before_polling = crate::Instant::now();
                     let out = this.future.poll(cx);
+                    // Time it took to execute `poll`.
+                    let poll_duration = crate::Instant::now() - before_polling;
+                    if poll_duration.as_millis() >= 10 {
+                        log::warn!(
+                            "The task named `{}` has occupied the CPU for an unreasonable amount \
+                            of time ({}ms). Please report this issue if it happens frequently.",
+                            this.name,
+                            poll_duration.as_millis(),
+                        );
+                    }
                     if *this.enable_current_task {
                         unsafe {
                             bindings::current_task_exit();
