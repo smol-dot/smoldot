@@ -109,14 +109,16 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
                 return;
             const bufferedAmount = socket.bufferedAmount;
             const wasSent = bufferedAmountCheck.quenedUnreportedBytes - bufferedAmount;
-            config.onWritableBytes(wasSent);
             bufferedAmountCheck.quenedUnreportedBytes = bufferedAmount;
             if (bufferedAmount != 0) {
-            setTimeout(checkBufferedAmount, bufferedAmountCheck.nextTimeout);
-            bufferedAmountCheck.nextTimeout *= 2;
-            if (bufferedAmountCheck.nextTimeout > 500)
-                bufferedAmountCheck.nextTimeout = 500;
+                setTimeout(checkBufferedAmount, bufferedAmountCheck.nextTimeout);
+                bufferedAmountCheck.nextTimeout *= 2;
+                if (bufferedAmountCheck.nextTimeout > 500)
+                    bufferedAmountCheck.nextTimeout = 500;
             }
+            // Note: it is important to call `onWritableBytes` at the very end, as it might
+            // trigger a call to `send`.
+            config.onWritableBytes(wasSent);
         };
 
         socket.onopen = () => {

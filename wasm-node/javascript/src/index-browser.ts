@@ -112,7 +112,6 @@ export function start(options?: ClientOptions): Client {
           return;
         const bufferedAmount = connection.bufferedAmount;
         const wasSent = bufferedAmountCheck.quenedUnreportedBytes - bufferedAmount;
-        config.onWritableBytes(wasSent);
         bufferedAmountCheck.quenedUnreportedBytes = bufferedAmount;
         if (bufferedAmount != 0) {
           setTimeout(checkBufferedAmount, bufferedAmountCheck.nextTimeout);
@@ -120,6 +119,9 @@ export function start(options?: ClientOptions): Client {
           if (bufferedAmountCheck.nextTimeout > 500)
             bufferedAmountCheck.nextTimeout = 500;
         }
+        // Note: it is important to call `onWritableBytes` at the very end, as it might
+        // trigger a call to `send`.
+        config.onWritableBytes(wasSent);
       };
 
       connection.onopen = () => {
