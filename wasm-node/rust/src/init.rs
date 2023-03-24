@@ -132,9 +132,14 @@ pub(crate) fn init<TPlat: smoldot_light::platform::Platform, TChain>(
                     if poll_duration.as_millis() >= 10 {
                         log::warn!(
                             "The task named `{}` has occupied the CPU for an unreasonable amount \
-                            of time ({}ms). Please report this issue if it happens frequently.",
+                            of time ({}ms). Please report this issue{}.",
                             this.name,
                             poll_duration.as_millis(),
+                            if poll_duration.as_millis() < 100 {
+                                " if it happens regularly"
+                            } else {
+                                ""
+                            }
                         );
                     }
                     if *this.enable_current_task {
