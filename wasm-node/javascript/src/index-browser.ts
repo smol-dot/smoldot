@@ -456,7 +456,8 @@ export function start(options?: ClientOptions): Client {
               // (UDP or TCP)
               "a=sctp-port:5000" + "\n" +
               // The maximum SCTP user message size (in bytes) (RFC8841)
-              "a=max-message-size:16384" + "\n" +  // TODO: should this be part of the spec?
+              // Setting this field is part of the libp2p spec.
+              "a=max-message-size:16384" + "\n" +
               // A transport address for a candidate that can be used for connectivity
               // checks (RFC8839).
               "a=candidate:1 1 UDP 1 " + targetIp + " " + targetPort + " typ host" + "\n";
