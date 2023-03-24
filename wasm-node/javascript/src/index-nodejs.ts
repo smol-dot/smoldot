@@ -204,8 +204,8 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             // The bytes queued using `socket.write` and where `write` has returned false have now
             // been sent. Notify the API that it can write more data.
             if (socket.destroyed) return;
-            config.onWritableBytes(drainingBytes.num);
             drainingBytes.num = 0;
+            config.onWritableBytes(drainingBytes.num);
         });
 
         return {
