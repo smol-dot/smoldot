@@ -820,6 +820,8 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                 log_name: log_name.clone(), // TODO: add a way to differentiate multiple different json-rpc services under the same chain
                 max_pending_requests: NonZeroU32::new(128).unwrap(),
                 max_subscriptions: 1024, // Note: the PolkadotJS UI is very heavy in terms of subscriptions.
+                max_parallel_requests: NonZeroU32::new(24).unwrap(),
+                max_parallel_subscription_updates: NonZeroU32::new(8).unwrap(),
             });
 
             let spawn_new_task = self.spawn_new_task.clone();
@@ -843,8 +845,6 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                     system_version,
                     genesis_block_hash,
                     genesis_block_state_root,
-                    max_parallel_requests: NonZeroU32::new(24).unwrap(),
-                    max_parallel_subscription_updates: NonZeroU32::new(8).unwrap(),
                 })
             };
 
