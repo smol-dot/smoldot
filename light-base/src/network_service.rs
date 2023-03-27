@@ -40,11 +40,12 @@ use crate::platform::Platform;
 
 use alloc::{
     boxed::Box,
+    format,
     string::{String, ToString as _},
     sync::Arc,
     vec::Vec,
 };
-use core::{cmp, num::NonZeroUsize, pin::Pin, task::Poll, time::Duration};
+use core::{cmp, num::NonZeroUsize, task::Poll, time::Duration};
 use futures::{
     channel::{mpsc, oneshot},
     lock::Mutex,
@@ -157,8 +158,8 @@ struct SharedGuarded<TPlat: Platform> {
     messages_from_connections_rx:
         mpsc::Receiver<(service::ConnectionId, service::ConnectionToCoordinator)>,
 
-    /// Channel where new tasks can be sent in order to be executed asynchronously.
-    new_tasks_tx: mpsc::Sender<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
+    /// Value received in [`Config::tasks_executor`].
+    tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 
     active_connections: HashMap<
         service::ConnectionId,
@@ -202,7 +203,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
     /// Returns the networking service, plus a list of receivers on which events are pushed.
     /// All of these receivers must be polled regularly to prevent the networking service from
     /// slowing down.
-    pub async fn new(mut config: Config) -> (Arc<Self>, Vec<stream::BoxStream<'static, Event>>) {
+    pub async fn new(config: Config) -> (Arc<Self>, Vec<stream::BoxStream<'static, Event>>) {
         let (event_senders, event_receivers): (Vec<_>, Vec<_>) = (0..config.num_events_receivers)
             .map(|_| mpsc::channel(16))
             .unzip();
@@ -240,7 +241,6 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         let mut abort_handles = Vec::new();
 
         let (messages_from_connections_tx, messages_from_connections_rx) = mpsc::channel(32);
-        let (new_tasks_tx, mut new_tasks_rx) = mpsc::channel(8);
 
         let shared = Arc::new(Shared {
             guarded: Mutex::new(SharedGuarded {
@@ -259,7 +259,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                 active_connections: HashMap::with_capacity_and_hasher(32, Default::default()),
                 messages_from_connections_tx,
                 messages_from_connections_rx,
-                new_tasks_tx,
+                tasks_executor: config.tasks_executor,
                 blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
                 grandpa_warp_sync_requests: HashMap::with_capacity_and_hasher(
                     8,
@@ -277,7 +277,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         });
 
         // Spawn main task that processes the network service.
-        (config.tasks_executor)(
+        (shared.guarded.try_lock().unwrap().tasks_executor)(
             "network-service".into(),
             Box::pin({
                 let shared = shared.clone();
@@ -291,7 +291,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
 
         // Spawn task starts a discovery request at a periodic interval.
         // This is done through a separate task due to ease of implementation.
-        (config.tasks_executor)(
+        (shared.guarded.try_lock().unwrap().tasks_executor)(
             "network-discovery".into(),
             Box::pin({
                 let shared = shared.clone();
@@ -317,28 +317,6 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                         // Starting requests has generated messages. Wake up the main task so that
                         // these messages are dispatched.
                         shared.wake_up_main_background_task.notify(1);
-                    }
-                };
-
-                let (abortable, abort_handle) = future::abortable(future);
-                abort_handles.push(abort_handle);
-                abortable.map(|_| ())
-            }),
-        );
-
-        // Spawn task dedicated to processing existing connections.
-        (config.tasks_executor)(
-            "connections".into(),
-            Box::pin({
-                let future = async move {
-                    let mut connections = stream::FuturesUnordered::new();
-                    loop {
-                        futures::select! {
-                            new_connec = new_tasks_rx.select_next_some() => {
-                                connections.push(new_connec);
-                            },
-                            () = connections.select_next_some() => {},
-                        }
                     }
                 };
 
@@ -1370,6 +1348,11 @@ async fn update_round<TPlat: Platform>(
             .important_nodes
             .contains(&start_connect.expected_peer_id);
 
+        let task_name = format!(
+            "connection-{}-{}",
+            start_connect.expected_peer_id, start_connect.multiaddr
+        );
+
         // Perform the connection process in a separate task.
         let task = tasks::connection_task(
             start_connect,
@@ -1381,7 +1364,7 @@ async fn update_round<TPlat: Platform>(
         // Sending the new task might fail in case a shutdown is happening, in which case
         // we don't really care about the state of anything anymore.
         // The sending here is normally very quick.
-        let _ = guarded.new_tasks_tx.send(Box::pin(task)).await;
+        let _ = (guarded.tasks_executor)(task_name, Box::pin(task));
     }
 
     // Pull messages that the coordinator has generated in destination to the various
