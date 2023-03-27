@@ -322,19 +322,15 @@ pub struct StartConfig<'a, TPlat: Platform> {
 
 impl ServicePrototype {
     /// Consumes this prototype and starts the service through [`StartConfig::tasks_executor`].
-    pub fn start<TPlat: Platform>(self, mut config: StartConfig<'_, TPlat>) {
-        let background = background::Background::new(
+    pub fn start<TPlat: Platform>(self, config: StartConfig<'_, TPlat>) {
+        background::Background::start(
             self.log_target.clone(),
             self.requests_subscriptions.clone(),
-            &config,
-        );
-
-        background.start_tasks(
-            &mut config.tasks_executor,
+            config,
             self.max_parallel_requests,
             self.max_parallel_subscription_updates,
             self.background_abort_registrations,
-        );
+        )
     }
 }
 

@@ -218,14 +218,17 @@ struct Cache {
 }
 
 impl<TPlat: Platform> Background<TPlat> {
-    pub(super) fn new(
+    pub(super) fn start(
         log_target: String,
         requests_subscriptions: Arc<
             requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>,
         >,
-        config: &StartConfig<'_, TPlat>,
-    ) -> Arc<Self> {
-        Arc::new(Background {
+        mut config: StartConfig<'_, TPlat>,
+        max_parallel_requests: NonZeroU32,
+        max_parallel_subscription_updates: NonZeroU32,
+        background_abort_registrations: Vec<future::AbortRegistration>,
+    ) {
+        let me = Arc::new(Background {
             log_target,
             requests_subscriptions,
             chain_name: config.chain_spec.name().to_owned(),
@@ -252,19 +255,8 @@ impl<TPlat: Platform> Background<TPlat> {
             }),
             genesis_block_hash: config.genesis_block_hash,
             printed_legacy_json_rpc_warning: atomic::AtomicBool::new(false),
-        })
-    }
+        });
 
-    /// Spawns the tasks that the background requires.
-    ///
-    /// This should only ever be called once for each service.
-    pub(super) fn start_tasks(
-        self: Arc<Self>,
-        spawner: &mut (dyn FnMut(String, future::BoxFuture<'static, ()>) + Send),
-        max_parallel_requests: NonZeroU32,
-        max_parallel_subscription_updates: NonZeroU32,
-        background_abort_registrations: Vec<future::AbortRegistration>,
-    ) {
         let mut background_abort_registrations = background_abort_registrations.into_iter();
 
         // A certain number of tasks (`max_parallel_requests`) are dedicated to pulling requests
@@ -272,9 +264,9 @@ impl<TPlat: Platform> Background<TPlat> {
         // Each task can only process one request at a time, which is why we spawn one task per
         // desired level of parallelism.
         for n in 0..max_parallel_requests.get() {
-            let me = self.clone();
-            spawner(
-                format!("{}-requests-{}", self.log_target, n),
+            let me = me.clone();
+            (config.tasks_executor)(
+                format!("{}-requests-{}", me.log_target, n),
                 future::Abortable::new(
                     async move {
                         loop {
@@ -295,9 +287,9 @@ impl<TPlat: Platform> Background<TPlat> {
         // A certain number of tasks (`max_parallel_subscription_updates`) are dedicated to
         // processing subscriptions-related tasks after they wake up.
         for n in 0..max_parallel_subscription_updates.get() {
-            let me = self.clone();
-            spawner(
-                format!("{}-subscriptions-{}", self.log_target, n),
+            let me = me.clone();
+            (config.tasks_executor)(
+                format!("{}-subscriptions-{}", me.log_target, n),
                 future::Abortable::new(
                     async move {
                         loop {
@@ -319,8 +311,8 @@ impl<TPlat: Platform> Background<TPlat> {
         // service.
         // TODO: this is actually racy, as a block subscription task could report a new block to a client, and then client can query it, before this block has been been added to the cache
         // TODO: extract to separate function
-        spawner(format!("{}-cache-populate", self.log_target), {
-            let me = self.clone();
+        (config.tasks_executor)(format!("{}-cache-populate", me.log_target), {
+            let me = me.clone();
             future::Abortable::new(
                 async move {
                     loop {
