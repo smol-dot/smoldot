@@ -265,7 +265,7 @@ pub struct ServicePrototype {
     max_parallel_subscription_updates: NonZeroU32,
 
     /// List of abort handles. When tasks are spawned, each handle is associated with a task, so
-    /// that they are all abortable. See [`Frontend::background_aborts`].
+    /// that they can all be aborted. See [`Frontend::background_aborts`].
     background_abort_registrations: Vec<future::AbortRegistration>,
 }
 
