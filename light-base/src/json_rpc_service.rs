@@ -323,7 +323,7 @@ pub struct StartConfig<'a, TPlat: Platform> {
 impl ServicePrototype {
     /// Consumes this prototype and starts the service through [`StartConfig::tasks_executor`].
     pub fn start<TPlat: Platform>(self, config: StartConfig<'_, TPlat>) {
-        background::Background::start(
+        background::start(
             self.log_target.clone(),
             self.requests_subscriptions.clone(),
             config,

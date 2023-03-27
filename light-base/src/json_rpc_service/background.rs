@@ -52,7 +52,7 @@ mod state_chain;
 mod transactions;
 
 /// Fields used to process JSON-RPC requests in the background.
-pub(super) struct Background<TPlat: Platform> {
+struct Background<TPlat: Platform> {
     /// Target to use for all the logs.
     log_target: String,
 
@@ -217,191 +217,186 @@ struct Cache {
     >,
 }
 
-impl<TPlat: Platform> Background<TPlat> {
-    pub(super) fn start(
-        log_target: String,
-        requests_subscriptions: Arc<
-            requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>,
-        >,
-        mut config: StartConfig<'_, TPlat>,
-        max_parallel_requests: NonZeroU32,
-        max_parallel_subscription_updates: NonZeroU32,
-        background_abort_registrations: Vec<future::AbortRegistration>,
-    ) {
-        let me = Arc::new(Background {
-            log_target,
-            requests_subscriptions,
-            chain_name: config.chain_spec.name().to_owned(),
-            chain_ty: config.chain_spec.chain_type().to_owned(),
-            chain_is_live: config.chain_spec.has_live_network(),
-            chain_properties_json: config.chain_spec.properties().to_owned(),
-            peer_id_base58: config.peer_id.to_base58(),
-            system_name: config.system_name.clone(),
-            system_version: config.system_version.clone(),
-            network_service: config.network_service.clone(),
-            sync_service: config.sync_service.clone(),
-            runtime_service: config.runtime_service.clone(),
-            transactions_service: config.transactions_service.clone(),
-            cache: Mutex::new(Cache {
-                recent_pinned_blocks: lru::LruCache::with_hasher(
-                    NonZeroUsize::new(32).unwrap(),
-                    Default::default(),
-                ),
-                subscription_id: None,
-                block_state_root_hashes_numbers: lru::LruCache::with_hasher(
-                    NonZeroUsize::new(32).unwrap(),
-                    Default::default(),
-                ),
-            }),
-            genesis_block_hash: config.genesis_block_hash,
-            printed_legacy_json_rpc_warning: atomic::AtomicBool::new(false),
-        });
+pub(super) fn start<TPlat: Platform>(
+    log_target: String,
+    requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>>,
+    mut config: StartConfig<'_, TPlat>,
+    max_parallel_requests: NonZeroU32,
+    max_parallel_subscription_updates: NonZeroU32,
+    background_abort_registrations: Vec<future::AbortRegistration>,
+) {
+    let me = Arc::new(Background {
+        log_target,
+        requests_subscriptions,
+        chain_name: config.chain_spec.name().to_owned(),
+        chain_ty: config.chain_spec.chain_type().to_owned(),
+        chain_is_live: config.chain_spec.has_live_network(),
+        chain_properties_json: config.chain_spec.properties().to_owned(),
+        peer_id_base58: config.peer_id.to_base58(),
+        system_name: config.system_name.clone(),
+        system_version: config.system_version.clone(),
+        network_service: config.network_service.clone(),
+        sync_service: config.sync_service.clone(),
+        runtime_service: config.runtime_service.clone(),
+        transactions_service: config.transactions_service.clone(),
+        cache: Mutex::new(Cache {
+            recent_pinned_blocks: lru::LruCache::with_hasher(
+                NonZeroUsize::new(32).unwrap(),
+                Default::default(),
+            ),
+            subscription_id: None,
+            block_state_root_hashes_numbers: lru::LruCache::with_hasher(
+                NonZeroUsize::new(32).unwrap(),
+                Default::default(),
+            ),
+        }),
+        genesis_block_hash: config.genesis_block_hash,
+        printed_legacy_json_rpc_warning: atomic::AtomicBool::new(false),
+    });
 
-        let mut background_abort_registrations = background_abort_registrations.into_iter();
+    let mut background_abort_registrations = background_abort_registrations.into_iter();
 
-        // A certain number of tasks (`max_parallel_requests`) are dedicated to pulling requests
-        // from the inner state machine and processing them.
-        // Each task can only process one request at a time, which is why we spawn one task per
-        // desired level of parallelism.
-        for n in 0..max_parallel_requests.get() {
-            let me = me.clone();
-            (config.tasks_executor)(
-                format!("{}-requests-{}", me.log_target, n),
-                future::Abortable::new(
-                    async move {
-                        loop {
-                            me.handle_request().await;
-
-                            // We yield once between each request in order to politely let other tasks
-                            // do some work and not monopolize the CPU.
-                            TPlat::yield_after_cpu_intensive().await;
-                        }
-                    },
-                    background_abort_registrations.next().unwrap(),
-                )
-                .map(|_: Result<(), _>| ())
-                .boxed(),
-            );
-        }
-
-        // A certain number of tasks (`max_parallel_subscription_updates`) are dedicated to
-        // processing subscriptions-related tasks after they wake up.
-        for n in 0..max_parallel_subscription_updates.get() {
-            let me = me.clone();
-            (config.tasks_executor)(
-                format!("{}-subscriptions-{}", me.log_target, n),
-                future::Abortable::new(
-                    async move {
-                        loop {
-                            me.requests_subscriptions.run_subscription_task().await;
-
-                            // We yield once between each request in order to politely let other tasks
-                            // do some work and not monopolize the CPU.
-                            TPlat::yield_after_cpu_intensive().await;
-                        }
-                    },
-                    background_abort_registrations.next().unwrap(),
-                )
-                .map(|_: Result<(), _>| ())
-                .boxed(),
-            );
-        }
-
-        // Spawn one task dedicated to filling the `Cache` with new blocks from the runtime
-        // service.
-        // TODO: this is actually racy, as a block subscription task could report a new block to a client, and then client can query it, before this block has been been added to the cache
-        // TODO: extract to separate function
-        (config.tasks_executor)(format!("{}-cache-populate", me.log_target), {
-            let me = me.clone();
+    // A certain number of tasks (`max_parallel_requests`) are dedicated to pulling requests
+    // from the inner state machine and processing them.
+    // Each task can only process one request at a time, which is why we spawn one task per
+    // desired level of parallelism.
+    for n in 0..max_parallel_requests.get() {
+        let me = me.clone();
+        (config.tasks_executor)(
+            format!("{}-requests-{}", me.log_target, n),
             future::Abortable::new(
                 async move {
                     loop {
-                        let mut cache = me.cache.lock().await;
+                        me.handle_request().await;
 
-                        // Subscribe to new runtime service blocks in order to push them in the
-                        // cache as soon as they are available.
-                        // The buffer size should be large enough so that, if the CPU is busy, it
-                        // doesn't become full before the execution of this task resumes.
-                        // The maximum number of pinned block is ignored, as this maximum is a way to
-                        // avoid malicious behaviors. This code is by definition not considered
-                        // malicious.
-                        let mut subscribe_all = me
-                            .runtime_service
-                            .subscribe_all(
-                                "json-rpc-blocks-cache",
-                                32,
-                                NonZeroUsize::new(usize::max_value()).unwrap(),
-                            )
-                            .await;
-
-                        cache.subscription_id = Some(subscribe_all.new_blocks.id());
-                        cache.recent_pinned_blocks.clear();
-                        debug_assert!(cache.recent_pinned_blocks.cap().get() >= 1);
-
-                        let finalized_block_hash = header::hash_from_scale_encoded_header(
-                            &subscribe_all.finalized_block_scale_encoded_header,
-                        );
-                        cache.recent_pinned_blocks.put(
-                            finalized_block_hash,
-                            subscribe_all.finalized_block_scale_encoded_header,
-                        );
-
-                        for block in subscribe_all.non_finalized_blocks_ancestry_order {
-                            if cache.recent_pinned_blocks.len()
-                                == cache.recent_pinned_blocks.cap().get()
-                            {
-                                let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
-                                subscribe_all.new_blocks.unpin_block(&hash).await;
-                            }
-
-                            let hash =
-                                header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                            cache
-                                .recent_pinned_blocks
-                                .put(hash, block.scale_encoded_header);
-                        }
-
-                        drop(cache);
-
-                        loop {
-                            let notification = subscribe_all.new_blocks.next().await;
-                            match notification {
-                                Some(runtime_service::Notification::Block(block)) => {
-                                    let mut cache = me.cache.lock().await;
-
-                                    if cache.recent_pinned_blocks.len()
-                                        == cache.recent_pinned_blocks.cap().get()
-                                    {
-                                        let (hash, _) =
-                                            cache.recent_pinned_blocks.pop_lru().unwrap();
-                                        subscribe_all.new_blocks.unpin_block(&hash).await;
-                                    }
-
-                                    let hash = header::hash_from_scale_encoded_header(
-                                        &block.scale_encoded_header,
-                                    );
-                                    cache
-                                        .recent_pinned_blocks
-                                        .put(hash, block.scale_encoded_header);
-                                }
-                                Some(runtime_service::Notification::Finalized { .. })
-                                | Some(runtime_service::Notification::BestBlockChanged {
-                                    ..
-                                }) => {}
-                                None => break,
-                            }
-                        }
+                        // We yield once between each request in order to politely let other tasks
+                        // do some work and not monopolize the CPU.
+                        TPlat::yield_after_cpu_intensive().await;
                     }
                 },
                 background_abort_registrations.next().unwrap(),
             )
             .map(|_: Result<(), _>| ())
-            .boxed()
-        });
-
-        debug_assert!(background_abort_registrations.next().is_none());
+            .boxed(),
+        );
     }
 
+    // A certain number of tasks (`max_parallel_subscription_updates`) are dedicated to
+    // processing subscriptions-related tasks after they wake up.
+    for n in 0..max_parallel_subscription_updates.get() {
+        let me = me.clone();
+        (config.tasks_executor)(
+            format!("{}-subscriptions-{}", me.log_target, n),
+            future::Abortable::new(
+                async move {
+                    loop {
+                        me.requests_subscriptions.run_subscription_task().await;
+
+                        // We yield once between each request in order to politely let other tasks
+                        // do some work and not monopolize the CPU.
+                        TPlat::yield_after_cpu_intensive().await;
+                    }
+                },
+                background_abort_registrations.next().unwrap(),
+            )
+            .map(|_: Result<(), _>| ())
+            .boxed(),
+        );
+    }
+
+    // Spawn one task dedicated to filling the `Cache` with new blocks from the runtime
+    // service.
+    // TODO: this is actually racy, as a block subscription task could report a new block to a client, and then client can query it, before this block has been been added to the cache
+    // TODO: extract to separate function
+    (config.tasks_executor)(format!("{}-cache-populate", me.log_target), {
+        let me = me.clone();
+        future::Abortable::new(
+            async move {
+                loop {
+                    let mut cache = me.cache.lock().await;
+
+                    // Subscribe to new runtime service blocks in order to push them in the
+                    // cache as soon as they are available.
+                    // The buffer size should be large enough so that, if the CPU is busy, it
+                    // doesn't become full before the execution of this task resumes.
+                    // The maximum number of pinned block is ignored, as this maximum is a way to
+                    // avoid malicious behaviors. This code is by definition not considered
+                    // malicious.
+                    let mut subscribe_all = me
+                        .runtime_service
+                        .subscribe_all(
+                            "json-rpc-blocks-cache",
+                            32,
+                            NonZeroUsize::new(usize::max_value()).unwrap(),
+                        )
+                        .await;
+
+                    cache.subscription_id = Some(subscribe_all.new_blocks.id());
+                    cache.recent_pinned_blocks.clear();
+                    debug_assert!(cache.recent_pinned_blocks.cap().get() >= 1);
+
+                    let finalized_block_hash = header::hash_from_scale_encoded_header(
+                        &subscribe_all.finalized_block_scale_encoded_header,
+                    );
+                    cache.recent_pinned_blocks.put(
+                        finalized_block_hash,
+                        subscribe_all.finalized_block_scale_encoded_header,
+                    );
+
+                    for block in subscribe_all.non_finalized_blocks_ancestry_order {
+                        if cache.recent_pinned_blocks.len()
+                            == cache.recent_pinned_blocks.cap().get()
+                        {
+                            let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
+                            subscribe_all.new_blocks.unpin_block(&hash).await;
+                        }
+
+                        let hash =
+                            header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+                        cache
+                            .recent_pinned_blocks
+                            .put(hash, block.scale_encoded_header);
+                    }
+
+                    drop(cache);
+
+                    loop {
+                        let notification = subscribe_all.new_blocks.next().await;
+                        match notification {
+                            Some(runtime_service::Notification::Block(block)) => {
+                                let mut cache = me.cache.lock().await;
+
+                                if cache.recent_pinned_blocks.len()
+                                    == cache.recent_pinned_blocks.cap().get()
+                                {
+                                    let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
+                                    subscribe_all.new_blocks.unpin_block(&hash).await;
+                                }
+
+                                let hash = header::hash_from_scale_encoded_header(
+                                    &block.scale_encoded_header,
+                                );
+                                cache
+                                    .recent_pinned_blocks
+                                    .put(hash, block.scale_encoded_header);
+                            }
+                            Some(runtime_service::Notification::Finalized { .. })
+                            | Some(runtime_service::Notification::BestBlockChanged { .. }) => {}
+                            None => break,
+                        }
+                    }
+                }
+            },
+            background_abort_registrations.next().unwrap(),
+        )
+        .map(|_: Result<(), _>| ())
+        .boxed()
+    });
+
+    debug_assert!(background_abort_registrations.next().is_none());
+}
+
+impl<TPlat: Platform> Background<TPlat> {
     /// Pulls one request from the inner state machine, and processes it.
     async fn handle_request(self: &Arc<Self>) {
         let (json_rpc_request, state_machine_request_id) =
