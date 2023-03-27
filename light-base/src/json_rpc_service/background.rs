@@ -23,6 +23,7 @@ use super::StartConfig;
 
 use alloc::{
     borrow::ToOwned as _,
+    format,
     string::{String, ToString as _},
     sync::Arc,
     vec::Vec,
@@ -51,7 +52,7 @@ mod state_chain;
 mod transactions;
 
 /// Fields used to process JSON-RPC requests in the background.
-pub(super) struct Background<TPlat: Platform> {
+struct Background<TPlat: Platform> {
     /// Target to use for all the logs.
     log_target: String,
 
@@ -216,62 +217,54 @@ struct Cache {
     >,
 }
 
-impl<TPlat: Platform> Background<TPlat> {
-    pub(super) fn new(
-        log_target: String,
-        requests_subscriptions: Arc<
-            requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>,
-        >,
-        config: &StartConfig<'_, TPlat>,
-    ) -> Arc<Self> {
-        Arc::new(Background {
-            log_target,
-            requests_subscriptions,
-            chain_name: config.chain_spec.name().to_owned(),
-            chain_ty: config.chain_spec.chain_type().to_owned(),
-            chain_is_live: config.chain_spec.has_live_network(),
-            chain_properties_json: config.chain_spec.properties().to_owned(),
-            peer_id_base58: config.peer_id.to_base58(),
-            system_name: config.system_name.clone(),
-            system_version: config.system_version.clone(),
-            network_service: config.network_service.clone(),
-            sync_service: config.sync_service.clone(),
-            runtime_service: config.runtime_service.clone(),
-            transactions_service: config.transactions_service.clone(),
-            cache: Mutex::new(Cache {
-                recent_pinned_blocks: lru::LruCache::with_hasher(
-                    NonZeroUsize::new(32).unwrap(),
-                    Default::default(),
-                ),
-                subscription_id: None,
-                block_state_root_hashes_numbers: lru::LruCache::with_hasher(
-                    NonZeroUsize::new(32).unwrap(),
-                    Default::default(),
-                ),
-            }),
-            genesis_block_hash: config.genesis_block_hash,
-            printed_legacy_json_rpc_warning: atomic::AtomicBool::new(false),
-        })
-    }
+pub(super) fn start<TPlat: Platform>(
+    log_target: String,
+    requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>>,
+    mut config: StartConfig<'_, TPlat>,
+    max_parallel_requests: NonZeroU32,
+    max_parallel_subscription_updates: NonZeroU32,
+    background_abort_registrations: Vec<future::AbortRegistration>,
+) {
+    let me = Arc::new(Background {
+        log_target,
+        requests_subscriptions,
+        chain_name: config.chain_spec.name().to_owned(),
+        chain_ty: config.chain_spec.chain_type().to_owned(),
+        chain_is_live: config.chain_spec.has_live_network(),
+        chain_properties_json: config.chain_spec.properties().to_owned(),
+        peer_id_base58: config.peer_id.to_base58(),
+        system_name: config.system_name.clone(),
+        system_version: config.system_version.clone(),
+        network_service: config.network_service.clone(),
+        sync_service: config.sync_service.clone(),
+        runtime_service: config.runtime_service.clone(),
+        transactions_service: config.transactions_service.clone(),
+        cache: Mutex::new(Cache {
+            recent_pinned_blocks: lru::LruCache::with_hasher(
+                NonZeroUsize::new(32).unwrap(),
+                Default::default(),
+            ),
+            subscription_id: None,
+            block_state_root_hashes_numbers: lru::LruCache::with_hasher(
+                NonZeroUsize::new(32).unwrap(),
+                Default::default(),
+            ),
+        }),
+        genesis_block_hash: config.genesis_block_hash,
+        printed_legacy_json_rpc_warning: atomic::AtomicBool::new(false),
+    });
 
-    /// Runs the background task forever.
-    ///
-    /// This should only ever be called once for each service.
-    pub(super) async fn run(
-        self: Arc<Self>,
-        max_parallel_requests: NonZeroU32,
-        max_parallel_subscription_updates: NonZeroU32,
-    ) -> ! {
-        // The body of this function consists in building a list of tasks, then running them.
-        let mut tasks = stream::FuturesUnordered::new();
+    let mut background_abort_registrations = background_abort_registrations.into_iter();
 
-        // A certain number of tasks (`max_parallel_requests`) are dedicated to pulling requests
-        // from the inner state machine and processing them.
-        // Each task can only process one request at a time, which is why we spawn one task per
-        // desired level of parallelism.
-        for _ in 0..max_parallel_requests.get() {
-            let me = self.clone();
-            tasks.push(
+    // A certain number of tasks (`max_parallel_requests`) are dedicated to pulling requests
+    // from the inner state machine and processing them.
+    // Each task can only process one request at a time, which is why we spawn one task per
+    // desired level of parallelism.
+    for n in 0..max_parallel_requests.get() {
+        let me = me.clone();
+        (config.tasks_executor)(
+            format!("{}-requests-{}", me.log_target, n),
+            future::Abortable::new(
                 async move {
                     loop {
                         me.handle_request().await;
@@ -280,16 +273,21 @@ impl<TPlat: Platform> Background<TPlat> {
                         // do some work and not monopolize the CPU.
                         TPlat::yield_after_cpu_intensive().await;
                     }
-                }
-                .boxed(),
-            );
-        }
+                },
+                background_abort_registrations.next().unwrap(),
+            )
+            .map(|_: Result<(), _>| ())
+            .boxed(),
+        );
+    }
 
-        // A certain number of tasks (`max_parallel_subscription_updates`) are dedicated to
-        // processing subscriptions-related tasks after they wake up.
-        for _ in 0..max_parallel_subscription_updates.get() {
-            let me = self.clone();
-            tasks.push(
+    // A certain number of tasks (`max_parallel_subscription_updates`) are dedicated to
+    // processing subscriptions-related tasks after they wake up.
+    for n in 0..max_parallel_subscription_updates.get() {
+        let me = me.clone();
+        (config.tasks_executor)(
+            format!("{}-subscriptions-{}", me.log_target, n),
+            future::Abortable::new(
                 async move {
                     loop {
                         me.requests_subscriptions.run_subscription_task().await;
@@ -298,17 +296,21 @@ impl<TPlat: Platform> Background<TPlat> {
                         // do some work and not monopolize the CPU.
                         TPlat::yield_after_cpu_intensive().await;
                     }
-                }
-                .boxed(),
-            );
-        }
+                },
+                background_abort_registrations.next().unwrap(),
+            )
+            .map(|_: Result<(), _>| ())
+            .boxed(),
+        );
+    }
 
-        // Spawn one task dedicated to filling the `Cache` with new blocks from the runtime
-        // service.
-        // TODO: this is actually racy, as a block subscription task could report a new block to a client, and then client can query it, before this block has been been added to the cache
-        // TODO: extract to separate function
-        tasks.push({
-            let me = self.clone();
+    // Spawn one task dedicated to filling the `Cache` with new blocks from the runtime
+    // service.
+    // TODO: this is actually racy, as a block subscription task could report a new block to a client, and then client can query it, before this block has been been added to the cache
+    // TODO: extract to separate function
+    (config.tasks_executor)(format!("{}-cache-populate", me.log_target), {
+        let me = me.clone();
+        future::Abortable::new(
             async move {
                 loop {
                     let mut cache = me.cache.lock().await;
@@ -384,16 +386,17 @@ impl<TPlat: Platform> Background<TPlat> {
                         }
                     }
                 }
-            }
-            .boxed()
-        });
+            },
+            background_abort_registrations.next().unwrap(),
+        )
+        .map(|_: Result<(), _>| ())
+        .boxed()
+    });
 
-        // Now that `tasks` is full, we start running them forever.
-        loop {
-            tasks.next().await;
-        }
-    }
+    debug_assert!(background_abort_registrations.next().is_none());
+}
 
+impl<TPlat: Platform> Background<TPlat> {
     /// Pulls one request from the inner state machine, and processes it.
     async fn handle_request(self: &Arc<Self>) {
         let (json_rpc_request, state_machine_request_id) =
