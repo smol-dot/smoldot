@@ -82,7 +82,7 @@ pub struct Config {
 
     /// Maximum number of subscriptions that can be processed simultaneously.
     ///
-    /// In combination with [`StartConfig::max_parallel_requests`], this can increase or decrease
+    /// In combination with [`Config::max_parallel_requests`], this can increase or decrease
     /// the priority of updating subscriptions compared to answering requests.
     pub max_parallel_subscription_updates: NonZeroU32,
 }
@@ -150,7 +150,7 @@ pub fn service(config: Config) -> (Frontend, ServicePrototype) {
 pub struct Frontend {
     /// State machine holding all the clients, requests, and subscriptions.
     ///
-    /// Shared with the [`background::Background`].
+    /// Shared with the [`background`].
     requests_subscriptions:
         Arc<requests_subscriptions::RequestsSubscriptions<background::SubscriptionMessage>>,
 
@@ -251,7 +251,7 @@ impl Drop for Frontend {
 pub struct ServicePrototype {
     /// State machine holding all the clients, requests, and subscriptions.
     ///
-    /// Shared with the [`background::Background`].
+    /// Shared with the [`background`].
     requests_subscriptions:
         Arc<requests_subscriptions::RequestsSubscriptions<background::SubscriptionMessage>>,
 
