@@ -146,7 +146,7 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
     /// be wrong to connect to the "Kusama" created by user A.
     pub potential_relay_chains: TRelays,
 
-    /// If `false`, then no JSON-RPC service is started for this chain. This saves up a lot of
+    /// If `true`, then no JSON-RPC service is started for this chain. This saves up a lot of
     /// resources, but will cause all JSON-RPC requests targeting this chain to fail.
     pub disable_json_rpc: bool,
 }
