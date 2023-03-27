@@ -43,7 +43,7 @@ use crate::{
     network_service, platform::Platform, runtime_service, sync_service, transactions_service,
 };
 
-use alloc::{boxed::Box, format, string::String, sync::Arc};
+use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use core::num::NonZeroU32;
 use futures::prelude::*;
 use smoldot::{
@@ -73,6 +73,18 @@ pub struct Config {
     /// This parameter is necessary in order to prevent users from using up too much memory within
     /// the client.
     pub max_subscriptions: u32,
+
+    /// Maximum number of JSON-RPC requests that can be processed simultaneously.
+    ///
+    /// This parameter is necessary in order to prevent users from using up too much memory within
+    /// the client.
+    pub max_parallel_requests: NonZeroU32,
+
+    /// Maximum number of subscriptions that can be processed simultaneously.
+    ///
+    /// In combination with [`Config::max_parallel_requests`], this can increase or decrease
+    /// the priority of updating subscriptions compared to answering requests.
+    pub max_parallel_subscription_updates: NonZeroU32,
 }
 
 /// Creates a new JSON-RPC service with the given configuration.
@@ -94,19 +106,35 @@ pub fn service(config: Config) -> (Frontend, ServicePrototype) {
 
     let log_target = format!("json-rpc-{}", config.log_name);
 
-    let (background_abort, background_abort_registration) = future::AbortHandle::new_pair();
+    // We are later going to spawn a bunch of tasks. Each task is associated with an "abort
+    // handle" that makes it possible to later abort it. We calculate here the number of handles
+    // that are necessary.
+    // This calculation must be in sync with the part of the code that spawns the tasks. Assertions
+    // are there in order to make sure that this is the case.
+    let num_handles =
+        config.max_parallel_requests.get() + config.max_parallel_subscription_updates.get() + 1;
+
+    let mut background_aborts = Vec::with_capacity(usize::try_from(num_handles).unwrap());
+    let mut background_abort_registrations = Vec::with_capacity(background_aborts.capacity());
+    for _ in 0..num_handles {
+        let (abort, reg) = future::AbortHandle::new_pair();
+        background_aborts.push(abort);
+        background_abort_registrations.push(reg);
+    }
 
     let frontend = Frontend {
         log_target: log_target.clone(),
         requests_subscriptions: requests_subscriptions.clone(),
         client_id,
-        background_abort: Arc::new(background_abort),
+        background_aborts: Arc::from(background_aborts),
     };
 
     let prototype = ServicePrototype {
-        background_abort_registration,
+        background_abort_registrations,
         log_target,
         requests_subscriptions,
+        max_parallel_requests: config.max_parallel_requests,
+        max_parallel_subscription_updates: config.max_parallel_subscription_updates,
     };
 
     (frontend, prototype)
@@ -122,7 +150,7 @@ pub fn service(config: Config) -> (Frontend, ServicePrototype) {
 pub struct Frontend {
     /// State machine holding all the clients, requests, and subscriptions.
     ///
-    /// Shared with the [`background::Background`].
+    /// Shared with the [`background`].
     requests_subscriptions:
         Arc<requests_subscriptions::RequestsSubscriptions<background::SubscriptionMessage>>,
 
@@ -132,9 +160,9 @@ pub struct Frontend {
     /// Target to use when emitting logs.
     log_target: String,
 
-    /// Handle to abort the background task that holds and processes the
+    /// Handles to abort the background tasks that hold and process the
     /// [`Frontend::requests_subscriptions`].
-    background_abort: Arc<future::AbortHandle>,
+    background_aborts: Arc<[future::AbortHandle]>,
 }
 
 impl Frontend {
@@ -211,8 +239,10 @@ impl Drop for Frontend {
     fn drop(&mut self) {
         // Call `abort()` if this was the last instance of the `Arc<AbortHandle>` (and thus the
         // last instance of `Frontend`).
-        if let Some(background_abort) = Arc::get_mut(&mut self.background_abort) {
-            background_abort.abort();
+        if let Some(background_aborts) = Arc::get_mut(&mut self.background_aborts) {
+            for background_abort in background_aborts {
+                background_abort.abort();
+            }
         }
     }
 }
@@ -221,14 +251,22 @@ impl Drop for Frontend {
 pub struct ServicePrototype {
     /// State machine holding all the clients, requests, and subscriptions.
     ///
-    /// Shared with the [`background::Background`].
+    /// Shared with the [`background`].
     requests_subscriptions:
         Arc<requests_subscriptions::RequestsSubscriptions<background::SubscriptionMessage>>,
 
     /// Target to use when emitting logs.
     log_target: String,
 
-    background_abort_registration: future::AbortRegistration,
+    /// Value obtained through [`Config::max_parallel_requests`].
+    max_parallel_requests: NonZeroU32,
+
+    /// Value obtained through [`Config::max_parallel_subscription_updates`].
+    max_parallel_subscription_updates: NonZeroU32,
+
+    /// List of abort handles. When tasks are spawned, each handle is associated with a task, so
+    /// that they can all be aborted. See [`Frontend::background_aborts`].
+    background_abort_registrations: Vec<future::AbortRegistration>,
 }
 
 /// Configuration for a JSON-RPC service.
@@ -280,45 +318,19 @@ pub struct StartConfig<'a, TPlat: Platform> {
     /// >           expensive. We prefer to require this value from the upper layer instead, as
     /// >           it is most likely needed anyway.
     pub genesis_block_state_root: [u8; 32],
-
-    /// Maximum number of JSON-RPC requests that can be processed simultaneously.
-    ///
-    /// This parameter is necessary in order to prevent users from using up too much memory within
-    /// the client.
-    pub max_parallel_requests: NonZeroU32,
-
-    /// Maximum number of subscriptions that can be processed simultaneously.
-    ///
-    /// In combination with [`StartConfig::max_parallel_requests`], this can increase or decrease
-    /// the priority of updating subscriptions compared to answering requests.
-    pub max_parallel_subscription_updates: NonZeroU32,
 }
 
 impl ServicePrototype {
     /// Consumes this prototype and starts the service through [`StartConfig::tasks_executor`].
-    pub fn start<TPlat: Platform>(self, mut config: StartConfig<'_, TPlat>) {
-        let background = background::Background::new(
+    pub fn start<TPlat: Platform>(self, config: StartConfig<'_, TPlat>) {
+        background::start(
             self.log_target.clone(),
             self.requests_subscriptions.clone(),
-            &config,
-        );
-
-        // Spawns the background task that actually runs the logic of that JSON-RPC service.
-        // This background task is abortable through the `background_abort` handle.
-        (config.tasks_executor)(self.log_target, {
-            let max_parallel_requests = config.max_parallel_requests;
-            let max_parallel_subscription_updates = config.max_parallel_subscription_updates;
-            future::Abortable::new(
-                async move {
-                    background
-                        .run(max_parallel_requests, max_parallel_subscription_updates)
-                        .await
-                },
-                self.background_abort_registration,
-            )
-            .map(|_| ())
-            .boxed()
-        });
+            config,
+            self.max_parallel_requests,
+            self.max_parallel_subscription_updates,
+            self.background_abort_registrations,
+        )
     }
 }
 
