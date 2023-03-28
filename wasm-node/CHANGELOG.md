@@ -9,6 +9,7 @@
 - Rename `/webrtc` to `/webrtc-direct` in multiaddresses, in accordance with the rest of the libp2p ecosystem. ([#326](https://github.com/smol-dot/smoldot/pull/326))
 - Improved the ganularity of the tasks that handle JSON-RPC requests and libp2p connections. Smoldot now yields more often to the browser, reducing the chances and the severity of freezes during the rendering of the web page. ([#349](https://github.com/smol-dot/smoldot/pull/349))
 - Smoldot is now compiled with the `bulk-memory-operations` and `sign-extensions-ops` WebAssembly features enabled. This is expected to considerably speed up its execution. The minimum version required to run smoldot is now Chrome 75, Firefox 79, NodeJS v12.5, and Deno v0.4. ([#356](https://github.com/smol-dot/smoldot/pull/356))
+- When the `state_getKeysPaged` JSON-RPC function is called, and the list of keys returned in the response is truncated (due to the `count` and `startKey` parameters), the rest of the keys are now put in a cache with the expectation that `state_getKeysPaged` is called again in order to obtain the rest of the keys. The `state_getKeysPaged` JSON-RPC function is unfortunately very often used by PolkadotJS despite being completely unsuitable for light clients.
 
 ### Fixed
 

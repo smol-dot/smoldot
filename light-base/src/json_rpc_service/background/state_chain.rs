@@ -1052,6 +1052,33 @@ impl<TPlat: Platform> Background<TPlat> {
             ),
         };
 
+        // Because the user is likely to call this function multiple times in a row with the exact
+        // same parameters, we store the untruncated responses in a cache. Check if we hit the
+        // cache.
+        if let Some(keys) = self
+            .cache
+            .lock()
+            .await
+            .state_get_keys_paged
+            .get(&(hash, prefix.clone()))
+        {
+            let out = keys
+                .iter()
+                .filter(|k| start_key.as_ref().map_or(true, |start| *k >= &start.0)) // TODO: not sure if start should be in the set or not?
+                .cloned()
+                .map(methods::HexString)
+                .take(usize::try_from(count).unwrap_or(usize::max_value()))
+                .collect::<Vec<_>>();
+
+            self.requests_subscriptions
+                .respond(
+                    request_id.1,
+                    methods::Response::state_getKeysPaged(out).to_json_response(request_id.0),
+                )
+                .await;
+            return;
+        }
+
         // Obtain the state trie root and height of the requested block.
         // This is necessary to perform network storage queries.
         let (state_root, block_number) = match self.state_trie_root_hash(&hash).await {
@@ -1080,7 +1107,7 @@ impl<TPlat: Platform> Background<TPlat> {
             .storage_prefix_keys_query(
                 block_number,
                 &hash,
-                &prefix.unwrap().0, // TODO: don't unwrap! what is this Option?
+                &prefix.as_ref().unwrap().0, // TODO: don't unwrap! what is this Option?
                 &state_root,
                 3,
                 Duration::from_secs(12),
@@ -1092,11 +1119,24 @@ impl<TPlat: Platform> Background<TPlat> {
             Ok(keys) => {
                 // TODO: instead of requesting all keys with that prefix from the network, pass `start_key` to the network service
                 let out = keys
-                    .into_iter()
-                    .filter(|k| start_key.as_ref().map_or(true, |start| k >= &start.0)) // TODO: not sure if start should be in the set or not?
+                    .iter()
+                    .filter(|k| start_key.as_ref().map_or(true, |start| *k >= &start.0)) // TODO: not sure if start should be in the set or not?
+                    .cloned() // TODO: instead of cloning, make `Response::state_getKeysPaged` accept references
                     .map(methods::HexString)
                     .take(usize::try_from(count).unwrap_or(usize::max_value()))
                     .collect::<Vec<_>>();
+
+                // If the returned response is somehow truncated, it is very likely that the
+                // JSON-RPC client will call the function again with the exact same parameters.
+                // Thus, store the results in a cache.
+                if out.len() != keys.len() {
+                    self.cache
+                        .lock()
+                        .await
+                        .state_get_keys_paged
+                        .push((hash, prefix), keys);
+                }
+
                 methods::Response::state_getKeysPaged(out).to_json_response(request_id.0)
             }
             Err(error) => json_rpc::parse::build_error_response(
