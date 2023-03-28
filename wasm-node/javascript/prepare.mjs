@@ -64,10 +64,20 @@ child_process.execSync(
 
 // The important step in this script is running `cargo build --target wasm32-wasi` on the Rust
 // code. This generates a `wasm` file in `target/wasm32-wasi`.
+// Some optional Wasm features are enabled during the compilation in order to speed up the
+// execution of smoldot.
+// Note that this doesn't enable these features in the Rust standard library (which comes
+// precompiled), but the missing optimizations shouldn't be too much of a problem. The Rust
+// standard library could be compiled with these features using the `-Z build-std` flag, but at
+// the time of the writing of this comment this would require an unstable version of Rust.
+// Use `rustc --print target-features --target wasm32-wasi` to see the list of target features.
+// See <https://webassembly.org/roadmap/> to know which version of which engine supports which
+// feature.
+// See also the issue: <https://github.com/smol-dot/smoldot/issues/350>
 child_process.execSync(
     "cargo +" + rustVersion + " build --package smoldot-light-wasm --target wasm32-wasi --no-default-features " +
     (buildProfile == 'debug' ? '' : ("--profile " + buildProfile)),
-    { 'stdio': 'inherit' }
+    { 'stdio': 'inherit', 'env': { 'RUSTFLAGS': '-C target-feature=+bulk-memory,+sign-ext', ...process.env } }
 );
 
 // The code below will write a variable number of files to the `src/instance/autogen` directory.
