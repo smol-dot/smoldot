@@ -15,9 +15,6 @@
 
 - Fix runtime transactions not being handled properly when multiple transactions are stacked. ([#335](https://github.com/smol-dot/smoldot/pull/335))
 - No longer generate a JavaScript exception due to `document` being undefined when executing inside of a WebWorker. ([#340](https://github.com/smol-dot/smoldot/pull/340))
-
-### Fixed
-
 - Fix JavaScript errors being thrown if a peer resets a libp2p connection abruptly. ([#315](https://github.com/smol-dot/smoldot/pull/315))
 - TCP connections are now properly closed gracefully (with a FIN flag) on NodeJS and Deno. ([#315](https://github.com/smol-dot/smoldot/pull/315))
 - Outbound data on libp2p connections is now properly back-pressured if the remote doesn't accept to receive more data. ([#315](https://github.com/smol-dot/smoldot/pull/315))
