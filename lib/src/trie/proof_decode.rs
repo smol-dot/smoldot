@@ -468,15 +468,44 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             _ => None,
                         },
                         trie_node_info: TrieNodeInfo {
-                            children: Children {
-                                children_bitmap: *children_bitmap,
-                            },
+                            children: self.children_from_key(key, *children_bitmap),
+
                             storage_value,
                         },
                     },
                 )
             },
         )
+    }
+
+    fn children_from_key(&self, key: &Vec<nibble::Nibble>, children_bitmap: u16) -> Children {
+        debug_assert_eq!(self.entries.get(key).unwrap().2, children_bitmap);
+
+        let mut children = [Child::NoChild; 16];
+        let mut child_search = key.clone();
+
+        for nibble in nibble::all_nibbles().filter(|n| (children_bitmap & (1 << u8::from(*n))) != 0)
+        {
+            child_search.push(nibble);
+
+            children[usize::from(u8::from(nibble))] = if let Some((child, _)) = self
+                .entries
+                .range::<[nibble::Nibble], _>((
+                    ops::Bound::Included(&child_search[..]),
+                    ops::Bound::Unbounded,
+                ))
+                .next()
+                .filter(|(maybe_child, _)| maybe_child.starts_with(&child_search))
+            {
+                Child::InProof { child_key: child }
+            } else {
+                Child::AbsentFromProof
+            };
+
+            child_search.pop();
+        }
+
+        Children { children }
     }
 
     /// Returns information about a trie node.
@@ -517,7 +546,9 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                     // that it doesn't exist.
                     return Some(TrieNodeInfo {
                         storage_value: StorageValue::None,
-                        children: Children { children_bitmap: 0 },
+                        children: Children {
+                            children: [Child::NoChild; 16],
+                        },
                     });
                 }
                 Some((found_key, (storage_value, _, children_bitmap))) if *found_key == key => {
@@ -541,9 +572,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                                 )
                             }
                         },
-                        children: Children {
-                            children_bitmap: *children_bitmap,
-                        },
+                        children: self.children_from_key(found_key, *children_bitmap),
                     });
                 }
                 Some((found_key, (_, _, children_bitmap))) if key.starts_with(found_key) => {
@@ -555,24 +584,8 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                         // It has been proven that the requested key doesn't exist in the trie.
                         return Some(TrieNodeInfo {
                             storage_value: StorageValue::None,
-                            children: Children { children_bitmap: 0 },
-                        });
-                    } else if let Some((descendant, _)) = self
-                        .entries
-                        .range::<[nibble::Nibble], _>((
-                            ops::Bound::Included(key),
-                            ops::Bound::Unbounded,
-                        ))
-                        .next()
-                        .filter(|(k, _)| k.starts_with(key))
-                    {
-                        // There exists a node in the proof that starts with `key`. Consequently,
-                        // we know that `key` doesn't correspond to a node that exists.
-                        let nibble = descendant[key.len()];
-                        return Some(TrieNodeInfo {
-                            storage_value: StorageValue::None,
                             children: Children {
-                                children_bitmap: 1 << u8::from(nibble),
+                                children: [Child::NoChild; 16],
                             },
                         });
                     } else if self
@@ -593,7 +606,9 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                         // Thus, the requested key doesn't exist in the trie.
                         return Some(TrieNodeInfo {
                             storage_value: StorageValue::None,
-                            children: Children { children_bitmap: 0 },
+                            children: Children {
+                                children: [Child::NoChild; 16],
+                            },
                         });
                     } else {
                         // Child present.
@@ -746,55 +761,67 @@ pub struct TrieNodeInfo<'a> {
     /// Storage value of the node, if any.
     pub storage_value: StorageValue<'a>,
     /// Which children the node has.
-    pub children: Children,
+    pub children: Children<'a>,
 }
 
 /// See [`TrieNodeInfo::children`].
 #[derive(Copy, Clone)]
-pub struct Children {
-    /// If `(children_bitmap & (1 << n)) == 1` (where `n is in 0..16`), then this node has a
-    /// child whose key starts with the key of the parent, followed with
-    /// `Nibble::try_from(n).unwrap()`, followed with 0 or more extra nibbles unknown here.
-    children_bitmap: u16,
+pub struct Children<'a> {
+    children: [Child<'a>; 16],
 }
 
-impl Children {
+/// Information about a specific child in the list of children.
+#[derive(Copy, Clone)]
+pub enum Child<'a> {
+    /// Child exists and can be found in the proof.
+    InProof {
+        /// Key of the child. Always starts with the key of its parent.
+        child_key: &'a [nibble::Nibble],
+    },
+    /// Child exists but isn't present in the proof.
+    AbsentFromProof,
+    /// Child doesn't exist.
+    NoChild,
+}
+
+impl<'a> Children<'a> {
     /// Returns `true` if a child in the direction of the given nibble is present.
     pub fn has_child(&self, nibble: nibble::Nibble) -> bool {
-        self.children_bitmap & (1 << u8::from(nibble)) != 0
+        match self.children[usize::from(u8::from(nibble))] {
+            Child::InProof { .. } | Child::AbsentFromProof => true,
+            Child::NoChild => false,
+        }
     }
 
-    /// Iterates over all the children of the node. For each child, contains the nibble that must
-    /// be appended to the key of the node in order to find the child.
-    pub fn next_nibbles(&'_ self) -> impl Iterator<Item = nibble::Nibble> + '_ {
-        nibble::all_nibbles().filter(move |n| (self.children_bitmap & (1 << u8::from(*n)) != 0))
+    /// Returns the information about the child in the given direction.
+    pub fn child(&self, direction: nibble::Nibble) -> Child<'a> {
+        self.children[usize::from(u8::from(direction))]
     }
 
-    /// Iterators over all the children of the node. Returns an iterator producing one element per
-    /// child, where the element is `key` plus the nibble of this child.
-    pub fn unfold_append_to_key(
-        &'_ self,
-        key: Vec<nibble::Nibble>,
-    ) -> impl Iterator<Item = Vec<nibble::Nibble>> + '_ {
-        nibble::all_nibbles()
-            .filter(move |n| (self.children_bitmap & (1 << u8::from(*n)) != 0))
-            .map(move |nibble| {
-                let mut k = key.clone();
-                k.push(nibble);
-                k
-            })
+    /// Returns an iterator of 16 items, one for each child.
+    pub fn children(&'_ self) -> impl ExactSizeIterator<Item = Child<'a>> + '_ {
+        self.children.iter().copied()
     }
 }
 
-impl fmt::Debug for Children {
+impl<'a> fmt::Debug for Children<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:016b}", self.children_bitmap)
+        fmt::Binary::fmt(&self, f)
     }
 }
 
-impl fmt::Binary for Children {
+impl<'a> fmt::Binary for Children<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:016b}", self.children_bitmap)
+        for child in &self.children {
+            let chr = match child {
+                Child::InProof { .. } | Child::AbsentFromProof => '1',
+                Child::NoChild => '0',
+            };
+
+            fmt::Write::write_char(f, chr)?
+        }
+
+        Ok(())
     }
 }
 
