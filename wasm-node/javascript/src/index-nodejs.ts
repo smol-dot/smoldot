@@ -107,10 +107,16 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
         const checkBufferedAmount = () => {
             if (socket.readyState != 1)
                 return;
+            // Note that we might expect `bufferedAmount` to always be <= the sum of the lengths
+            // of all the data that has been sent, but that seems to not be the case. It is
+            // unclear whether this is intended or a bug, but is is likely that `bufferedAmount`
+            // also includes WebSocket headers. For this reason, we use `bufferedAmount` as a hint
+            // rather than a correct value.
             const bufferedAmount = socket.bufferedAmount;
-            const wasSent = bufferedAmountCheck.quenedUnreportedBytes - bufferedAmount;
-            bufferedAmountCheck.quenedUnreportedBytes = bufferedAmount;
-            if (bufferedAmount != 0) {
+            let wasSent = bufferedAmountCheck.quenedUnreportedBytes - bufferedAmount;
+            if (wasSent < 0) wasSent = 0;
+            bufferedAmountCheck.quenedUnreportedBytes -= wasSent;
+            if (bufferedAmountCheck.quenedUnreportedBytes != 0) {
                 setTimeout(checkBufferedAmount, bufferedAmountCheck.nextTimeout);
                 bufferedAmountCheck.nextTimeout *= 2;
                 if (bufferedAmountCheck.nextTimeout > 500)
@@ -118,7 +124,8 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             }
             // Note: it is important to call `onWritableBytes` at the very end, as it might
             // trigger a call to `send`.
-            config.onWritableBytes(wasSent);
+            if (wasSent != 0)
+                config.onWritableBytes(wasSent);
         };
 
         socket.onopen = () => {
