@@ -7,7 +7,7 @@
 - No longer panic when a libp2p networking request emitted by smoldot exceeds the maximum size allowed by the protocol. Instead, either a warning is printed (similar to consensus-related issues) or a JSON-RPC error is returned. ([#318](https://github.com/smol-dot/smoldot/pull/318))
 - Add an arbitrary limit to the size of unprocessed networking packets, in order to avoid DoS attacks. This limit is necessary in order to bypass limitations in the networking APIs exposed by browsers. ([#312](https://github.com/smol-dot/smoldot/pull/312))
 - Rename `/webrtc` to `/webrtc-direct` in multiaddresses, in accordance with the rest of the libp2p ecosystem. ([#326](https://github.com/smol-dot/smoldot/pull/326))
-- Improved the ganularity of the tasks that handle JSON-RPC requests and libp2p connections. Smoldot will now yield more often to the browser, reducing the chances and the severity of freezes during the rendering of the web page. ([#349](https://github.com/smol-dot/smoldot/pull/349))
+- Improved the ganularity of the tasks that handle JSON-RPC requests and libp2p connections. Smoldot now yields more often to the browser, reducing the chances and the severity of freezes during the rendering of the web page. ([#349](https://github.com/smol-dot/smoldot/pull/349))
 
 ### Fixed
 
