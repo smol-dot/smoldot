@@ -799,7 +799,7 @@ impl<'a> Children<'a> {
     }
 
     /// Returns an iterator of 16 items, one for each child.
-    pub fn children(&'_ self) -> impl ExactSizeIterator<Item = Child<'a>> + '_ {
+    pub fn children(&'_ self) -> impl DoubleEndedIterator + ExactSizeIterator<Item = Child<'a>> + '_ {
         self.children.iter().copied()
     }
 }
