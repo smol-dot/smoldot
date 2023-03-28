@@ -215,6 +215,13 @@ struct Cache {
         >,
         fnv::FnvBuildHasher,
     >,
+
+    /// When `state_getKeysPaged` is called and the response is truncated, the response is
+    /// inserted in this cache. The API user is likely to call `state_getKeysPaged` again with
+    /// the same parameters, in which case we hit the cache and avoid the networking requests.
+    /// The keys are `(block_hash, prefix)` and values are list of keys.
+    state_get_keys_paged:
+        lru::LruCache<([u8; 32], Option<methods::HexString>), Vec<Vec<u8>>, fnv::FnvBuildHasher>,
 }
 
 pub(super) fn start<TPlat: Platform>(
@@ -247,6 +254,10 @@ pub(super) fn start<TPlat: Platform>(
             subscription_id: None,
             block_state_root_hashes_numbers: lru::LruCache::with_hasher(
                 NonZeroUsize::new(32).unwrap(),
+                Default::default(),
+            ),
+            state_get_keys_paged: lru::LruCache::with_hasher(
+                NonZeroUsize::new(2).unwrap(),
                 Default::default(),
             ),
         }),
