@@ -124,9 +124,7 @@ impl Sub<Instant> for Instant {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref CLIENT: Mutex<Option<init::Client<platform::Platform, ()>>> = Mutex::new(None);
-}
+static CLIENT: Mutex<Option<init::Client<platform::Platform, ()>>> = Mutex::new(None);
 
 fn init(
     max_log_level: u32,
