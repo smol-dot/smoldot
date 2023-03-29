@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.1 - 2023-03-29
+
 ### Changed
 
 - No longer panic when a libp2p networking request emitted by smoldot exceeds the maximum size allowed by the protocol. Instead, either a warning is printed (similar to consensus-related issues) or a JSON-RPC error is returned. ([#318](https://github.com/smol-dot/smoldot/pull/318))
