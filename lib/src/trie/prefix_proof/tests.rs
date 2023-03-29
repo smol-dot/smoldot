@@ -14499,8 +14499,11 @@ fn regression_test_174() {
                 prefix_scan = scan;
                 continue;
             }
-            Ok(ResumeOutcome::Success { keys }) => {
-                assert_eq!(keys, EXPECTED);
+            Ok(ResumeOutcome::Success { mut keys }) => {
+                let mut expected = EXPECTED.to_owned();
+                expected.sort();
+                keys.sort();
+                assert_eq!(keys, expected);
                 return;
             }
             Err((_, err)) => panic!("{err:?}"),
