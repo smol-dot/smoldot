@@ -66,6 +66,7 @@
 
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![recursion_limit = "512"]
+#![forbid(unsafe_code)]
 #![deny(rustdoc::broken_intra_doc_links)]
 // TODO: the `unused_crate_dependencies` lint is disabled because of dev-dependencies, see <https://github.com/rust-lang/rust/issues/95513>
 // #![deny(unused_crate_dependencies)]
