@@ -25,12 +25,25 @@ This repository contains the following components:
 
 - `smoldot-full-node` (`/full-node`): A work-in-progress prototype of a full node binary that can connect to Substrate-base chains. Doesn't yet support many features that the official client supports.
 
+# Frequently asked questions
+
 ## Does smoldot support &lt;blockchain&gt;?
 
 Smoldot pledges to support the Polkadot, Kusama, Westend, and Rococo chains, where "support" means "everything works as intended".
 
 Because Polkadot, Kusama, Westend, and Rococo were built using the Substrate framework, smoldot has to support most features found in the Substrate repository. Consequently, smoldot is able to connect to most Substrate-based chains.
 However, given that Substrate is a very generic framework that doesn't offer any specification, and that any user of Substrate can in principle modify most aspects of it in any way they want, it is not possible to offer a guarantee that smoldot is compatible with all Substrate-based chains.
+
+## Can I embed smoldot into a mobile application or an application in general?
+
+Yes! There exists two ways of doing that:
+
+- If your application is in Rust, use the `smoldot-light` library (see above). You can find a usage example in the `examples` directory. If your application uses a language or technology other than Rust (Flutter, React Native, C++, etc.), you can also embed ̀`smoldot-light` by writing a small Rust library that uses `smoldot-light` then writing bindings from your technology that makes it possible to call into your Rust code.
+- If your application is in JavaScript or can embed JavaScript (for example in a `WebView`), use the `smoldot-light-js` package (see above). `smoldot-light-js` is itself built on top of `smoldot-light`.
+
+For technologies other than Rust or JavaScript, the second solution has obviously more overhead since there are more layers, but is easier.
+
+While it is not excluded to add Flutter/React Native/etc. packages to this repository that make it as easy as possible to integrate smoldot, the main maintainer of this repository unfortunately doesn't know enough about mobile development to create or maintain these packages.
 
 # About the repository
 
