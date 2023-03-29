@@ -20,13 +20,13 @@
 - TCP connections are now properly closed gracefully (with a FIN flag) on NodeJS and Deno. ([#315](https://github.com/smol-dot/smoldot/pull/315))
 - Outbound data on libp2p connections is now properly back-pressured if the remote doesn't accept to receive more data. ([#315](https://github.com/smol-dot/smoldot/pull/315))
 
-## 1.0.0 - 2022-03-12
+## 1.0.0 - 2023-03-12
 
 ### Fixed
 
 - Fix Deno throwing an exception when failing to connect to an unreachable node through a TCP/IP multiaddr. ([#246](https://github.com/smol-dot/smoldot/pull/246))
 
-## 0.7.13 - 2022-03-03
+## 0.7.13 - 2023-03-03
 
 ### Added
 
@@ -44,7 +44,7 @@
 - Fix panic when the input data of a Wasm function call is larger than a Wasm page. ([#218](https://github.com/smol-dot/smoldot/pull/218))
 - Subscriptions to the `chain_subscribeAllHeads` JSON-RPC function now generate notifications named `chain_allHead`, like in Substrate. They were erroneously named `chain_newHead`. ([#227](https://github.com/smol-dot/smoldot/pull/227))
 
-## 0.7.12 - 2022-02-22
+## 0.7.12 - 2023-02-22
 
 ### Changed
 
@@ -57,7 +57,7 @@
 - The memory of the Wasm virtual machine is now properly zeroed between runs. This should fix a rare `MemoryAccessOutOfBounds` error occasionally appearing. ([#211](https://github.com/smol-dot/smoldot/pull/211))
 - Fix the Wasm virtual machine not working properly if it exports its memory rather than import it. ([#207](https://github.com/smol-dot/smoldot/pull/207))
 
-## 0.7.11 - 2022-02-13
+## 0.7.11 - 2023-02-13
 
 ### Changed
 
@@ -68,7 +68,7 @@
 - Fix `state_getKeys` and `state_getKeysPaged` missing entries under certain conditions. ([#178](https://github.com/smol-dot/smoldot/pull/178))
 - The alternative spellings `relayChain` and `paraId` for the `relay_chain` and `para_id` fields in chain specifications are now properly accepted as intended. ([#160](https://github.com/smol-dot/smoldot/pull/160))
 
-## 0.7.10 - 2022-02-10
+## 0.7.10 - 2023-02-10
 
 ### Fixed
 
