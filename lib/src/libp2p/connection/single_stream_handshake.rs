@@ -77,10 +77,10 @@ enum NegotiationState {
         negotiation: multistream_select::InProgress<iter::Once<&'static str>, &'static str>,
         /// Handshake that will be driven after the protocol negotiation is successful. Created
         /// ahead of time but not actually used.
-        handshake: Box<noise::HandshakeInProgress>,
+        handshake: noise::HandshakeInProgress,
     },
     Encryption {
-        handshake: Box<noise::HandshakeInProgress>,
+        handshake: noise::HandshakeInProgress,
     },
     Multiplexing {
         peer_id: PeerId,
@@ -108,11 +108,11 @@ impl HealthyHandshake {
         HealthyHandshake {
             state: NegotiationState::EncryptionProtocol {
                 negotiation,
-                handshake: Box::new(noise::HandshakeInProgress::new(noise::Config {
+                handshake: noise::HandshakeInProgress::new(noise::Config {
                     key: noise_key,
                     is_initiator,
                     prologue: &[],
-                })),
+                }),
             },
         }
     }
@@ -193,9 +193,7 @@ impl HealthyHandshake {
                         }
                         noise::NoiseHandshake::InProgress(updated) => {
                             return Ok(Handshake::Healthy(HealthyHandshake {
-                                state: NegotiationState::Encryption {
-                                    handshake: Box::new(updated),
-                                },
+                                state: NegotiationState::Encryption { handshake: updated },
                             }));
                         }
                     };
