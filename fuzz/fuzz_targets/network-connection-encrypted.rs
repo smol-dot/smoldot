@@ -47,15 +47,16 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         is_initiator
     };
 
-    let mut local = single_stream_handshake::Handshake::noise_yamux(local_is_initiator);
-    let mut remote = single_stream_handshake::Handshake::noise_yamux(!local_is_initiator);
-
     // Note that the noise keys and randomness are constant rather than being derived from the
     // fuzzing data. This is because we're not here to fuzz the cryptographic code (which we
     // assume is working well) but everything around it (decoding frames, allocating buffers,
     // etc.).
     let local_key = noise::NoiseKey::new(&[0; 32]);
     let remote_key = noise::NoiseKey::new(&[1; 32]);
+
+    let mut local = single_stream_handshake::Handshake::noise_yamux(&local_key, local_is_initiator);
+    let mut remote =
+        single_stream_handshake::Handshake::noise_yamux(&remote_key, !local_is_initiator);
 
     // Store the data that the local has emitted but the remote hasn't received yet, and vice
     // versa.
@@ -72,9 +73,6 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     ) {
         match local {
             single_stream_handshake::Handshake::Success { .. } => {}
-            single_stream_handshake::Handshake::NoiseKeyRequired(key_req) => {
-                local = key_req.resume(&local_key).into()
-            }
             single_stream_handshake::Handshake::Healthy(nego) => {
                 let local_to_remote_buffer_len = local_to_remote_buffer.len();
                 if local_to_remote_buffer_len < local_to_remote_buffer.capacity() {
@@ -104,9 +102,6 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
 
         match remote {
             single_stream_handshake::Handshake::Success { .. } => {}
-            single_stream_handshake::Handshake::NoiseKeyRequired(key_req) => {
-                remote = key_req.resume(&remote_key).into()
-            }
             single_stream_handshake::Handshake::Healthy(nego) => {
                 let remote_to_local_buffer_len = remote_to_local_buffer.len();
                 if remote_to_local_buffer_len < remote_to_local_buffer.capacity() {
