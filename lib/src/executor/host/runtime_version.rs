@@ -108,17 +108,37 @@ pub fn find_encoded_embedded_runtime_version_apis(
                         // We found a custom section with a name that interests us, but we already
                         // parsed a custom section with that same name earlier. Continue with the
                         // value that was parsed earlier.
-                        (prev_found @ (Some(_), _), Some((b"runtime_version", _))) => prev_found,
-                        (prev_found @ (_, Some(_)), Some((b"runtime_apis", _))) => prev_found,
+                        (
+                            prev_found @ (Some(_), _),
+                            Some(WasmSection {
+                                name: b"runtime_version",
+                                ..
+                            }),
+                        ) => prev_found,
+                        (
+                            prev_found @ (_, Some(_)),
+                            Some(WasmSection {
+                                name: b"runtime_apis",
+                                ..
+                            }),
+                        ) => prev_found,
 
                         // Found a custom section that interests us, and we didn't find one
                         // before.
-                        ((None, prev_rt_apis), Some((b"runtime_version", content))) => {
-                            (Some(content), prev_rt_apis)
-                        }
-                        ((prev_rt_version, None), Some((b"runtime_apis", content))) => {
-                            (prev_rt_version, Some(content))
-                        }
+                        (
+                            (None, prev_rt_apis),
+                            Some(WasmSection {
+                                name: b"runtime_version",
+                                content,
+                            }),
+                        ) => (Some(content), prev_rt_apis),
+                        (
+                            (prev_rt_version, None),
+                            Some(WasmSection {
+                                name: b"runtime_apis",
+                                content,
+                            }),
+                        ) => (prev_rt_version, Some(content)),
 
                         // Found a custom section with a name that doesn't interest us.
                         (prev_found, Some(_)) => prev_found,
@@ -500,8 +520,13 @@ fn core_version_api<'a, E: nom::error::ParseError<&'a [u8]>>(
     )(bytes)
 }
 
+struct WasmSection<'a> {
+    name: &'a [u8],
+    content: &'a [u8],
+}
+
 /// Parses a Wasm section. If it is a custom section, returns its name and content.
-fn wasm_section(bytes: &'_ [u8]) -> nom::IResult<&'_ [u8], Option<(&'_ [u8], &'_ [u8])>> {
+fn wasm_section(bytes: &'_ [u8]) -> nom::IResult<&'_ [u8], Option<WasmSection<'_>>> {
     nom::branch::alt((
         nom::combinator::map(
             nom::combinator::map_parser(
@@ -520,7 +545,7 @@ fn wasm_section(bytes: &'_ [u8]) -> nom::IResult<&'_ [u8], Option<(&'_ [u8], &'_
                     nom::combinator::rest,
                 )),
             ),
-            |(name, content)| Some((name, content)),
+            |(name, content)| Some(WasmSection { name, content }),
         ),
         nom::combinator::map(
             nom::sequence::tuple((
