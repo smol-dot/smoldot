@@ -1304,10 +1304,7 @@ pub enum ProtocolError {
     #[display(fmt = "Error in an incoming substream: {_0}")]
     InboundError(InboundError),
     /// Error while decoding the handshake of the block announces substream.
-    #[display(
-        fmt = "Error while decoding the handshake of the block announces substream: {}",
-        _0
-    )]
+    #[display(fmt = "Error while decoding the handshake of the block announces substream: {_0}")]
     BadBlockAnnouncesHandshake(protocol::BlockAnnouncesHandshakeDecodeError),
     /// Error while decoding a received block announce.
     #[display(fmt = "Error while decoding a received block announce: {_0}")]

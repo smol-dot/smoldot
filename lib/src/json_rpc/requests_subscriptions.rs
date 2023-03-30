@@ -327,7 +327,7 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
             let removed = clients.list.remove(&client.0)?;
             debug_assert!(Arc::ptr_eq(
                 &(removed.clone() as Arc<_>),
-                &client.1.upgrade().unwrap()
+                &Arc::downcast::<ClientInner<TSubMsg>>(client.1.upgrade().unwrap()).unwrap()
             ));
 
             // Shrink `clients.list` in order to potentially reclaim memory after a potential

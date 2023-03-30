@@ -200,7 +200,7 @@ impl alloc::task::Wake for Waker {
                 // but it is possible that it is not in the niche situation where a task get woken
                 // up while the queue is currently being destroyed.
                 let Some(tasks_queue) = self.tasks_queue.upgrade() else { return };
-                tasks_queue.queue.push(QueuedTask::InSlab(idx as usize));
+                tasks_queue.queue.push(QueuedTask::InSlab(idx));
                 tasks_queue.item_pushed_to_queue.notify_additional(1);
             }
         }

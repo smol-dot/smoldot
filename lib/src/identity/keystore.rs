@@ -164,7 +164,7 @@ impl Keystore {
                             nom::bytes::complete::tag("-"),
                             nom::combinator::map_opt(
                                 nom::bytes::complete::take_while(|c| {
-                                    (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+                                    ('0'..='9').contains(&c) || ('a'..='f').contains(&c)
                                 }),
                                 |k: &str| {
                                     if k.len() == 64 {
