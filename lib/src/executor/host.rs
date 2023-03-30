@@ -274,9 +274,9 @@ impl HostVmPrototype {
     /// Creates a new [`HostVmPrototype`]. Parses and potentially JITs the module.
     pub fn new(config: Config<impl AsRef<[u8]>>) -> Result<Self, NewErr> {
         // TODO: configurable maximum allowed size? a uniform value is important for consensus
-        let module = zstd::zstd_decode_if_necessary(config.module.as_ref(), 50 * 1024 * 1024)
+        let module_bytes = zstd::zstd_decode_if_necessary(config.module.as_ref(), 50 * 1024 * 1024)
             .map_err(NewErr::BadFormat)?;
-        let runtime_version = runtime_version::find_embedded_runtime_version(&module)
+        let runtime_version = runtime_version::find_embedded_runtime_version(&module_bytes)
             .ok()
             .flatten(); // TODO: return error instead of using `ok()`? unclear
 
@@ -286,11 +286,11 @@ impl HostVmPrototype {
         // array.
         let (mut vm_proto, registered_functions) = {
             let mut registered_functions = Vec::new();
-            let vm_proto = vm::VirtualMachinePrototype::new(
-                module,
-                config.exec_hint,
+            let vm_proto = vm::VirtualMachinePrototype::new(vm::Config {
+                module_bytes: &module_bytes[..],
+                exec_hint: config.exec_hint,
                 // This closure is called back for each function that the runtime imports.
-                |mod_name, f_name, signature| {
+                symbols: &mut |mod_name, f_name, signature| {
                     if mod_name != "env" {
                         return Err(());
                     }
@@ -309,7 +309,7 @@ impl HostVmPrototype {
                     });
                     Ok(id)
                 },
-            )?;
+            })?;
             registered_functions.shrink_to_fit();
             (vm_proto, registered_functions)
         };

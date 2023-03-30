@@ -51,11 +51,11 @@ struct BaseComponents {
 impl InterpreterPrototype {
     /// See [`super::VirtualMachinePrototype::new`].
     pub fn new(
-        module_bytes: impl AsRef<[u8]>,
-        mut symbols: impl FnMut(&str, &str, &Signature) -> Result<usize, ()>,
+        module_bytes: &[u8],
+        symbols: &mut dyn FnMut(&str, &str, &Signature) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
         let engine = wasmi::Engine::default(); // TODO: investigate config
-        let module = wasmi::Module::new(&engine, module_bytes.as_ref())
+        let module = wasmi::Module::new(&engine, module_bytes)
             .map_err(|err| NewErr::InvalidWasm(err.to_string()))?;
 
         let mut resolved_imports = Vec::with_capacity(module.imports().len());
