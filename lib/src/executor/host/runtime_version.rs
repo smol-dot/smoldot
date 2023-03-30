@@ -47,7 +47,7 @@ pub fn find_embedded_runtime_version(
     decoded_runtime_version.apis =
         match CoreVersionApisRefIter::from_slice_no_length(runtime_apis_content) {
             Ok(d) => d,
-            Err(()) => return Err(FindEmbeddedRuntimeVersionError::RuntimeApisDecode),
+            Err(err) => return Err(FindEmbeddedRuntimeVersionError::RuntimeApisDecode(err)),
         };
 
     Ok(Some(CoreVersion(
@@ -66,7 +66,8 @@ pub enum FindEmbeddedRuntimeVersionError {
     /// Error while decoding the runtime version.
     RuntimeVersionDecode,
     /// Error while decoding the runtime APIs.
-    RuntimeApisDecode,
+    #[display(fmt = "{_0}")]
+    RuntimeApisDecode(CoreVersionApisFromSliceErr),
 }
 
 /// Tries to find the custom sections containing the runtime version and APIs.
@@ -255,7 +256,7 @@ impl<'a> CoreVersionApisRefIter<'a> {
     /// Decodes a SCALE-encoded list of APIs.
     ///
     /// The input slice isn't expected to contain the number of APIs.
-    pub fn from_slice_no_length(input: &'a [u8]) -> Result<Self, ()> {
+    pub fn from_slice_no_length(input: &'a [u8]) -> Result<Self, CoreVersionApisFromSliceErr> {
         let result: Result<_, nom::Err<nom::error::Error<&[u8]>>> =
             nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
                 nom::combinator::recognize(nom::multi::fold_many0(
@@ -268,7 +269,7 @@ impl<'a> CoreVersionApisRefIter<'a> {
 
         match result {
             Ok((_, me)) => Ok(me),
-            Err(_) => Err(()),
+            Err(_) => Err(CoreVersionApisFromSliceErr()),
         }
     }
 
@@ -370,6 +371,11 @@ impl<'a> fmt::Debug for CoreVersionApisRefIter<'a> {
         f.debug_list().entries(self.clone()).finish()
     }
 }
+
+/// Error potentially returned by [`CoreVersionApisRefIter::from_slice_no_length`].
+#[derive(Debug, Clone, derive_more::Display)]
+#[display(fmt = "Error decoding core version APIs")]
+pub struct CoreVersionApisFromSliceErr();
 
 /// Hashes the name of an API in order to be able to compare it to [`CoreVersionApi::name_hash`].
 pub fn hash_api_name(api_name: &str) -> [u8; 8] {
