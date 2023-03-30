@@ -51,9 +51,6 @@ mod tests;
 pub enum Handshake {
     /// Connection handshake in progress.
     Healthy(HealthyHandshake),
-    /// Connection handshake has reached the noise handshake, and it is necessary to know the
-    /// noise key in order to proceed.
-    NoiseKeyRequired(NoiseKeyRequired),
     /// Handshake has succeeded. Connection is now open.
     Success {
         /// Network identity of the remote.
@@ -65,8 +62,8 @@ pub enum Handshake {
 
 impl Handshake {
     /// Shortcut for [`HealthyHandshake::noise_yamux`] wrapped in a [`Handshake`].
-    pub fn noise_yamux(is_initiator: bool) -> Self {
-        HealthyHandshake::noise_yamux(is_initiator).into()
+    pub fn noise_yamux(noise_key: &NoiseKey, is_initiator: bool) -> Self {
+        HealthyHandshake::noise_yamux(noise_key, is_initiator).into()
     }
 }
 
@@ -78,7 +75,9 @@ pub struct HealthyHandshake {
 enum NegotiationState {
     EncryptionProtocol {
         negotiation: multistream_select::InProgress<iter::Once<&'static str>, &'static str>,
-        is_initiator: bool,
+        /// Handshake that will be driven after the protocol negotiation is successful. Created
+        /// ahead of time but not actually used.
+        handshake: Box<noise::HandshakeInProgress>,
     },
     Encryption {
         handshake: Box<noise::HandshakeInProgress>,
@@ -93,9 +92,9 @@ enum NegotiationState {
 impl HealthyHandshake {
     /// Initializes a new state machine for a Noise + Yamux handshake.
     ///
-    /// Must pass `true` if the connection has been opened by the local machine, or `false` if it
-    /// has been opened by the remote.
-    pub fn noise_yamux(is_initiator: bool) -> Self {
+    /// Must pass `true` for `is_initiator` if the connection has been opened by the local machine,
+    /// or `false` if it has been opened by the remote.
+    pub fn noise_yamux(noise_key: &NoiseKey, is_initiator: bool) -> Self {
         let negotiation = multistream_select::InProgress::new(if is_initiator {
             multistream_select::Config::Dialer {
                 requested_protocol: noise::PROTOCOL_NAME,
@@ -109,7 +108,11 @@ impl HealthyHandshake {
         HealthyHandshake {
             state: NegotiationState::EncryptionProtocol {
                 negotiation,
-                is_initiator,
+                handshake: Box::new(noise::HandshakeInProgress::new(noise::Config {
+                    key: noise_key,
+                    is_initiator,
+                    prologue: &[],
+                })),
             },
         }
     }
@@ -128,7 +131,7 @@ impl HealthyHandshake {
             match self.state {
                 NegotiationState::EncryptionProtocol {
                     negotiation,
-                    is_initiator,
+                    handshake,
                 } => {
                     // Earliest point of the handshake. The encryption is being negotiated.
                     // Delegating read/write to the negotiation.
@@ -141,16 +144,13 @@ impl HealthyHandshake {
                             Ok(Handshake::Healthy(HealthyHandshake {
                                 state: NegotiationState::EncryptionProtocol {
                                     negotiation: updated,
-                                    is_initiator,
+                                    handshake,
                                 },
                             }))
                         }
                         multistream_select::Negotiation::Success(_) => {
-                            // Reached the point where the Noise key is required in order to
-                            // continue. This Noise key is requested from the user.
-                            Ok(Handshake::NoiseKeyRequired(NoiseKeyRequired {
-                                is_initiator,
-                            }))
+                            self.state = NegotiationState::Encryption { handshake };
+                            continue;
                         }
                         multistream_select::Negotiation::NotAvailable => {
                             Err(HandshakeError::NoEncryptionProtocol)
@@ -303,33 +303,6 @@ impl HealthyHandshake {
 impl fmt::Debug for HealthyHandshake {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("HealthyHandshake").finish()
-    }
-}
-
-/// Connection handshake has reached the noise handshake, and it is necessary to know the noise
-/// key in order to proceed.
-pub struct NoiseKeyRequired {
-    is_initiator: bool,
-}
-
-impl NoiseKeyRequired {
-    /// Turn this [`NoiseKeyRequired`] back into a [`HealthyHandshake`] by indicating the noise key.
-    pub fn resume(self, noise_key: &NoiseKey) -> HealthyHandshake {
-        HealthyHandshake {
-            state: NegotiationState::Encryption {
-                handshake: Box::new(noise::HandshakeInProgress::new(noise::Config {
-                    key: noise_key,
-                    is_initiator: self.is_initiator,
-                    prologue: &[],
-                })),
-            },
-        }
-    }
-}
-
-impl fmt::Debug for NoiseKeyRequired {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("NoiseKeyRequired").finish()
     }
 }
 

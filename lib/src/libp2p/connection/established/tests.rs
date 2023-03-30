@@ -49,11 +49,11 @@ fn perform_handshake(
     assert_ne!(alice_to_bob_buffer_size, 0);
     assert_ne!(bob_to_alice_buffer_size, 0);
 
-    let mut alice = single_stream_handshake::Handshake::noise_yamux(true);
-    let mut bob = single_stream_handshake::Handshake::noise_yamux(false);
-
     let alice_key = NoiseKey::new(&rand::random());
     let bob_key = NoiseKey::new(&rand::random());
+
+    let mut alice = single_stream_handshake::Handshake::noise_yamux(&alice_key, true);
+    let mut bob = single_stream_handshake::Handshake::noise_yamux(&bob_key, false);
 
     let mut alice_to_bob_buffer = Vec::with_capacity(alice_to_bob_buffer_size);
     let mut bob_to_alice_buffer = Vec::with_capacity(bob_to_alice_buffer_size);
@@ -67,9 +67,6 @@ fn perform_handshake(
     ) {
         match alice {
             single_stream_handshake::Handshake::Success { .. } => {}
-            single_stream_handshake::Handshake::NoiseKeyRequired(key_req) => {
-                alice = key_req.resume(&alice_key).into()
-            }
             single_stream_handshake::Handshake::Healthy(nego) => {
                 let alice_to_bob_buffer_len = alice_to_bob_buffer.len();
                 if alice_to_bob_buffer_len < alice_to_bob_buffer.capacity() {
@@ -99,9 +96,6 @@ fn perform_handshake(
 
         match bob {
             single_stream_handshake::Handshake::Success { .. } => {}
-            single_stream_handshake::Handshake::NoiseKeyRequired(key_req) => {
-                bob = key_req.resume(&bob_key).into()
-            }
             single_stream_handshake::Handshake::Healthy(nego) => {
                 let bob_to_alice_buffer_len = bob_to_alice_buffer.len();
                 if bob_to_alice_buffer_len < bob_to_alice_buffer.capacity() {

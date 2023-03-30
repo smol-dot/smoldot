@@ -74,9 +74,6 @@ enum SingleStreamConnectionTaskInner<TNow> {
         /// When the handshake phase times out.
         timeout: TNow,
 
-        /// See [`super::Config::noise_key`].
-        noise_key: Arc<NoiseKey>,
-
         /// See [`super::Config::max_inbound_substreams`].
         max_inbound_substreams: usize,
 
@@ -154,11 +151,11 @@ where
         SingleStreamConnectionTask {
             connection: SingleStreamConnectionTaskInner::Handshake {
                 handshake: single_stream_handshake::HealthyHandshake::noise_yamux(
+                    &config.noise_key,
                     config.is_initiator,
                 ),
                 randomness_seed: config.randomness_seed,
                 timeout: config.handshake_timeout,
-                noise_key: config.noise_key,
                 max_inbound_substreams: config.max_inbound_substreams,
                 notification_protocols: config.notification_protocols,
                 request_response_protocols: config.request_response_protocols,
@@ -692,7 +689,6 @@ where
                 mut handshake,
                 randomness_seed,
                 timeout,
-                noise_key,
                 max_inbound_substreams,
                 notification_protocols,
                 request_response_protocols,
@@ -756,7 +752,6 @@ where
                                 handshake: updated_handshake,
                                 randomness_seed,
                                 timeout,
-                                noise_key,
                                 max_inbound_substreams,
                                 notification_protocols,
                                 request_response_protocols,
@@ -807,9 +802,6 @@ where
                                     VecDeque::with_capacity(4),
                             };
                             break;
-                        }
-                        single_stream_handshake::Handshake::NoiseKeyRequired(key) => {
-                            handshake = key.resume(&noise_key);
                         }
                     }
                 }
