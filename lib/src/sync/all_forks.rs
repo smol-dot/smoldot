@@ -1379,7 +1379,7 @@ impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
         self.inner.inner.inner.blocks.insert_unverified_block(
             self.decoded_header.number,
             self.inner.expected_next_hash,
-            pending_blocks::UnverifiedBlockState::HeaderKnown {
+            pending_blocks::UnverifiedBlockState::Header {
                 parent_hash: self.decoded_header.parent_hash,
             },
             PendingBlock {
@@ -1619,7 +1619,7 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
         self.inner.inner.blocks.insert_unverified_block(
             self.announced_header_number,
             self.announced_header_hash,
-            pending_blocks::UnverifiedBlockState::HeaderKnown {
+            pending_blocks::UnverifiedBlockState::Header {
                 parent_hash: self.announced_header_parent_hash,
             },
             PendingBlock {
@@ -1822,7 +1822,7 @@ impl<'a, TBl, TRq, TSrc> AddSourceUnknown<'a, TBl, TRq, TSrc> {
         self.inner.inner.blocks.insert_unverified_block(
             self.best_block_number,
             self.best_block_hash,
-            pending_blocks::UnverifiedBlockState::HeightHashKnown,
+            pending_blocks::UnverifiedBlockState::HeightHash,
             PendingBlock {
                 header: None,
                 user_data: best_block_user_data,

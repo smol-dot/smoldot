@@ -136,14 +136,14 @@ pub struct Config {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum UnverifiedBlockState {
     /// Only the height and hash of the block is known.
-    HeightHashKnown,
+    HeightHash,
     /// The header of the block is known, but not its body.
-    HeaderKnown {
+    Header {
         /// Hash of the block that is parent of this one.
         parent_hash: [u8; 32],
     },
     /// The header and body of the block are both known. The block is waiting to be verified.
-    HeaderBodyKnown {
+    HeaderBody {
         /// Hash of the block that is parent of this one.
         parent_hash: [u8; 32],
     },
@@ -153,9 +153,9 @@ impl UnverifiedBlockState {
     /// Returns the parent block hash stored in this instance, if any.
     pub fn parent_hash(&self) -> Option<&[u8; 32]> {
         match self {
-            UnverifiedBlockState::HeightHashKnown => None,
-            UnverifiedBlockState::HeaderKnown { parent_hash } => Some(parent_hash),
-            UnverifiedBlockState::HeaderBodyKnown { parent_hash } => Some(parent_hash),
+            UnverifiedBlockState::HeightHash => None,
+            UnverifiedBlockState::Header { parent_hash } => Some(parent_hash),
+            UnverifiedBlockState::HeaderBody { parent_hash } => Some(parent_hash),
         }
     }
 }
@@ -577,20 +577,19 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         let curr = &mut self.blocks.user_data_mut(height, hash).unwrap().state;
 
         match curr {
-            UnverifiedBlockState::HeaderKnown {
+            UnverifiedBlockState::Header {
                 parent_hash: cur_ph,
             }
-            | UnverifiedBlockState::HeaderBodyKnown {
+            | UnverifiedBlockState::HeaderBody {
                 parent_hash: cur_ph,
             } if *cur_ph == parent_hash => return,
-            UnverifiedBlockState::HeaderKnown { .. }
-            | UnverifiedBlockState::HeaderBodyKnown { .. } => {
+            UnverifiedBlockState::Header { .. } | UnverifiedBlockState::HeaderBody { .. } => {
                 panic!()
             }
-            UnverifiedBlockState::HeightHashKnown => {}
+            UnverifiedBlockState::HeightHash => {}
         }
 
-        *curr = UnverifiedBlockState::HeaderKnown { parent_hash };
+        *curr = UnverifiedBlockState::Header { parent_hash };
         self.blocks.set_parent_hash(height, hash, parent_hash);
     }
 
@@ -618,20 +617,19 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         let curr = &mut self.blocks.user_data_mut(height, hash).unwrap().state;
 
         match curr {
-            UnverifiedBlockState::HeaderKnown {
+            UnverifiedBlockState::Header {
                 parent_hash: cur_ph,
             } if *cur_ph == parent_hash => {}
-            UnverifiedBlockState::HeaderBodyKnown {
+            UnverifiedBlockState::HeaderBody {
                 parent_hash: cur_ph,
             } if *cur_ph == parent_hash => return,
-            UnverifiedBlockState::HeaderKnown { .. }
-            | UnverifiedBlockState::HeaderBodyKnown { .. } => {
+            UnverifiedBlockState::Header { .. } | UnverifiedBlockState::HeaderBody { .. } => {
                 panic!()
             }
-            UnverifiedBlockState::HeightHashKnown => {}
+            UnverifiedBlockState::HeightHash => {}
         }
 
-        *curr = UnverifiedBlockState::HeaderBodyKnown { parent_hash };
+        *curr = UnverifiedBlockState::HeaderBody { parent_hash };
         self.blocks.set_parent_hash(height, hash, parent_hash);
     }
 
@@ -693,9 +691,9 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                 .unwrap()
                 .state
             {
-                UnverifiedBlockState::HeightHashKnown => false,
-                UnverifiedBlockState::HeaderKnown { .. } => !self.verify_bodies,
-                UnverifiedBlockState::HeaderBodyKnown { .. } => true,
+                UnverifiedBlockState::HeightHash => false,
+                UnverifiedBlockState::Header { .. } => !self.verify_bodies,
+                UnverifiedBlockState::HeaderBody { .. } => true,
             }
         })
     }
@@ -731,13 +729,13 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         let bad_parent_iter = self
             .blocks
             .iter()
-            .filter(|(height, hash, _)| self.blocks.is_parent_bad(*height, *hash).unwrap_or(false));
+            .filter(|(height, hash, _)| self.blocks.is_parent_bad(*height, hash).unwrap_or(false));
 
         // List of blocks whose parent is in the data structure.
         let parent_known_iter = self.blocks.iter().filter(|(height, hash, _)| {
             match (
                 height.checked_sub(1),
-                self.blocks.parent_hash(*height, *hash),
+                self.blocks.parent_hash(*height, hash),
             ) {
                 (Some(n), Some(h)) => self.blocks.contains(n, h),
                 _ => false,
@@ -749,10 +747,8 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         let bad_iter = self
             .blocks
             .iter()
-            .filter(|(height, hash, _)| self.blocks.is_bad(*height, *hash).unwrap())
-            .filter(|(height, hash, _)| {
-                !self.blocks.is_parent_bad(*height, *hash).unwrap_or(false)
-            });
+            .filter(|(height, hash, _)| self.blocks.is_bad(*height, hash).unwrap())
+            .filter(|(height, hash, _)| !self.blocks.is_parent_bad(*height, hash).unwrap_or(false));
 
         // Never return any block that is the best block of a source.
         bad_parent_iter
@@ -967,7 +963,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                 self.blocks
                     .iter()
                     .filter(move |(_, _, block_info)| {
-                        matches!(&block_info.state, UnverifiedBlockState::HeaderKnown { .. })
+                        matches!(&block_info.state, UnverifiedBlockState::Header { .. })
                     })
                     .map(|(height, hash, _)| (height, hash)),
             )
@@ -990,10 +986,10 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                     .user_data(*unknown_block_height, unknown_block_hash)
                     .map(|ud| &ud.state)
                 {
-                    None | Some(UnverifiedBlockState::HeightHashKnown) => true,
+                    None | Some(UnverifiedBlockState::HeightHash) => true,
                     Some(
-                        UnverifiedBlockState::HeaderKnown { .. }
-                        | UnverifiedBlockState::HeaderBodyKnown { .. },
+                        UnverifiedBlockState::Header { .. }
+                        | UnverifiedBlockState::HeaderBody { .. },
                     ) => false,
                 });
             });
