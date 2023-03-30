@@ -514,7 +514,7 @@ where
                 // TODO: don't allocate an intermediary buffer, but instead pass them directly to the encryption
                 let mut buffers = Vec::with_capacity(32);
                 let mut extract_out = self.inner.yamux.extract_out(unencrypted_bytes_to_extract);
-                while let Some(buffer) = extract_out.next() {
+                while let Some(buffer) = extract_out.extract_next() {
                     buffers.push(buffer.as_ref().to_vec()); // TODO: copy
                 }
 

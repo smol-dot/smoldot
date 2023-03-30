@@ -1686,7 +1686,7 @@ pub struct ExtractOut<'a, T> {
 
 impl<'a, T> ExtractOut<'a, T> {
     /// Builds the next buffer to send out and returns it.
-    pub fn next(&'_ mut self) -> Option<impl AsRef<[u8]> + '_> {
+    pub fn extract_next(&'_ mut self) -> Option<impl AsRef<[u8]> + '_> {
         while self.size_bytes != 0 {
             match self.yamux.outgoing {
                 Outgoing::Header {

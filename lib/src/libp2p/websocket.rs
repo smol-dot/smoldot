@@ -63,7 +63,7 @@ pub async fn websocket_client_handshake<'a, T: AsyncRead + AsyncWrite + Send + U
         Ok(soketto::handshake::ServerResponse::Rejected { status_code }) => {
             return Err(io::Error::new(
                 io::ErrorKind::ConnectionRefused,
-                format!("Status code {}", status_code),
+                format!("Status code {status_code}"),
             ))
         }
         Err(err) => return Err(io::Error::new(io::ErrorKind::Other, err)),

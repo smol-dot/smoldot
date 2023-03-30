@@ -766,7 +766,7 @@ where
                         if let Some(KBucketsPeer { addresses, .. }) =
                             self.kbuckets_peers.get_mut(&peer_id)
                         {
-                            addresses.set_disconnected(&address);
+                            addresses.set_disconnected(address);
                             debug_assert_eq!(addresses.iter_connected().count(), 0);
                         }
                     }
@@ -791,7 +791,7 @@ where
                         if let Some(KBucketsPeer { addresses, .. }) =
                             self.kbuckets_peers.get_mut(&peer_id)
                         {
-                            addresses.set_disconnected(&address);
+                            addresses.set_disconnected(address);
                             debug_assert_ne!(addresses.iter_connected().count(), 0);
                         }
                     }
@@ -809,7 +809,7 @@ where
                     if let Some(KBucketsPeer { addresses, .. }) =
                         self.kbuckets_peers.get_mut(&expected_peer_id)
                     {
-                        addresses.set_disconnected(&address);
+                        addresses.set_disconnected(address);
                     }
                 }
                 peers::Event::StartShutdown {
