@@ -98,7 +98,7 @@ impl InterpreterPrototype {
     fn from_base_components(base_components: BaseComponents) -> Result<Self, NewErr> {
         let mut store = wasmi::Store::new(base_components.module.engine(), ());
 
-        let mut linker = wasmi::Linker::<()>::new(&base_components.module.engine());
+        let mut linker = wasmi::Linker::<()>::new(base_components.module.engine());
         let mut import_memory = None;
 
         for (module_import, resolved_function) in base_components

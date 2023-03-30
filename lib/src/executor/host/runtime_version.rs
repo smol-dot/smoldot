@@ -33,8 +33,14 @@ pub fn find_embedded_runtime_version(
 ) -> Result<Option<CoreVersion>, FindEmbeddedRuntimeVersionError> {
     let (runtime_version_content, runtime_apis_content) =
         match find_encoded_embedded_runtime_version_apis(binary_wasm_module) {
-            Ok((Some(v), Some(a))) => (v, a),
-            Ok((None, None)) => return Ok(None),
+            Ok(EmbeddedRuntimeVersionApis {
+                runtime_version_content: Some(v),
+                runtime_apis_content: Some(a),
+            }) => (v, a),
+            Ok(EmbeddedRuntimeVersionApis {
+                runtime_version_content: None,
+                runtime_apis_content: None,
+            }) => return Ok(None),
             Ok(_) => return Err(FindEmbeddedRuntimeVersionError::CustomSectionsPresenceMismatch),
             Err(err) => return Err(FindEmbeddedRuntimeVersionError::FindSections(err)),
         };
@@ -70,12 +76,21 @@ pub enum FindEmbeddedRuntimeVersionError {
     RuntimeApisDecode(CoreVersionApisFromSliceErr),
 }
 
+/// Returns by [`find_encoded_embedded_runtime_version_apis`].
+#[derive(Debug, Copy, Clone)]
+pub struct EmbeddedRuntimeVersionApis<'a> {
+    /// Content of the `runtime_version` section, if any was found.
+    pub runtime_version_content: Option<&'a [u8]>,
+    /// Content of the `runtime_apis` section, if any was found.
+    pub runtime_apis_content: Option<&'a [u8]>,
+}
+
 /// Tries to find the custom sections containing the runtime version and APIs.
 ///
 /// This function does not attempt to decode the content of the custom sections.
 pub fn find_encoded_embedded_runtime_version_apis(
     binary_wasm_module: &[u8],
-) -> Result<(Option<&[u8]>, Option<&[u8]>), FindEncodedEmbeddedRuntimeVersionApisError> {
+) -> Result<EmbeddedRuntimeVersionApis, FindEncodedEmbeddedRuntimeVersionApisError> {
     let mut parser =
         nom::combinator::all_consuming(nom::combinator::complete(nom::sequence::preceded(
             nom::sequence::tuple((
@@ -112,12 +127,15 @@ pub fn find_encoded_embedded_runtime_version_apis(
             ),
         )));
 
-    let (runtime_version, runtime_apis) = match parser(binary_wasm_module) {
+    let (runtime_version_content, runtime_apis_content) = match parser(binary_wasm_module) {
         Ok((_, content)) => content,
         Err(_) => return Err(FindEncodedEmbeddedRuntimeVersionApisError::FailedToParse),
     };
 
-    Ok((runtime_version, runtime_apis))
+    Ok(EmbeddedRuntimeVersionApis {
+        runtime_version_content,
+        runtime_apis_content,
+    })
 }
 
 /// Error returned by [`find_encoded_embedded_runtime_version_apis`].
