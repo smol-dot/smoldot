@@ -1227,28 +1227,26 @@ where
             if matches!(
                 current_state.open,
                 NotificationsOutOpenState::NotOpen | NotificationsOutOpenState::ClosedByRemote
-            ) {
-                if self
-                    .connections_by_peer
-                    .range(
-                        (peer_index, ConnectionId::min_value())
-                            ..=(peer_index, ConnectionId::max_value()),
-                    )
-                    .any(|(_, connection_id)| {
-                        let state = self.inner.connection_state(*connection_id);
-                        state.established && !state.shutting_down
-                    })
-                {
-                    let _prev_value = self.unfulfilled_desired_outbound_substreams.insert(
-                        (peer_index, notification_protocol),
-                        match current_state.open {
-                            NotificationsOutOpenState::NotOpen => false,
-                            NotificationsOutOpenState::ClosedByRemote => true,
-                            _ => unreachable!(),
-                        },
-                    );
-                    debug_assert!(_prev_value.is_none());
-                }
+            ) && self
+                .connections_by_peer
+                .range(
+                    (peer_index, ConnectionId::min_value())
+                        ..=(peer_index, ConnectionId::max_value()),
+                )
+                .any(|(_, connection_id)| {
+                    let state = self.inner.connection_state(*connection_id);
+                    state.established && !state.shutting_down
+                })
+            {
+                let _prev_value = self.unfulfilled_desired_outbound_substreams.insert(
+                    (peer_index, notification_protocol),
+                    match current_state.open {
+                        NotificationsOutOpenState::NotOpen => false,
+                        NotificationsOutOpenState::ClosedByRemote => true,
+                        _ => unreachable!(),
+                    },
+                );
+                debug_assert!(_prev_value.is_none());
             }
 
             // Remove substream from `fulfilled_undesired_outbound_substreams`, as it is
