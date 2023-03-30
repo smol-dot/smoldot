@@ -842,7 +842,7 @@ where
                         ),
                     );
 
-                    match nom::Finish::finish(parser(&handshake_read_buffer)) {
+                    match nom::Finish::finish(parser(handshake_read_buffer)) {
                         Ok((rest, framed_message)) => {
                             let protobuf_frame_size = handshake_read_buffer.len() - rest.len();
                             (
