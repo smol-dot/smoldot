@@ -59,10 +59,9 @@ use rand::{Rng as _, SeedableRng as _};
 
 pub use collection::{
     ConfigRequestResponse, ConfigRequestResponseIn, ConnectionId, ConnectionToCoordinator,
-    CoordinatorToConnection, MultiStreamConnectionTask, MultiStreamHandshakeKind,
-    NotificationProtocolConfig, NotificationsInClosedErr, NotificationsOutErr, ReadWrite,
-    RequestError, SingleStreamConnectionTask, SingleStreamHandshakeKind, StartRequestError,
-    SubstreamId,
+    CoordinatorToConnection, MultiStreamConnectionTask, NotificationProtocolConfig,
+    NotificationsInClosedErr, NotificationsOutErr, ReadWrite, RequestError,
+    SingleStreamConnectionTask, StartRequestError, SubstreamId,
 };
 
 /// Configuration for a [`Peers`].
@@ -106,6 +105,10 @@ pub struct Config {
 pub struct Peers<TConn, TNow> {
     /// Underlying state machine that manages connections.
     inner: collection::Network<Connection<TConn>, TNow>,
+
+    /// See [`Config::noise_key`].
+    // TODO: eventually make it possible for the API user to choose a separate noise key per connection; this is extra hard because the same remote peerid could open multiple incoming substreams to multiple different local peerids without it being a protocol violation
+    noise_key: libp2p::connection::NoiseKey,
 
     /// List of all peer identities known to the state machine.
     peers: slab::Slab<Peer>,
@@ -204,6 +207,29 @@ struct Connection<TConn> {
     user_data: TConn,
 }
 
+/// What kind of handshake to perform on the newly-added connection.
+pub enum SingleStreamHandshakeKind {
+    /// Use the multistream-select protocol to negotiate the Noise encryption, then use the
+    /// multistream-select protocol to negotiate the Yamux multiplexing.
+    MultistreamSelectNoiseYamux,
+}
+
+/// What kind of handshake to perform on the newly-added connection.
+pub enum MultiStreamHandshakeKind {
+    /// The connection is a WebRTC connection.
+    ///
+    /// See <https://github.com/libp2p/specs/pull/412> for details.
+    ///
+    /// The reading and writing side of substreams must never be closed. Substreams can only be
+    /// abruptly destroyed by either side.
+    WebRtc {
+        /// Multihash encoding of the TLS certificate used by the local node at the DTLS layer.
+        local_tls_certificate_multihash: Vec<u8>,
+        /// Multihash encoding of the TLS certificate used by the remote node at the DTLS layer.
+        remote_tls_certificate_multihash: Vec<u8>,
+    },
+}
+
 impl<TConn, TNow> Peers<TConn, TNow>
 where
     TConn: Clone,
@@ -220,7 +246,6 @@ where
             ),
             inner: collection::Network::new(collection::Config {
                 capacity: config.connections_capacity,
-                noise_key: config.noise_key,
                 max_inbound_substreams: config.max_inbound_substreams,
                 notification_protocols: config.notification_protocols,
                 request_response_protocols: config.request_response_protocols,
@@ -228,6 +253,7 @@ where
                 handshake_timeout: config.handshake_timeout,
                 randomness_seed: randomness.sample(rand::distributions::Standard),
             }),
+            noise_key: config.noise_key,
             connections_by_peer: BTreeSet::new(),
             peer_indices: hashbrown::HashMap::with_capacity_and_hasher(
                 config.peers_capacity,
@@ -269,7 +295,7 @@ where
 
     /// Returns the Noise key originally passed as [`Config::noise_key`].
     pub fn noise_key(&self) -> &libp2p::connection::NoiseKey {
-        self.inner.noise_key()
+        &self.noise_key
     }
 
     /// Pulls a message that must be sent to a connection.
@@ -931,7 +957,13 @@ where
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
         self.inner.insert_single_stream(
             when_connected,
-            handshake_kind,
+            match handshake_kind {
+                SingleStreamHandshakeKind::MultistreamSelectNoiseYamux => {
+                    collection::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
+                        noise_key: &self.noise_key,
+                    }
+                }
+            },
             false,
             Connection {
                 peer_index: None,
@@ -963,7 +995,13 @@ where
 
         let (connection_id, connection_task) = self.inner.insert_single_stream(
             when_connected,
-            handshake_kind,
+            match handshake_kind {
+                SingleStreamHandshakeKind::MultistreamSelectNoiseYamux => {
+                    collection::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
+                        noise_key: &self.noise_key,
+                    }
+                }
+            },
             true,
             Connection {
                 peer_index: Some(peer_index),
@@ -996,7 +1034,16 @@ where
     {
         self.inner.insert_multi_stream(
             when_connected,
-            handshake_kind,
+            match handshake_kind {
+                MultiStreamHandshakeKind::WebRtc {
+                    local_tls_certificate_multihash,
+                    remote_tls_certificate_multihash,
+                } => collection::MultiStreamHandshakeKind::WebRtc {
+                    noise_key: &self.noise_key,
+                    local_tls_certificate_multihash,
+                    remote_tls_certificate_multihash,
+                },
+            },
             false,
             Connection {
                 peer_index: None,
@@ -1031,7 +1078,16 @@ where
 
         let (connection_id, connection_task) = self.inner.insert_multi_stream(
             when_connected,
-            handshake_kind,
+            match handshake_kind {
+                MultiStreamHandshakeKind::WebRtc {
+                    local_tls_certificate_multihash,
+                    remote_tls_certificate_multihash,
+                } => collection::MultiStreamHandshakeKind::WebRtc {
+                    noise_key: &self.noise_key,
+                    local_tls_certificate_multihash,
+                    remote_tls_certificate_multihash,
+                },
+            },
             true,
             Connection {
                 peer_index: Some(peer_index),

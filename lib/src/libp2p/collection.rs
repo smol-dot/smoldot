@@ -49,7 +49,7 @@
 
 use crate::libp2p::connection::noise;
 
-use super::connection::{established, single_stream_handshake, NoiseKey};
+use super::connection::{established, single_stream_handshake};
 use alloc::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     string::String,
@@ -79,14 +79,17 @@ mod multi_stream;
 mod single_stream;
 
 /// What kind of handshake to perform on the newly-added connection.
-pub enum SingleStreamHandshakeKind {
+pub enum SingleStreamHandshakeKind<'a> {
     /// Use the multistream-select protocol to negotiate the Noise encryption, then use the
     /// multistream-select protocol to negotiate the Yamux multiplexing.
-    MultistreamSelectNoiseYamux,
+    MultistreamSelectNoiseYamux {
+        /// Local secret key to use for the handshake.
+        noise_key: &'a noise::NoiseKey,
+    },
 }
 
 /// What kind of handshake to perform on the newly-added connection.
-pub enum MultiStreamHandshakeKind {
+pub enum MultiStreamHandshakeKind<'a> {
     /// The connection is a WebRTC connection.
     ///
     /// See <https://github.com/libp2p/specs/pull/412> for details.
@@ -94,6 +97,8 @@ pub enum MultiStreamHandshakeKind {
     /// The reading and writing side of substreams must never be closed. Substreams can only be
     /// abruptly destroyed by either side.
     WebRtc {
+        /// Local secret key to use for the handshake.
+        noise_key: &'a noise::NoiseKey,
         /// Multihash encoding of the TLS certificate used by the local node at the DTLS layer.
         local_tls_certificate_multihash: Vec<u8>,
         /// Multihash encoding of the TLS certificate used by the remote node at the DTLS layer.
@@ -125,11 +130,6 @@ pub struct Config {
 
     /// Name of the ping protocol on the network.
     pub ping_protocol: String,
-
-    /// Key used for the encryption layer.
-    /// This is a Noise static key, according to the Noise specification.
-    /// Signed using the actual libp2p key.
-    pub noise_key: NoiseKey,
 }
 
 /// Configuration for a specific overlay network.
@@ -257,9 +257,6 @@ pub struct Network<TConn, TNow> {
     /// See [`Config::handshake_timeout`].
     handshake_timeout: Duration,
 
-    /// See [`Config::noise_key`].
-    noise_key: NoiseKey,
-
     /// See [`OverlayNetwork`].
     notification_protocols: Arc<[OverlayNetwork]>,
 
@@ -356,7 +353,6 @@ where
             ),
             ingoing_notification_substreams_by_connection: BTreeMap::new(),
             randomness_seeds: ChaCha20Rng::from_seed(config.randomness_seed),
-            noise_key: config.noise_key,
             max_inbound_substreams: config.max_inbound_substreams,
             notification_protocols,
             request_response_protocols: config.request_response_protocols.into_iter().collect(), // TODO: stupid overhead
@@ -381,13 +377,16 @@ where
         let connection_id = self.next_connection_id;
         self.next_connection_id.0 += 1;
 
+        // We only support one kind of handshake at the moment. Make sure (at compile time) that
+        // the value provided as parameter is indeed the one expected.
+        let SingleStreamHandshakeKind::MultistreamSelectNoiseYamux { noise_key } = handshake_kind;
+
         let connection_task = SingleStreamConnectionTask::new(single_stream::Config {
             randomness_seed: self.randomness_seeds.gen(),
             handshake: single_stream_handshake::HealthyHandshake::noise_yamux(
-                &self.noise_key,
+                noise_key,
                 is_initiator,
             ),
-            handshake_kind,
             handshake_timeout: when_connected + self.handshake_timeout,
             max_inbound_substreams: self.max_inbound_substreams,
             notification_protocols: self.notification_protocols.clone(),
@@ -428,8 +427,9 @@ where
         // followed with the multihash-encoded fingerprints of the initiator's certificate
         // and the receiver's certificate.
         // See <https://github.com/libp2p/specs/pull/412>.
-        let noise_prologue = {
+        let (noise_key, noise_prologue) = {
             let MultiStreamHandshakeKind::WebRtc {
+                noise_key,
                 local_tls_certificate_multihash,
                 remote_tls_certificate_multihash,
             } = handshake_kind;
@@ -447,11 +447,11 @@ where
                 out.extend_from_slice(&remote_tls_certificate_multihash);
                 out.extend_from_slice(&local_tls_certificate_multihash);
             }
-            out
+            (noise_key, out)
         };
 
         let handshake = noise::HandshakeInProgress::new(noise::Config {
-            key: &self.noise_key,
+            key: &noise_key,
             // It's the "server" that initiates the Noise handshake.
             is_initiator: !is_initiator,
             prologue: &noise_prologue,
@@ -564,11 +564,6 @@ where
                 shutting_down: true,
             },
         }
-    }
-
-    /// Returns the Noise key originally passed as [`Config::noise_key`].
-    pub fn noise_key(&self) -> &NoiseKey {
-        &self.noise_key
     }
 
     /// Returns the list the overlay networks originally passed as

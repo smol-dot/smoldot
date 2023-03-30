@@ -24,8 +24,7 @@ use super::{
         read_write::ReadWrite,
     },
     ConnectionToCoordinator, ConnectionToCoordinatorInner, CoordinatorToConnection,
-    CoordinatorToConnectionInner, NotificationsOutErr, OverlayNetwork, ShutdownCause,
-    SingleStreamHandshakeKind, SubstreamId,
+    CoordinatorToConnectionInner, NotificationsOutErr, OverlayNetwork, ShutdownCause, SubstreamId,
 };
 
 use alloc::{collections::VecDeque, string::ToString as _, sync::Arc};
@@ -38,7 +37,6 @@ use core::{
 pub(super) struct Config<TNow> {
     pub(super) randomness_seed: [u8; 32],
     pub(super) handshake: single_stream_handshake::HealthyHandshake,
-    pub(super) handshake_kind: SingleStreamHandshakeKind,
     pub(super) handshake_timeout: TNow,
     pub(super) max_inbound_substreams: usize,
     pub(super) notification_protocols: Arc<[OverlayNetwork]>,
@@ -143,10 +141,6 @@ where
     // Note that the parameters of this function are a bit rough and undocumented, as this is
     // a function only called from the parent module.
     pub(super) fn new(config: Config<TNow>) -> Self {
-        // We only support one kind of handshake at the moment. Make sure (at compile time) that
-        // the value provided as parameter is indeed the one expected.
-        let SingleStreamHandshakeKind::MultistreamSelectNoiseYamux = config.handshake_kind;
-
         SingleStreamConnectionTask {
             connection: SingleStreamConnectionTaskInner::Handshake {
                 handshake: config.handshake,
