@@ -200,25 +200,23 @@ impl<TPlat: Platform> Background<TPlat> {
                             break loop {
                                 let next_message = messages_rx.next();
                                 futures::pin_mut!(next_message);
-                                match next_message.await {
-                                    (
-                                        SubscriptionMessage::StopIfTransactionLegacy {
-                                            stop_request_id,
-                                        },
-                                        confirmation_sender,
-                                    ) => {
-                                        me.requests_subscriptions
-                                            .respond(
-                                                &stop_request_id.1,
-                                                methods::Response::author_unwatchExtrinsic(true)
-                                                    .to_json_response(&stop_request_id.0),
-                                            )
-                                            .await;
+                                if let (
+                                    SubscriptionMessage::StopIfTransactionLegacy {
+                                        stop_request_id,
+                                    },
+                                    confirmation_sender,
+                                ) = next_message.await
+                                {
+                                    me.requests_subscriptions
+                                        .respond(
+                                            &stop_request_id.1,
+                                            methods::Response::author_unwatchExtrinsic(true)
+                                                .to_json_response(&stop_request_id.0),
+                                        )
+                                        .await;
 
-                                        confirmation_sender.send();
-                                        break;
-                                    }
-                                    _ => {}
+                                    confirmation_sender.send();
+                                    break;
                                 }
                             };
                         }

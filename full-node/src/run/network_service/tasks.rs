@@ -154,11 +154,7 @@ pub(super) async fn established_connection_task(
 
     loop {
         // Inject in the connection task the messages coming from the coordinator, if any.
-        loop {
-            let message = match coordinator_to_connection.next().now_or_never() {
-                Some(Some(msg)) => msg,
-                _ => break,
-            };
+        while let Some(Some(message)) = coordinator_to_connection.next().now_or_never() {
             connection_task.inject_coordinator_message(message);
         }
 

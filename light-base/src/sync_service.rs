@@ -543,11 +543,11 @@ impl<TPlat: Platform> SyncService<TPlat> {
 
     // TODO: documentation
     // TODO: there's no proof that the call proof is actually correct
-    pub async fn call_proof_query<'a>(
+    pub async fn call_proof_query(
         self: Arc<Self>,
         block_number: u64,
         config: protocol::CallProofRequestConfig<
-            'a,
+            '_,
             impl Iterator<Item = impl AsRef<[u8]>> + Clone,
         >,
         total_attempts: u32,

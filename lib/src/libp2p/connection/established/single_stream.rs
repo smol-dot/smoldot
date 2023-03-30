@@ -280,7 +280,7 @@ where
             if let Some(incoming_data) = read_write.incoming_buffer.as_mut() {
                 let num_read = self
                     .encryption
-                    .inject_inbound_data(*incoming_data)
+                    .inject_inbound_data(incoming_data)
                     .map_err(Error::Noise)?;
                 read_write.advance_read(num_read);
             }
@@ -514,7 +514,7 @@ where
                 // TODO: don't allocate an intermediary buffer, but instead pass them directly to the encryption
                 let mut buffers = Vec::with_capacity(32);
                 let mut extract_out = self.inner.yamux.extract_out(unencrypted_bytes_to_extract);
-                while let Some(buffer) = extract_out.next() {
+                while let Some(buffer) = extract_out.extract_next() {
                     buffers.push(buffer.as_ref().to_vec()); // TODO: copy
                 }
 

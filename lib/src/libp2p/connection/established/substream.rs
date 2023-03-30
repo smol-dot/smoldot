@@ -1117,26 +1117,25 @@ where
         max_notification_size: usize,
         user_data: TNotifUd,
     ) {
-        match &mut self.inner {
-            SubstreamInner::NotificationsInWait { protocol_index } => {
-                let protocol_index = *protocol_index;
+        if let SubstreamInner::NotificationsInWait { protocol_index } = &mut self.inner {
+            let protocol_index = *protocol_index;
 
-                self.inner = SubstreamInner::NotificationsIn {
-                    close_desired: false,
-                    next_notification: leb128::FramedInProgress::new(max_notification_size),
-                    handshake: {
-                        let handshake_len = handshake.len();
-                        leb128::encode_usize(handshake_len)
-                            .chain(handshake.into_iter())
-                            .collect::<VecDeque<_>>()
-                    },
-                    protocol_index,
-                    max_notification_size,
-                    user_data,
-                }
+            self.inner = SubstreamInner::NotificationsIn {
+                close_desired: false,
+                next_notification: leb128::FramedInProgress::new(max_notification_size),
+                handshake: {
+                    let handshake_len = handshake.len();
+                    leb128::encode_usize(handshake_len)
+                        .chain(handshake.into_iter())
+                        .collect::<VecDeque<_>>()
+                },
+                protocol_index,
+                max_notification_size,
+                user_data,
             }
-            _ => {} // TODO: too defensive, should be panic!()
         }
+
+        // TODO: too defensive, should be } else { panic!() }
     }
 
     /// Rejects an inbound notifications protocol. Must be called in response to a
@@ -1488,10 +1487,7 @@ pub enum InboundError {
     /// Unexpected end of file while receiving an inbound request.
     RequestInExpectedEof,
     /// Error while receiving an inbound notifications substream handshake.
-    #[display(
-        fmt = "Error while receiving an inbound notifications substream handshake: {}",
-        error
-    )]
+    #[display(fmt = "Error while receiving an inbound notifications substream handshake: {error}")]
     NotificationsInError {
         /// Error that happened.
         error: leb128::FramedError,

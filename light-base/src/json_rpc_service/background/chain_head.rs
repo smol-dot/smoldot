@@ -111,9 +111,9 @@ impl<TPlat: Platform> Background<TPlat> {
             Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
                 self.requests_subscriptions
                     .respond(
-                        &request_id.1,
+                        request_id.1,
                         json_rpc::parse::build_error_response(
-                            &request_id.0,
+                            request_id.0,
                             json_rpc::parse::ErrorResponse::ServerError(
                                 -32000,
                                 "Too many active subscriptions",
@@ -753,8 +753,8 @@ impl<TPlat: Platform> Background<TPlat> {
                                 break;
                             }
 
-                            if block.is_new_best {
-                                if me
+                            if block.is_new_best
+                                && me
                                     .requests_subscriptions
                                     .try_push_notification(
                                         &request_id.1,
@@ -769,9 +769,8 @@ impl<TPlat: Platform> Background<TPlat> {
                                     )
                                     .await
                                     .is_err()
-                                {
-                                    break;
-                                }
+                            {
+                                break;
                             }
                         }
                         future::Either::Left((
@@ -818,8 +817,8 @@ impl<TPlat: Platform> Background<TPlat> {
                                 break;
                             }
 
-                            if block.is_new_best {
-                                if me
+                            if block.is_new_best
+                                && me
                                     .requests_subscriptions
                                     .try_push_notification(
                                         &request_id.1,
@@ -834,9 +833,8 @@ impl<TPlat: Platform> Background<TPlat> {
                                     )
                                     .await
                                     .is_err()
-                                {
-                                    break;
-                                }
+                            {
+                                break;
                             }
                         }
                         future::Either::Right((
@@ -1209,7 +1207,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 let response = match block_scale_encoded_header
                     .as_ref()
-                    .map(|h| header::decode(&h, me.sync_service.block_number_bytes()))
+                    .map(|h| header::decode(h, me.sync_service.block_number_bytes()))
                 {
                     Some(Ok(decoded_header)) => {
                         let future = me.sync_service.clone().storage_query(

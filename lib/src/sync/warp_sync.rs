@@ -620,18 +620,13 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             // TODO: O(n)
             if !self.in_progress_requests.iter().any(|(_, rq)| {
                 rq.0 == *warp_sync_source_id
-                    && match rq.2 {
+                    && matches!(rq.2,
                         RequestDetail::StorageGetMerkleProof {
                             block_hash: ref b,
                             ref keys,
                         } if *b == header.hash(self.block_number_bytes)
                             && keys.iter().any(|k| k == b":code")
-                            && keys.iter().any(|k| k == b":heappages") =>
-                        {
-                            true
-                        }
-                        _ => false,
-                    }
+                            && keys.iter().any(|k| k == b":heappages"))
             }) {
                 Some((
                     *warp_sync_source_id,
@@ -1438,7 +1433,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                 );
                             }
                         };
-                    decoded_proofs.insert(call.clone(), decoded_proof);
+                    decoded_proofs.insert(*call, decoded_proof);
                 }
 
                 decoded_proofs

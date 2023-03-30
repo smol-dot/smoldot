@@ -930,7 +930,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                                     .as_ref()
                                     .unwrap()
                             })
-                            .unwrap_or(&finalized_parahead),
+                            .unwrap_or(finalized_parahead),
                     );
 
                     // Elements in `all_subscriptions` are removed one by one and

@@ -379,17 +379,17 @@ where
         let connection_id = self.next_connection_id;
         self.next_connection_id.0 += 1;
 
-        let connection_task = SingleStreamConnectionTask::new(
-            self.randomness_seeds.gen(),
+        let connection_task = SingleStreamConnectionTask::new(single_stream::Config {
+            randomness_seed: self.randomness_seeds.gen(),
             is_initiator,
             handshake_kind,
-            when_connected + self.handshake_timeout,
-            self.noise_key.clone(),
-            self.max_inbound_substreams,
-            self.notification_protocols.clone(),
-            self.request_response_protocols.clone(),
-            self.ping_protocol.clone(),
-        );
+            handshake_timeout: when_connected + self.handshake_timeout,
+            noise_key: self.noise_key.clone(),
+            max_inbound_substreams: self.max_inbound_substreams,
+            notification_protocols: self.notification_protocols.clone(),
+            request_response_protocols: self.request_response_protocols.clone(),
+            ping_protocol: self.ping_protocol.clone(),
+        });
 
         let _previous_value = self.connections.insert(
             connection_id,

@@ -71,7 +71,7 @@ pub enum ParseError<'a> {
     /// Call concerns a notification that isn't recognized.
     UnknownNotification(&'a str),
     /// JSON-RPC request is valid, but there is a problem related to the method being called.
-    #[display(fmt = "{}", error)]
+    #[display(fmt = "{error}")]
     Method {
         /// Identifier of the request sent by the user.
         request_id: &'a str,

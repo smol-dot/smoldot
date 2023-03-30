@@ -766,7 +766,7 @@ where
                         if let Some(KBucketsPeer { addresses, .. }) =
                             self.kbuckets_peers.get_mut(&peer_id)
                         {
-                            addresses.set_disconnected(&address);
+                            addresses.set_disconnected(address);
                             debug_assert_eq!(addresses.iter_connected().count(), 0);
                         }
                     }
@@ -791,7 +791,7 @@ where
                         if let Some(KBucketsPeer { addresses, .. }) =
                             self.kbuckets_peers.get_mut(&peer_id)
                         {
-                            addresses.set_disconnected(&address);
+                            addresses.set_disconnected(address);
                             debug_assert_ne!(addresses.iter_connected().count(), 0);
                         }
                     }
@@ -809,7 +809,7 @@ where
                     if let Some(KBucketsPeer { addresses, .. }) =
                         self.kbuckets_peers.get_mut(&expected_peer_id)
                     {
-                        addresses.set_disconnected(&address);
+                        addresses.set_disconnected(address);
                     }
                 }
                 peers::Event::StartShutdown {
@@ -1304,10 +1304,7 @@ pub enum ProtocolError {
     #[display(fmt = "Error in an incoming substream: {_0}")]
     InboundError(InboundError),
     /// Error while decoding the handshake of the block announces substream.
-    #[display(
-        fmt = "Error while decoding the handshake of the block announces substream: {}",
-        _0
-    )]
+    #[display(fmt = "Error while decoding the handshake of the block announces substream: {_0}")]
     BadBlockAnnouncesHandshake(protocol::BlockAnnouncesHandshakeDecodeError),
     /// Error while decoding a received block announce.
     #[display(fmt = "Error while decoding a received block announce: {_0}")]

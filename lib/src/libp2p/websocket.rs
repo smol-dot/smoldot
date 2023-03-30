@@ -46,8 +46,8 @@ pub struct Config<'a, T> {
 
 /// Negotiates the WebSocket protocol (including the HTTP-like request) on the given socket, and
 /// returns an object that translates reads and writes into WebSocket binary frames.
-pub async fn websocket_client_handshake<'a, T: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
-    config: Config<'a, T>,
+pub async fn websocket_client_handshake<T: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
+    config: Config<'_, T>,
 ) -> Result<Connection<T>, io::Error> {
     let mut client = soketto::handshake::Client::new(config.tcp_socket, config.host, config.url);
 
@@ -63,7 +63,7 @@ pub async fn websocket_client_handshake<'a, T: AsyncRead + AsyncWrite + Send + U
         Ok(soketto::handshake::ServerResponse::Rejected { status_code }) => {
             return Err(io::Error::new(
                 io::ErrorKind::ConnectionRefused,
-                format!("Status code {}", status_code),
+                format!("Status code {status_code}"),
             ))
         }
         Err(err) => return Err(io::Error::new(io::ErrorKind::Other, err)),

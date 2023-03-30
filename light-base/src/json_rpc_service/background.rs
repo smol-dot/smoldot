@@ -320,7 +320,6 @@ pub(super) fn start<TPlat: Platform>(
     // TODO: this is actually racy, as a block subscription task could report a new block to a client, and then client can query it, before this block has been been added to the cache
     // TODO: extract to separate function
     (config.tasks_executor)(format!("{}-cache-populate", me.log_target), {
-        let me = me.clone();
         future::Abortable::new(
             async move {
                 loop {

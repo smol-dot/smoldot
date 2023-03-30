@@ -840,14 +840,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         hash: [u8; 32],
     ) {
         debug_assert!(self.shared.sources.contains(source_id.0));
-        match (
+        if let (AllSyncInner::AllForks(sync), SourceMapping::AllForks(src)) = (
             &mut self.inner,
             self.shared.sources.get(source_id.0).unwrap(),
         ) {
-            (AllSyncInner::AllForks(sync), SourceMapping::AllForks(src)) => {
-                sync.add_known_block_to_source(*src, height, hash)
-            }
-            _ => {}
+            sync.add_known_block_to_source(*src, height, hash)
         }
     }
 
@@ -2833,9 +2830,10 @@ impl<TRq> Shared<TRq> {
             let (source_id, _) = self
                 .sources
                 .iter()
-                .find(|(_, s)| match s {
-                    SourceMapping::GrandpaWarpSync(s) if *s == source_id => true,
-                    _ => false,
+                .find(|(_, s)| {
+                    matches!(s,
+                        SourceMapping::GrandpaWarpSync(s) if *s == source_id
+                    )
                 })
                 .unwrap();
 

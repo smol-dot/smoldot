@@ -35,6 +35,18 @@ use core::{
     time::Duration,
 };
 
+pub(super) struct Config<TNow> {
+    pub(super) randomness_seed: [u8; 32],
+    pub(super) is_initiator: bool,
+    pub(super) handshake_kind: SingleStreamHandshakeKind,
+    pub(super) handshake_timeout: TNow,
+    pub(super) noise_key: Arc<NoiseKey>,
+    pub(super) max_inbound_substreams: usize,
+    pub(super) notification_protocols: Arc<[OverlayNetwork]>,
+    pub(super) request_response_protocols: Arc<[ConfigRequestResponse]>,
+    pub(super) ping_protocol: Arc<str>,
+}
+
 /// State machine dedicated to a single single-stream connection.
 pub struct SingleStreamConnectionTask<TNow> {
     /// State machine of the underlying connection.
@@ -134,31 +146,23 @@ where
 {
     // Note that the parameters of this function are a bit rough and undocumented, as this is
     // a function only called from the parent module.
-    pub(super) fn new(
-        randomness_seed: [u8; 32],
-        is_initiator: bool,
-        handshake_kind: SingleStreamHandshakeKind,
-        handshake_timeout: TNow,
-        noise_key: Arc<NoiseKey>,
-        max_inbound_substreams: usize,
-        notification_protocols: Arc<[OverlayNetwork]>,
-        request_response_protocols: Arc<[ConfigRequestResponse]>,
-        ping_protocol: Arc<str>,
-    ) -> Self {
+    pub(super) fn new(config: Config<TNow>) -> Self {
         // We only support one kind of handshake at the moment. Make sure (at compile time) that
         // the value provided as parameter is indeed the one expected.
-        let SingleStreamHandshakeKind::MultistreamSelectNoiseYamux = handshake_kind;
+        let SingleStreamHandshakeKind::MultistreamSelectNoiseYamux = config.handshake_kind;
 
         SingleStreamConnectionTask {
             connection: SingleStreamConnectionTaskInner::Handshake {
-                handshake: single_stream_handshake::HealthyHandshake::noise_yamux(is_initiator),
-                randomness_seed,
-                timeout: handshake_timeout,
-                noise_key,
-                max_inbound_substreams,
-                notification_protocols,
-                request_response_protocols,
-                ping_protocol,
+                handshake: single_stream_handshake::HealthyHandshake::noise_yamux(
+                    config.is_initiator,
+                ),
+                randomness_seed: config.randomness_seed,
+                timeout: config.handshake_timeout,
+                noise_key: config.noise_key,
+                max_inbound_substreams: config.max_inbound_substreams,
+                notification_protocols: config.notification_protocols,
+                request_response_protocols: config.request_response_protocols,
+                ping_protocol: config.ping_protocol,
             },
             pending_messages: VecDeque::with_capacity({
                 // We never buffer more than a few messages.
