@@ -95,7 +95,7 @@ wasmtime = { version = "7.0.0", default-features = false, features = ["async", "
 [dev-dependencies]
 async-std = "1.12.0"
 criterion = "0.4.0"
-tempfile = "3.4.0"
+tempfile = "3.5.0"
 wat = "1.0.61"
 
 [package.metadata.docs.rs]

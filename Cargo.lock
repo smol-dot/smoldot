@@ -964,6 +964,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "errno"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50d6a0976c999d473fe89ad888d5a284e55366d9dc9038b1ba2aa15128c4afa0"
+dependencies = [
+ "errno-dragonfly",
+ "libc",
+ "windows-sys 0.45.0",
+]
+
+[[package]]
 name = "errno-dragonfly"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1364,7 +1375,7 @@ checksum = "aae5bc6e2eb41c9def29a3e0f1306382807764b9b53112030eff57435667352d"
 dependencies = [
  "hermit-abi 0.2.6",
  "io-lifetimes",
- "rustix",
+ "rustix 0.36.8",
  "windows-sys 0.42.0",
 ]
 
@@ -1492,6 +1503,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f9f08d8963a6c613f4b1a78f4f4a4dbfadf8e6545b2d72861731e4858b8b47f"
 
 [[package]]
+name = "linux-raw-sys"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd550e73688e6d578f0ac2119e32b797a327631a42f9433e59d02e139c8df60d"
+
+[[package]]
 name = "lock_api"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1537,7 +1554,7 @@ version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b20a59d985586e4a5aef64564ac77299f8586d8be6cf9106a5a40207e8908efb"
 dependencies = [
- "rustix",
+ "rustix 0.36.8",
 ]
 
 [[package]]
@@ -1776,7 +1793,7 @@ checksum = "28141e0cc4143da2443301914478dc976a61ffdb3f043058310c70df2fed8954"
 dependencies = [
  "cfg-if",
  "libc",
- "redox_syscall",
+ "redox_syscall 0.2.10",
  "smallvec",
  "windows-sys 0.32.0",
 ]
@@ -2059,13 +2076,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "redox_syscall"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "567664f262709473930a4bf9e51bf2ebf3348f2e748ccc50dea20646858f8f29"
+dependencies = [
+ "bitflags",
+]
+
+[[package]]
 name = "redox_users"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "528532f3d801c87aec9def2add9ca802fe569e44a544afe633765267840abe64"
 dependencies = [
  "getrandom",
- "redox_syscall",
+ "redox_syscall 0.2.10",
 ]
 
 [[package]]
@@ -2119,10 +2145,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f43abb88211988493c1abb44a70efa56ff0ce98f233b7b276146f1f3f7ba9644"
 dependencies = [
  "bitflags",
- "errno",
+ "errno 0.2.8",
  "io-lifetimes",
  "libc",
- "linux-raw-sys",
+ "linux-raw-sys 0.1.3",
+ "windows-sys 0.45.0",
+]
+
+[[package]]
+name = "rustix"
+version = "0.37.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62b24138615de35e32031d041a09032ef3487a616d901ca4db224e7d557efae2"
+dependencies = [
+ "bitflags",
+ "errno 0.3.0",
+ "io-lifetimes",
+ "libc",
+ "linux-raw-sys 0.3.0",
  "windows-sys 0.45.0",
 ]
 
@@ -2550,15 +2590,15 @@ checksum = "c02424087780c9b71cc96799eaeddff35af2bc513278cda5c99fc1f5d026d3c1"
 
 [[package]]
 name = "tempfile"
-version = "3.4.0"
+version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af18f7ae1acd354b992402e9ec5864359d693cd8a79dcbef59f76891701c1e95"
+checksum = "b9fbec84f381d5795b08656e4912bec604d162bff9291d6189a78f4c8ab87998"
 dependencies = [
  "cfg-if",
  "fastrand",
- "redox_syscall",
- "rustix",
- "windows-sys 0.42.0",
+ "redox_syscall 0.3.5",
+ "rustix 0.37.3",
+ "windows-sys 0.45.0",
 ]
 
 [[package]]
@@ -2576,7 +2616,7 @@ version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4c9afddd2cec1c0909f06b00ef33f94ab2cc0578c4a610aa208ddfec8aa2b43a"
 dependencies = [
- "rustix",
+ "rustix 0.36.8",
  "windows-sys 0.45.0",
 ]
 
@@ -3021,7 +3061,7 @@ checksum = "01b1192624694399f601de28db78975ed20fa859da8e048bf8250bd3b38d302b"
 dependencies = [
  "cc",
  "cfg-if",
- "rustix",
+ "rustix 0.36.8",
  "wasmtime-asm-macros",
  "windows-sys 0.45.0",
 ]
@@ -3086,7 +3126,7 @@ dependencies = [
  "memoffset 0.8.0",
  "paste",
  "rand",
- "rustix",
+ "rustix 0.36.8",
  "wasmtime-asm-macros",
  "wasmtime-environ",
  "wasmtime-fiber",
