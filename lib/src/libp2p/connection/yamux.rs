@@ -503,24 +503,22 @@ impl<T> Yamux<T> {
         }
 
         // If the remote is currently opening a substream, automatically reject it.
-        match self.incoming {
-            Incoming::PendingIncomingSubstream {
-                substream_id,
-                data_frame_size,
-                fin,
-                ..
-            } => {
-                self.incoming = if data_frame_size == 0 {
-                    Incoming::Header(arrayvec::ArrayVec::new())
-                } else {
-                    Incoming::DataFrame {
-                        substream_id,
-                        remaining_bytes: data_frame_size,
-                        fin,
-                    }
-                };
-            }
-            _ => {}
+        if let Incoming::PendingIncomingSubstream {
+            substream_id,
+            data_frame_size,
+            fin,
+            ..
+        } = self.incoming
+        {
+            self.incoming = if data_frame_size == 0 {
+                Incoming::Header(arrayvec::ArrayVec::new())
+            } else {
+                Incoming::DataFrame {
+                    substream_id,
+                    remaining_bytes: data_frame_size,
+                    fin,
+                }
+            };
         }
     }
 
@@ -568,7 +566,7 @@ impl<T> Yamux<T> {
                 }
             })
             .inspect(|(dead_id, _, _)| {
-                debug_assert!(match self.outgoing {
+                debug_assert!(!matches!(self.outgoing,
                     Outgoing::Header {
                         substream_data_frame: Some((OutgoingSubstreamData::Healthy(id), _)),
                         ..
@@ -576,9 +574,7 @@ impl<T> Yamux<T> {
                     | Outgoing::SubstreamData {
                         data: OutgoingSubstreamData::Healthy(id),
                         ..
-                    } if id == *dead_id => false,
-                    _ => true,
-                });
+                    } if id == *dead_id));
             })
     }
 
@@ -740,7 +736,7 @@ impl<T> Yamux<T> {
                     }
 
                     // Full header available to decode in `incoming_header`.
-                    let decoded_header = match header::decode_yamux_header(&incoming_header) {
+                    let decoded_header = match header::decode_yamux_header(incoming_header) {
                         Ok(h) => h,
                         Err(err) => return Err(Error::HeaderDecode(err)),
                     };
@@ -1461,13 +1457,13 @@ impl<'a, T> SubstreamRef<'a, T> {
     /// Returns `false` if [`SubstreamMut::close`] or [`SubstreamMut::reset`] has been called on
     /// this substream, or if the remote has reset it.
     pub fn can_send(&self) -> bool {
-        match self.substream.state {
+        matches!(
+            self.substream.state,
             SubstreamState::Healthy {
                 local_write: SubstreamStateLocalWrite::Open,
                 ..
-            } => true,
-            _ => false,
-        }
+            }
+        )
     }
 }
 
@@ -1578,25 +1574,23 @@ impl<'a, T> SubstreamMut<'a, T> {
     /// [`SubstreamMut::reset`] has been called on this substream, or if the substream has been
     /// reset by the remote.
     pub fn can_receive(&self) -> bool {
-        match self.substream.get().state {
+        matches!(self.substream.get().state,
             SubstreamState::Healthy {
                 remote_write_closed,
                 ..
-            } => !remote_write_closed,
-            SubstreamState::Reset => false,
-        }
+            } if !remote_write_closed)
     }
 
     /// Returns `false` if [`SubstreamMut::close`] or [`SubstreamMut::reset`] has been called on
     /// this substream, or if the remote has .
     pub fn can_send(&self) -> bool {
-        match self.substream.get().state {
+        matches!(
+            self.substream.get().state,
             SubstreamState::Healthy {
                 local_write: SubstreamStateLocalWrite::Open,
                 ..
-            } => true,
-            _ => false,
-        }
+            }
+        )
     }
 
     /// Marks the substream as closed. It is no longer possible to write data on it.
@@ -1610,14 +1604,12 @@ impl<'a, T> SubstreamMut<'a, T> {
     // TODO: doc obsolete
     pub fn close(&mut self) {
         let substream = self.substream.get_mut();
-        match substream.state {
-            SubstreamState::Healthy {
-                local_write: ref mut local_write @ SubstreamStateLocalWrite::Open,
-                ..
-            } => {
-                *local_write = SubstreamStateLocalWrite::FinDesired;
-            }
-            _ => {}
+        if let SubstreamState::Healthy {
+            local_write: ref mut local_write @ SubstreamStateLocalWrite::Open,
+            ..
+        } = substream.state
+        {
+            *local_write = SubstreamStateLocalWrite::FinDesired;
         }
     }
 
@@ -1850,12 +1842,12 @@ impl<'a, T> ExtractOut<'a, T> {
                         .yamux
                         .substreams
                         .iter_mut()
-                        .find(|(_, s)| match &s.state {
+                        .find(|(_, s)| {
+                            matches!(&s.state,
                             SubstreamState::Healthy {
                                 remote_window_pending_increase,
                                 ..
-                            } if *remote_window_pending_increase != 0 => true,
-                            _ => false,
+                            } if *remote_window_pending_increase != 0)
                         })
                         .map(|(id, sub)| (*id, sub))
                     {

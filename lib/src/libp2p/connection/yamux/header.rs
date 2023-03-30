@@ -79,12 +79,12 @@ pub fn decode_yamux_header(bytes: &[u8]) -> Result<DecodedYamuxHeader, YamuxHead
 
 /// Error while decoding a Yamux header.
 #[derive(Debug, derive_more::Display)]
-#[display(fmt = "Error at offset {}", offset)]
+#[display(fmt = "Error at offset {offset}")]
 pub struct YamuxHeaderDecodeError {
     offset: usize,
 }
 
-fn decode<'a>(bytes: &'a [u8]) -> nom::IResult<&'a [u8], DecodedYamuxHeader> {
+fn decode(bytes: &'_ [u8]) -> nom::IResult<&'_ [u8], DecodedYamuxHeader> {
     nom::sequence::preceded(
         nom::bytes::complete::tag(&[0]),
         nom::branch::alt((
@@ -161,7 +161,7 @@ fn decode<'a>(bytes: &'a [u8]) -> nom::IResult<&'a [u8], DecodedYamuxHeader> {
     )(bytes)
 }
 
-fn flags<'a>(bytes: &'a [u8]) -> nom::IResult<&'a [u8], (bool, bool, bool, bool)> {
+fn flags(bytes: &'_ [u8]) -> nom::IResult<&'_ [u8], (bool, bool, bool, bool)> {
     nom::combinator::map_opt(nom::number::complete::be_u16, |flags| {
         let syn = (flags & 0x1) != 0;
         let ack = (flags & 0x2) != 0;
