@@ -481,7 +481,11 @@ pub enum NoiseHandshake {
 }
 
 /// Handshake still in progress. More data needs to be sent or received.
-pub struct HandshakeInProgress {
+pub struct HandshakeInProgress(Box<HandshakeInProgressInner>);
+
+/// The actual fields are wrapped within a `Box` because we move the `HandshakeInProgress`
+/// frequently.
+struct HandshakeInProgressInner {
     /// Underlying noise state machine.
     ///
     /// Libp2p always uses the XX handshake.
@@ -556,14 +560,14 @@ impl HandshakeInProgress {
             (tx, rx, 2)
         };
 
-        let mut handshake = HandshakeInProgress {
+        let mut handshake = HandshakeInProgress(Box::new(HandshakeInProgressInner {
             inner,
             tx_payload,
             rx_payload,
             rx_messages_remain,
             rx_buffer_encrypted: Vec::with_capacity(65536 + 2),
             tx_buffer_encrypted: VecDeque::new(),
-        };
+        }));
 
         handshake.update_message_write();
         handshake
@@ -572,13 +576,13 @@ impl HandshakeInProgress {
     /// Calls [`snow::HandshakeState::write_message`] if necessary, updates all the internal state,
     /// and puts the message into `tx_buffer_encrypted`.
     fn update_message_write(&mut self) {
-        if self.inner.is_handshake_finished() || !self.inner.is_my_turn() {
+        if self.0.inner.is_handshake_finished() || !self.0.inner.is_my_turn() {
             return;
         }
 
-        debug_assert!(self.tx_buffer_encrypted.is_empty());
+        debug_assert!(self.0.tx_buffer_encrypted.is_empty());
 
-        let payload = match &mut self.tx_payload {
+        let payload = match &mut self.0.tx_payload {
             None => None,
             Some((n, _)) if *n != 0 => {
                 *n -= 1;
@@ -591,42 +595,43 @@ impl HandshakeInProgress {
             }
         };
 
-        self.tx_buffer_encrypted.resize(512, 0);
-        self.tx_buffer_encrypted.make_contiguous(); // TODO: this is a hack to fix the follow-up debug_assert! from triggering; fixing this properly requires bigger changes
-        debug_assert!(self.tx_buffer_encrypted.as_slices().1.is_empty());
+        self.0.tx_buffer_encrypted.resize(512, 0);
+        self.0.tx_buffer_encrypted.make_contiguous(); // TODO: this is a hack to fix the follow-up debug_assert! from triggering; fixing this properly requires bigger changes
+        debug_assert!(self.0.tx_buffer_encrypted.as_slices().1.is_empty());
         let written = self
+            .0
             .inner
             .write_message(
                 payload.as_ref().map(|p| &p[..]).unwrap_or(&[]),
-                self.tx_buffer_encrypted.as_mut_slices().0,
+                self.0.tx_buffer_encrypted.as_mut_slices().0,
             )
             .unwrap();
-        assert!(written < self.tx_buffer_encrypted.len()); // be sure that the message has fit into `out`.
-        self.tx_buffer_encrypted.truncate(written);
+        assert!(written < self.0.tx_buffer_encrypted.len()); // be sure that the message has fit into `out`.
+        self.0.tx_buffer_encrypted.truncate(written);
 
         // Handshake must also be prefixed with two bytes indicating its length.
         // The message is guaranteed by the Noise specs to not be more than 64kiB.
-        let length_bytes = u16::try_from(self.tx_buffer_encrypted.len())
+        let length_bytes = u16::try_from(self.0.tx_buffer_encrypted.len())
             .unwrap()
             .to_be_bytes();
-        self.tx_buffer_encrypted.push_front(length_bytes[1]);
-        self.tx_buffer_encrypted.push_front(length_bytes[0]);
+        self.0.tx_buffer_encrypted.push_front(length_bytes[1]);
+        self.0.tx_buffer_encrypted.push_front(length_bytes[0]);
     }
 
     /// Try to turn this [`HandshakeInProgress`] into a [`NoiseHandshake::Success`] if possible.
     fn try_finish(self) -> NoiseHandshake {
-        if !self.tx_buffer_encrypted.is_empty() {
+        if !self.0.tx_buffer_encrypted.is_empty() {
             return NoiseHandshake::InProgress(self);
         }
 
-        if !self.inner.is_handshake_finished() {
+        if !self.0.inner.is_handshake_finished() {
             return NoiseHandshake::InProgress(self);
         }
 
         // `into_transport_mode()` can only panic if `!is_handshake_finished()`.
-        let cipher = self.inner.into_transport_mode().unwrap();
+        let cipher = self.0.inner.into_transport_mode().unwrap();
 
-        let remote_peer_id = match self.rx_payload {
+        let remote_peer_id = match self.0.rx_payload {
             RxPayload::Received(peer_id) => peer_id,
             // Since `is_handshake_finished()` has returned true, all messages have been
             // exchanged. As such, the remote payload cannot be in a "still waiting to come"
@@ -636,12 +641,12 @@ impl HandshakeInProgress {
 
         // If `rx_buffer_encrypted` wasn't empty, that would mean there would still be a handshake
         // message to decode, which shouldn't be possible given that the handshake is finished.
-        debug_assert!(self.rx_buffer_encrypted.is_empty());
+        debug_assert!(self.0.rx_buffer_encrypted.is_empty());
 
         NoiseHandshake::Success {
             cipher: Noise {
                 inner: cipher,
-                rx_buffer_encrypted: self.rx_buffer_encrypted,
+                rx_buffer_encrypted: self.0.rx_buffer_encrypted,
                 rx_buffer_decrypted: Vec::new(), // TODO: with_capacity
             },
             remote_peer_id,
@@ -662,11 +667,11 @@ impl HandshakeInProgress {
             // Copy data from `self.tx_buffer_encrypted` to `read_write`.
             loop {
                 debug_assert!(
-                    !self.tx_buffer_encrypted.as_slices().0.is_empty()
-                        || self.tx_buffer_encrypted.as_slices().1.is_empty()
+                    !self.0.tx_buffer_encrypted.as_slices().0.is_empty()
+                        || self.0.tx_buffer_encrypted.as_slices().1.is_empty()
                 );
 
-                let to_write = self.tx_buffer_encrypted.as_slices().0;
+                let to_write = self.0.tx_buffer_encrypted.as_slices().0;
                 if !to_write.is_empty() && read_write.outgoing_buffer.is_none() {
                     return Err(HandshakeError::WriteClosed);
                 }
@@ -678,13 +683,13 @@ impl HandshakeInProgress {
 
                 read_write.write_out(&to_write[..to_write_len]);
                 for _ in 0..to_write_len {
-                    self.tx_buffer_encrypted.pop_front().unwrap();
+                    self.0.tx_buffer_encrypted.pop_front().unwrap();
                 }
             }
 
             // Check if incoming data is still part of the handshake.
             // If not, return now without reading anything more.
-            if self.rx_messages_remain == 0 {
+            if self.0.rx_messages_remain == 0 {
                 break;
             }
 
@@ -696,34 +701,37 @@ impl HandshakeInProgress {
 
             // Handshake message must start with two bytes of length.
             // Copy bytes one by one from payload until we reach a length of two.
-            while self.rx_buffer_encrypted.len() < 2 {
+            while self.0.rx_buffer_encrypted.len() < 2 {
                 if read_write.incoming_buffer_available() == 0 {
                     break 'outer_loop;
                 }
 
-                self.rx_buffer_encrypted
+                self.0
+                    .rx_buffer_encrypted
                     .push(read_write.read_bytes::<1>()[0]);
             }
 
             // Decoding the first two bytes, which are the length of the handshake message.
             let expected_len =
-                u16::from_be_bytes(<[u8; 2]>::try_from(&self.rx_buffer_encrypted[..2]).unwrap());
+                u16::from_be_bytes(<[u8; 2]>::try_from(&self.0.rx_buffer_encrypted[..2]).unwrap());
             debug_assert!(
-                expected_len == 0 || self.rx_buffer_encrypted.len() < 2 + usize::from(expected_len)
+                expected_len == 0
+                    || self.0.rx_buffer_encrypted.len() < 2 + usize::from(expected_len)
             );
 
             // Copy as much data as possible from `payload` to `self.rx_buffer_encrypted`, without
             // copying more than the handshake message.
             let to_copy = cmp::min(
-                usize::from(expected_len) + 2 - self.rx_buffer_encrypted.len(),
+                usize::from(expected_len) + 2 - self.0.rx_buffer_encrypted.len(),
                 read_write.incoming_buffer_available(),
             );
-            self.rx_buffer_encrypted
+            self.0
+                .rx_buffer_encrypted
                 .extend(read_write.incoming_bytes_iter().take(to_copy));
-            debug_assert!(self.rx_buffer_encrypted.len() <= usize::from(expected_len) + 2);
+            debug_assert!(self.0.rx_buffer_encrypted.len() <= usize::from(expected_len) + 2);
 
             // Return early if the entire handshake message has not been received yet.
-            if self.rx_buffer_encrypted.len() < usize::from(expected_len) + 2 {
+            if self.0.rx_buffer_encrypted.len() < usize::from(expected_len) + 2 {
                 break;
             }
 
@@ -734,8 +742,9 @@ impl HandshakeInProgress {
                 // such, we allocate a buffer of size equal to the encrypted message.
                 let mut decoded = vec![0; usize::from(expected_len)];
                 match self
+                    .0
                     .inner
-                    .read_message(&self.rx_buffer_encrypted[2..], &mut decoded)
+                    .read_message(&self.0.rx_buffer_encrypted[2..], &mut decoded)
                 {
                     Err(err) => {
                         return Err(HandshakeError::Cipher(CipherError(err)));
@@ -749,11 +758,11 @@ impl HandshakeInProgress {
             };
 
             // Data in `rx_buffer_encrypted` has been fully decoded and can be thrown away.
-            self.rx_buffer_encrypted.clear();
-            self.rx_messages_remain -= 1;
+            self.0.rx_buffer_encrypted.clear();
+            self.0.rx_messages_remain -= 1;
 
             // Check and update the status of the payload reception.
-            let payload_expected = match &mut self.rx_payload {
+            let payload_expected = match &mut self.0.rx_payload {
                 RxPayload::NthMessage(0) => true,
                 RxPayload::NthMessage(n) => {
                     *n -= 1;
@@ -785,7 +794,7 @@ impl HandshakeInProgress {
                 // Assuming that the libp2p+noise specifications are well-designed, the payload
                 // will only arrive after `get_remote_static` is `Some`. Since we have already
                 // checked that the payload arrives when it is supposed to, this can never panic.
-                let remote_noise_static = self.inner.get_remote_static().unwrap();
+                let remote_noise_static = self.0.inner.get_remote_static().unwrap();
                 // TODO: don't use concat() in order to not allocate a Vec
                 remote_public_key
                     .verify(
@@ -794,7 +803,7 @@ impl HandshakeInProgress {
                     )
                     .map_err(HandshakeError::SignatureVerificationFailed)?;
 
-                self.rx_payload = RxPayload::Received(remote_public_key.into_peer_id());
+                self.0.rx_payload = RxPayload::Received(remote_public_key.into_peer_id());
             } else if !decoded_payload.is_empty() {
                 return Err(HandshakeError::UnexpectedPayload);
             };
