@@ -1298,16 +1298,14 @@ impl<T> Yamux<T> {
         self.outgoing = Outgoing::Header {
             header,
             is_goaway: false,
-            substream_data_frame: if let Some(length) =
-                NonZeroUsize::new(usize::try_from(data_length).unwrap())
-            {
-                Some((
-                    OutgoingSubstreamData::Healthy(SubstreamId(substream_id)),
-                    length,
-                ))
-            } else {
-                None
-            },
+            substream_data_frame: NonZeroUsize::new(usize::try_from(data_length).unwrap()).map(
+                |length| {
+                    (
+                        OutgoingSubstreamData::Healthy(SubstreamId(substream_id)),
+                        length,
+                    )
+                },
+            ),
         };
     }
 
