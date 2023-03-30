@@ -23,8 +23,8 @@ use super::{
         read_write::ReadWrite,
     },
     ConfigRequestResponse, ConnectionToCoordinator, ConnectionToCoordinatorInner,
-    CoordinatorToConnection, CoordinatorToConnectionInner, MultiStreamHandshakeKind,
-    NotificationsOutErr, OverlayNetwork, PeerId, ShutdownCause, SubstreamFate, SubstreamId,
+    CoordinatorToConnection, CoordinatorToConnectionInner, NotificationsOutErr, OverlayNetwork,
+    PeerId, ShutdownCause, SubstreamFate, SubstreamId,
 };
 
 use alloc::{collections::VecDeque, string::ToString as _, sync::Arc, vec, vec::Vec};
@@ -140,49 +140,16 @@ where
     // a function only called from the parent module.
     pub(super) fn new(
         randomness_seed: [u8; 32],
-        is_initiator: bool,
         now: TNow,
-        handshake_kind: MultiStreamHandshakeKind,
+        handshake: noise::HandshakeInProgress,
         max_inbound_substreams: usize,
-        noise_key: Arc<noise::NoiseKey>,
         notification_protocols: Arc<[OverlayNetwork]>,
         request_response_protocols: Arc<[ConfigRequestResponse]>,
         ping_protocol: Arc<str>,
     ) -> Self {
-        // In the WebRTC handshake, the Noise prologue must be set to `"libp2p-webrtc-noise:"`
-        // followed with the multihash-encoded fingerprints of the initiator's certificate
-        // and the receiver's certificate.
-        // See <https://github.com/libp2p/specs/pull/412>.
-        let noise_prologue = {
-            let MultiStreamHandshakeKind::WebRtc {
-                local_tls_certificate_multihash,
-                remote_tls_certificate_multihash,
-            } = handshake_kind;
-            const PREFIX: &[u8] = b"libp2p-webrtc-noise:";
-            let mut out = Vec::with_capacity(
-                PREFIX.len()
-                    + local_tls_certificate_multihash.len()
-                    + remote_tls_certificate_multihash.len(),
-            );
-            out.extend_from_slice(PREFIX);
-            if is_initiator {
-                out.extend_from_slice(&local_tls_certificate_multihash);
-                out.extend_from_slice(&remote_tls_certificate_multihash);
-            } else {
-                out.extend_from_slice(&remote_tls_certificate_multihash);
-                out.extend_from_slice(&local_tls_certificate_multihash);
-            }
-            out
-        };
-
         MultiStreamConnectionTask {
             connection: MultiStreamConnectionTaskInner::Handshake {
-                handshake: Some(noise::HandshakeInProgress::new(noise::Config {
-                    key: &noise_key,
-                    // It's the "server" that initiates the Noise handshake.
-                    is_initiator: !is_initiator,
-                    prologue: &noise_prologue,
-                })),
+                handshake: Some(handshake),
                 opened_substream: None,
                 handshake_read_buffer: Vec::new(),
                 handshake_read_buffer_partial_read: 0,
