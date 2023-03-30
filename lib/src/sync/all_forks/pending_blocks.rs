@@ -898,7 +898,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// - If [`Config::verify_bodies`] was `true`, downloading the body of blocks whose body is
     /// unknown.
-    /// - Downloading headers of blocks whose state is [`UnverifiedBlockState::HeightHashKnown`].
+    /// - Downloading headers of blocks whose state is [`UnverifiedBlockState::HeightHash`].
     ///
     /// Requests are ordered by increasing block height. In other words, the most important
     /// requests are returned first.
