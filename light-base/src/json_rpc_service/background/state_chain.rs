@@ -369,7 +369,7 @@ impl<TPlat: Platform> Background<TPlat> {
             Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
                 self.requests_subscriptions
                     .respond(
-                        &request_id.1,
+                        request_id.1,
                         json_rpc::parse::build_error_response(
                             request_id.0,
                             json_rpc::parse::ErrorResponse::ServerError(
@@ -921,7 +921,7 @@ impl<TPlat: Platform> Background<TPlat> {
         };
 
         self.requests_subscriptions
-            .respond(&request_id.1, response)
+            .respond(request_id.1, response)
             .await;
     }
 
@@ -1031,7 +1031,7 @@ impl<TPlat: Platform> Background<TPlat> {
         };
 
         self.requests_subscriptions
-            .respond(&request_id.1, response)
+            .respond(request_id.1, response)
             .await;
     }
 
@@ -1190,16 +1190,15 @@ impl<TPlat: Platform> Background<TPlat> {
                 request_id.0,
                 json_rpc::parse::ErrorResponse::ServerError(
                     -32000,
-                    &format!("Failed to decode metadata from runtime. Error: {}", error),
+                    &format!("Failed to decode metadata from runtime. Error: {error}"),
                 ),
                 None,
             ),
             Err(error) => {
                 log::warn!(
                     target: &self.log_target,
-                    "Returning error from `state_getMetadata`. \
-                            API user might not function properly. Error: {}",
-                    error
+                    "Returning error from `state_getMetadata`. API user might not function \
+                    properly. Error: {error}"
                 );
                 json_rpc::parse::build_error_response(
                     request_id.0,

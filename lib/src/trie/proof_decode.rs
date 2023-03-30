@@ -588,7 +588,9 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                                 children: [Child::NoChild; 16],
                             },
                         });
-                    } else if self
+                    }
+
+                    if self
                         .entries
                         .range::<[nibble::Nibble], _>((
                             ops::Bound::Included(&key[..found_key.len() + 1]),
@@ -610,12 +612,12 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                                 children: [Child::NoChild; 16],
                             },
                         });
-                    } else {
-                        // Child present.
-                        // The request key can possibly be in the trie, but we have no way of
-                        // knowing because the proof doesn't have enough information.
-                        return None;
                     }
+
+                    // Child present.
+                    // The request key can possibly be in the trie, but we have no way of
+                    // knowing because the proof doesn't have enough information.
+                    return None;
                 }
                 Some((found_key, _)) => {
                     // ̀`found_key` is somewhere between the ancestor of the requested key and the
