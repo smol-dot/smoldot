@@ -1364,7 +1364,7 @@ async fn update_round<TPlat: Platform>(
         // Sending the new task might fail in case a shutdown is happening, in which case
         // we don't really care about the state of anything anymore.
         // The sending here is normally very quick.
-        let _ = (guarded.tasks_executor)(task_name, Box::pin(task));
+        (guarded.tasks_executor)(task_name, Box::pin(task));
     }
 
     // Pull messages that the coordinator has generated in destination to the various
