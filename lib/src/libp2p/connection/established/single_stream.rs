@@ -280,7 +280,7 @@ where
             if let Some(incoming_data) = read_write.incoming_buffer.as_mut() {
                 let num_read = self
                     .encryption
-                    .inject_inbound_data(*incoming_data)
+                    .inject_inbound_data(incoming_data)
                     .map_err(Error::Noise)?;
                 read_write.advance_read(num_read);
             }

@@ -536,7 +536,7 @@ impl HandshakeInProgress {
         let inner = {
             let builder = snow::Builder::new(noise_params())
                 .local_private_key(&config.key.key.private)
-                .prologue(&config.prologue);
+                .prologue(config.prologue);
             if config.is_initiator {
                 builder.build_initiator()
             } else {
@@ -834,10 +834,7 @@ pub enum HandshakeError {
     #[display(fmt = "Cipher error: {_0}")]
     Cipher(CipherError),
     /// Failed to decode the payload as the libp2p-extension-to-noise payload.
-    #[display(
-        fmt = "Failed to decode payload as the libp2p-extension-to-noise payload: {}",
-        _0
-    )]
+    #[display(fmt = "Failed to decode payload as the libp2p-extension-to-noise payload: {_0}")]
     PayloadDecode(PayloadDecodeError),
     /// Key passed as part of the payload failed to decode into a libp2p public key.
     InvalidKey,
