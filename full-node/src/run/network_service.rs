@@ -711,13 +711,9 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
     let mut guarded = inner.guarded.lock().await;
 
     // Inject in the coordinator the messages that the connections have generated.
-    loop {
-        let (connection_id, message) =
-            match guarded.messages_from_connections_rx.next().now_or_never() {
-                Some(Some(v)) => v,
-                _ => break,
-            };
-
+    while let Some(Some((connection_id, message))) =
+        guarded.messages_from_connections_rx.next().now_or_never()
+    {
         guarded
             .network
             .inject_connection_message(connection_id, message);
