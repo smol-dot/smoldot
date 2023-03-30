@@ -63,6 +63,22 @@ use alloc::{string::String, vec::Vec};
 use core::{fmt, iter};
 use smallvec::SmallVec;
 
+/// Configuration to pass to [`VirtualMachinePrototype::new`].
+pub struct Config<'a> {
+    /// Encoded wasm bytecode.
+    pub module_bytes: &'a [u8],
+
+    /// Hint about how to execute the WebAssembly code.
+    pub exec_hint: ExecHint,
+
+    /// Called for each import that the module has. It must assign a number to each import, or
+    /// return an error if the import can't be resolved. When the VM calls one of these functions,
+    /// this number will be returned back in order for the user to know how to handle the call.
+    pub symbols: &'a mut dyn FnMut(&str, &str, &Signature) -> Result<usize, ()>,
+}
+
+/// Virtual machine ready to start executing a function.
+///
 /// > **Note**: This struct implements `Clone`. Cloning a [`VirtualMachinePrototype`] allocates
 /// >           memory necessary for the clone to run.
 #[derive(Clone)]
@@ -81,36 +97,31 @@ impl VirtualMachinePrototype {
     /// Creates a new process state machine from the given module. This method notably allocates
     /// the memory necessary for the virtual machine to run.
     ///
-    /// The closure is called for each import that the module has. It must assign a number to each
-    /// import, or return an error if the import can't be resolved. When the VM calls one of these
-    /// functions, this number will be returned back in order for the user to know how to handle
-    /// the call.
     ///
     /// See [the module-level documentation](..) for an explanation of the parameters.
-    pub fn new(
-        module_bytes: impl AsRef<[u8]>,
-        exec_hint: ExecHint,
-        symbols: impl FnMut(&str, &str, &Signature) -> Result<usize, ()>,
-    ) -> Result<Self, NewErr> {
+    pub fn new(config: Config) -> Result<Self, NewErr> {
         Ok(VirtualMachinePrototype {
-            inner: match exec_hint {
+            inner: match config.exec_hint {
                 #[cfg(all(target_arch = "x86_64", feature = "std"))]
                 ExecHint::CompileAheadOfTime => VirtualMachinePrototypeInner::Jit(
-                    jit::JitPrototype::new(module_bytes, symbols)?,
+                    jit::JitPrototype::new(config.module_bytes, config.symbols)?,
                 ),
                 #[cfg(not(all(target_arch = "x86_64", feature = "std")))]
                 ExecHint::CompileAheadOfTime => VirtualMachinePrototypeInner::Interpreter(
-                    interpreter::InterpreterPrototype::new(module_bytes, symbols)?,
+                    interpreter::InterpreterPrototype::new(config.module_bytes, config.symbols)?,
                 ),
                 ExecHint::Oneshot | ExecHint::Untrusted | ExecHint::ForceWasmi => {
                     VirtualMachinePrototypeInner::Interpreter(
-                        interpreter::InterpreterPrototype::new(module_bytes, symbols)?,
+                        interpreter::InterpreterPrototype::new(
+                            config.module_bytes,
+                            config.symbols,
+                        )?,
                     )
                 }
 
                 #[cfg(all(target_arch = "x86_64", feature = "std"))]
                 ExecHint::ForceWasmtime => VirtualMachinePrototypeInner::Jit(
-                    jit::JitPrototype::new(module_bytes, symbols)?,
+                    jit::JitPrototype::new(config.module_bytes, config.symbols)?,
                 ),
             },
         })

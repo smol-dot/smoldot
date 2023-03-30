@@ -65,8 +65,8 @@ struct BaseComponents {
 impl JitPrototype {
     /// See [`super::VirtualMachinePrototype::new`].
     pub fn new(
-        module_bytes: impl AsRef<[u8]>,
-        mut symbols: impl FnMut(&str, &str, &Signature) -> Result<usize, ()>,
+        module_bytes: &[u8],
+        symbols: &mut dyn FnMut(&str, &str, &Signature) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
         let mut config = wasmtime::Config::new();
         config.cranelift_nan_canonicalization(true);
@@ -81,7 +81,7 @@ impl JitPrototype {
         let engine =
             wasmtime::Engine::new(&config).map_err(|err| NewErr::InvalidWasm(err.to_string()))?;
 
-        let module = wasmtime::Module::from_binary(&engine, module_bytes.as_ref())
+        let module = wasmtime::Module::from_binary(&engine, module_bytes)
             .map_err(|err| NewErr::InvalidWasm(err.to_string()))?;
 
         // Building the list of imports that the Wasm VM is able to use.
