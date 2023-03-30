@@ -19,7 +19,7 @@ use super::{
     super::{
         connection::{
             established::{self, ConfigRequestResponse},
-            single_stream_handshake, NoiseKey,
+            single_stream_handshake,
         },
         read_write::ReadWrite,
     },
@@ -37,10 +37,9 @@ use core::{
 
 pub(super) struct Config<TNow> {
     pub(super) randomness_seed: [u8; 32],
-    pub(super) is_initiator: bool,
+    pub(super) handshake: single_stream_handshake::HealthyHandshake,
     pub(super) handshake_kind: SingleStreamHandshakeKind,
     pub(super) handshake_timeout: TNow,
-    pub(super) noise_key: Arc<NoiseKey>,
     pub(super) max_inbound_substreams: usize,
     pub(super) notification_protocols: Arc<[OverlayNetwork]>,
     pub(super) request_response_protocols: Arc<[ConfigRequestResponse]>,
@@ -150,10 +149,7 @@ where
 
         SingleStreamConnectionTask {
             connection: SingleStreamConnectionTaskInner::Handshake {
-                handshake: single_stream_handshake::HealthyHandshake::noise_yamux(
-                    &config.noise_key,
-                    config.is_initiator,
-                ),
+                handshake: config.handshake,
                 randomness_seed: config.randomness_seed,
                 timeout: config.handshake_timeout,
                 max_inbound_substreams: config.max_inbound_substreams,

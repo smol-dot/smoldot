@@ -47,6 +47,8 @@
 //! the calls to [`Network::inject_connection_message`].
 //!
 
+use crate::libp2p::connection::noise;
+
 use super::connection::{established, single_stream_handshake, NoiseKey};
 use alloc::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -256,7 +258,7 @@ pub struct Network<TConn, TNow> {
     handshake_timeout: Duration,
 
     /// See [`Config::noise_key`].
-    noise_key: Arc<NoiseKey>,
+    noise_key: NoiseKey,
 
     /// See [`OverlayNetwork`].
     notification_protocols: Arc<[OverlayNetwork]>,
@@ -354,7 +356,7 @@ where
             ),
             ingoing_notification_substreams_by_connection: BTreeMap::new(),
             randomness_seeds: ChaCha20Rng::from_seed(config.randomness_seed),
-            noise_key: Arc::new(config.noise_key),
+            noise_key: config.noise_key,
             max_inbound_substreams: config.max_inbound_substreams,
             notification_protocols,
             request_response_protocols: config.request_response_protocols.into_iter().collect(), // TODO: stupid overhead
@@ -381,10 +383,12 @@ where
 
         let connection_task = SingleStreamConnectionTask::new(single_stream::Config {
             randomness_seed: self.randomness_seeds.gen(),
-            is_initiator,
+            handshake: single_stream_handshake::HealthyHandshake::noise_yamux(
+                &self.noise_key,
+                is_initiator,
+            ),
             handshake_kind,
             handshake_timeout: when_connected + self.handshake_timeout,
-            noise_key: self.noise_key.clone(),
             max_inbound_substreams: self.max_inbound_substreams,
             notification_protocols: self.notification_protocols.clone(),
             request_response_protocols: self.request_response_protocols.clone(),
@@ -420,13 +424,44 @@ where
         let connection_id = self.next_connection_id;
         self.next_connection_id.0 += 1;
 
+        // In the WebRTC handshake, the Noise prologue must be set to `"libp2p-webrtc-noise:"`
+        // followed with the multihash-encoded fingerprints of the initiator's certificate
+        // and the receiver's certificate.
+        // See <https://github.com/libp2p/specs/pull/412>.
+        let noise_prologue = {
+            let MultiStreamHandshakeKind::WebRtc {
+                local_tls_certificate_multihash,
+                remote_tls_certificate_multihash,
+            } = handshake_kind;
+            const PREFIX: &[u8] = b"libp2p-webrtc-noise:";
+            let mut out = Vec::with_capacity(
+                PREFIX.len()
+                    + local_tls_certificate_multihash.len()
+                    + remote_tls_certificate_multihash.len(),
+            );
+            out.extend_from_slice(PREFIX);
+            if is_initiator {
+                out.extend_from_slice(&local_tls_certificate_multihash);
+                out.extend_from_slice(&remote_tls_certificate_multihash);
+            } else {
+                out.extend_from_slice(&remote_tls_certificate_multihash);
+                out.extend_from_slice(&local_tls_certificate_multihash);
+            }
+            out
+        };
+
+        let handshake = noise::HandshakeInProgress::new(noise::Config {
+            key: &self.noise_key,
+            // It's the "server" that initiates the Noise handshake.
+            is_initiator: !is_initiator,
+            prologue: &noise_prologue,
+        });
+
         let connection_task = MultiStreamConnectionTask::new(
             self.randomness_seeds.gen(),
-            is_initiator,
             now,
-            handshake_kind,
+            handshake,
             self.max_inbound_substreams,
-            self.noise_key.clone(),
             self.notification_protocols.clone(),
             self.request_response_protocols.clone(),
             self.ping_protocol.clone(),
