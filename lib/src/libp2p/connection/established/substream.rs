@@ -373,38 +373,44 @@ where
         Option<Event<TRqUd, TNotifUd>>,
     ) {
         match self.inner {
-            SubstreamInner::InboundNegotiating(nego, was_rejected_already) => match nego.read_write(read_write) {
-                Ok(multistream_select::Negotiation::InProgress(nego)) => {
-                    (Some(SubstreamInner::InboundNegotiating(nego, was_rejected_already)), None)
+            SubstreamInner::InboundNegotiating(nego, was_rejected_already) => {
+                match nego.read_write(read_write) {
+                    Ok(multistream_select::Negotiation::InProgress(nego)) => (
+                        Some(SubstreamInner::InboundNegotiating(
+                            nego,
+                            was_rejected_already,
+                        )),
+                        None,
+                    ),
+                    Ok(multistream_select::Negotiation::ListenerAcceptOrDeny(accept_deny)) => {
+                        // TODO: maybe avoid cloning the protocol name?
+                        let protocol = accept_deny.requested_protocol().to_owned();
+                        (
+                            Some(SubstreamInner::InboundNegotiatingApiWait(accept_deny)),
+                            Some(Event::InboundNegotiated(protocol)),
+                        )
+                    }
+                    Ok(multistream_select::Negotiation::Success) => {
+                        // Unreachable, as we expect a `ListenerAcceptOrDeny`.
+                        unreachable!()
+                    }
+                    Ok(multistream_select::Negotiation::NotAvailable) => {
+                        // Unreachable in listener mode.
+                        unreachable!()
+                    }
+                    Err(_) if was_rejected_already => {
+                        // If the negotiation was already rejected once, it is likely that the
+                        // multistream-select protocol error is due to the fact that the remote
+                        // assumes that the multistream-select negotiation always succeeds. As such,
+                        // we treat this situation as "negotiation has failed gracefully".
+                        (Some(SubstreamInner::InboundFailed), None)
+                    }
+                    Err(err) => (
+                        None,
+                        Some(Event::InboundError(InboundError::NegotiationError(err))),
+                    ),
                 }
-                Ok(multistream_select::Negotiation::ListenerAcceptOrDeny(accept_deny)) => {
-                    // TODO: maybe avoid cloning the protocol name?
-                    let protocol = accept_deny.requested_protocol().to_owned();
-                    (
-                        Some(SubstreamInner::InboundNegotiatingApiWait(accept_deny)),
-                        Some(Event::InboundNegotiated(protocol)),
-                    )
-                }
-                Ok(multistream_select::Negotiation::Success) => {
-                    // Unreachable, as we expect a `ListenerAcceptOrDeny`.
-                    unreachable!()
-                }
-                Ok(multistream_select::Negotiation::NotAvailable) => {
-                    // Unreachable in listener mode.
-                    unreachable!()
-                }
-                Err(_) if was_rejected_already => {
-                    // If the negotiation was already rejected once, it is likely that the
-                    // multistream-select protocol error is due to the fact that the remote
-                    // assumes that the multistream-select negotiation always succeeds. As such,
-                    // we treat this situation as "negotiation has failed gracefully".
-                    (Some(SubstreamInner::InboundFailed), None)
-                },
-                Err(err) => (
-                    None,
-                    Some(Event::InboundError(InboundError::NegotiationError(err))),
-                ),
-            },
+            }
             SubstreamInner::InboundNegotiatingApiWait(accept_deny) => (
                 Some(SubstreamInner::InboundNegotiatingApiWait(accept_deny)),
                 None,
@@ -1406,7 +1412,9 @@ where
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self.inner {
             SubstreamInner::InboundFailed => f.debug_tuple("incoming-negotiation-failed").finish(),
-            SubstreamInner::InboundNegotiating(_, _) => f.debug_tuple("incoming-negotiating").finish(),
+            SubstreamInner::InboundNegotiating(_, _) => {
+                f.debug_tuple("incoming-negotiating").finish()
+            }
             SubstreamInner::InboundNegotiatingAccept(_, _) => {
                 f.debug_tuple("incoming-negotiating-after-accept").finish()
             }
@@ -1461,7 +1469,7 @@ pub enum Event<TRqUd, TNotifUd> {
     InboundError(InboundError),
 
     /// An inbound substream has successfully negotiated a protocol. Call
-    /// [`Substream::set_inbound_ty`] in order to resume.
+    /// [`Substream::accept_inbound`] or [`Substream::reject_inbound`] in order to resume.
     InboundNegotiated(String),
 
     /// Received a request in the context of a request-response protocol.
