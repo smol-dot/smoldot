@@ -38,7 +38,7 @@ pub struct Substream<TNow, TRqUd, TNotifUd> {
 // TODO: remove `protocol_index` fields?
 enum SubstreamInner<TNow, TRqUd, TNotifUd> {
     /// Protocol negotiation in progress in an incoming substream.
-    InboundNegotiating(multistream_select::InProgress<String>),
+    InboundNegotiating(multistream_select::InProgress<String>, bool),
     /// Protocol negotiation in an incoming substream is in progress, and an
     /// [`Event::InboundNegotiated`] has been emitted. Now waiting for the API user to indicate
     /// whether the protocol is supported and if so the type of substream.
@@ -51,7 +51,6 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
     /// In order to save a round-trip time, the remote might assume that the protocol negotiation
     /// has succeeded. As such, it might send additional data on this substream that should be
     /// ignored.
-    // TODO: this variant is actually no longer used as is equivalent to a "poisoned" state
     InboundFailed,
 
     /// Failure to negotiate an outbound notifications substream.
@@ -219,7 +218,7 @@ where
             });
 
         Substream {
-            inner: SubstreamInner::InboundNegotiating(negotiation),
+            inner: SubstreamInner::InboundNegotiating(negotiation, false),
         }
     }
 
@@ -374,9 +373,9 @@ where
         Option<Event<TRqUd, TNotifUd>>,
     ) {
         match self.inner {
-            SubstreamInner::InboundNegotiating(nego) => match nego.read_write(read_write) {
+            SubstreamInner::InboundNegotiating(nego, was_rejected_already) => match nego.read_write(read_write) {
                 Ok(multistream_select::Negotiation::InProgress(nego)) => {
-                    (Some(SubstreamInner::InboundNegotiating(nego)), None)
+                    (Some(SubstreamInner::InboundNegotiating(nego, was_rejected_already)), None)
                 }
                 Ok(multistream_select::Negotiation::ListenerAcceptOrDeny(accept_deny)) => {
                     // TODO: maybe avoid cloning the protocol name?
@@ -394,6 +393,13 @@ where
                     // Unreachable in listener mode.
                     unreachable!()
                 }
+                Err(_) if was_rejected_already => {
+                    // If the negotiation was already rejected once, it is likely that the
+                    // multistream-select protocol error is due to the fact that the remote
+                    // assumes that the multistream-select negotiation always succeeds. As such,
+                    // we treat this situation as "negotiation has failed gracefully".
+                    (Some(SubstreamInner::InboundFailed), None)
+                },
                 Err(err) => (
                     None,
                     Some(Event::InboundError(InboundError::NegotiationError(err))),
@@ -1150,7 +1156,7 @@ where
 
     pub fn reset(self) -> Option<Event<TRqUd, TNotifUd>> {
         match self.inner {
-            SubstreamInner::InboundNegotiating(_) => None,
+            SubstreamInner::InboundNegotiating(_, _) => None,
             SubstreamInner::InboundNegotiatingAccept(_, _) => None,
             SubstreamInner::InboundNegotiatingApiWait(_) => None,
             SubstreamInner::InboundFailed => None,
@@ -1386,7 +1392,7 @@ where
     pub fn reject_inbound(&mut self) {
         match mem::replace(&mut self.inner, SubstreamInner::InboundFailed) {
             SubstreamInner::InboundNegotiatingApiWait(accept_deny) => {
-                self.inner = SubstreamInner::InboundNegotiating(accept_deny.reject())
+                self.inner = SubstreamInner::InboundNegotiating(accept_deny.reject(), true)
             }
             _ => panic!(),
         }
@@ -1400,7 +1406,7 @@ where
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self.inner {
             SubstreamInner::InboundFailed => f.debug_tuple("incoming-negotiation-failed").finish(),
-            SubstreamInner::InboundNegotiating(_) => f.debug_tuple("incoming-negotiating").finish(),
+            SubstreamInner::InboundNegotiating(_, _) => f.debug_tuple("incoming-negotiating").finish(),
             SubstreamInner::InboundNegotiatingAccept(_, _) => {
                 f.debug_tuple("incoming-negotiating-after-accept").finish()
             }

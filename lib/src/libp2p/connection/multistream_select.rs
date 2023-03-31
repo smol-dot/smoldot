@@ -97,6 +97,8 @@ pub enum Negotiation<P> {
     /// Negotiation has ended successfully. A protocol has been negotiated.
     Success,
     /// Negotiation has ended, but there isn't any protocol in common between the two parties.
+    ///
+    /// Can only ever happen as the dialing side.
     NotAvailable,
 }
 
