@@ -84,6 +84,12 @@ pub struct Config {
 }
 
 pub struct Yamux<T> {
+    /// The actual fields are wrapped in a `Box` because the `Yamux` object is moved around pretty
+    /// often.
+    inner: Box<YamuxInner<T>>,
+}
+
+struct YamuxInner<T> {
     /// List of substreams currently open in the Yamux state machine.
     ///
     /// A `SipHasher` is used in order to avoid hash collision attacks on substream IDs.
@@ -268,8 +274,8 @@ enum OutgoingSubstreamData {
         /// Buffer of buffers to be written out to the socket.
         write_buffers: Vec<Vec<u8>>,
 
-        /// Number of bytes in `self.write_buffers[0]` has have already been written out to the
-        /// socket.
+        /// Number of bytes in `self.inner.write_buffers[0]` has have already been written out to
+        /// the socket.
         first_write_buffer_offset: usize,
     },
 }
@@ -280,25 +286,27 @@ impl<T> Yamux<T> {
         let mut randomness = ChaCha20Rng::from_seed(config.randomness_seed);
 
         Yamux {
-            substreams: hashbrown::HashMap::with_capacity_and_hasher(
-                config.capacity,
-                SipHasherBuild::new(randomness.gen()),
-            ),
-            num_inbound: 0,
-            received_goaway: None,
-            incoming: Incoming::Header(arrayvec::ArrayVec::new()),
-            outgoing: Outgoing::Idle,
-            outgoing_goaway: OutgoingGoAway::NotRequired,
-            next_outbound_substream: if config.is_initiator {
-                NonZeroU32::new(1).unwrap()
-            } else {
-                NonZeroU32::new(2).unwrap()
-            },
-            pings_to_send: 0,
-            // We leave the initial capacity at 0, as it is likely that no ping is sent at all.
-            pings_waiting_reply: VecDeque::new(),
-            rsts_to_send: VecDeque::with_capacity(config.capacity),
-            randomness,
+            inner: Box::new(YamuxInner {
+                substreams: hashbrown::HashMap::with_capacity_and_hasher(
+                    config.capacity,
+                    SipHasherBuild::new(randomness.gen()),
+                ),
+                num_inbound: 0,
+                received_goaway: None,
+                incoming: Incoming::Header(arrayvec::ArrayVec::new()),
+                outgoing: Outgoing::Idle,
+                outgoing_goaway: OutgoingGoAway::NotRequired,
+                next_outbound_substream: if config.is_initiator {
+                    NonZeroU32::new(1).unwrap()
+                } else {
+                    NonZeroU32::new(2).unwrap()
+                },
+                pings_to_send: 0,
+                // We leave the initial capacity at 0, as it is likely that no ping is sent at all.
+                pings_waiting_reply: VecDeque::new(),
+                rsts_to_send: VecDeque::with_capacity(config.capacity),
+                randomness,
+            }),
         }
     }
 
@@ -307,24 +315,24 @@ impl<T> Yamux<T> {
     /// > **Note**: After a substream has been closed or reset, it must be removed using
     /// >           [`Yamux::remove_dead_substream`] before this function can return `true`.
     pub fn is_empty(&self) -> bool {
-        self.substreams.is_empty()
+        self.inner.substreams.is_empty()
     }
 
     /// Returns the number of substreams in the Yamux state machine. Includes substreams that are
     /// dead but haven't been removed yet.
     pub fn len(&self) -> usize {
-        self.substreams.len()
+        self.inner.substreams.len()
     }
 
     /// Returns the number of inbound substreams in the Yamux state machine. Includes substreams
     /// that are dead but haven't been removed yet.
     pub fn num_inbound(&self) -> usize {
         debug_assert_eq!(
-            self.num_inbound,
-            self.substreams.values().filter(|s| s.inbound).count()
+            self.inner.num_inbound,
+            self.inner.substreams.values().filter(|s| s.inbound).count()
         );
 
-        self.num_inbound
+        self.inner.num_inbound
     }
 
     /// Opens a new substream.
@@ -351,13 +359,18 @@ impl<T> Yamux<T> {
     ///
     pub fn open_substream(&mut self, user_data: T) -> SubstreamMut<T> {
         // It is forbidden to open new substreams if a `GoAway` frame has been received.
-        assert!(self.received_goaway.is_none());
+        assert!(self.inner.received_goaway.is_none());
 
         // Make sure that the `loop` below can finish.
-        assert!(usize::try_from(u32::max_value() / 2 - 1)
-            .map_or(true, |full_len| self.substreams.len() < full_len));
+        assert!(
+            usize::try_from(u32::max_value() / 2 - 1).map_or(true, |full_len| self
+                .inner
+                .substreams
+                .len()
+                < full_len)
+        );
 
-        // Grab a `VacantEntry` in `self.substreams`.
+        // Grab a `VacantEntry` in `self.inner.substreams`.
         let entry = loop {
             // Allocating a substream ID is surprisingly difficult because overflows in the
             // identifier are possible if the software runs for a very long time.
@@ -365,9 +378,9 @@ impl<T> Yamux<T> {
             // this ID exists, the code below properly handles wrapping around and ignores IDs
             // already in use .
             // TODO: simply skill whole connection if overflow
-            let id_attempt = self.next_outbound_substream;
-            self.next_outbound_substream = {
-                let mut id = self.next_outbound_substream.get();
+            let id_attempt = self.inner.next_outbound_substream;
+            self.inner.next_outbound_substream = {
+                let mut id = self.inner.next_outbound_substream.get();
                 loop {
                     // Odd ids are reserved for the initiator and even ids are reserved for the
                     // listener. Assuming that the current id is valid, incrementing by 2 will
@@ -380,7 +393,7 @@ impl<T> Yamux<T> {
                     }
                 }
             };
-            if let Entry::Vacant(e) = self.substreams.entry(id_attempt) {
+            if let Entry::Vacant(e) = self.inner.substreams.entry(id_attempt) {
                 break e;
             }
         };
@@ -404,11 +417,11 @@ impl<T> Yamux<T> {
             user_data,
         });
 
-        match self.substreams.entry(substream_id.0) {
+        match self.inner.substreams.entry(substream_id.0) {
             Entry::Occupied(e) => SubstreamMut {
                 substream: e,
-                outgoing: &mut self.outgoing,
-                rsts_to_send: &mut self.rsts_to_send,
+                outgoing: &mut self.inner.outgoing,
+                rsts_to_send: &mut self.inner.rsts_to_send,
             },
             _ => unreachable!(),
         }
@@ -419,19 +432,21 @@ impl<T> Yamux<T> {
     ///
     /// If `Some` is returned, it is forbidden to open new outbound substreams.
     pub fn received_goaway(&self) -> Option<GoAwayErrorCode> {
-        self.received_goaway
+        self.inner.received_goaway
     }
 
     /// Returns an iterator to the list of all substream user datas.
     pub fn user_datas(&self) -> impl ExactSizeIterator<Item = (SubstreamId, &T)> {
-        self.substreams
+        self.inner
+            .substreams
             .iter()
             .map(|(id, s)| (SubstreamId(*id), &s.user_data))
     }
 
     /// Returns an iterator to the list of all substream user datas.
     pub fn user_datas_mut(&mut self) -> impl ExactSizeIterator<Item = (SubstreamId, &mut T)> {
-        self.substreams
+        self.inner
+            .substreams
             .iter_mut()
             .map(|(id, s)| (SubstreamId(*id), &mut s.user_data))
     }
@@ -441,18 +456,18 @@ impl<T> Yamux<T> {
     pub fn substream_by_id(&self, id: SubstreamId) -> Option<SubstreamRef<T>> {
         Some(SubstreamRef {
             id,
-            substream: self.substreams.get(&id.0)?,
+            substream: self.inner.substreams.get(&id.0)?,
         })
     }
 
     /// Returns a reference to a substream by its ID. Returns `None` if no substream with this ID
     /// is open.
     pub fn substream_by_id_mut(&mut self, id: SubstreamId) -> Option<SubstreamMut<T>> {
-        if let Entry::Occupied(e) = self.substreams.entry(id.0) {
+        if let Entry::Occupied(e) = self.inner.substreams.entry(id.0) {
             Some(SubstreamMut {
                 substream: e,
-                outgoing: &mut self.outgoing,
-                rsts_to_send: &mut self.rsts_to_send,
+                outgoing: &mut self.inner.outgoing,
+                rsts_to_send: &mut self.inner.rsts_to_send,
             })
         } else {
             None
@@ -461,7 +476,7 @@ impl<T> Yamux<T> {
 
     /// Queues sending out a ping to the remote.
     pub fn queue_ping(&mut self) {
-        self.pings_to_send += 1;
+        self.inner.pings_to_send += 1;
     }
 
     /// Returns `true` if [`Yamux::send_goaway`] has been called in the past.
@@ -469,13 +484,13 @@ impl<T> Yamux<T> {
     /// In other words, returns `true` if a `GoAway` frame has been either queued for sending
     /// (and is available through [`Yamux::extract_out`]) or has already been sent out.
     pub fn goaway_queued_or_sent(&self) -> bool {
-        !matches!(self.outgoing_goaway, OutgoingGoAway::NotRequired)
+        !matches!(self.inner.outgoing_goaway, OutgoingGoAway::NotRequired)
     }
 
     /// Returns `true` if [`Yamux::send_goaway`] has been called in the past and that this
     /// `GoAway` frame has been extracted through [`Yamux::extract_out`].
     pub fn goaway_sent(&self) -> bool {
-        matches!(self.outgoing_goaway, OutgoingGoAway::Sent)
+        matches!(self.inner.outgoing_goaway, OutgoingGoAway::Sent)
     }
 
     /// Queues a `GoAway` frame, requesting the remote to no longer open any substream.
@@ -494,8 +509,10 @@ impl<T> Yamux<T> {
     /// the same instance of [`Yamux`].
     ///
     pub fn send_goaway(&mut self, code: GoAwayErrorCode) {
-        match self.outgoing_goaway {
-            OutgoingGoAway::NotRequired => self.outgoing_goaway = OutgoingGoAway::Required(code),
+        match self.inner.outgoing_goaway {
+            OutgoingGoAway::NotRequired => {
+                self.inner.outgoing_goaway = OutgoingGoAway::Required(code)
+            }
             _ => panic!("send_goaway called multiple times"),
         }
 
@@ -505,9 +522,9 @@ impl<T> Yamux<T> {
             data_frame_size,
             fin,
             ..
-        } = self.incoming
+        } = self.inner.incoming
         {
-            self.incoming = if data_frame_size == 0 {
+            self.inner.incoming = if data_frame_size == 0 {
                 Incoming::Header(arrayvec::ArrayVec::new())
             } else {
                 Incoming::DataFrame {
@@ -528,7 +545,8 @@ impl<T> Yamux<T> {
         &'_ self,
     ) -> impl Iterator<Item = (SubstreamId, DeadSubstreamTy, &'_ T)> + '_ {
         // TODO: O(n)
-        self.substreams
+        self.inner
+            .substreams
             .iter()
             .filter_map(|(id, substream)| {
                 match &substream.state {
@@ -563,7 +581,7 @@ impl<T> Yamux<T> {
                 }
             })
             .inspect(|(dead_id, _, _)| {
-                debug_assert!(!matches!(self.outgoing,
+                debug_assert!(!matches!(self.inner.outgoing,
                     Outgoing::Header {
                         substream_data_frame: Some((OutgoingSubstreamData::Healthy(id), _)),
                         ..
@@ -582,11 +600,11 @@ impl<T> Yamux<T> {
     /// Panics if the substream with that id doesn't exist or isn't dead.
     ///
     pub fn remove_dead_substream(&mut self, id: SubstreamId) -> T {
-        let substream = self.substreams.remove(&id.0).unwrap();
+        let substream = self.inner.substreams.remove(&id.0).unwrap();
         // TODO: check whether substream is dead using the same criteria as in dead_substreams()
 
         if substream.inbound {
-            self.num_inbound -= 1;
+            self.inner.num_inbound -= 1;
         }
 
         substream.user_data
@@ -619,7 +637,7 @@ impl<T> Yamux<T> {
         let mut total_read: usize = 0;
 
         loop {
-            match self.incoming {
+            match self.inner.incoming {
                 Incoming::PendingIncomingSubstream { .. } => break,
 
                 Incoming::DataFrame {
@@ -627,7 +645,7 @@ impl<T> Yamux<T> {
                     remaining_bytes: 0,
                     fin: true,
                 } => {
-                    self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
+                    self.inner.incoming = Incoming::Header(arrayvec::ArrayVec::new());
 
                     if let Some(Substream {
                         state:
@@ -636,7 +654,7 @@ impl<T> Yamux<T> {
                                 ..
                             },
                         ..
-                    }) = self.substreams.get_mut(&substream_id.0)
+                    }) = self.inner.substreams.get_mut(&substream_id.0)
                     {
                         *remote_write_closed = true;
 
@@ -653,7 +671,7 @@ impl<T> Yamux<T> {
                     fin: false,
                     ..
                 } => {
-                    self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
+                    self.inner.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                 }
 
                 Incoming::DataFrame {
@@ -691,7 +709,7 @@ impl<T> Yamux<T> {
                                 ..
                             },
                         ..
-                    }) = self.substreams.get_mut(&substream_id.0)
+                    }) = self.inner.substreams.get_mut(&substream_id.0)
                     {
                         debug_assert!(!*remote_write_closed);
                         return Ok(IncomingDataOutcome {
@@ -704,9 +722,9 @@ impl<T> Yamux<T> {
                         });
                     }
 
-                    // Also note that we don't switch back `self.incoming` to `Header`. Instead,
-                    // the next iteration will pick up `DataFrame` again and transition again.
-                    // This is necessary to handle the `fin` flag elegantly.
+                    // Also note that we don't switch back `self.inner.incoming` to `Header`.
+                    // Instead, the next iteration will pick up `DataFrame` again and transition
+                    // again. This is necessary to handle the `fin` flag elegantly.
                 }
 
                 Incoming::DataFrame {
@@ -744,11 +762,11 @@ impl<T> Yamux<T> {
                             // Ping. In order to queue the pong message, the outgoing queue must
                             // be empty. If it is not the case, we simply leave the ping header
                             // there and prevent any further data from being read.
-                            if !matches!(self.outgoing, Outgoing::Idle) {
+                            if !matches!(self.inner.outgoing, Outgoing::Idle) {
                                 break;
                             }
 
-                            self.outgoing = Outgoing::Header {
+                            self.inner.outgoing = Outgoing::Header {
                                 header: {
                                     let mut header = arrayvec::ArrayVec::new();
                                     header
@@ -775,10 +793,11 @@ impl<T> Yamux<T> {
                                 is_goaway: false,
                             };
 
-                            self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
+                            self.inner.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                         }
                         header::DecodedYamuxHeader::PingResponse { opaque_value } => {
                             let pos = match self
+                                .inner
                                 .pings_waiting_reply
                                 .iter()
                                 .position(|v| *v == opaque_value)
@@ -787,8 +806,8 @@ impl<T> Yamux<T> {
                                 None => return Err(Error::PingResponseNotMatching),
                             };
 
-                            self.pings_waiting_reply.remove(pos);
-                            self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
+                            self.inner.pings_waiting_reply.remove(pos);
+                            self.inner.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                             return Ok(IncomingDataOutcome {
                                 yamux: self,
                                 bytes_read: total_read,
@@ -796,12 +815,13 @@ impl<T> Yamux<T> {
                             });
                         }
                         header::DecodedYamuxHeader::GoAway { error_code } => {
-                            self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
+                            self.inner.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                             // TODO: error if we have received one in the past before?
-                            self.received_goaway = Some(error_code);
+                            self.inner.received_goaway = Some(error_code);
 
-                            let mut reset_substreams = Vec::with_capacity(self.substreams.len());
-                            for (substream_id, substream) in self.substreams.iter_mut() {
+                            let mut reset_substreams =
+                                Vec::with_capacity(self.inner.substreams.len());
+                            for (substream_id, substream) in self.inner.substreams.iter_mut() {
                                 if !matches!(
                                     substream.state,
                                     SubstreamState::Healthy {
@@ -818,7 +838,7 @@ impl<T> Yamux<T> {
                                 // being reset. If that happens, we need to update some internal
                                 // state regarding this frame of data.
                                 match (
-                                    &mut self.outgoing,
+                                    &mut self.inner.outgoing,
                                     mem::replace(&mut substream.state, SubstreamState::Reset),
                                 ) {
                                     (
@@ -878,18 +898,18 @@ impl<T> Yamux<T> {
                                 return Err(Error::DataWithRst);
                             }
 
-                            self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
+                            self.inner.incoming = Incoming::Header(arrayvec::ArrayVec::new());
 
                             // The remote might have sent a RST frame concerning a substream for
                             // which we have sent a RST frame earlier. Considering that we don't
                             // always keep traces of old substreams, we have no way to know whether
                             // this is the case or not.
-                            if let Some(s) = self.substreams.get_mut(&stream_id) {
+                            if let Some(s) = self.inner.substreams.get_mut(&stream_id) {
                                 // We might be currently writing a frame of data of the substream
                                 // being reset. If that happens, we need to update some internal
                                 // state regarding this frame of data.
                                 match (
-                                    &mut self.outgoing,
+                                    &mut self.inner.outgoing,
                                     mem::replace(&mut s.state, SubstreamState::Reset),
                                 ) {
                                     (
@@ -947,7 +967,7 @@ impl<T> Yamux<T> {
                             length,
                             ..
                         } => {
-                            match self.substreams.get(&stream_id) {
+                            match self.inner.substreams.get(&stream_id) {
                                 Some(Substream {
                                     state: SubstreamState::Healthy { .. },
                                     ..
@@ -972,8 +992,8 @@ impl<T> Yamux<T> {
 
                             // If we have queued or sent a GoAway frame, then the substream is
                             // automatically rejected.
-                            if !matches!(self.outgoing_goaway, OutgoingGoAway::NotRequired) {
-                                self.incoming = if !is_data || length == 0 {
+                            if !matches!(self.inner.outgoing_goaway, OutgoingGoAway::NotRequired) {
+                                self.inner.incoming = if !is_data || length == 0 {
                                     Incoming::Header(arrayvec::ArrayVec::new())
                                 } else {
                                     Incoming::DataFrame {
@@ -990,11 +1010,11 @@ impl<T> Yamux<T> {
                             // order to potentially queue the substream rejection message later.
                             // If it is not the case, we simply leave the header there and prevent
                             // any further data from being read.
-                            if !matches!(self.outgoing, Outgoing::Idle) {
+                            if !matches!(self.inner.outgoing, Outgoing::Idle) {
                                 break;
                             }
 
-                            self.incoming = Incoming::PendingIncomingSubstream {
+                            self.inner.incoming = Incoming::PendingIncomingSubstream {
                                 substream_id: SubstreamId(stream_id),
                                 extra_window: if !is_data { length } else { 0 },
                                 data_frame_size: if is_data { length } else { 0 },
@@ -1031,7 +1051,7 @@ impl<T> Yamux<T> {
                                         ..
                                     },
                                 ..
-                            }) = self.substreams.get_mut(&stream_id)
+                            }) = self.inner.substreams.get_mut(&stream_id)
                             {
                                 if *remote_write_closed {
                                     return Err(Error::WriteAfterFin);
@@ -1048,7 +1068,7 @@ impl<T> Yamux<T> {
                                 *remote_window_pending_increase += 256 * 1024;
                             }
 
-                            self.incoming = Incoming::DataFrame {
+                            self.inner.incoming = Incoming::DataFrame {
                                 substream_id: SubstreamId(stream_id),
                                 remaining_bytes: length,
                                 fin,
@@ -1072,7 +1092,7 @@ impl<T> Yamux<T> {
                             if let Some(Substream {
                                 state: SubstreamState::Healthy { allowed_window, .. },
                                 ..
-                            }) = self.substreams.get_mut(&stream_id)
+                            }) = self.inner.substreams.get_mut(&stream_id)
                             {
                                 *allowed_window = allowed_window
                                     .checked_add(u64::from(length))
@@ -1085,7 +1105,7 @@ impl<T> Yamux<T> {
 
                             // We transition to `DataFrame` to make the handling a bit more
                             // elegant.
-                            self.incoming = Incoming::DataFrame {
+                            self.inner.incoming = Incoming::DataFrame {
                                 substream_id: SubstreamId(stream_id),
                                 remaining_bytes: 0,
                                 fin,
@@ -1141,14 +1161,14 @@ impl<T> Yamux<T> {
     /// Panics if no incoming substream is currently pending.
     ///
     pub fn accept_pending_substream(&mut self, user_data: T) -> SubstreamMut<T> {
-        match self.incoming {
+        match self.inner.incoming {
             Incoming::PendingIncomingSubstream {
                 substream_id,
                 extra_window,
                 data_frame_size,
                 fin,
             } => {
-                let _was_before = self.substreams.insert(
+                let _was_before = self.inner.substreams.insert(
                     substream_id.0,
                     Substream {
                         state: SubstreamState::Healthy {
@@ -1168,9 +1188,9 @@ impl<T> Yamux<T> {
                 );
                 debug_assert!(_was_before.is_none());
 
-                self.num_inbound += 1;
+                self.inner.num_inbound += 1;
 
-                self.incoming = if data_frame_size == 0 {
+                self.inner.incoming = if data_frame_size == 0 {
                     Incoming::Header(arrayvec::ArrayVec::new())
                 } else {
                     Incoming::DataFrame {
@@ -1181,12 +1201,12 @@ impl<T> Yamux<T> {
                 };
 
                 SubstreamMut {
-                    substream: match self.substreams.entry(substream_id.0) {
+                    substream: match self.inner.substreams.entry(substream_id.0) {
                         Entry::Occupied(e) => e,
                         _ => unreachable!(),
                     },
-                    outgoing: &mut self.outgoing,
-                    rsts_to_send: &mut self.rsts_to_send,
+                    outgoing: &mut self.inner.outgoing,
+                    rsts_to_send: &mut self.inner.rsts_to_send,
                 }
             }
             _ => panic!(),
@@ -1209,18 +1229,18 @@ impl<T> Yamux<T> {
     ///
     pub fn reject_pending_substream(&mut self) {
         // Implementation note: the rejection mechanism could alternatively be implemented by
-        // queuing the substream rejection, rather than immediately putting it in `self.outgoing`.
+        // queuing the substream rejection, rather than immediately putting it in `self.inner.outgoing`.
         // However, this could open a DoS attack vector, as the remote could send a huge number
         // of substream open request which would inevitably increase the memory consumption of the
         // local node.
-        match self.incoming {
+        match self.inner.incoming {
             Incoming::PendingIncomingSubstream {
                 substream_id,
                 data_frame_size,
                 fin,
                 ..
             } => {
-                self.incoming = if data_frame_size == 0 {
+                self.inner.incoming = if data_frame_size == 0 {
                     Incoming::Header(arrayvec::ArrayVec::new())
                 } else {
                     Incoming::DataFrame {
@@ -1240,8 +1260,8 @@ impl<T> Yamux<T> {
                 header.try_extend_from_slice(&0u32.to_be_bytes()).unwrap();
                 debug_assert_eq!(header.len(), 12);
 
-                debug_assert!(matches!(self.outgoing, Outgoing::Idle));
-                self.outgoing = Outgoing::Header {
+                debug_assert!(matches!(self.inner.outgoing, Outgoing::Idle));
+                self.inner.outgoing = Outgoing::Header {
                     header,
                     substream_data_frame: None,
                     is_goaway: false,
@@ -1251,11 +1271,11 @@ impl<T> Yamux<T> {
         }
     }
 
-    /// Writes a data frame header in `self.outgoing`.
+    /// Writes a data frame header in `self.inner.outgoing`.
     ///
     /// # Panic
     ///
-    /// Panics if `self.outgoing` is not `Idle`.
+    /// Panics if `self.inner.outgoing` is not `Idle`.
     ///
     fn queue_data_frame_header(
         &mut self,
@@ -1264,11 +1284,11 @@ impl<T> Yamux<T> {
         substream_id: NonZeroU32,
         data_length: u32,
     ) {
-        assert!(matches!(self.outgoing, Outgoing::Idle));
+        assert!(matches!(self.inner.outgoing, Outgoing::Idle));
 
         let mut flags: u16 = 0;
         if syn_ack_flag {
-            if (substream_id.get() % 2) == (self.next_outbound_substream.get() % 2) {
+            if (substream_id.get() % 2) == (self.inner.next_outbound_substream.get() % 2) {
                 // SYN
                 flags |= 0x1;
             } else {
@@ -1292,7 +1312,7 @@ impl<T> Yamux<T> {
             .unwrap();
         debug_assert_eq!(header.len(), 12);
 
-        self.outgoing = Outgoing::Header {
+        self.inner.outgoing = Outgoing::Header {
             header,
             is_goaway: false,
             substream_data_frame: NonZeroUsize::new(usize::try_from(data_length).unwrap()).map(
@@ -1306,11 +1326,11 @@ impl<T> Yamux<T> {
         };
     }
 
-    /// Writes a window size update frame header in `self.outgoing`.
+    /// Writes a window size update frame header in `self.inner.outgoing`.
     ///
     /// # Panic
     ///
-    /// Panics if `self.outgoing` is not `Idle`.
+    /// Panics if `self.inner.outgoing` is not `Idle`.
     ///
     fn queue_window_size_frame_header(
         &mut self,
@@ -1318,11 +1338,11 @@ impl<T> Yamux<T> {
         substream_id: NonZeroU32,
         window_size: u32,
     ) {
-        assert!(matches!(self.outgoing, Outgoing::Idle));
+        assert!(matches!(self.inner.outgoing, Outgoing::Idle));
 
         let mut flags: u16 = 0;
         if syn_ack_flag {
-            if (substream_id.get() % 2) == (self.next_outbound_substream.get() % 2) {
+            if (substream_id.get() % 2) == (self.inner.next_outbound_substream.get() % 2) {
                 // SYN
                 flags |= 0x1;
             } else {
@@ -1343,21 +1363,21 @@ impl<T> Yamux<T> {
             .unwrap();
         debug_assert_eq!(header.len(), 12);
 
-        self.outgoing = Outgoing::Header {
+        self.inner.outgoing = Outgoing::Header {
             header,
             substream_data_frame: None,
             is_goaway: false,
         };
     }
 
-    /// Writes a ping frame header in `self.outgoing`.
+    /// Writes a ping frame header in `self.inner.outgoing`.
     ///
     /// # Panic
     ///
-    /// Panics if `self.outgoing` is not `Idle`.
+    /// Panics if `self.inner.outgoing` is not `Idle`.
     ///
     fn queue_ping_request_header(&mut self, opaque_value: u32) {
-        assert!(matches!(self.outgoing, Outgoing::Idle));
+        assert!(matches!(self.inner.outgoing, Outgoing::Idle));
 
         let mut header = arrayvec::ArrayVec::new();
         header.push(0);
@@ -1369,7 +1389,7 @@ impl<T> Yamux<T> {
             .unwrap();
         debug_assert_eq!(header.len(), 12);
 
-        self.outgoing = Outgoing::Header {
+        self.inner.outgoing = Outgoing::Header {
             header,
             substream_data_frame: None,
             is_goaway: false,
@@ -1389,7 +1409,7 @@ where
         {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.debug_list()
-                    .entries(self.0.substreams.values().map(|v| &v.user_data))
+                    .entries(self.0.inner.substreams.values().map(|v| &v.user_data))
                     .finish()
             }
         }
@@ -1675,7 +1695,7 @@ impl<'a, T> ExtractOut<'a, T> {
     /// Builds the next buffer to send out and returns it.
     pub fn extract_next(&'_ mut self) -> Option<impl AsRef<[u8]> + '_> {
         while self.size_bytes != 0 {
-            match self.yamux.outgoing {
+            match self.yamux.inner.outgoing {
                 Outgoing::Header {
                     ref mut header,
                     ref mut substream_data_frame,
@@ -1688,12 +1708,12 @@ impl<'a, T> ExtractOut<'a, T> {
                         let out = mem::take(header);
                         if *is_goaway {
                             debug_assert!(matches!(
-                                self.yamux.outgoing_goaway,
+                                self.yamux.inner.outgoing_goaway,
                                 OutgoingGoAway::Queued
                             ));
-                            self.yamux.outgoing_goaway = OutgoingGoAway::Sent;
+                            self.yamux.inner.outgoing_goaway = OutgoingGoAway::Sent;
                         }
-                        self.yamux.outgoing =
+                        self.yamux.inner.outgoing =
                             if let Some((data, remaining_bytes)) = substream_data_frame.take() {
                                 Outgoing::SubstreamData {
                                     data,
@@ -1718,7 +1738,7 @@ impl<'a, T> ExtractOut<'a, T> {
                 } => {
                     let (write_buffers, first_write_buffer_offset) = match data {
                         OutgoingSubstreamData::Healthy(id) => {
-                            let substream = self.yamux.substreams.get_mut(&id.0).unwrap();
+                            let substream = self.yamux.inner.substreams.get_mut(&id.0).unwrap();
                             if let SubstreamState::Healthy {
                                 ref mut write_buffers,
                                 ref mut first_write_buffer_offset,
@@ -1746,7 +1766,7 @@ impl<'a, T> ExtractOut<'a, T> {
                         *first_write_buffer_offset = 0;
                         match NonZeroUsize::new(remain.get() - first_buf_avail) {
                             Some(r) => *remain = r,
-                            None => self.yamux.outgoing = Outgoing::Idle,
+                            None => self.yamux.inner.outgoing = Outgoing::Idle,
                         };
                         either::Right(out)
                     } else if remain.get() <= self.size_bytes {
@@ -1756,7 +1776,7 @@ impl<'a, T> ExtractOut<'a, T> {
                             0,
                         );
                         *first_write_buffer_offset += remain.get();
-                        self.yamux.outgoing = Outgoing::Idle;
+                        self.yamux.inner.outgoing = Outgoing::Idle;
                         either::Right(out)
                     } else {
                         let out = VecWithOffset(
@@ -1775,7 +1795,7 @@ impl<'a, T> ExtractOut<'a, T> {
 
                 Outgoing::Idle => {
                     // Send a `GoAway` frame if demanded.
-                    if let OutgoingGoAway::Required(code) = self.yamux.outgoing_goaway {
+                    if let OutgoingGoAway::Required(code) = self.yamux.inner.outgoing_goaway {
                         let mut header = arrayvec::ArrayVec::new();
                         header.push(0);
                         header.push(3);
@@ -1793,17 +1813,17 @@ impl<'a, T> ExtractOut<'a, T> {
                             .unwrap();
                         debug_assert_eq!(header.len(), 12);
 
-                        self.yamux.outgoing = Outgoing::Header {
+                        self.yamux.inner.outgoing = Outgoing::Header {
                             header,
                             substream_data_frame: None,
                             is_goaway: true,
                         };
-                        self.yamux.outgoing_goaway = OutgoingGoAway::Queued;
+                        self.yamux.inner.outgoing_goaway = OutgoingGoAway::Queued;
                         continue;
                     }
 
                     // Send RST frames.
-                    if let Some(substream_id) = self.yamux.rsts_to_send.pop_front() {
+                    if let Some(substream_id) = self.yamux.inner.rsts_to_send.pop_front() {
                         let mut header = arrayvec::ArrayVec::new();
                         header.push(0);
                         header.push(1);
@@ -1814,7 +1834,7 @@ impl<'a, T> ExtractOut<'a, T> {
                         header.try_extend_from_slice(&0u32.to_be_bytes()).unwrap();
                         debug_assert_eq!(header.len(), 12);
 
-                        self.yamux.outgoing = Outgoing::Header {
+                        self.yamux.inner.outgoing = Outgoing::Header {
                             header,
                             substream_data_frame: None,
                             is_goaway: false,
@@ -1823,11 +1843,11 @@ impl<'a, T> ExtractOut<'a, T> {
                     }
 
                     // Send outgoing pings.
-                    if self.yamux.pings_to_send > 0 {
-                        self.yamux.pings_to_send -= 1;
-                        let opaque_value: u32 = self.yamux.randomness.gen();
+                    if self.yamux.inner.pings_to_send > 0 {
+                        self.yamux.inner.pings_to_send -= 1;
+                        let opaque_value: u32 = self.yamux.inner.randomness.gen();
                         self.yamux.queue_ping_request_header(opaque_value);
-                        self.yamux.pings_waiting_reply.push_back(opaque_value);
+                        self.yamux.inner.pings_waiting_reply.push_back(opaque_value);
                         continue;
                     }
 
@@ -1835,6 +1855,7 @@ impl<'a, T> ExtractOut<'a, T> {
                     // TODO: O(n)
                     if let Some((id, sub)) = self
                         .yamux
+                        .inner
                         .substreams
                         .iter_mut()
                         .find(|(_, s)| {
@@ -1873,6 +1894,7 @@ impl<'a, T> ExtractOut<'a, T> {
                     // TODO: choose substreams in some sort of round-robin way
                     if let Some((id, sub)) = self
                         .yamux
+                        .inner
                         .substreams
                         .iter_mut()
                         .find(|(_, s)| match &s.state {
