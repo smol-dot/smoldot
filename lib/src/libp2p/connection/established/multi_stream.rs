@@ -27,7 +27,6 @@ use alloc::{collections::VecDeque, string::String, vec, vec::Vec};
 use core::{
     cmp, fmt,
     hash::Hash,
-    iter,
     ops::{Add, Sub},
     time::Duration,
 };
@@ -199,18 +198,17 @@ where
             let out_substream_id = self.next_out_substream_id;
             self.next_out_substream_id += 1;
 
-            let supported_protocols = self
+            let max_protocol_name_len = self
                 .request_protocols
                 .iter()
                 .filter(|p| p.inbound_allowed)
-                .map(|p| p.name.clone())
-                .chain(self.notifications_protocols.iter().map(|p| p.name.clone()))
-                .chain(iter::once(self.ping_protocol.clone()))
-                .collect::<Vec<_>>();
+                .map(|p| p.name.len())
+                .max()
+                .unwrap_or(0);
 
             Substream {
                 id: out_substream_id,
-                inner: Some(substream::Substream::ingoing(supported_protocols)),
+                inner: Some(substream::Substream::ingoing(max_protocol_name_len)),
                 read_buffer: Vec::new(),
                 read_buffer_partial_read: 0,
                 local_writing_side_closed: false,
@@ -547,13 +545,13 @@ where
                             .inner
                             .as_mut()
                             .unwrap()
-                            .set_inbound_ty(substream::InboundTy::Ping);
+                            .accept_inbound(substream::InboundTy::Ping);
                     } else if let Some(protocol_index) = self
                         .request_protocols
                         .iter()
                         .position(|p| p.name == protocol)
                     {
-                        substream.inner.as_mut().unwrap().set_inbound_ty(
+                        substream.inner.as_mut().unwrap().accept_inbound(
                             substream::InboundTy::Request {
                                 protocol_index,
                                 request_max_size: if let ConfigRequestResponseIn::Payload {
@@ -572,7 +570,7 @@ where
                         .iter()
                         .position(|p| p.name == protocol)
                     {
-                        substream.inner.as_mut().unwrap().set_inbound_ty(
+                        substream.inner.as_mut().unwrap().accept_inbound(
                             substream::InboundTy::Notifications {
                                 protocol_index,
                                 max_handshake_size: self.notifications_protocols[protocol_index]
@@ -580,7 +578,7 @@ where
                             },
                         );
                     } else {
-                        unreachable!();
+                        substream.inner.as_mut().unwrap().reject_inbound();
                     }
                 }
 

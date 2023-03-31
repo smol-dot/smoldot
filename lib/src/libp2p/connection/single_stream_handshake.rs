@@ -74,7 +74,7 @@ pub struct HealthyHandshake {
 
 enum NegotiationState {
     EncryptionProtocol {
-        negotiation: multistream_select::InProgress<iter::Once<&'static str>, &'static str>,
+        negotiation: multistream_select::InProgress<&'static str>,
         /// Handshake that will be driven after the protocol negotiation is successful. Created
         /// ahead of time but not actually used.
         handshake: noise::HandshakeInProgress,
@@ -85,7 +85,7 @@ enum NegotiationState {
     Multiplexing {
         peer_id: PeerId,
         encryption: Box<noise::Noise>,
-        negotiation: multistream_select::InProgress<iter::Once<&'static str>, &'static str>,
+        negotiation: multistream_select::InProgress<&'static str>,
     },
 }
 
@@ -101,7 +101,7 @@ impl HealthyHandshake {
             }
         } else {
             multistream_select::Config::Listener {
-                supported_protocols: iter::once(noise::PROTOCOL_NAME),
+                max_protocol_name_len: noise::PROTOCOL_NAME.len(),
             }
         });
 
@@ -148,8 +148,21 @@ impl HealthyHandshake {
                                 },
                             }))
                         }
-                        multistream_select::Negotiation::Success(_) => {
+                        multistream_select::Negotiation::Success => {
                             self.state = NegotiationState::Encryption { handshake };
+                            continue;
+                        }
+                        multistream_select::Negotiation::ListenerAcceptOrDeny(accept_reject) => {
+                            let negotiation =
+                                if accept_reject.requested_protocol() == noise::PROTOCOL_NAME {
+                                    accept_reject.accept()
+                                } else {
+                                    accept_reject.reject()
+                                };
+                            self.state = NegotiationState::EncryptionProtocol {
+                                negotiation,
+                                handshake,
+                            };
                             continue;
                         }
                         multistream_select::Negotiation::NotAvailable => {
@@ -179,7 +192,7 @@ impl HealthyHandshake {
                                     }
                                 } else {
                                     multistream_select::Config::Listener {
-                                        supported_protocols: iter::once(yamux::PROTOCOL_NAME),
+                                        max_protocol_name_len: yamux::PROTOCOL_NAME.len(),
                                     }
                                 });
 
@@ -284,7 +297,21 @@ impl HealthyHandshake {
                                 },
                             }))
                         }
-                        multistream_select::Negotiation::Success(_) => Ok(Handshake::Success {
+                        multistream_select::Negotiation::ListenerAcceptOrDeny(accept_reject) => {
+                            let negotiation =
+                                if accept_reject.requested_protocol() == yamux::PROTOCOL_NAME {
+                                    accept_reject.accept()
+                                } else {
+                                    accept_reject.reject()
+                                };
+                            self.state = NegotiationState::Multiplexing {
+                                peer_id,
+                                encryption,
+                                negotiation,
+                            };
+                            continue;
+                        }
+                        multistream_select::Negotiation::Success => Ok(Handshake::Success {
                             connection: ConnectionPrototype::from_noise_yamux(*encryption),
                             remote_peer_id: peer_id,
                         }),
