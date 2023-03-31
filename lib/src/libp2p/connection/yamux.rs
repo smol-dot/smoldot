@@ -154,7 +154,8 @@ enum SubstreamState {
         remote_window_pending_increase: u64,
         /// Amount of data the local node is allowed to transmit to the remote.
         allowed_window: u64,
-        local_write: SubstreamStateLocalWrite,
+        /// State of the local writing side of this substream.
+        local_write_close: SubstreamStateLocalWrite,
         /// True if the writing side of the remote node is closed for this substream.
         remote_write_closed: bool,
         /// Buffer of buffers to be written out to the socket.
@@ -408,7 +409,7 @@ impl<T> Yamux<T> {
                 remote_allowed_window: DEFAULT_FRAME_SIZE,
                 remote_window_pending_increase: 0,
                 allowed_window: DEFAULT_FRAME_SIZE,
-                local_write: SubstreamStateLocalWrite::Open,
+                local_write_close: SubstreamStateLocalWrite::Open,
                 remote_write_closed: false,
                 write_buffers: Vec::with_capacity(16),
                 first_write_buffer_offset: 0,
@@ -556,7 +557,7 @@ impl<T> Yamux<T> {
                         &substream.user_data,
                     )),
                     SubstreamState::Healthy {
-                        local_write,
+                        local_write_close: local_write,
                         remote_write_closed,
                         write_buffers,
                         first_write_buffer_offset,
@@ -1177,7 +1178,7 @@ impl<T> Yamux<T> {
                             remote_allowed_window: DEFAULT_FRAME_SIZE,
                             remote_window_pending_increase: 0,
                             allowed_window: DEFAULT_FRAME_SIZE + u64::from(extra_window),
-                            local_write: SubstreamStateLocalWrite::Open,
+                            local_write_close: SubstreamStateLocalWrite::Open,
                             remote_write_closed: data_frame_size == 0 && fin,
                             write_buffers: Vec::new(),
                             first_write_buffer_offset: 0,
@@ -1475,7 +1476,7 @@ impl<'a, T> SubstreamRef<'a, T> {
         matches!(
             self.substream.state,
             SubstreamState::Healthy {
-                local_write: SubstreamStateLocalWrite::Open,
+                local_write_close: SubstreamStateLocalWrite::Open,
                 ..
             }
         )
@@ -1531,7 +1532,7 @@ impl<'a, T> SubstreamMut<'a, T> {
         match &mut substream.state {
             SubstreamState::Reset => {}
             SubstreamState::Healthy {
-                local_write,
+                local_write_close: local_write,
                 write_buffers,
                 first_write_buffer_offset,
                 ..
@@ -1602,7 +1603,7 @@ impl<'a, T> SubstreamMut<'a, T> {
         matches!(
             self.substream.get().state,
             SubstreamState::Healthy {
-                local_write: SubstreamStateLocalWrite::Open,
+                local_write_close: SubstreamStateLocalWrite::Open,
                 ..
             }
         )
@@ -1620,7 +1621,7 @@ impl<'a, T> SubstreamMut<'a, T> {
     pub fn close(&mut self) {
         let substream = self.substream.get_mut();
         if let SubstreamState::Healthy {
-            local_write: ref mut local_write @ SubstreamStateLocalWrite::Open,
+            local_write_close: ref mut local_write @ SubstreamStateLocalWrite::Open,
             ..
         } = substream.state
         {
@@ -1900,7 +1901,7 @@ impl<'a, T> ExtractOut<'a, T> {
                         .find(|(_, s)| match &s.state {
                             SubstreamState::Healthy {
                                 write_buffers,
-                                local_write,
+                                local_write_close: local_write,
                                 ..
                             } => {
                                 !write_buffers.is_empty()
@@ -1913,7 +1914,7 @@ impl<'a, T> ExtractOut<'a, T> {
                         if let SubstreamState::Healthy {
                             first_message_queued,
                             allowed_window,
-                            local_write,
+                            local_write_close: local_write,
                             write_buffers,
                             ..
                         } = &mut sub.state
