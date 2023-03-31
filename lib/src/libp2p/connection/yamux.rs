@@ -163,9 +163,9 @@ enum SubstreamState {
         /// True if the writing side of the remote node is closed for this substream.
         remote_write_closed: bool,
         /// Buffer of buffers to be written out to the socket.
-        // TODO: is it a good idea to have an unbounded Vec?
+        // TODO: is it a good idea to have an unbounded VecDeque?
         // TODO: call shrink_to_fit from time to time?
-        write_buffers: Vec<Vec<u8>>,
+        write_buffers: VecDeque<Vec<u8>>,
         /// Number of bytes in `self.write_buffers[0]` has have already been written out to the
         /// socket.
         first_write_buffer_offset: usize,
@@ -277,7 +277,7 @@ enum OutgoingSubstreamData {
     /// Data is coming from a substream in a reset state.
     Obsolete {
         /// Buffer of buffers to be written out to the socket.
-        write_buffers: Vec<Vec<u8>>,
+        write_buffers: VecDeque<Vec<u8>>,
 
         /// Number of bytes in `self.inner.write_buffers[0]` has have already been written out to
         /// the socket.
@@ -419,7 +419,7 @@ impl<T> Yamux<T> {
                 allowed_window: DEFAULT_FRAME_SIZE,
                 local_write_close: SubstreamStateLocalWrite::Open,
                 remote_write_closed: false,
-                write_buffers: Vec::with_capacity(16),
+                write_buffers: VecDeque::with_capacity(16),
                 first_write_buffer_offset: 0,
             },
             inbound: false,
@@ -1208,7 +1208,7 @@ impl<T> Yamux<T> {
                             allowed_window: DEFAULT_FRAME_SIZE + u64::from(extra_window),
                             local_write_close: SubstreamStateLocalWrite::Open,
                             remote_write_closed: data_frame_size == 0 && fin,
-                            write_buffers: Vec::new(),
+                            write_buffers: VecDeque::new(),
                             first_write_buffer_offset: 0,
                         },
                         inbound: true,
@@ -1570,7 +1570,7 @@ impl<'a, T> SubstreamMut<'a, T> {
                 debug_assert!(!write_buffers.is_empty() || *first_write_buffer_offset == 0);
 
                 if matches!(local_write, SubstreamStateLocalWrite::Open) {
-                    write_buffers.push(data);
+                    write_buffers.push_back(data);
                 }
             }
         }
@@ -1795,8 +1795,10 @@ impl<'a, T> ExtractOut<'a, T> {
                     let out = if first_buf_avail <= remain.get()
                         && first_buf_avail <= self.size_bytes
                     {
-                        let out =
-                            VecWithOffset(write_buffers.remove(0), *first_write_buffer_offset);
+                        let out = VecWithOffset(
+                            write_buffers.pop_front().unwrap(),
+                            *first_write_buffer_offset,
+                        );
                         self.size_bytes -= first_buf_avail;
                         *first_write_buffer_offset = 0;
                         match NonZeroUsize::new(remain.get() - first_buf_avail) {
