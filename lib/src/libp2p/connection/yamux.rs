@@ -95,6 +95,10 @@ struct YamuxInner<T> {
     /// A `SipHasher` is used in order to avoid hash collision attacks on substream IDs.
     substreams: hashbrown::HashMap<NonZeroU32, Substream<T>, SipHasherBuild>,
 
+    /// Subset of the content of [`YamuxInner::substreams`] that is considered "dead", meaning
+    /// that it is returned by [`Yamux::dead_substreams`].
+    dead_substreams: hashbrown::HashSet<NonZeroU32, SipHasherBuild>,
+
     /// Number of substreams within [`Yamux::substreams`] whose [`Substream::inbound`] is `true`.
     num_inbound: usize,
 
@@ -292,6 +296,10 @@ impl<T> Yamux<T> {
                     config.capacity,
                     SipHasherBuild::new(randomness.gen()),
                 ),
+                dead_substreams: hashbrown::HashSet::with_capacity_and_hasher(
+                    config.capacity,
+                    SipHasherBuild::new(randomness.gen()),
+                ),
                 num_inbound: 0,
                 received_goaway: None,
                 incoming: Incoming::Header(arrayvec::ArrayVec::new()),
@@ -423,6 +431,7 @@ impl<T> Yamux<T> {
                 substream: e,
                 outgoing: &mut self.inner.outgoing,
                 rsts_to_send: &mut self.inner.rsts_to_send,
+                dead_substreams: &mut self.inner.dead_substreams,
             },
             _ => unreachable!(),
         }
@@ -469,6 +478,7 @@ impl<T> Yamux<T> {
                 substream: e,
                 outgoing: &mut self.inner.outgoing,
                 rsts_to_send: &mut self.inner.rsts_to_send,
+                dead_substreams: &mut self.inner.dead_substreams,
             })
         } else {
             None
@@ -547,36 +557,38 @@ impl<T> Yamux<T> {
     ) -> impl Iterator<Item = (SubstreamId, DeadSubstreamTy, &'_ T)> + '_ {
         // TODO: O(n)
         self.inner
-            .substreams
+            .dead_substreams
             .iter()
-            .filter_map(|(id, substream)| {
+            .map(|id| {
+                let substream = self.inner.substreams.get(id).unwrap();
                 match &substream.state {
-                    SubstreamState::Reset => Some((
+                    SubstreamState::Reset => (
                         SubstreamId(*id),
                         DeadSubstreamTy::Reset,
                         &substream.user_data,
-                    )),
+                    ),
                     SubstreamState::Healthy {
-                        local_write_close: local_write,
+                        local_write_close,
                         remote_write_closed,
                         write_buffers,
                         first_write_buffer_offset,
                         ..
                     } => {
-                        if matches!(local_write, SubstreamStateLocalWrite::FinQueued)
+                        if matches!(local_write_close, SubstreamStateLocalWrite::FinQueued)
                             && *remote_write_closed
                             && (write_buffers.is_empty() // TODO: cumbersome
                             || (write_buffers.len() == 1
                                 && write_buffers[0].len()
                                     <= *first_write_buffer_offset))
                         {
-                            Some((
+                            (
                                 SubstreamId(*id),
                                 DeadSubstreamTy::ClosedGracefully,
                                 &substream.user_data,
-                            ))
+                            )
                         } else {
-                            None
+                            // Substream shouldn't have been put in `dead_substreams`.
+                            unreachable!()
                         }
                     }
                 }
@@ -601,8 +613,12 @@ impl<T> Yamux<T> {
     /// Panics if the substream with that id doesn't exist or isn't dead.
     ///
     pub fn remove_dead_substream(&mut self, id: SubstreamId) -> T {
+        let was_in = self.inner.dead_substreams.remove(&id.0);
+        if !was_in {
+            panic!()
+        }
+
         let substream = self.inner.substreams.remove(&id.0).unwrap();
-        // TODO: check whether substream is dead using the same criteria as in dead_substreams()
 
         if substream.inbound {
             self.inner.num_inbound -= 1;
@@ -652,12 +668,18 @@ impl<T> Yamux<T> {
                         state:
                             SubstreamState::Healthy {
                                 remote_write_closed: remote_write_closed @ false,
+                                local_write_close,
                                 ..
                             },
                         ..
                     }) = self.inner.substreams.get_mut(&substream_id.0)
                     {
                         *remote_write_closed = true;
+
+                        if matches!(*local_write_close, SubstreamStateLocalWrite::FinQueued) {
+                            let _was_inserted = self.inner.dead_substreams.insert(substream_id.0);
+                            debug_assert!(_was_inserted);
+                        }
 
                         return Ok(IncomingDataOutcome {
                             yamux: self,
@@ -835,6 +857,10 @@ impl<T> Yamux<T> {
 
                                 reset_substreams.push(SubstreamId(*substream_id));
 
+                                let _was_inserted =
+                                    self.inner.dead_substreams.insert(*substream_id);
+                                debug_assert!(_was_inserted);
+
                                 // We might be currently writing a frame of data of the substream
                                 // being reset. If that happens, we need to update some internal
                                 // state regarding this frame of data.
@@ -906,6 +932,9 @@ impl<T> Yamux<T> {
                             // always keep traces of old substreams, we have no way to know whether
                             // this is the case or not.
                             if let Some(s) = self.inner.substreams.get_mut(&stream_id) {
+                                let _was_inserted = self.inner.dead_substreams.insert(stream_id);
+                                debug_assert!(_was_inserted);
+
                                 // We might be currently writing a frame of data of the substream
                                 // being reset. If that happens, we need to update some internal
                                 // state regarding this frame of data.
@@ -1208,6 +1237,7 @@ impl<T> Yamux<T> {
                     },
                     outgoing: &mut self.inner.outgoing,
                     rsts_to_send: &mut self.inner.rsts_to_send,
+                    dead_substreams: &mut self.inner.dead_substreams,
                 }
             }
             _ => panic!(),
@@ -1497,6 +1527,7 @@ pub struct SubstreamMut<'a, T> {
     substream: OccupiedEntry<'a, NonZeroU32, Substream<T>, SipHasherBuild>,
     outgoing: &'a mut Outgoing,
     rsts_to_send: &'a mut VecDeque<NonZeroU32>,
+    dead_substreams: &'a mut hashbrown::HashSet<NonZeroU32, SipHasherBuild>,
 }
 
 impl<'a, T> SubstreamMut<'a, T> {
@@ -1646,6 +1677,10 @@ impl<'a, T> SubstreamMut<'a, T> {
         if let SubstreamState::Healthy { .. } = self.substream.get().state {
             self.rsts_to_send.push_back(substream_id.0);
         }
+        // TODO: else { panic!() } ?!
+
+        let _was_inserted = self.dead_substreams.insert(substream_id.0);
+        debug_assert!(_was_inserted);
 
         // We might be currently writing a frame of data of the substream being reset.
         // If that happens, we need to update some internal state regarding this frame of data.
@@ -1913,6 +1948,7 @@ impl<'a, T> ExtractOut<'a, T> {
                     {
                         if let SubstreamState::Healthy {
                             first_message_queued,
+                            remote_write_closed,
                             allowed_window,
                             local_write_close: local_write,
                             write_buffers,
@@ -1932,6 +1968,10 @@ impl<'a, T> ExtractOut<'a, T> {
                                 && len_out_usize == pending_len;
                             if fin_flag {
                                 *local_write = SubstreamStateLocalWrite::FinQueued;
+                                if *remote_write_closed {
+                                    let _was_inserted = self.yamux.inner.dead_substreams.insert(id);
+                                    debug_assert!(!_was_inserted);
+                                }
                             }
                             self.yamux
                                 .queue_data_frame_header(syn_ack_flag, fin_flag, id, len_out);
