@@ -60,11 +60,12 @@
 use super::super::read_write::ReadWrite;
 use crate::util::leb128;
 
+use alloc::{string::String, vec::Vec};
 use core::{cmp, fmt, iter, mem, str};
 
 /// Configuration of a multistream-select protocol.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum Config<I, P> {
+pub enum Config<P> {
     /// Local node is the dialing side and requests the specific protocol.
     Dialer {
         /// Name of the protocol to try negotiate. The multistream-select negotiation will
@@ -73,42 +74,83 @@ pub enum Config<I, P> {
     },
     /// Local node is the listening side.
     Listener {
-        /// List of protocol names that are supported. In case of success, the-negotiated protocol
-        /// is one of the protocols in this list.
-        supported_protocols: I,
+        /// Maximum allowed length of a protocol. Set this to a value superior or equal to the
+        /// length of the longest protocol that is supported locally.
+        ///
+        /// This limit is necessary in order to prevent the remote from sending an infinite stream
+        /// of data for the protocol name.
+        max_protocol_name_len: usize,
     },
 }
 
 /// Current state of a multistream-select negotiation.
 #[derive(Debug)]
-pub enum Negotiation<I, P> {
+pub enum Negotiation<P> {
     /// Negotiation is still in progress. Use the provided [`InProgress`] object to inject and
     /// extract more data from/to the remote.
-    InProgress(InProgress<I, P>),
+    InProgress(InProgress<P>),
+    /// Negotiation is still in progress and is waiting for accepting or refusing the protocol
+    /// requested by the remote.
+    ///
+    /// Can never happen if configured as the dialing side.
+    ListenerAcceptOrDeny(ListenerAcceptOrDeny<P>),
     /// Negotiation has ended successfully. A protocol has been negotiated.
-    Success(P),
+    Success,
     /// Negotiation has ended, but there isn't any protocol in common between the two parties.
     NotAvailable,
 }
 
-impl<I, P> Negotiation<I, P>
+impl<P> Negotiation<P>
 where
-    I: Iterator<Item = P> + Clone,
     P: AsRef<str>,
 {
     /// Shortcut method for [`InProgress::new`] and wrapping the [`InProgress`] in a
     /// [`Negotiation`].
-    pub fn new(config: Config<I, P>) -> Self {
+    pub fn new(config: Config<P>) -> Self {
         Negotiation::InProgress(InProgress::new(config))
     }
 }
 
+/// Negotiation is still in progress and is waiting for accepting or refusing the protocol
+/// requested by the remote.
+#[derive(Debug)]
+pub struct ListenerAcceptOrDeny<P> {
+    inner: InProgress<P>,
+    protocol: String,
+}
+
+impl<P> ListenerAcceptOrDeny<P> {
+    /// Name of the protocol requested by the remote.
+    pub fn requested_protocol(&self) -> &str {
+        &self.protocol
+    }
+
+    /// Accept the requested protocol and resume the handshake.
+    pub fn accept(mut self) -> InProgress<P> {
+        debug_assert!(matches!(self.inner.state, InProgressState::CommandExpected));
+        self.inner.state = InProgressState::SendProtocolOk {
+            num_bytes_written: 0,
+            protocol: self.protocol.into_bytes(),
+        };
+        self.inner
+    }
+
+    /// Reject the requested protocol and resume the handshake.
+    pub fn reject(mut self) -> InProgress<P> {
+        debug_assert!(matches!(self.inner.state, InProgressState::CommandExpected));
+        self.inner.state = InProgressState::SendProtocolNa {
+            num_bytes_written: 0,
+        };
+        self.inner
+    }
+}
+
 /// Negotiation in progress.
-pub struct InProgress<I, P> {
+pub struct InProgress<P> {
     /// Configuration of the negotiation. Always `Some` except right before destruction.
-    config: Option<Config<I, P>>,
+    config: Option<Config<P>>,
     /// Current state of the negotiation.
-    state: InProgressState<P>,
+    state: InProgressState,
     /// Maximum allowed size of a frame for `recv_buffer`.
     max_frame_len: usize,
     /// Incoming data is buffered in this `recv_buffer` before being decoded.
@@ -116,7 +158,7 @@ pub struct InProgress<I, P> {
 }
 
 /// Current state of the negotiation.
-enum InProgressState<P> {
+enum InProgressState {
     SendHandshake {
         /// Number of bytes of the handshake already written out.
         num_bytes_written: usize,
@@ -129,7 +171,7 @@ enum InProgressState<P> {
         /// Number of bytes of the response already written out.
         num_bytes_written: usize,
         /// Which protocol to acknowledge.
-        protocol: P,
+        protocol: Vec<u8>,
     },
     SendProtocolNa {
         /// Number of bytes of the response already written out.
@@ -140,23 +182,18 @@ enum InProgressState<P> {
     ProtocolRequestAnswerExpected,
 }
 
-impl<I, P> InProgress<I, P>
+impl<P> InProgress<P>
 where
-    I: Iterator<Item = P> + Clone,
     P: AsRef<str>,
 {
     /// Initializes a new handshake state machine.
-    pub fn new(config: Config<I, P>) -> Self {
+    pub fn new(config: Config<P>) -> Self {
         // Length, in bytes, of the longest protocol name.
         let max_proto_name_len = match &config {
             Config::Dialer { requested_protocol } => requested_protocol.as_ref().len(),
             Config::Listener {
-                supported_protocols,
-            } => supported_protocols
-                .clone()
-                .map(|p| p.as_ref().len())
-                .max()
-                .unwrap_or(0),
+                max_protocol_name_len,
+            } => *max_protocol_name_len,
         };
 
         // Any incoming frame larger than `max_frame_len` will trigger a protocol error.
@@ -209,7 +246,7 @@ where
     pub fn read_write<TNow>(
         mut self,
         read_write: &mut ReadWrite<TNow>,
-    ) -> Result<Negotiation<I, P>, Error> {
+    ) -> Result<Negotiation<P>, Error> {
         loop {
             // `self.recv_buffer` serves as a helper to delimit `data` into frames. The first step
             // is to inject the received data into `recv_buffer`.
@@ -313,14 +350,14 @@ where
                         return Err(Error::WriteClosed);
                     }
 
-                    let message = MessageOut::ProtocolOk(protocol.as_ref());
+                    let message = MessageOut::ProtocolOk(&protocol);
 
                     let written_before = read_write.written_bytes;
                     let done = message.write_out(num_bytes_written, read_write);
                     num_bytes_written += read_write.written_bytes - written_before;
 
                     if done {
-                        return Ok(Negotiation::Success(protocol));
+                        return Ok(Negotiation::Success);
                     }
                     self.state = InProgressState::SendProtocolOk {
                         num_bytes_written,
@@ -390,17 +427,12 @@ where
                     self.state = InProgressState::CommandExpected;
                 }
 
-                (
-                    InProgressState::CommandExpected,
-                    Some(Config::Listener {
-                        supported_protocols,
-                    }),
-                ) => {
+                (InProgressState::CommandExpected, Some(Config::Listener { .. })) => {
                     if read_write.incoming_buffer.is_none() {
                         return Err(Error::ReadClosed);
                     }
 
-                    let frame = match self.recv_buffer {
+                    let mut frame = match self.recv_buffer {
                         leb128::Framed::Finished(frame) => {
                             self.recv_buffer = leb128::Framed::InProgress(
                                 leb128::FramedInProgress::new(self.max_frame_len),
@@ -416,21 +448,19 @@ where
                         }
                     };
 
-                    if frame.is_empty() {
+                    if frame.last().map_or(true, |b| *b != b'\n') {
                         return Err(Error::InvalidCommand);
-                    } else if let Some(protocol) = supported_protocols
-                        .clone()
-                        .find(|p| p.as_ref().as_bytes() == &frame[..frame.len() - 1])
-                    {
-                        self.state = InProgressState::SendProtocolOk {
-                            num_bytes_written: 0,
-                            protocol,
-                        };
-                    } else {
-                        self.state = InProgressState::SendProtocolNa {
-                            num_bytes_written: 0,
-                        };
                     }
+
+                    frame.pop().unwrap();
+
+                    let protocol = String::from_utf8(frame).map_err(|_| Error::InvalidCommand)?;
+
+                    self.state = InProgressState::CommandExpected;
+                    return Ok(Negotiation::ListenerAcceptOrDeny(ListenerAcceptOrDeny {
+                        inner: self,
+                        protocol,
+                    }));
                 }
 
                 (
@@ -471,7 +501,7 @@ where
                     if &frame[..frame.len() - 1] != requested_protocol.as_ref().as_bytes() {
                         return Err(Error::UnexpectedProtocolRequestAnswer);
                     }
-                    return Ok(Negotiation::Success(requested_protocol));
+                    return Ok(Negotiation::Success);
                 }
 
                 // Invalid states.
@@ -491,7 +521,7 @@ where
     }
 }
 
-impl<I, P> fmt::Debug for InProgress<I, P> {
+impl<P> fmt::Debug for InProgress<P> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("InProgress").finish()
     }
@@ -623,7 +653,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::{super::super::read_write::ReadWrite, Config, MessageOut, Negotiation};
-    use core::iter;
 
     #[test]
     fn encode() {
@@ -665,11 +694,11 @@ mod tests {
     #[test]
     fn negotiation_basic_works() {
         fn test_with_buffer_sizes(size1: usize, size2: usize) {
-            let mut negotiation1 = Negotiation::new(Config::<iter::Once<_>, _>::Dialer {
+            let mut negotiation1 = Negotiation::new(Config::Dialer {
                 requested_protocol: "/foo",
             });
-            let mut negotiation2 = Negotiation::new(Config::Listener {
-                supported_protocols: iter::once("/foo"),
+            let mut negotiation2 = Negotiation::new(Config::<String>::Listener {
+                max_protocol_name_len: 4,
             });
 
             let mut buf_1_to_2 = Vec::new();
@@ -677,7 +706,7 @@ mod tests {
 
             while !matches!(
                 (&negotiation1, &negotiation2),
-                (Negotiation::Success(_), Negotiation::Success(_))
+                (Negotiation::Success, Negotiation::Success)
             ) {
                 match negotiation1 {
                     Negotiation::InProgress(nego) => {
@@ -713,7 +742,8 @@ mod tests {
                             }
                         }
                     }
-                    Negotiation::Success(_) => {}
+                    Negotiation::Success => {}
+                    Negotiation::ListenerAcceptOrDeny(_) => unreachable!(),
                     Negotiation::NotAvailable => panic!(),
                 }
 
@@ -751,7 +781,15 @@ mod tests {
                             }
                         }
                     }
-                    Negotiation::Success(_) => {}
+                    Negotiation::ListenerAcceptOrDeny(accept_reject)
+                        if accept_reject.requested_protocol() == "/foo" =>
+                    {
+                        negotiation2 = Negotiation::InProgress(accept_reject.accept());
+                    }
+                    Negotiation::ListenerAcceptOrDeny(accept_reject) => {
+                        negotiation2 = Negotiation::InProgress(accept_reject.reject());
+                    }
+                    Negotiation::Success => {}
                     Negotiation::NotAvailable => panic!(),
                 }
             }
