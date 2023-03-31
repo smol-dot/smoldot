@@ -555,7 +555,6 @@ impl<T> Yamux<T> {
     pub fn dead_substreams(
         &'_ self,
     ) -> impl Iterator<Item = (SubstreamId, DeadSubstreamTy, &'_ T)> + '_ {
-        // TODO: O(n)
         self.inner
             .dead_substreams
             .iter()
