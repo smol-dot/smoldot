@@ -118,9 +118,6 @@ pub struct Yamux<T> {
 
     /// List of substream IDs that have been reset locally. For each entry, a RST header should
     /// be sent to the remote and the entry removed.
-    ///
-    /// The FNV hasher is used because the substream IDs are allocated locally, and as such there
-    /// is no risk of HashDoS attack.
     rsts_to_send: VecDeque<NonZeroU32>,
 
     /// Source of randomness used for various purposes.
