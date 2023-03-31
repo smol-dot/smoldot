@@ -256,6 +256,14 @@ where
                 // Discard the data from the decrypted data buffer.
                 self.encryption.consume_inbound_data(num_read);
 
+                // Give the possibility for the remote to send more data.
+                // TODO: only do that for notification substreams? because for requests we already set the value to the maximum when the substream is created
+                self.inner
+                    .yamux
+                    .substream_by_id_mut(substream_id)
+                    .unwrap()
+                    .add_remote_window(u64::try_from(num_read).unwrap());
+
                 if let Some(event) = event {
                     return Ok((self, Some(event)));
                 } else if num_read == 0 {

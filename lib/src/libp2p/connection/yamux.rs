@@ -1077,7 +1077,6 @@ impl<T> Yamux<T> {
                                     SubstreamState::Healthy {
                                         remote_write_closed,
                                         remote_allowed_window,
-                                        remote_window_pending_increase,
                                         ..
                                     },
                                 ..
@@ -1093,9 +1092,6 @@ impl<T> Yamux<T> {
                                 *remote_allowed_window = remote_allowed_window
                                     .checked_sub(u64::from(length))
                                     .ok_or(Error::CreditsExceeded)?;
-
-                                // TODO: make this behavior tweakable by the user!
-                                *remote_window_pending_increase += 256 * 1024;
                             }
 
                             self.inner.incoming = Incoming::DataFrame {
@@ -1577,22 +1573,22 @@ impl<'a, T> SubstreamMut<'a, T> {
         }
     }
 
-    /// Allow the remote to send up to `bytes` bytes at once in the next packet.
-    ///
-    /// This method sets the number of allowed bytes to at least this value. In other words,
-    /// if this method was to be twice with the same parameter, the second call would have no
-    /// effect.
-    ///
-    /// # Context
-    ///
-    /// In order to properly handle back-pressure, the Yamux protocol only allows the remote to
-    /// send a certain number of bytes before the local node grants the authorization to send more
-    /// data.
-    /// This method grants the authorization to the remote to send up to `bytes` bytes.
-    ///
-    /// Call this when you expect a large payload with the maximum size this payload is allowed
-    /// to be.
-    ///
+    /// Adds `bytes` to the number of bytes the remote is allowed to send at once in the next
+    /// packet.
+    // TODO: properly define behavior in case of overflow?
+    pub fn add_remote_window(&mut self, bytes: u64) {
+        if let SubstreamState::Healthy {
+            remote_window_pending_increase,
+            ..
+        } = &mut self.substream.get_mut().state
+        {
+            *remote_window_pending_increase = remote_window_pending_increase.saturating_add(bytes);
+        }
+    }
+
+    /// Similar to [`SubstreamMut::add_remote_window`], but sets the number of allowed bytes to
+    /// be at least this value. In other words, if this method was to be twice with the same
+    /// parameter, the second call would have no effect.
     pub fn reserve_window(&mut self, bytes: u64) {
         if let SubstreamState::Healthy {
             remote_window_pending_increase,
