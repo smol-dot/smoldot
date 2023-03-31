@@ -38,13 +38,13 @@
 //!
 //! # About protocol names
 //!
-//! Due to flaws in the wire protocol design, a protocol named `ls` or `na` causes an ambiguity in
+//! Due to flaws in the wire protocol design, a protocol named `na` causes an ambiguity in
 //! the exchange. Because protocol names are normally decided ahead of time, this situation is
 //! expected to never arise, except in the presence of a malicious remote. The decision has been
 //! taken that such protocol will always fail to negotiate, but will also not produce any error
 //! or panic.
 //!
-//! Please don't intentionally name a protocol `ls` or `na`.
+//! Please don't intentionally name a protocol `na`.
 //!
 //! # Usage
 //!
@@ -60,7 +60,6 @@
 use super::super::read_write::ReadWrite;
 use crate::util::leb128;
 
-use alloc::vec::Vec;
 use core::{cmp, fmt, iter, mem, str};
 
 /// Configuration of a multistream-select protocol.
@@ -131,10 +130,6 @@ enum InProgressState<P> {
         num_bytes_written: usize,
         /// Which protocol to acknowledge.
         protocol: P,
-    },
-    SendLsResponse {
-        /// Number of bytes of the response already written out.
-        num_bytes_written: usize,
     },
     SendProtocolNa {
         /// Number of bytes of the response already written out.
@@ -237,7 +232,7 @@ where
                         return Err(Error::WriteClosed);
                     }
 
-                    let message = MessageOut::Handshake::<iter::Empty<_>, &'static str>;
+                    let message = MessageOut::Handshake::<&'static str>;
 
                     let written_before = read_write.written_bytes;
                     let done = message.write_out(num_bytes_written, read_write);
@@ -269,9 +264,7 @@ where
                         return Err(Error::WriteClosed);
                     }
 
-                    let message = MessageOut::ProtocolRequest::<iter::Empty<_>, _>(
-                        requested_protocol.as_ref(),
-                    );
+                    let message = MessageOut::ProtocolRequest(requested_protocol.as_ref());
 
                     let written_before = read_write.written_bytes;
                     let done = message.write_out(num_bytes_written, read_write);
@@ -295,7 +288,7 @@ where
                         return Err(Error::WriteClosed);
                     }
 
-                    let message = MessageOut::ProtocolNa::<iter::Empty<_>, &'static str>;
+                    let message = MessageOut::ProtocolNa::<&'static str>;
 
                     let written_before = read_write.written_bytes;
                     let done = message.write_out(num_bytes_written, read_write);
@@ -320,7 +313,7 @@ where
                         return Err(Error::WriteClosed);
                     }
 
-                    let message = MessageOut::ProtocolOk::<iter::Empty<_>, _>(protocol.as_ref());
+                    let message = MessageOut::ProtocolOk(protocol.as_ref());
 
                     let written_before = read_write.written_bytes;
                     let done = message.write_out(num_bytes_written, read_write);
@@ -334,36 +327,6 @@ where
                         protocol,
                     };
                     break;
-                }
-
-                (
-                    InProgressState::SendLsResponse {
-                        mut num_bytes_written,
-                    },
-                    Some(Config::Listener {
-                        supported_protocols,
-                    }),
-                ) => {
-                    if read_write.outgoing_buffer.is_none() {
-                        return Err(Error::WriteClosed);
-                    }
-
-                    // TODO: overhead stupidity
-                    let list = supported_protocols.clone().collect::<Vec<_>>();
-                    let message = MessageOut::LsResponse(
-                        list.iter().map(|p| AsRef::<str>::as_ref(p).as_bytes()),
-                    );
-
-                    let written_before = read_write.written_bytes;
-                    let done = message.write_out(num_bytes_written, read_write);
-                    num_bytes_written += read_write.written_bytes - written_before;
-
-                    if done {
-                        self.state = InProgressState::CommandExpected;
-                    } else {
-                        self.state = InProgressState::SendLsResponse { num_bytes_written };
-                        break;
-                    }
                 }
 
                 (InProgressState::HandshakeExpected, Some(Config::Dialer { .. })) => {
@@ -455,13 +418,6 @@ where
 
                     if frame.is_empty() {
                         return Err(Error::InvalidCommand);
-                    } else if &*frame == b"ls\n" {
-                        // Because of the order of checks, a protocol named `ls` will never be
-                        // successfully negotiated. Debugging is expected to be less confusing if
-                        // the negotiation always fails.
-                        self.state = InProgressState::SendLsResponse {
-                            num_bytes_written: 0,
-                        };
                     } else if let Some(protocol) = supported_protocols
                         .clone()
                         .find(|p| p.as_ref().as_bytes() == &frame[..frame.len() - 1])
@@ -522,9 +478,6 @@ where
                 (InProgressState::SendProtocolRequest { .. }, Some(Config::Listener { .. })) => {
                     unreachable!();
                 }
-                (InProgressState::SendLsResponse { .. }, Some(Config::Dialer { .. })) => {
-                    unreachable!();
-                }
                 (InProgressState::CommandExpected, Some(Config::Dialer { .. })) => unreachable!(),
                 (InProgressState::ProtocolRequestAnswerExpected, Some(Config::Listener { .. })) => {
                     unreachable!();
@@ -567,18 +520,16 @@ const HANDSHAKE: &[u8] = b"/multistream/1.0.0\n";
 
 /// Message on the multistream-select protocol.
 #[derive(Debug, Copy, Clone)]
-pub enum MessageOut<I, P> {
+pub enum MessageOut<P> {
     Handshake,
-    Ls,
-    LsResponse(I),
     ProtocolRequest(P),
     ProtocolOk(P),
+    LnAfterProtocol,
     ProtocolNa,
 }
 
-impl<I, P> MessageOut<I, P>
+impl<P> MessageOut<P>
 where
-    I: Iterator<Item = P> + Clone,
     P: AsRef<[u8]>,
 {
     /// Returns the bytes representation of this message, as a list of buffers. The message
@@ -586,10 +537,9 @@ where
     pub fn into_bytes(mut self) -> impl Iterator<Item = impl AsRef<[u8]>> {
         let len = match &self {
             MessageOut::Handshake => HANDSHAKE.len(),
-            MessageOut::Ls => 3,
-            MessageOut::LsResponse(list) => list.clone().count(),
             MessageOut::ProtocolRequest(p) => p.as_ref().len() + 1,
             MessageOut::ProtocolOk(p) => p.as_ref().len() + 1,
+            MessageOut::LnAfterProtocol => 1,
             MessageOut::ProtocolNa => 3,
         };
 
@@ -600,32 +550,22 @@ where
             let ret = match (&mut self, n) {
                 (MessageOut::Handshake, 0) => Some(either::Left(HANDSHAKE)),
                 (MessageOut::Handshake, _) => None,
-                (MessageOut::Ls, 0) => Some(either::Left(&b"ls\n"[..])),
-                (MessageOut::Ls, 500) => Some(either::Left(&b"\n"[..])), // TODO: hack, see below
-                (MessageOut::Ls, _) => None,
-                (MessageOut::LsResponse(list), n) if n % 3 == 0 => {
-                    let protocol_len = list.clone().nth(n / 3)?.as_ref().len() + 1;
-                    // TODO: overhead
-                    let length = leb128::encode_usize(protocol_len).collect::<Vec<_>>();
-                    Some(either::Right(either::Right(length)))
-                }
-                (MessageOut::LsResponse(list), n) if n % 3 == 1 => {
-                    let protocol = list.clone().nth(n / 3).unwrap();
-                    Some(either::Right(either::Left(protocol)))
-                }
-                (MessageOut::LsResponse(_), _) => Some(either::Left(&b"\n"[..])),
                 (MessageOut::ProtocolOk(_) | MessageOut::ProtocolRequest(_), 0) => {
-                    let proto = match mem::replace(&mut self, MessageOut::Ls) {
+                    let proto = match mem::replace(&mut self, MessageOut::LnAfterProtocol) {
                         MessageOut::ProtocolOk(p) | MessageOut::ProtocolRequest(p) => p,
                         _ => unreachable!(),
                     };
-                    // TODO: this is completely a hack; decide whether it's acceptable
-                    n = 499;
-                    Some(either::Right(either::Left(proto)))
+
+                    Some(either::Right(proto))
                 }
                 (MessageOut::ProtocolOk(_) | MessageOut::ProtocolRequest(_), _) => {
                     unreachable!()
                 }
+                (MessageOut::LnAfterProtocol, 0 | 1) => {
+                    n = 1;
+                    Some(either::Left(&b"\n"[..]))
+                }
+                (MessageOut::LnAfterProtocol, _) => None,
                 (MessageOut::ProtocolNa, 0) => Some(either::Left(&b"na\n"[..])),
                 (MessageOut::ProtocolNa, _) => None,
             };
@@ -688,27 +628,18 @@ mod tests {
     #[test]
     fn encode() {
         assert_eq!(
-            MessageOut::<iter::Empty<_>, &'static [u8]>::Handshake
-                .into_bytes()
-                .fold(Vec::new(), move |mut a, b| {
+            MessageOut::<&'static [u8]>::Handshake.into_bytes().fold(
+                Vec::new(),
+                move |mut a, b| {
                     a.extend_from_slice(b.as_ref());
                     a
-                }),
+                }
+            ),
             b"\x13/multistream/1.0.0\n".to_vec()
         );
 
         assert_eq!(
-            MessageOut::<iter::Empty<_>, &'static [u8]>::Ls
-                .into_bytes()
-                .fold(Vec::new(), move |mut a, b| {
-                    a.extend_from_slice(b.as_ref());
-                    a
-                }),
-            b"\x03ls\n".to_vec()
-        );
-
-        assert_eq!(
-            MessageOut::ProtocolRequest::<iter::Empty<_>, _>("/hello")
+            MessageOut::ProtocolRequest("/hello")
                 .into_bytes()
                 .fold(Vec::new(), move |mut a, b| {
                     a.extend_from_slice(b.as_ref());
@@ -718,12 +649,13 @@ mod tests {
         );
 
         assert_eq!(
-            MessageOut::<iter::Empty<_>, &'static [u8]>::ProtocolNa
-                .into_bytes()
-                .fold(Vec::new(), move |mut a, b| {
+            MessageOut::<&'static [u8]>::ProtocolNa.into_bytes().fold(
+                Vec::new(),
+                move |mut a, b| {
                     a.extend_from_slice(b.as_ref());
                     a
-                }),
+                }
+            ),
             b"\x03na\n".to_vec()
         );
 
