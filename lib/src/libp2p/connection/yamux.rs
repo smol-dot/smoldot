@@ -52,7 +52,7 @@
 
 use crate::util::SipHasherBuild;
 
-use alloc::{collections::VecDeque, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 use core::{
     cmp, fmt, mem,
     num::{NonZeroU32, NonZeroUsize},
