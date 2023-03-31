@@ -165,6 +165,7 @@ enum SubstreamState {
         /// Buffer of buffers to be written out to the socket.
         // TODO: is it a good idea to have an unbounded VecDeque?
         // TODO: call shrink_to_fit from time to time?
+        // TODO: instead of storing `Vec<u8>`s, consider storing a generic `B` and let the user manually write a `B` to the output buffer
         write_buffers: VecDeque<Vec<u8>>,
         /// Number of bytes in `self.write_buffers[0]` has have already been written out to the
         /// socket.
