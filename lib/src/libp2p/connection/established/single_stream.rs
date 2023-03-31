@@ -185,17 +185,14 @@ where
 
             // It might be that the remote has reset the ping substream, in which case the out ping
             // substream no longer exists and we immediately consider the ping as failed.
-            if let Some(substream) = self
-                .inner
-                .yamux
-                .substream_by_id_mut(self.inner.outgoing_pings)
-            {
+            if self.inner.yamux.has_substream(self.inner.outgoing_pings) {
                 let payload = self
                     .inner
                     .ping_payload_randomness
                     .sample(rand::distributions::Standard);
-                substream
-                    .into_user_data()
+                self.inner
+                    .yamux
+                    .user_data_mut(self.inner.outgoing_pings)
                     .as_mut()
                     .unwrap()
                     .queue_ping(&payload, read_write.now.clone() + self.inner.ping_timeout);
@@ -236,7 +233,7 @@ where
             // but this time update the state machine specific to that substream.
             if let Some((substream_id, bytes_remaining)) = self.inner.current_data_frame {
                 // It might be that the substream has been closed in `process_substream`.
-                if self.inner.yamux.substream_by_id_mut(substream_id).is_none() {
+                if !self.inner.yamux.has_substream(substream_id) {
                     self.encryption.consume_inbound_data(bytes_remaining.get());
                     self.inner.current_data_frame = None;
                     continue;
@@ -260,9 +257,7 @@ where
                 // TODO: only do that for notification substreams? because for requests we already set the value to the maximum when the substream is created
                 self.inner
                     .yamux
-                    .substream_by_id_mut(substream_id)
-                    .unwrap()
-                    .add_remote_window(u64::try_from(num_read).unwrap());
+                    .add_remote_window(substream_id, u64::try_from(num_read).unwrap());
 
                 if let Some(event) = event {
                     return Ok((self, Some(event)));
@@ -438,12 +433,8 @@ where
 
                         // Mutable reference to the substream state machine within the yamux
                         // state machine.
-                        let state_machine_refmut = self
-                            .inner
-                            .yamux
-                            .substream_by_id_mut(dead_substream_id)
-                            .unwrap()
-                            .into_user_data();
+                        let state_machine_refmut =
+                            self.inner.yamux.user_data_mut(dead_substream_id);
 
                         // Extract the substream state machine, maybe putting it back later.
                         let state_machine_extracted = match state_machine_refmut.take() {
@@ -574,15 +565,13 @@ where
         let mut total_read = 0;
 
         loop {
-            let mut substream = inner.yamux.substream_by_id_mut(substream_id).unwrap();
-
-            let state_machine = match substream.user_data_mut().take() {
+            let state_machine = match inner.yamux.user_data_mut(substream_id).take() {
                 Some(s) => s,
                 None => break (total_read, None),
             };
 
-            let read_is_closed = !substream.can_receive();
-            let write_is_closed = !substream.can_send();
+            let read_is_closed = !inner.yamux.can_receive(substream_id);
+            let write_is_closed = !inner.yamux.can_send(substream_id);
 
             let mut substream_read_write = ReadWrite {
                 now: outer_read_write.now.clone(),
@@ -613,23 +602,22 @@ where
             let written_bytes = substream_read_write.written_bytes;
             if written_bytes != 0 {
                 debug_assert!(!write_is_closed);
-                substream.write(inner.intermediary_buffer[..written_bytes].to_vec());
+                inner.yamux.write(
+                    substream_id,
+                    inner.intermediary_buffer[..written_bytes].to_vec(),
+                );
             }
             if !write_is_closed && closed_after {
                 debug_assert_eq!(written_bytes, 0);
-                substream.close();
+                inner.yamux.close(substream_id);
             }
 
             match substream_update {
-                Some(s) => *substream.user_data_mut() = Some(s),
+                Some(s) => *inner.yamux.user_data_mut(substream_id) = Some(s),
                 None => {
                     if !closed_after || !read_is_closed {
                         // TODO: what we do here is definitely correct, but the docs of `reset()` seem sketchy, investigate
-                        inner
-                            .yamux
-                            .substream_by_id_mut(substream_id)
-                            .unwrap()
-                            .reset();
+                        inner.yamux.reset(substream_id);
                     }
                 }
             };
@@ -637,13 +625,7 @@ where
             let event_to_yield = match event {
                 None => None,
                 Some(substream::Event::InboundNegotiated(protocol)) => {
-                    let substream = inner
-                        .yamux
-                        .substream_by_id_mut(substream_id)
-                        .unwrap()
-                        .into_user_data()
-                        .as_mut()
-                        .unwrap();
+                    let substream = inner.yamux.user_data_mut(substream_id).as_mut().unwrap();
 
                     if protocol == inner.ping_protocol {
                         substream.set_inbound_ty(substream::InboundTy::Ping);
@@ -818,7 +800,7 @@ where
             }
         };
 
-        let mut substream =
+        let substream_id =
             self.inner
                 .yamux
                 .open_substream(Some(substream::Substream::request_out(
@@ -834,13 +816,14 @@ where
                 )));
 
         // TODO: we add some bytes due to the length prefix, this is a bit hacky as we should ask this information from the substream
-        substream.reserve_window(
+        self.inner.yamux.reserve_window(
+            substream_id,
             u64::try_from(self.inner.request_protocols[protocol_index].max_response_size)
                 .unwrap_or(u64::max_value())
                 .saturating_add(64),
         );
 
-        Ok(SubstreamId(SubstreamIdInner::SingleStream(substream.id())))
+        Ok(SubstreamId(SubstreamIdInner::SingleStream(substream_id)))
     }
 
     /// Returns the user data associated to a notifications substream.
@@ -855,10 +838,13 @@ where
             _ => return None,
         };
 
+        if !self.inner.yamux.has_substream(id) {
+            return None;
+        }
+
         self.inner
             .yamux
-            .substream_by_id_mut(id)?
-            .into_user_data()
+            .user_data_mut(id)
             .as_mut()
             .unwrap()
             .notifications_substream_user_data_mut()
@@ -908,7 +894,7 @@ where
                     user_data,
                 )));
 
-        SubstreamId(SubstreamIdInner::SingleStream(substream.id()))
+        SubstreamId(SubstreamIdInner::SingleStream(substream))
     }
 
     /// Accepts an inbound notifications protocol. Must be called in response to a
@@ -933,9 +919,7 @@ where
                                                       // TODO: self.inner.notifications_protocols[protocol_index].max_notification_size;
         self.inner
             .yamux
-            .substream_by_id_mut(substream_id)
-            .unwrap()
-            .into_user_data()
+            .user_data_mut(substream_id)
             .as_mut()
             .unwrap()
             .accept_in_notifications_substream(handshake, max_notification_size, user_data);
@@ -956,9 +940,7 @@ where
 
         self.inner
             .yamux
-            .substream_by_id_mut(substream_id)
-            .unwrap()
-            .into_user_data()
+            .user_data_mut(substream_id)
             .as_mut()
             .unwrap()
             .reject_in_notifications_substream();
@@ -993,9 +975,7 @@ where
 
         self.inner
             .yamux
-            .substream_by_id_mut(substream_id)
-            .unwrap()
-            .into_user_data()
+            .user_data_mut(substream_id)
             .as_mut()
             .unwrap()
             .write_notification_unbounded(notification);
@@ -1016,10 +996,11 @@ where
             _ => panic!(),
         };
 
-        let substream = self.inner.yamux.substream_by_id(substream_id).unwrap();
-        let already_queued = substream.queued_bytes();
-        let from_substream = substream
-            .into_user_data()
+        let already_queued = self.inner.yamux.queued_bytes(substream_id);
+        let from_substream = self
+            .inner
+            .yamux
+            .user_data(substream_id)
             .as_ref()
             .unwrap()
             .notification_substream_queued_bytes();
@@ -1044,11 +1025,13 @@ where
             _ => panic!(),
         };
 
+        if !self.inner.yamux.has_substream(substream_id) {
+            panic!()
+        }
+
         self.inner
             .yamux
-            .substream_by_id_mut(substream_id)
-            .unwrap()
-            .into_user_data()
+            .user_data_mut(substream_id)
             .as_mut()
             .unwrap()
             .close_notifications_substream();
@@ -1070,11 +1053,13 @@ where
             _ => return Err(RespondInRequestError::SubstreamClosed),
         };
 
+        if !self.inner.yamux.has_substream(substream_id) {
+            return Err(RespondInRequestError::SubstreamClosed);
+        }
+
         self.inner
             .yamux
-            .substream_by_id_mut(substream_id)
-            .ok_or(RespondInRequestError::SubstreamClosed)?
-            .into_user_data()
+            .user_data_mut(substream_id)
             .as_mut()
             .unwrap()
             .respond_in_request(response)
@@ -1137,11 +1122,9 @@ impl ConnectionPrototype {
             randomness_seed: randomness.sample(rand::distributions::Standard),
         });
 
-        let outgoing_pings = yamux
-            .open_substream(Some(substream::Substream::ping_out(
-                config.ping_protocol.clone(),
-            )))
-            .id();
+        let outgoing_pings = yamux.open_substream(Some(substream::Substream::ping_out(
+            config.ping_protocol.clone(),
+        )));
 
         SingleStream {
             encryption: self.encryption,

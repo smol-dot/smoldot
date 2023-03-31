@@ -57,7 +57,7 @@ use core::{
     cmp, fmt, mem,
     num::{NonZeroU32, NonZeroUsize},
 };
-use hashbrown::hash_map::{Entry, OccupiedEntry};
+use hashbrown::hash_map::Entry;
 use rand::Rng as _;
 use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 
@@ -367,7 +367,7 @@ impl<T> Yamux<T> {
     /// Panics if a [`IncomingDataDetail::GoAway`] event has been generated. This can also be
     /// checked by calling [`Yamux::received_goaway`].
     ///
-    pub fn open_substream(&mut self, user_data: T) -> SubstreamMut<T> {
+    pub fn open_substream(&mut self, user_data: T) -> SubstreamId {
         // It is forbidden to open new substreams if a `GoAway` frame has been received.
         assert!(self.inner.received_goaway.is_none());
 
@@ -427,15 +427,7 @@ impl<T> Yamux<T> {
             user_data,
         });
 
-        match self.inner.substreams.entry(substream_id.0) {
-            Entry::Occupied(e) => SubstreamMut {
-                substream: e,
-                outgoing: &mut self.inner.outgoing,
-                rsts_to_send: &mut self.inner.rsts_to_send,
-                dead_substreams: &mut self.inner.dead_substreams,
-            },
-            _ => unreachable!(),
-        }
+        substream_id
     }
 
     /// Returns `Some` if a [`IncomingDataDetail::GoAway`] event has been generated in the past,
@@ -462,27 +454,269 @@ impl<T> Yamux<T> {
             .map(|(id, s)| (SubstreamId(*id), &mut s.user_data))
     }
 
-    /// Returns a reference to a substream by its ID. Returns `None` if no substream with this ID
-    /// is open.
-    pub fn substream_by_id(&self, id: SubstreamId) -> Option<SubstreamRef<T>> {
-        Some(SubstreamRef {
-            id,
-            substream: self.inner.substreams.get(&id.0)?,
-        })
+    /// Returns `true` if the given [`SubstreamId`] exists.
+    ///
+    /// Also returns `true` if the substream is in a dead state.
+    pub fn has_substream(&self, substream_id: SubstreamId) -> bool {
+        self.inner.substreams.contains_key(&substream_id.0)
     }
 
-    /// Returns a reference to a substream by its ID. Returns `None` if no substream with this ID
-    /// is open.
-    pub fn substream_by_id_mut(&mut self, id: SubstreamId) -> Option<SubstreamMut<T>> {
-        if let Entry::Occupied(e) = self.inner.substreams.entry(id.0) {
-            Some(SubstreamMut {
-                substream: e,
-                outgoing: &mut self.inner.outgoing,
-                rsts_to_send: &mut self.inner.rsts_to_send,
-                dead_substreams: &mut self.inner.dead_substreams,
-            })
-        } else {
-            None
+    /// Returns the user data associated to a substream.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] is invalid.
+    ///
+    pub fn user_data(&self, substream_id: SubstreamId) -> &T {
+        &self
+            .inner
+            .substreams
+            .get(&substream_id.0)
+            .unwrap()
+            .user_data
+    }
+
+    /// Returns the user data associated to a substream.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] is invalid.
+    ///
+    pub fn user_data_mut(&mut self, substream_id: SubstreamId) -> &mut T {
+        &mut self
+            .inner
+            .substreams
+            .get_mut(&substream_id.0)
+            .unwrap_or_else(|| panic!())
+            .user_data
+    }
+
+    /// Appends data to the buffer of data to send out on this substream.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] is invalid.
+    /// Panics if [`Yamux::close`] has already been called on this substream.
+    ///
+    // TODO: doc obsolete
+    pub fn write(&mut self, substream_id: SubstreamId, data: Vec<u8>) {
+        let substream = self
+            .inner
+            .substreams
+            .get_mut(&substream_id.0)
+            .unwrap_or_else(|| panic!());
+        match &mut substream.state {
+            SubstreamState::Reset => {}
+            SubstreamState::Healthy {
+                local_write_close: local_write,
+                write_buffers,
+                first_write_buffer_offset,
+                ..
+            } => {
+                debug_assert!(!write_buffers.is_empty() || *first_write_buffer_offset == 0);
+
+                if matches!(local_write, SubstreamStateLocalWrite::Open) {
+                    write_buffers.push_back(data);
+                }
+            }
+        }
+    }
+
+    /// Adds `bytes` to the number of bytes the remote is allowed to send at once in the next
+    /// packet.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] is invalid.
+    ///
+    // TODO: properly define behavior in case of overflow?
+    pub fn add_remote_window(&mut self, substream_id: SubstreamId, bytes: u64) {
+        if let SubstreamState::Healthy {
+            remote_window_pending_increase,
+            ..
+        } = &mut self
+            .inner
+            .substreams
+            .get_mut(&substream_id.0)
+            .unwrap_or_else(|| panic!())
+            .state
+        {
+            *remote_window_pending_increase = remote_window_pending_increase.saturating_add(bytes);
+        }
+    }
+
+    /// Similar to [`SubstreamMut::add_remote_window`], but sets the number of allowed bytes to
+    /// be at least this value. In other words, if this method was to be twice with the same
+    /// parameter, the second call would have no effect.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] is invalid.
+    ///
+    pub fn reserve_window(&mut self, substream_id: SubstreamId, bytes: u64) {
+        if let SubstreamState::Healthy {
+            remote_window_pending_increase,
+            ..
+        } = &mut self
+            .inner
+            .substreams
+            .get_mut(&substream_id.0)
+            .unwrap_or_else(|| panic!())
+            .state
+        {
+            *remote_window_pending_increase = cmp::max(*remote_window_pending_increase, bytes);
+        }
+    }
+
+    /// Returns the number of bytes queued for writing on this substream.
+    ///
+    /// Returns 0 if the substream is in a reset state.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] is invalid.
+    ///
+    pub fn queued_bytes(&self, substream_id: SubstreamId) -> usize {
+        match &self
+            .inner
+            .substreams
+            .get(&substream_id.0)
+            .unwrap_or_else(|| panic!())
+            .state
+        {
+            SubstreamState::Healthy {
+                write_buffers,
+                first_write_buffer_offset,
+                ..
+            } => write_buffers.iter().fold(0, |n, buf| n + buf.len()) - first_write_buffer_offset,
+            SubstreamState::Reset => 0,
+        }
+    }
+
+    /// Returns `false` if the remote has closed their writing side of this substream, or if
+    /// [`SubstreamMut::reset`] has been called on this substream, or if the substream has been
+    /// reset by the remote.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] is invalid.
+    ///
+    pub fn can_receive(&self, substream_id: SubstreamId) -> bool {
+        matches!(self.inner.substreams.get(&substream_id.0).unwrap_or_else(|| panic!()).state,
+            SubstreamState::Healthy {
+                remote_write_closed,
+                ..
+            } if !remote_write_closed)
+    }
+
+    /// Returns `false` if [`SubstreamMut::close`] or [`SubstreamMut::reset`] has been called on
+    /// this substream, or if the remote has .
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] is invalid.
+    ///
+    pub fn can_send(&self, substream_id: SubstreamId) -> bool {
+        matches!(
+            self.inner
+                .substreams
+                .get(&substream_id.0)
+                .unwrap_or_else(|| panic!())
+                .state,
+            SubstreamState::Healthy {
+                local_write_close: SubstreamStateLocalWrite::Open,
+                ..
+            }
+        )
+    }
+
+    /// Marks the substream as closed. It is no longer possible to write data on it.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] is invalid.
+    /// Panics if the local writing side is already closed, which can happen if
+    /// [`SubstreamMut::close`] has already been called on this substream or if the remote has
+    /// reset the substream in the past.
+    ///
+    // TODO: doc obsolete
+    pub fn close(&mut self, substream_id: SubstreamId) {
+        let substream = self
+            .inner
+            .substreams
+            .get_mut(&substream_id.0)
+            .unwrap_or_else(|| panic!());
+        if let SubstreamState::Healthy {
+            local_write_close: ref mut local_write @ SubstreamStateLocalWrite::Open,
+            ..
+        } = substream.state
+        {
+            *local_write = SubstreamStateLocalWrite::FinDesired;
+        }
+    }
+
+    /// Abruptly shuts down the substream. Sends a frame with the `RST` flag to the remote.
+    ///
+    /// Use this method when a protocol error happens on a substream.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] is invalid.
+    /// Panics if the local writing side is already closed, which can happen if
+    /// [`SubstreamMut::close`] has already been called on this substream or if the remote has
+    /// reset the substream in the past.
+    ///
+    pub fn reset(&mut self, substream_id: SubstreamId) {
+        // Add an entry to the list of RST headers to send to the remote.
+        if let SubstreamState::Healthy { .. } = self
+            .inner
+            .substreams
+            .get(&substream_id.0)
+            .unwrap_or_else(|| panic!())
+            .state
+        {
+            self.inner.rsts_to_send.push_back(substream_id.0);
+        }
+        // TODO: else { panic!() } ?!
+
+        let _was_inserted = self.inner.dead_substreams.insert(substream_id.0);
+        debug_assert!(_was_inserted);
+
+        // We might be currently writing a frame of data of the substream being reset.
+        // If that happens, we need to update some internal state regarding this frame of data.
+        match (
+            &mut self.inner.outgoing,
+            mem::replace(
+                &mut self
+                    .inner
+                    .substreams
+                    .get_mut(&substream_id.0)
+                    .unwrap_or_else(|| panic!())
+                    .state,
+                SubstreamState::Reset,
+            ),
+        ) {
+            (
+                Outgoing::Header {
+                    substream_data_frame: Some((data @ OutgoingSubstreamData::Healthy(_), _)),
+                    ..
+                }
+                | Outgoing::SubstreamData {
+                    data: data @ OutgoingSubstreamData::Healthy(_),
+                    ..
+                },
+                SubstreamState::Healthy {
+                    write_buffers,
+                    first_write_buffer_offset,
+                    ..
+                },
+            ) if *data == OutgoingSubstreamData::Healthy(substream_id) => {
+                *data = OutgoingSubstreamData::Obsolete {
+                    write_buffers,
+                    first_write_buffer_offset,
+                };
+            }
+            _ => {}
         }
     }
 
@@ -1186,7 +1420,7 @@ impl<T> Yamux<T> {
     ///
     /// Panics if no incoming substream is currently pending.
     ///
-    pub fn accept_pending_substream(&mut self, user_data: T) -> SubstreamMut<T> {
+    pub fn accept_pending_substream(&mut self, user_data: T) -> SubstreamId {
         match self.inner.incoming {
             Incoming::PendingIncomingSubstream {
                 substream_id,
@@ -1226,15 +1460,7 @@ impl<T> Yamux<T> {
                     }
                 };
 
-                SubstreamMut {
-                    substream: match self.inner.substreams.entry(substream_id.0) {
-                        Entry::Occupied(e) => e,
-                        _ => unreachable!(),
-                    },
-                    outgoing: &mut self.inner.outgoing,
-                    rsts_to_send: &mut self.inner.rsts_to_send,
-                    dead_substreams: &mut self.inner.dead_substreams,
-                }
+                substream_id
             }
             _ => panic!(),
         }
@@ -1444,277 +1670,6 @@ where
         f.debug_struct("Yamux")
             .field("substreams", &List(self))
             .finish()
-    }
-}
-
-/// Reference to a substream within the [`Yamux`].
-pub struct SubstreamRef<'a, T> {
-    id: SubstreamId,
-    substream: &'a Substream<T>,
-}
-
-impl<'a, T> SubstreamRef<'a, T> {
-    /// Identifier of the substream.
-    pub fn id(&self) -> SubstreamId {
-        self.id
-    }
-
-    /// Returns the user data associated to this substream.
-    pub fn user_data(&self) -> &T {
-        &self.substream.user_data
-    }
-
-    /// Returns the user data associated to this substream.
-    pub fn into_user_data(self) -> &'a T {
-        &self.substream.user_data
-    }
-
-    /// Returns the number of bytes queued for writing on this substream.
-    ///
-    /// Returns 0 if the substream is in a reset state.
-    pub fn queued_bytes(&self) -> usize {
-        match &self.substream.state {
-            SubstreamState::Healthy {
-                write_buffers,
-                first_write_buffer_offset,
-                ..
-            } => write_buffers.iter().fold(0, |n, buf| n + buf.len()) - first_write_buffer_offset,
-            SubstreamState::Reset => 0,
-        }
-    }
-
-    /// Returns `false` if the remote has closed their writing side of this substream, or if
-    /// [`SubstreamMut::reset`] has been called on this substream, or if the substream has been
-    /// reset by the remote.
-    pub fn can_receive(&self) -> bool {
-        match self.substream.state {
-            SubstreamState::Healthy {
-                remote_write_closed,
-                ..
-            } => !remote_write_closed,
-            SubstreamState::Reset => false,
-        }
-    }
-
-    /// Returns `false` if [`SubstreamMut::close`] or [`SubstreamMut::reset`] has been called on
-    /// this substream, or if the remote has reset it.
-    pub fn can_send(&self) -> bool {
-        matches!(
-            self.substream.state,
-            SubstreamState::Healthy {
-                local_write_close: SubstreamStateLocalWrite::Open,
-                ..
-            }
-        )
-    }
-}
-
-impl<'a, T> fmt::Debug for SubstreamRef<'a, T>
-where
-    T: fmt::Debug,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Substream").field(self.user_data()).finish()
-    }
-}
-
-/// Reference to a substream within the [`Yamux`].
-pub struct SubstreamMut<'a, T> {
-    substream: OccupiedEntry<'a, NonZeroU32, Substream<T>, SipHasherBuild>,
-    outgoing: &'a mut Outgoing,
-    rsts_to_send: &'a mut VecDeque<NonZeroU32>,
-    dead_substreams: &'a mut hashbrown::HashSet<NonZeroU32, SipHasherBuild>,
-}
-
-impl<'a, T> SubstreamMut<'a, T> {
-    /// Identifier of the substream.
-    pub fn id(&self) -> SubstreamId {
-        SubstreamId(*self.substream.key())
-    }
-
-    /// Returns the user data associated to this substream.
-    pub fn user_data(&self) -> &T {
-        &self.substream.get().user_data
-    }
-
-    /// Returns the user data associated to this substream.
-    pub fn user_data_mut(&mut self) -> &mut T {
-        &mut self.substream.get_mut().user_data
-    }
-
-    /// Returns the user data associated to this substream.
-    pub fn into_user_data(self) -> &'a mut T {
-        &mut self.substream.into_mut().user_data
-    }
-
-    /// Appends data to the buffer of data to send out on this substream.
-    ///
-    /// # Panic
-    ///
-    /// Panics if [`SubstreamMut::close`] has already been called on this substream.
-    ///
-    // TODO: doc obsolete
-    pub fn write(&mut self, data: Vec<u8>) {
-        let substream = self.substream.get_mut();
-        match &mut substream.state {
-            SubstreamState::Reset => {}
-            SubstreamState::Healthy {
-                local_write_close: local_write,
-                write_buffers,
-                first_write_buffer_offset,
-                ..
-            } => {
-                debug_assert!(!write_buffers.is_empty() || *first_write_buffer_offset == 0);
-
-                if matches!(local_write, SubstreamStateLocalWrite::Open) {
-                    write_buffers.push_back(data);
-                }
-            }
-        }
-    }
-
-    /// Adds `bytes` to the number of bytes the remote is allowed to send at once in the next
-    /// packet.
-    // TODO: properly define behavior in case of overflow?
-    pub fn add_remote_window(&mut self, bytes: u64) {
-        if let SubstreamState::Healthy {
-            remote_window_pending_increase,
-            ..
-        } = &mut self.substream.get_mut().state
-        {
-            *remote_window_pending_increase = remote_window_pending_increase.saturating_add(bytes);
-        }
-    }
-
-    /// Similar to [`SubstreamMut::add_remote_window`], but sets the number of allowed bytes to
-    /// be at least this value. In other words, if this method was to be twice with the same
-    /// parameter, the second call would have no effect.
-    pub fn reserve_window(&mut self, bytes: u64) {
-        if let SubstreamState::Healthy {
-            remote_window_pending_increase,
-            ..
-        } = &mut self.substream.get_mut().state
-        {
-            *remote_window_pending_increase = cmp::max(*remote_window_pending_increase, bytes);
-        }
-    }
-
-    /// Returns the number of bytes queued for writing on this substream.
-    ///
-    /// Returns 0 if the substream is in a reset state.
-    pub fn queued_bytes(&self) -> usize {
-        match &self.substream.get().state {
-            SubstreamState::Healthy {
-                write_buffers,
-                first_write_buffer_offset,
-                ..
-            } => write_buffers.iter().fold(0, |n, buf| n + buf.len()) - first_write_buffer_offset,
-            SubstreamState::Reset => 0,
-        }
-    }
-
-    /// Returns `false` if the remote has closed their writing side of this substream, or if
-    /// [`SubstreamMut::reset`] has been called on this substream, or if the substream has been
-    /// reset by the remote.
-    pub fn can_receive(&self) -> bool {
-        matches!(self.substream.get().state,
-            SubstreamState::Healthy {
-                remote_write_closed,
-                ..
-            } if !remote_write_closed)
-    }
-
-    /// Returns `false` if [`SubstreamMut::close`] or [`SubstreamMut::reset`] has been called on
-    /// this substream, or if the remote has .
-    pub fn can_send(&self) -> bool {
-        matches!(
-            self.substream.get().state,
-            SubstreamState::Healthy {
-                local_write_close: SubstreamStateLocalWrite::Open,
-                ..
-            }
-        )
-    }
-
-    /// Marks the substream as closed. It is no longer possible to write data on it.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the local writing side is already closed, which can happen if
-    /// [`SubstreamMut::close`] has already been called on this substream or if the remote has
-    /// reset the substream in the past.
-    ///
-    // TODO: doc obsolete
-    pub fn close(&mut self) {
-        let substream = self.substream.get_mut();
-        if let SubstreamState::Healthy {
-            local_write_close: ref mut local_write @ SubstreamStateLocalWrite::Open,
-            ..
-        } = substream.state
-        {
-            *local_write = SubstreamStateLocalWrite::FinDesired;
-        }
-    }
-
-    /// Abruptly shuts down the substream. Sends a frame with the `RST` flag to the remote.
-    ///
-    /// Use this method when a protocol error happens on a substream.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the local writing side is already closed, which can happen if
-    /// [`SubstreamMut::close`] has already been called on this substream or if the remote has
-    /// reset the substream in the past.
-    ///
-    pub fn reset(&mut self) {
-        let substream_id = SubstreamId(*self.substream.key());
-
-        // Add an entry to the list of RST headers to send to the remote.
-        if let SubstreamState::Healthy { .. } = self.substream.get().state {
-            self.rsts_to_send.push_back(substream_id.0);
-        }
-        // TODO: else { panic!() } ?!
-
-        let _was_inserted = self.dead_substreams.insert(substream_id.0);
-        debug_assert!(_was_inserted);
-
-        // We might be currently writing a frame of data of the substream being reset.
-        // If that happens, we need to update some internal state regarding this frame of data.
-        match (
-            &mut self.outgoing,
-            mem::replace(&mut self.substream.get_mut().state, SubstreamState::Reset),
-        ) {
-            (
-                Outgoing::Header {
-                    substream_data_frame: Some((data @ OutgoingSubstreamData::Healthy(_), _)),
-                    ..
-                }
-                | Outgoing::SubstreamData {
-                    data: data @ OutgoingSubstreamData::Healthy(_),
-                    ..
-                },
-                SubstreamState::Healthy {
-                    write_buffers,
-                    first_write_buffer_offset,
-                    ..
-                },
-            ) if *data == OutgoingSubstreamData::Healthy(substream_id) => {
-                *data = OutgoingSubstreamData::Obsolete {
-                    write_buffers,
-                    first_write_buffer_offset,
-                };
-            }
-            _ => {}
-        }
-    }
-}
-
-impl<'a, T> fmt::Debug for SubstreamMut<'a, T>
-where
-    T: fmt::Debug,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Substream").field(self.user_data()).finish()
     }
 }
 
