@@ -1923,7 +1923,7 @@ impl<'a, T> ExtractOut<'a, T> {
                                 *local_write = SubstreamStateLocalWrite::FinQueued;
                                 if *remote_write_closed {
                                     let _was_inserted = self.yamux.inner.dead_substreams.insert(id);
-                                    debug_assert!(!_was_inserted);
+                                    debug_assert!(_was_inserted);
                                 }
                             }
                             self.yamux
