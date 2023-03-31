@@ -37,9 +37,8 @@
 //!
 //! The generic parameter of [`Yamux`] is an opaque "user data" associated to each substream.
 //!
-//! When [`SubstreamMut::write`] is called, the buffer of data to send out is stored within the
-//! [`Yamux`] object. This data will then be progressively returned by
-//! [`Yamux::extract_out`].
+//! When [`Yamux::write`] is called, the buffer of data to send out is stored within the
+//! [`Yamux`] object. This data will then be progressively returned by [`Yamux::extract_out`].
 //!
 //! It is the responsibility of the user to enforce a bound to the amount of enqueued data, as
 //! the [`Yamux`] itself doesn't enforce any limit. Enforcing such a bound must be done based
@@ -545,9 +544,9 @@ impl<T> Yamux<T> {
         }
     }
 
-    /// Similar to [`SubstreamMut::add_remote_window`], but sets the number of allowed bytes to
-    /// be at least this value. In other words, if this method was to be twice with the same
-    /// parameter, the second call would have no effect.
+    /// Similar to [`Yamux::add_remote_window`], but sets the number of allowed bytes to be at
+    /// least this value. In other words, if this method was to be twice with the same parameter,
+    /// the second call would have no effect.
     ///
     /// # Panic
     ///
@@ -594,7 +593,7 @@ impl<T> Yamux<T> {
     }
 
     /// Returns `false` if the remote has closed their writing side of this substream, or if
-    /// [`SubstreamMut::reset`] has been called on this substream, or if the substream has been
+    /// [`Yamux::reset`] has been called on this substream, or if the substream has been
     /// reset by the remote.
     ///
     /// # Panic
@@ -609,8 +608,8 @@ impl<T> Yamux<T> {
             } if !remote_write_closed)
     }
 
-    /// Returns `false` if [`SubstreamMut::close`] or [`SubstreamMut::reset`] has been called on
-    /// this substream, or if the remote has .
+    /// Returns `false` if [`Yamux::close`] or [`Yamux::reset`] has been called on this substream,
+    /// or if the remote has .
     ///
     /// # Panic
     ///
@@ -635,9 +634,9 @@ impl<T> Yamux<T> {
     /// # Panic
     ///
     /// Panics if the [`SubstreamId`] is invalid.
-    /// Panics if the local writing side is already closed, which can happen if
-    /// [`SubstreamMut::close`] has already been called on this substream or if the remote has
-    /// reset the substream in the past.
+    /// Panics if the local writing side is already closed, which can happen if [`Yamux::close`]
+    /// has already been called on this substream or if the remote has reset the substream in the
+    /// past.
     ///
     // TODO: doc obsolete
     pub fn close(&mut self, substream_id: SubstreamId) {
@@ -662,9 +661,9 @@ impl<T> Yamux<T> {
     /// # Panic
     ///
     /// Panics if the [`SubstreamId`] is invalid.
-    /// Panics if the local writing side is already closed, which can happen if
-    /// [`SubstreamMut::close`] has already been called on this substream or if the remote has
-    /// reset the substream in the past.
+    /// Panics if the local writing side is already closed, which can happen if [`Yamux::close`]
+    /// has already been called on this substream or if the remote has reset the substream in the
+    /// past.
     ///
     pub fn reset(&mut self, substream_id: SubstreamId) {
         // Add an entry to the list of RST headers to send to the remote.
