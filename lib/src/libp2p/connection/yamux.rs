@@ -807,22 +807,20 @@ impl<T> Yamux<T> {
                         first_write_buffer_offset,
                         ..
                     } => {
-                        if matches!(local_write_close, SubstreamStateLocalWrite::FinQueued)
-                            && *remote_write_closed
-                            && (write_buffers.is_empty() // TODO: cumbersome
+                        debug_assert!(
+                            matches!(local_write_close, SubstreamStateLocalWrite::FinQueued)
+                                && *remote_write_closed
+                                && (write_buffers.is_empty() // TODO: cumbersome
                             || (write_buffers.len() == 1
                                 && write_buffers[0].len()
                                     <= *first_write_buffer_offset))
-                        {
-                            (
-                                SubstreamId(*id),
-                                DeadSubstreamTy::ClosedGracefully,
-                                &substream.user_data,
-                            )
-                        } else {
-                            // Substream shouldn't have been put in `dead_substreams`.
-                            unreachable!()
-                        }
+                        );
+
+                        (
+                            SubstreamId(*id),
+                            DeadSubstreamTy::ClosedGracefully,
+                            &substream.user_data,
+                        )
                     }
                 }
             })
@@ -1462,9 +1460,7 @@ impl<T> Yamux<T> {
                     };
 
                     let first_buf_avail = write_buffers[0].len() - *first_write_buffer_offset;
-                    let out = if first_buf_avail <= remain.get()
-                        && first_buf_avail <= size_bytes
-                    {
+                    let out = if first_buf_avail <= remain.get() && first_buf_avail <= size_bytes {
                         let out = VecWithOffset(
                             write_buffers.pop_front().unwrap(),
                             *first_write_buffer_offset,
@@ -1483,8 +1479,7 @@ impl<T> Yamux<T> {
                                     ..
                                 } = self.inner.substreams.get(&id.0).unwrap().state
                                 {
-                                    let _was_inserted =
-                                        self.inner.dead_substreams.insert(id.0);
+                                    let _was_inserted = self.inner.dead_substreams.insert(id.0);
                                     debug_assert!(_was_inserted);
                                 }
                             }
@@ -1500,8 +1495,7 @@ impl<T> Yamux<T> {
                         either::Right(out)
                     } else {
                         let out = VecWithOffset(
-                            write_buffers[0][*first_write_buffer_offset..][..size_bytes]
-                                .to_vec(),
+                            write_buffers[0][*first_write_buffer_offset..][..size_bytes].to_vec(),
                             0,
                         );
                         *first_write_buffer_offset += size_bytes;
