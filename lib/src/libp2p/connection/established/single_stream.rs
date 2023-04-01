@@ -529,7 +529,6 @@ where
                             None => (&mut [], &mut []),
                         },
                     );
-                    debug_assert!(_read <= unencrypted_bytes_to_extract);
                     read_write.advance_write(written);
                 }
             }
