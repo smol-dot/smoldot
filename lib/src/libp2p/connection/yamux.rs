@@ -119,11 +119,12 @@ struct YamuxInner<T> {
     next_outbound_substream: NonZeroU32,
 
     /// Number of pings to send out that haven't been queued yet.
-    pings_to_send: u32,
+    pings_to_send: usize,
 
-    /// List of pings that have been sent out but haven't been replied yet. For each ping,
-    /// contains the opaque value that has been sent out and that must be matched by the remote.
-    pings_waiting_reply: VecDeque<u32>,
+    /// List of pings that have been sent out but haven't been replied yet. Each ping has as key
+    /// the opaque value that has been sent out and that must be matched by the remote.
+    /// Since the opaque values are generated locally and randomly, we can use the `FNV` hasher.
+    pings_waiting_reply: hashbrown::HashSet<u32, fnv::FnvBuildHasher>,
 
     /// List of substream IDs that have been reset locally. For each entry, a RST header should
     /// be sent to the remote and the entry removed.
@@ -285,6 +286,9 @@ enum OutgoingSubstreamData {
     },
 }
 
+/// Maximum number of simultaneous outgoing pings allowed.
+const MAX_PINGS: usize = 100000;
+
 impl<T> Yamux<T> {
     /// Initializes a new Yamux state machine.
     pub fn new(config: Config) -> Yamux<T> {
@@ -312,7 +316,7 @@ impl<T> Yamux<T> {
                 },
                 pings_to_send: 0,
                 // We leave the initial capacity at 0, as it is likely that no ping is sent at all.
-                pings_waiting_reply: VecDeque::new(),
+                pings_waiting_reply: hashbrown::HashSet::with_hasher(Default::default()),
                 rsts_to_send: VecDeque::with_capacity(config.capacity),
                 randomness,
             }),
@@ -720,7 +724,21 @@ impl<T> Yamux<T> {
     }
 
     /// Queues sending out a ping to the remote.
+    ///
+    /// # Panic
+    ///
+    /// Panics if there are already [`MAX_PINGS`] pings that have been queued and that the remote
+    /// hasn't answered yet. [`MAX_PINGS`] is pretty large, and unless there is a bug in the API
+    /// user's code causing pings to be allocated in a loop, this limit is not likely to ever be
+    /// reached.
+    ///
     pub fn queue_ping(&mut self) {
+        // A maximum number of simultaneous pings (`MAX_PINGS`) is necessary because we don't
+        // support sending multiple identical ping opaque values. Since the ping opaque values
+        // are 32 bits, the actual maximum number of simultaneous pings is 2^32. But because we
+        // allocate ping values by looping until we find a not-yet-allocated value, the arbitrary
+        // self-enforced maximum needs to be way lower.
+        assert!(self.inner.pings_to_send + self.inner.pings_waiting_reply.len() < MAX_PINGS);
         self.inner.pings_to_send += 1;
     }
 
@@ -1068,18 +1086,10 @@ impl<T> Yamux<T> {
                             self.inner.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                         }
                         header::DecodedYamuxHeader::PingResponse { opaque_value } => {
-                            // TODO: this is `O(n)`
-                            let pos = match self
-                                .inner
-                                .pings_waiting_reply
-                                .iter()
-                                .position(|v| *v == opaque_value)
-                            {
-                                Some(p) => p,
-                                None => return Err(Error::PingResponseNotMatching),
-                            };
+                            if !self.inner.pings_waiting_reply.remove(&opaque_value) {
+                                return Err(Error::PingResponseNotMatching);
+                            }
 
-                            self.inner.pings_waiting_reply.remove(pos);
                             self.inner.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                             return Ok(IncomingDataOutcome {
                                 yamux: self,
@@ -1593,9 +1603,16 @@ impl<T> Yamux<T> {
                     // Send outgoing pings.
                     if self.inner.pings_to_send > 0 {
                         self.inner.pings_to_send -= 1;
-                        let opaque_value: u32 = self.inner.randomness.gen();
-                        self.queue_ping_request_header(opaque_value);
-                        self.inner.pings_waiting_reply.push_back(opaque_value);
+                        // Generate opaque values in a loop until we don't hit a duplicate.
+                        loop {
+                            let opaque_value: u32 = self.inner.randomness.gen();
+                            if !self.inner.pings_waiting_reply.insert(opaque_value) {
+                                continue;
+                            }
+                            self.queue_ping_request_header(opaque_value);
+                            break;
+                        }
+                        debug_assert!(self.inner.pings_waiting_reply.len() <= MAX_PINGS);
                         continue;
                     }
 
