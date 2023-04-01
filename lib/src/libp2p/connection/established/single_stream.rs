@@ -504,7 +504,7 @@ where
             // Calculate number of bytes that we can extract from yamux. This is similar but not
             // exactly the same as the size of the outgoing buffer, as noise adds some headers to
             // the data.
-            let unencrypted_bytes_to_extract = self
+            let mut unencrypted_bytes_to_extract = self
                 .encryption
                 .encrypt_size_conv(read_write.outgoing_buffer_available());
 
@@ -512,9 +512,10 @@ where
                 // Extract outgoing data that is buffered within yamux.
                 // TODO: don't allocate an intermediary buffer, but instead pass them directly to the encryption
                 let mut buffers = Vec::with_capacity(32);
-                let mut extract_out = self.inner.yamux.extract_out(unencrypted_bytes_to_extract);
-                while let Some(buffer) = extract_out.extract_next() {
-                    buffers.push(buffer.as_ref().to_vec()); // TODO: copy
+                while let Some(buffer) = self.inner.yamux.extract_next(unencrypted_bytes_to_extract) {
+                    let buffer = buffer.as_ref();
+                    unencrypted_bytes_to_extract -= buffer.len();
+                    buffers.push(buffer.to_vec()); // TODO: copy
                 }
 
                 if !buffers.is_empty() {

@@ -1389,27 +1389,277 @@ impl<T> Yamux<T> {
         })
     }
 
-    /// Returns an object that provides an iterator to a list of buffers whose content must be
-    /// sent out on the socket.
+    /// Builds the next buffer to send out on the socket and returns it.
     ///
-    /// The buffers produced by the iterator will never yield more than `size_bytes` bytes of
-    /// data. The user is expected to pass an exact amount of bytes that the next layer is ready
-    /// to accept.
-    ///
-    /// After the [`ExtractOut`] has been destroyed, the Yamux state machine will automatically
-    /// consider that these `size_bytes` have been sent out, even if the iterator has been
-    /// destroyed before finishing. It is a logic error to `mem::forget` the [`ExtractOut`].
+    /// The buffer will never be larger than `size_bytes` bytes. The user is expected to pass an
+    /// exact amount of bytes that the next layer is ready to accept.
     ///
     /// > **Note**: Most other objects in the networking code have a "`read_write`" method that
     /// >           writes the outgoing data to a buffer. This is an idiomatic way to do things in
     /// >           situations where the data is generated on the fly. In the context of Yamux,
     /// >           however, this would be rather sub-optimal considering that buffers to send out
     /// >           are already stored in their final form in the state machine.
-    pub fn extract_out(&mut self, size_bytes: usize) -> ExtractOut<T> {
-        ExtractOut {
-            yamux: self,
-            size_bytes,
+    pub fn extract_next(&'_ mut self, size_bytes: usize) -> Option<impl AsRef<[u8]> + '_> {
+        while size_bytes != 0 {
+            match self.inner.outgoing {
+                Outgoing::Header {
+                    ref mut header,
+                    ref mut substream_data_frame,
+                    ref is_goaway,
+                } => {
+                    // Finish writing the header.
+                    debug_assert!(!header.is_empty());
+                    if size_bytes >= header.len() {
+                        let out = mem::take(header);
+                        if *is_goaway {
+                            debug_assert!(matches!(
+                                self.inner.outgoing_goaway,
+                                OutgoingGoAway::Queued
+                            ));
+                            self.inner.outgoing_goaway = OutgoingGoAway::Sent;
+                        }
+                        self.inner.outgoing =
+                            if let Some((data, remaining_bytes)) = substream_data_frame.take() {
+                                Outgoing::SubstreamData {
+                                    data,
+                                    remaining_bytes,
+                                }
+                            } else {
+                                Outgoing::Idle
+                            };
+                        return Some(either::Left(out));
+                    } else {
+                        let to_add = header[..size_bytes].to_vec();
+                        for _ in 0..size_bytes {
+                            header.remove(0);
+                        }
+                        return Some(either::Right(VecWithOffset(to_add, 0)));
+                    }
+                }
+
+                Outgoing::SubstreamData {
+                    remaining_bytes: ref mut remain,
+                    ref mut data,
+                } => {
+                    let (write_buffers, first_write_buffer_offset, substream_id) = match data {
+                        OutgoingSubstreamData::Healthy(id) => {
+                            let substream = self.inner.substreams.get_mut(&id.0).unwrap();
+                            if let SubstreamState::Healthy {
+                                ref mut write_buffers,
+                                ref mut first_write_buffer_offset,
+                                ..
+                            } = &mut substream.state
+                            {
+                                (write_buffers, first_write_buffer_offset, Some(*id))
+                            } else {
+                                unreachable!()
+                            }
+                        }
+                        OutgoingSubstreamData::Obsolete {
+                            ref mut write_buffers,
+                            ref mut first_write_buffer_offset,
+                        } => (write_buffers, first_write_buffer_offset, None),
+                    };
+
+                    let first_buf_avail = write_buffers[0].len() - *first_write_buffer_offset;
+                    let out = if first_buf_avail <= remain.get()
+                        && first_buf_avail <= size_bytes
+                    {
+                        let out = VecWithOffset(
+                            write_buffers.pop_front().unwrap(),
+                            *first_write_buffer_offset,
+                        );
+                        *first_write_buffer_offset = 0;
+                        let write_buffers_empty = write_buffers.is_empty();
+                        match NonZeroUsize::new(remain.get() - first_buf_avail) {
+                            Some(r) => *remain = r,
+                            None => self.inner.outgoing = Outgoing::Idle,
+                        };
+                        if write_buffers_empty {
+                            if let Some(id) = substream_id {
+                                if let SubstreamState::Healthy {
+                                    local_write_close: SubstreamStateLocalWrite::FinQueued,
+                                    remote_write_closed: true,
+                                    ..
+                                } = self.inner.substreams.get(&id.0).unwrap().state
+                                {
+                                    let _was_inserted =
+                                        self.inner.dead_substreams.insert(id.0);
+                                    debug_assert!(_was_inserted);
+                                }
+                            }
+                        }
+                        either::Right(out)
+                    } else if remain.get() <= size_bytes {
+                        let out = VecWithOffset(
+                            write_buffers[0][*first_write_buffer_offset..][..remain.get()].to_vec(),
+                            0,
+                        );
+                        *first_write_buffer_offset += remain.get();
+                        self.inner.outgoing = Outgoing::Idle;
+                        either::Right(out)
+                    } else {
+                        let out = VecWithOffset(
+                            write_buffers[0][*first_write_buffer_offset..][..size_bytes]
+                                .to_vec(),
+                            0,
+                        );
+                        *first_write_buffer_offset += size_bytes;
+                        *remain = NonZeroUsize::new(remain.get() - size_bytes).unwrap();
+                        either::Right(out)
+                    };
+
+                    return Some(out);
+                }
+
+                Outgoing::Idle => {
+                    // Send a `GoAway` frame if demanded.
+                    if let OutgoingGoAway::Required(code) = self.inner.outgoing_goaway {
+                        let mut header = arrayvec::ArrayVec::new();
+                        header.push(0);
+                        header.push(3);
+                        header.try_extend_from_slice(&0u16.to_be_bytes()).unwrap();
+                        header.try_extend_from_slice(&0u32.to_be_bytes()).unwrap();
+                        header
+                            .try_extend_from_slice(
+                                &match code {
+                                    GoAwayErrorCode::NormalTermination => 0u32,
+                                    GoAwayErrorCode::ProtocolError => 1u32,
+                                    GoAwayErrorCode::InternalError => 2u32,
+                                }
+                                .to_be_bytes(),
+                            )
+                            .unwrap();
+                        debug_assert_eq!(header.len(), 12);
+
+                        self.inner.outgoing = Outgoing::Header {
+                            header,
+                            substream_data_frame: None,
+                            is_goaway: true,
+                        };
+                        self.inner.outgoing_goaway = OutgoingGoAway::Queued;
+                        continue;
+                    }
+
+                    // Send RST frames.
+                    if let Some(substream_id) = self.inner.rsts_to_send.pop_front() {
+                        let mut header = arrayvec::ArrayVec::new();
+                        header.push(0);
+                        header.push(1);
+                        header.try_extend_from_slice(&8u16.to_be_bytes()).unwrap();
+                        header
+                            .try_extend_from_slice(&substream_id.get().to_be_bytes())
+                            .unwrap();
+                        header.try_extend_from_slice(&0u32.to_be_bytes()).unwrap();
+                        debug_assert_eq!(header.len(), 12);
+
+                        self.inner.outgoing = Outgoing::Header {
+                            header,
+                            substream_data_frame: None,
+                            is_goaway: false,
+                        };
+                        continue;
+                    }
+
+                    // Send outgoing pings.
+                    if self.inner.pings_to_send > 0 {
+                        self.inner.pings_to_send -= 1;
+                        let opaque_value: u32 = self.inner.randomness.gen();
+                        self.queue_ping_request_header(opaque_value);
+                        self.inner.pings_waiting_reply.push_back(opaque_value);
+                        continue;
+                    }
+
+                    // Send window update frames.
+                    // TODO: O(n)
+                    if let Some((id, sub)) = self
+                        .inner
+                        .substreams
+                        .iter_mut()
+                        .find(|(_, s)| {
+                            matches!(&s.state,
+                            SubstreamState::Healthy {
+                                remote_window_pending_increase,
+                                ..
+                            } if *remote_window_pending_increase != 0)
+                        })
+                        .map(|(id, sub)| (*id, sub))
+                    {
+                        if let SubstreamState::Healthy {
+                            first_message_queued,
+                            remote_window_pending_increase,
+                            remote_allowed_window,
+                            ..
+                        } = &mut sub.state
+                        {
+                            let syn_ack_flag = !*first_message_queued;
+                            *first_message_queued = true;
+
+                            let update = u32::try_from(*remote_window_pending_increase)
+                                .unwrap_or(u32::max_value());
+                            *remote_window_pending_increase -= u64::from(update);
+                            *remote_allowed_window += u64::from(update);
+                            self.queue_window_size_frame_header(syn_ack_flag, id, update);
+                            continue;
+                        } else {
+                            unreachable!()
+                        }
+                    }
+
+                    // Start writing more data from another substream.
+                    // TODO: O(n)
+                    // TODO: choose substreams in some sort of round-robin way
+                    if let Some((id, sub)) = self
+                        .inner
+                        .substreams
+                        .iter_mut()
+                        .find(|(_, s)| match &s.state {
+                            SubstreamState::Healthy {
+                                write_buffers,
+                                local_write_close: local_write,
+                                ..
+                            } => {
+                                !write_buffers.is_empty()
+                                    || matches!(local_write, SubstreamStateLocalWrite::FinDesired)
+                            }
+                            _ => false,
+                        })
+                        .map(|(id, sub)| (*id, sub))
+                    {
+                        if let SubstreamState::Healthy {
+                            first_message_queued,
+                            allowed_window,
+                            local_write_close: local_write,
+                            write_buffers,
+                            ..
+                        } = &mut sub.state
+                        {
+                            let pending_len = write_buffers.iter().fold(0, |l, b| l + b.len());
+                            let len_out = cmp::min(
+                                u32::try_from(pending_len).unwrap_or(u32::max_value()),
+                                u32::try_from(*allowed_window).unwrap_or(u32::max_value()),
+                            );
+                            let len_out_usize = usize::try_from(len_out).unwrap();
+                            *allowed_window -= u64::from(len_out);
+                            let syn_ack_flag = !*first_message_queued;
+                            *first_message_queued = true;
+                            let fin_flag = !matches!(local_write, SubstreamStateLocalWrite::Open)
+                                && len_out_usize == pending_len;
+                            if fin_flag {
+                                *local_write = SubstreamStateLocalWrite::FinQueued;
+                            }
+                            self.queue_data_frame_header(syn_ack_flag, fin_flag, id, len_out);
+                        } else {
+                            unreachable!()
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
         }
+
+        None
     }
 
     /// Accepts an incoming substream.
@@ -1676,285 +1926,6 @@ where
         f.debug_struct("Yamux")
             .field("substreams", &List(self))
             .finish()
-    }
-}
-
-pub struct ExtractOut<'a, T> {
-    yamux: &'a mut Yamux<T>,
-    size_bytes: usize,
-}
-
-impl<'a, T> ExtractOut<'a, T> {
-    /// Builds the next buffer to send out and returns it.
-    pub fn extract_next(&'_ mut self) -> Option<impl AsRef<[u8]> + '_> {
-        while self.size_bytes != 0 {
-            match self.yamux.inner.outgoing {
-                Outgoing::Header {
-                    ref mut header,
-                    ref mut substream_data_frame,
-                    ref is_goaway,
-                } => {
-                    // Finish writing the header.
-                    debug_assert!(!header.is_empty());
-                    if self.size_bytes >= header.len() {
-                        self.size_bytes -= header.len();
-                        let out = mem::take(header);
-                        if *is_goaway {
-                            debug_assert!(matches!(
-                                self.yamux.inner.outgoing_goaway,
-                                OutgoingGoAway::Queued
-                            ));
-                            self.yamux.inner.outgoing_goaway = OutgoingGoAway::Sent;
-                        }
-                        self.yamux.inner.outgoing =
-                            if let Some((data, remaining_bytes)) = substream_data_frame.take() {
-                                Outgoing::SubstreamData {
-                                    data,
-                                    remaining_bytes,
-                                }
-                            } else {
-                                Outgoing::Idle
-                            };
-                        return Some(either::Left(out));
-                    } else {
-                        let to_add = header[..self.size_bytes].to_vec();
-                        for _ in 0..self.size_bytes {
-                            header.remove(0);
-                        }
-                        return Some(either::Right(VecWithOffset(to_add, 0)));
-                    }
-                }
-
-                Outgoing::SubstreamData {
-                    remaining_bytes: ref mut remain,
-                    ref mut data,
-                } => {
-                    let (write_buffers, first_write_buffer_offset, substream_id) = match data {
-                        OutgoingSubstreamData::Healthy(id) => {
-                            let substream = self.yamux.inner.substreams.get_mut(&id.0).unwrap();
-                            if let SubstreamState::Healthy {
-                                ref mut write_buffers,
-                                ref mut first_write_buffer_offset,
-                                ..
-                            } = &mut substream.state
-                            {
-                                (write_buffers, first_write_buffer_offset, Some(*id))
-                            } else {
-                                unreachable!()
-                            }
-                        }
-                        OutgoingSubstreamData::Obsolete {
-                            ref mut write_buffers,
-                            ref mut first_write_buffer_offset,
-                        } => (write_buffers, first_write_buffer_offset, None),
-                    };
-
-                    let first_buf_avail = write_buffers[0].len() - *first_write_buffer_offset;
-                    let out = if first_buf_avail <= remain.get()
-                        && first_buf_avail <= self.size_bytes
-                    {
-                        let out = VecWithOffset(
-                            write_buffers.pop_front().unwrap(),
-                            *first_write_buffer_offset,
-                        );
-                        self.size_bytes -= first_buf_avail;
-                        *first_write_buffer_offset = 0;
-                        let write_buffers_empty = write_buffers.is_empty();
-                        match NonZeroUsize::new(remain.get() - first_buf_avail) {
-                            Some(r) => *remain = r,
-                            None => self.yamux.inner.outgoing = Outgoing::Idle,
-                        };
-                        if write_buffers_empty {
-                            if let Some(id) = substream_id {
-                                if let SubstreamState::Healthy {
-                                    local_write_close: SubstreamStateLocalWrite::FinQueued,
-                                    remote_write_closed: true,
-                                    ..
-                                } = self.yamux.inner.substreams.get(&id.0).unwrap().state
-                                {
-                                    let _was_inserted =
-                                        self.yamux.inner.dead_substreams.insert(id.0);
-                                    debug_assert!(_was_inserted);
-                                }
-                            }
-                        }
-                        either::Right(out)
-                    } else if remain.get() <= self.size_bytes {
-                        self.size_bytes -= remain.get();
-                        let out = VecWithOffset(
-                            write_buffers[0][*first_write_buffer_offset..][..remain.get()].to_vec(),
-                            0,
-                        );
-                        *first_write_buffer_offset += remain.get();
-                        self.yamux.inner.outgoing = Outgoing::Idle;
-                        either::Right(out)
-                    } else {
-                        let out = VecWithOffset(
-                            write_buffers[0][*first_write_buffer_offset..][..self.size_bytes]
-                                .to_vec(),
-                            0,
-                        );
-                        *first_write_buffer_offset += self.size_bytes;
-                        *remain = NonZeroUsize::new(remain.get() - self.size_bytes).unwrap();
-                        self.size_bytes = 0;
-                        either::Right(out)
-                    };
-
-                    return Some(out);
-                }
-
-                Outgoing::Idle => {
-                    // Send a `GoAway` frame if demanded.
-                    if let OutgoingGoAway::Required(code) = self.yamux.inner.outgoing_goaway {
-                        let mut header = arrayvec::ArrayVec::new();
-                        header.push(0);
-                        header.push(3);
-                        header.try_extend_from_slice(&0u16.to_be_bytes()).unwrap();
-                        header.try_extend_from_slice(&0u32.to_be_bytes()).unwrap();
-                        header
-                            .try_extend_from_slice(
-                                &match code {
-                                    GoAwayErrorCode::NormalTermination => 0u32,
-                                    GoAwayErrorCode::ProtocolError => 1u32,
-                                    GoAwayErrorCode::InternalError => 2u32,
-                                }
-                                .to_be_bytes(),
-                            )
-                            .unwrap();
-                        debug_assert_eq!(header.len(), 12);
-
-                        self.yamux.inner.outgoing = Outgoing::Header {
-                            header,
-                            substream_data_frame: None,
-                            is_goaway: true,
-                        };
-                        self.yamux.inner.outgoing_goaway = OutgoingGoAway::Queued;
-                        continue;
-                    }
-
-                    // Send RST frames.
-                    if let Some(substream_id) = self.yamux.inner.rsts_to_send.pop_front() {
-                        let mut header = arrayvec::ArrayVec::new();
-                        header.push(0);
-                        header.push(1);
-                        header.try_extend_from_slice(&8u16.to_be_bytes()).unwrap();
-                        header
-                            .try_extend_from_slice(&substream_id.get().to_be_bytes())
-                            .unwrap();
-                        header.try_extend_from_slice(&0u32.to_be_bytes()).unwrap();
-                        debug_assert_eq!(header.len(), 12);
-
-                        self.yamux.inner.outgoing = Outgoing::Header {
-                            header,
-                            substream_data_frame: None,
-                            is_goaway: false,
-                        };
-                        continue;
-                    }
-
-                    // Send outgoing pings.
-                    if self.yamux.inner.pings_to_send > 0 {
-                        self.yamux.inner.pings_to_send -= 1;
-                        let opaque_value: u32 = self.yamux.inner.randomness.gen();
-                        self.yamux.queue_ping_request_header(opaque_value);
-                        self.yamux.inner.pings_waiting_reply.push_back(opaque_value);
-                        continue;
-                    }
-
-                    // Send window update frames.
-                    // TODO: O(n)
-                    if let Some((id, sub)) = self
-                        .yamux
-                        .inner
-                        .substreams
-                        .iter_mut()
-                        .find(|(_, s)| {
-                            matches!(&s.state,
-                            SubstreamState::Healthy {
-                                remote_window_pending_increase,
-                                ..
-                            } if *remote_window_pending_increase != 0)
-                        })
-                        .map(|(id, sub)| (*id, sub))
-                    {
-                        if let SubstreamState::Healthy {
-                            first_message_queued,
-                            remote_window_pending_increase,
-                            remote_allowed_window,
-                            ..
-                        } = &mut sub.state
-                        {
-                            let syn_ack_flag = !*first_message_queued;
-                            *first_message_queued = true;
-
-                            let update = u32::try_from(*remote_window_pending_increase)
-                                .unwrap_or(u32::max_value());
-                            *remote_window_pending_increase -= u64::from(update);
-                            *remote_allowed_window += u64::from(update);
-                            self.yamux
-                                .queue_window_size_frame_header(syn_ack_flag, id, update);
-                            continue;
-                        } else {
-                            unreachable!()
-                        }
-                    }
-
-                    // Start writing more data from another substream.
-                    // TODO: O(n)
-                    // TODO: choose substreams in some sort of round-robin way
-                    if let Some((id, sub)) = self
-                        .yamux
-                        .inner
-                        .substreams
-                        .iter_mut()
-                        .find(|(_, s)| match &s.state {
-                            SubstreamState::Healthy {
-                                write_buffers,
-                                local_write_close: local_write,
-                                ..
-                            } => {
-                                !write_buffers.is_empty()
-                                    || matches!(local_write, SubstreamStateLocalWrite::FinDesired)
-                            }
-                            _ => false,
-                        })
-                        .map(|(id, sub)| (*id, sub))
-                    {
-                        if let SubstreamState::Healthy {
-                            first_message_queued,
-                            allowed_window,
-                            local_write_close: local_write,
-                            write_buffers,
-                            ..
-                        } = &mut sub.state
-                        {
-                            let pending_len = write_buffers.iter().fold(0, |l, b| l + b.len());
-                            let len_out = cmp::min(
-                                u32::try_from(pending_len).unwrap_or(u32::max_value()),
-                                u32::try_from(*allowed_window).unwrap_or(u32::max_value()),
-                            );
-                            let len_out_usize = usize::try_from(len_out).unwrap();
-                            *allowed_window -= u64::from(len_out);
-                            let syn_ack_flag = !*first_message_queued;
-                            *first_message_queued = true;
-                            let fin_flag = !matches!(local_write, SubstreamStateLocalWrite::Open)
-                                && len_out_usize == pending_len;
-                            if fin_flag {
-                                *local_write = SubstreamStateLocalWrite::FinQueued;
-                            }
-                            self.yamux
-                                .queue_data_frame_header(syn_ack_flag, fin_flag, id, len_out);
-                        } else {
-                            unreachable!()
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-
-        None
     }
 }
 
