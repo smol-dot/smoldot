@@ -893,9 +893,16 @@ impl<T> Yamux<T> {
                     remaining_bytes: 0,
                     fin: true,
                 } => {
+                    // End of the data frame. Proceed to receive new header at the next iteration.
                     self.inner.incoming = Incoming::Header(arrayvec::ArrayVec::new());
 
-                    if let Some(Substream {
+                    // Note that it is possible that we are receiving data corresponding to a
+                    // substream for which a RST has been sent out by the local node. Since the
+                    // local state machine doesn't keep track of RST'ted substreams, any
+                    // frame concerning a substream that has been RST or doesn't exist is
+                    // discarded and doesn't result in an error, under the presumption that we
+                    // are in this situation.
+                    let Some(Substream {
                         state:
                             SubstreamState::Healthy {
                                 remote_write_closed: remote_write_closed @ false,
@@ -905,26 +912,25 @@ impl<T> Yamux<T> {
                                 ..
                             },
                         ..
-                    }) = self.inner.substreams.get_mut(&substream_id.0)
+                    }) = self.inner.substreams.get_mut(&substream_id.0) else { continue; };
+
+                    *remote_write_closed = true;
+
+                    if matches!(*local_write_close, SubstreamStateLocalWrite::FinQueued)
+                        && (write_buffers.is_empty() // TODO: cumbersome
+                    || (write_buffers.len() == 1
+                        && write_buffers[0].len()
+                            <= *first_write_buffer_offset))
                     {
-                        *remote_write_closed = true;
-
-                        if matches!(*local_write_close, SubstreamStateLocalWrite::FinQueued)
-                            && (write_buffers.is_empty() // TODO: cumbersome
-                        || (write_buffers.len() == 1
-                            && write_buffers[0].len()
-                                <= *first_write_buffer_offset))
-                        {
-                            let _was_inserted = self.inner.dead_substreams.insert(substream_id.0);
-                            debug_assert!(_was_inserted);
-                        }
-
-                        return Ok(IncomingDataOutcome {
-                            yamux: self,
-                            bytes_read: total_read,
-                            detail: Some(IncomingDataDetail::StreamClosed { substream_id }),
-                        });
+                        let _was_inserted = self.inner.dead_substreams.insert(substream_id.0);
+                        debug_assert!(_was_inserted);
                     }
+
+                    return Ok(IncomingDataOutcome {
+                        yamux: self,
+                        bytes_read: total_read,
+                        detail: Some(IncomingDataDetail::StreamClosed { substream_id }),
+                    });
                 }
 
                 Incoming::DataFrame {
@@ -932,6 +938,7 @@ impl<T> Yamux<T> {
                     fin: false,
                     ..
                 } => {
+                    // End of the data frame. Proceed to receive new header at the next iteration.
                     self.inner.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                 }
 
@@ -945,20 +952,22 @@ impl<T> Yamux<T> {
 
                     debug_assert_ne!(*remaining_bytes, 0);
 
+                    // Extract the data and update the local states.
                     let pulled_data = cmp::min(
                         *remaining_bytes,
                         u32::try_from(data.len()).unwrap_or(u32::max_value()),
                     );
-
                     let pulled_data_usize = usize::try_from(pulled_data).unwrap();
                     *remaining_bytes -= pulled_data;
-
                     let start_offset = total_read;
                     total_read += pulled_data_usize;
                     data = &data[pulled_data_usize..];
 
-                    // Note that it is possible that we are receiving data corresponding to a
-                    // substream for which a RST has been sent out by the local node. Since the
+                    // If the substream still exists, report the event to the API user.
+                    // If the substream doesn't exist anymore, just continue iterating.
+                    //
+                    // It is possible that we are receiving data corresponding to a substream for
+                    // which a RST has been sent out by the local node. Since the
                     // local state machine doesn't keep track of RST'ted substreams, any
                     // frame concerning a substream that has been RST or doesn't exist is
                     // discarded and doesn't result in an error, under the presumption that we
@@ -983,9 +992,10 @@ impl<T> Yamux<T> {
                         });
                     }
 
-                    // Also note that we don't switch back `self.inner.incoming` to `Header`.
-                    // Instead, the next iteration will pick up `DataFrame` again and transition
-                    // again. This is necessary to handle the `fin` flag elegantly.
+                    // We don't switch back `self.inner.incoming` to `Header` even if there's no
+                    // bytes remaining in the data frame. Instead, the next iteration will pick up
+                    // `DataFrame` again and transition again. This is necessary to handle the
+                    // `fin` flag elegantly.
                 }
 
                 Incoming::DataFrame {
@@ -1024,6 +1034,7 @@ impl<T> Yamux<T> {
                             // be empty. If it is not the case, we simply leave the ping header
                             // there and prevent any further data from being read.
                             if !matches!(self.inner.outgoing, Outgoing::Idle) {
+                                // TODO: this could trigger a deadlock if the send buffer is very small
                                 break;
                             }
 
@@ -1057,6 +1068,7 @@ impl<T> Yamux<T> {
                             self.inner.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                         }
                         header::DecodedYamuxHeader::PingResponse { opaque_value } => {
+                            // TODO: this is `O(n)`
                             let pos = match self
                                 .inner
                                 .pings_waiting_reply
@@ -1156,7 +1168,10 @@ impl<T> Yamux<T> {
                             length,
                             ..
                         } => {
-                            // Handle `RST` flag separately.
+                            // Frame with the `RST` flag set. Destroy the substream.
+
+                            // It is invalid to have the `RST` flag set and data at the same time.
+                            // TODO: why is it invalid?
                             if matches!(decoded_header, header::DecodedYamuxHeader::Data { .. })
                                 && length != 0
                             {
@@ -1169,56 +1184,53 @@ impl<T> Yamux<T> {
                             // which we have sent a RST frame earlier. Considering that we don't
                             // always keep traces of old substreams, we have no way to know whether
                             // this is the case or not.
-                            if let Some(s) = self.inner.substreams.get_mut(&stream_id) {
-                                let _was_inserted = self.inner.dead_substreams.insert(stream_id);
-                                debug_assert!(_was_inserted);
+                            let Some(s) = self.inner.substreams.get_mut(&stream_id) else { continue };
 
-                                // We might be currently writing a frame of data of the substream
-                                // being reset. If that happens, we need to update some internal
-                                // state regarding this frame of data.
-                                match (
-                                    &mut self.inner.outgoing,
-                                    mem::replace(&mut s.state, SubstreamState::Reset),
-                                ) {
-                                    (
-                                        Outgoing::Header {
-                                            substream_data_frame:
-                                                Some((data @ OutgoingSubstreamData::Healthy(_), _)),
-                                            ..
-                                        }
-                                        | Outgoing::SubstreamData {
-                                            data: data @ OutgoingSubstreamData::Healthy(_),
-                                            ..
-                                        },
-                                        SubstreamState::Healthy {
-                                            write_buffers,
-                                            first_write_buffer_offset,
-                                            ..
-                                        },
-                                    ) if *data
-                                        == OutgoingSubstreamData::Healthy(SubstreamId(
-                                            stream_id,
-                                        )) =>
-                                    {
-                                        *data = OutgoingSubstreamData::Obsolete {
-                                            write_buffers,
-                                            first_write_buffer_offset,
-                                        };
+                            let _was_inserted = self.inner.dead_substreams.insert(stream_id);
+                            debug_assert!(_was_inserted);
+
+                            // We might be currently writing a frame of data of the substream
+                            // being reset. If that happens, we need to update some internal
+                            // state regarding this frame of data.
+                            match (
+                                &mut self.inner.outgoing,
+                                mem::replace(&mut s.state, SubstreamState::Reset),
+                            ) {
+                                (
+                                    Outgoing::Header {
+                                        substream_data_frame:
+                                            Some((data @ OutgoingSubstreamData::Healthy(_), _)),
+                                        ..
                                     }
-                                    _ => {}
+                                    | Outgoing::SubstreamData {
+                                        data: data @ OutgoingSubstreamData::Healthy(_),
+                                        ..
+                                    },
+                                    SubstreamState::Healthy {
+                                        write_buffers,
+                                        first_write_buffer_offset,
+                                        ..
+                                    },
+                                ) if *data
+                                    == OutgoingSubstreamData::Healthy(SubstreamId(stream_id)) =>
+                                {
+                                    *data = OutgoingSubstreamData::Obsolete {
+                                        write_buffers,
+                                        first_write_buffer_offset,
+                                    };
                                 }
-
-                                return Ok(IncomingDataOutcome {
-                                    yamux: self,
-                                    bytes_read: total_read,
-                                    detail: Some(IncomingDataDetail::StreamReset {
-                                        substream_id: SubstreamId(stream_id),
-                                    }),
-                                });
+                                _ => {}
                             }
+
+                            return Ok(IncomingDataOutcome {
+                                yamux: self,
+                                bytes_read: total_read,
+                                detail: Some(IncomingDataDetail::StreamReset {
+                                    substream_id: SubstreamId(stream_id),
+                                }),
+                            });
                         }
 
-                        // Remote has sent a SYN flag. A new substream is to be opened.
                         header::DecodedYamuxHeader::Data {
                             syn: true,
                             fin,
@@ -1235,6 +1247,7 @@ impl<T> Yamux<T> {
                             length,
                             ..
                         } => {
+                            // Remote has sent a SYN flag. A new substream is to be opened.
                             match self.inner.substreams.get(&stream_id) {
                                 Some(Substream {
                                     state: SubstreamState::Healthy { .. },
@@ -1250,9 +1263,20 @@ impl<T> Yamux<T> {
                                     // Because we don't immediately destroy substreams, the remote
                                     // might decide to re-use a substream ID that is still
                                     // allocated locally. If that happens, we block the reading.
+                                    // It will be unblocked when the API user destroys the old
+                                    // substream.
                                     break;
                                 }
                                 None => {}
+                            }
+
+                            // When receiving a new substream, the outgoing state must always be
+                            // `Outgoing::Idle`, in order to potentially queue the substream
+                            // rejection message later.
+                            // If it is not the case, we simply leave the header there and prevent
+                            // any further data from being read.
+                            if !matches!(self.inner.outgoing, Outgoing::Idle) {
+                                break;
                             }
 
                             let is_data =
@@ -1261,7 +1285,24 @@ impl<T> Yamux<T> {
                             // If we have queued or sent a GoAway frame, then the substream is
                             // automatically rejected.
                             if !matches!(self.inner.outgoing_goaway, OutgoingGoAway::NotRequired) {
-                                self.inner.incoming = if !is_data || length == 0 {
+                                // Send the `RST` frame.
+                                let mut header = arrayvec::ArrayVec::new();
+                                header.push(0);
+                                header.push(1);
+                                header.try_extend_from_slice(&0x8u16.to_be_bytes()).unwrap();
+                                header
+                                    .try_extend_from_slice(&stream_id.get().to_be_bytes())
+                                    .unwrap();
+                                header.try_extend_from_slice(&0u32.to_be_bytes()).unwrap();
+                                debug_assert_eq!(header.len(), 12);
+
+                                self.inner.outgoing = Outgoing::Header {
+                                    header,
+                                    substream_data_frame: None,
+                                    is_goaway: false,
+                                };
+
+                                self.inner.incoming = if !is_data {
                                     Incoming::Header(arrayvec::ArrayVec::new())
                                 } else {
                                     Incoming::DataFrame {
@@ -1270,16 +1311,8 @@ impl<T> Yamux<T> {
                                         fin,
                                     }
                                 };
-                                continue;
-                            }
 
-                            // As documented, when in the `Incoming::PendingIncomingSubstream`
-                            // state, the outgoing state must always be `Outgoing::Idle`, in
-                            // order to potentially queue the substream rejection message later.
-                            // If it is not the case, we simply leave the header there and prevent
-                            // any further data from being read.
-                            if !matches!(self.inner.outgoing, Outgoing::Idle) {
-                                break;
+                                continue;
                             }
 
                             self.inner.incoming = Incoming::PendingIncomingSubstream {
@@ -1332,6 +1365,8 @@ impl<T> Yamux<T> {
                                     .ok_or(Error::CreditsExceeded)?;
                             }
 
+                            // Switch to the `DataFrame` state in order to process the frame, even
+                            // if the substream no longer exists.
                             self.inner.incoming = Incoming::DataFrame {
                                 substream_id: SubstreamId(stream_id),
                                 remaining_bytes: length,
@@ -1743,14 +1778,10 @@ impl<T> Yamux<T> {
                 fin,
                 ..
             } => {
-                self.inner.incoming = if data_frame_size == 0 {
-                    Incoming::Header(arrayvec::ArrayVec::new())
-                } else {
-                    Incoming::DataFrame {
-                        substream_id,
-                        remaining_bytes: data_frame_size,
-                        fin,
-                    }
+                self.inner.incoming = Incoming::DataFrame {
+                    substream_id,
+                    remaining_bytes: data_frame_size,
+                    fin,
                 };
 
                 let mut header = arrayvec::ArrayVec::new();
