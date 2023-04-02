@@ -1048,7 +1048,6 @@ impl<T> Yamux<T> {
                         }
                     };
 
-                    // Handle any message other than data or window size.
                     match decoded_header {
                         header::DecodedYamuxHeader::PingRequest { opaque_value } => {
                             // Ping. In order to queue the pong message, the outgoing queue must
