@@ -1569,7 +1569,11 @@ impl<T> Yamux<T> {
                             if !self.inner.pings_waiting_reply.insert(opaque_value) {
                                 continue;
                             }
-                            self.queue_ping_request_header(opaque_value);
+                            self.inner.outgoing = Outgoing::Header {
+                                header: header::DecodedYamuxHeader::PingRequest { opaque_value },
+                                header_already_sent: 0,
+                                substream_data_frame: None,
+                            };
                             break;
                         }
                         debug_assert!(self.inner.pings_waiting_reply.len() <= MAX_PINGS);
@@ -1605,7 +1609,18 @@ impl<T> Yamux<T> {
                                 .unwrap_or(u32::max_value());
                             *remote_window_pending_increase -= u64::from(update);
                             *remote_allowed_window += u64::from(update);
-                            self.queue_window_size_frame_header(syn_ack_flag, id, update);
+                            self.inner.outgoing = Outgoing::Header {
+                                header: header::DecodedYamuxHeader::Window {
+                                    syn: syn_ack_flag && !sub.inbound,
+                                    ack: syn_ack_flag && sub.inbound,
+                                    fin: false,
+                                    rst: false,
+                                    stream_id: id,
+                                    length: update,
+                                },
+                                header_already_sent: 0,
+                                substream_data_frame: None,
+                            };
                             continue;
                         } else {
                             unreachable!()
@@ -1654,7 +1669,23 @@ impl<T> Yamux<T> {
                             if fin_flag {
                                 *local_write = SubstreamStateLocalWrite::FinQueued;
                             }
-                            self.queue_data_frame_header(syn_ack_flag, fin_flag, id, len_out);
+                            self.inner.outgoing = Outgoing::Header {
+                                header: header::DecodedYamuxHeader::Data {
+                                    syn: syn_ack_flag && !sub.inbound,
+                                    ack: syn_ack_flag && sub.inbound,
+                                    fin: fin_flag,
+                                    rst: false,
+                                    stream_id: id,
+                                    length: len_out,
+                                },
+                                header_already_sent: 0,
+                                substream_data_frame: NonZeroUsize::new(
+                                    usize::try_from(len_out).unwrap(),
+                                )
+                                .map(|length| {
+                                    (OutgoingSubstreamData::Healthy(SubstreamId(id)), length)
+                                }),
+                            };
                         } else {
                             unreachable!()
                         }
@@ -1777,91 +1808,6 @@ impl<T> Yamux<T> {
             }
             _ => panic!(),
         }
-    }
-
-    /// Writes a data frame header in `self.inner.outgoing`.
-    ///
-    /// # Panic
-    ///
-    /// Panics if `self.inner.outgoing` is not `Idle`.
-    ///
-    fn queue_data_frame_header(
-        &mut self,
-        syn_ack_flag: bool,
-        fin_flag: bool,
-        substream_id: NonZeroU32,
-        data_length: u32,
-    ) {
-        assert!(matches!(self.inner.outgoing, Outgoing::Idle));
-
-        let is_outbound =
-            (substream_id.get() % 2) == (self.inner.next_outbound_substream.get() % 2);
-
-        self.inner.outgoing = Outgoing::Header {
-            header: header::DecodedYamuxHeader::Data {
-                syn: syn_ack_flag && is_outbound,
-                ack: syn_ack_flag && !is_outbound,
-                fin: fin_flag,
-                rst: false,
-                stream_id: substream_id,
-                length: data_length,
-            },
-            header_already_sent: 0,
-            substream_data_frame: NonZeroUsize::new(usize::try_from(data_length).unwrap()).map(
-                |length| {
-                    (
-                        OutgoingSubstreamData::Healthy(SubstreamId(substream_id)),
-                        length,
-                    )
-                },
-            ),
-        };
-    }
-
-    /// Writes a window size update frame header in `self.inner.outgoing`.
-    ///
-    /// # Panic
-    ///
-    /// Panics if `self.inner.outgoing` is not `Idle`.
-    ///
-    fn queue_window_size_frame_header(
-        &mut self,
-        syn_ack_flag: bool,
-        substream_id: NonZeroU32,
-        window_size: u32,
-    ) {
-        assert!(matches!(self.inner.outgoing, Outgoing::Idle));
-
-        let is_outbound =
-            (substream_id.get() % 2) == (self.inner.next_outbound_substream.get() % 2);
-
-        self.inner.outgoing = Outgoing::Header {
-            header: header::DecodedYamuxHeader::Window {
-                syn: syn_ack_flag && is_outbound,
-                ack: syn_ack_flag && !is_outbound,
-                fin: false,
-                rst: false,
-                stream_id: substream_id,
-                length: window_size,
-            },
-            header_already_sent: 0,
-            substream_data_frame: None,
-        };
-    }
-
-    /// Writes a ping frame header in `self.inner.outgoing`.
-    ///
-    /// # Panic
-    ///
-    /// Panics if `self.inner.outgoing` is not `Idle`.
-    ///
-    fn queue_ping_request_header(&mut self, opaque_value: u32) {
-        assert!(matches!(self.inner.outgoing, Outgoing::Idle));
-        self.inner.outgoing = Outgoing::Header {
-            header: header::DecodedYamuxHeader::PingRequest { opaque_value },
-            header_already_sent: 0,
-            substream_data_frame: None,
-        };
     }
 }
 
