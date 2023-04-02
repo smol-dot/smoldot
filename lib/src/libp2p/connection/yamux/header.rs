@@ -66,6 +66,99 @@ pub enum GoAwayErrorCode {
     InternalError = 0x2,
 }
 
+pub fn encode(header: &DecodedYamuxHeader) -> [u8; 12] {
+    match header {
+        DecodedYamuxHeader::Data {
+            syn,
+            ack,
+            fin,
+            rst,
+            stream_id,
+            length,
+        }
+        | DecodedYamuxHeader::Window {
+            syn,
+            ack,
+            fin,
+            rst,
+            stream_id,
+            length,
+        } => {
+            let ty = match header {
+                DecodedYamuxHeader::Data { .. } => 0,
+                DecodedYamuxHeader::Window { .. } => 1,
+                _ => unreachable!(),
+            };
+
+            let mut flags: u8 = 0;
+            if *syn {
+                flags |= 0x1;
+            }
+            if *ack {
+                flags |= 0x2;
+            }
+            if *fin {
+                flags |= 0x4;
+            }
+            if *rst {
+                flags |= 0x8;
+            }
+
+            let stream_id = stream_id.get().to_be_bytes();
+            let length = length.to_be_bytes();
+
+            [
+                0,
+                ty,
+                0,
+                flags,
+                stream_id[0],
+                stream_id[1],
+                stream_id[2],
+                stream_id[3],
+                length[0],
+                length[1],
+                length[2],
+                length[3],
+            ]
+        }
+        DecodedYamuxHeader::PingRequest { opaque_value }
+        | DecodedYamuxHeader::PingResponse { opaque_value } => {
+            let flags = match header {
+                DecodedYamuxHeader::PingRequest { .. } => 1,
+                DecodedYamuxHeader::PingResponse { .. } => 2,
+                _ => unreachable!(),
+            };
+
+            let opaque_value = opaque_value.to_be_bytes();
+
+            [
+                0,
+                2,
+                0,
+                flags,
+                0,
+                0,
+                0,
+                0,
+                opaque_value[0],
+                opaque_value[1],
+                opaque_value[2],
+                opaque_value[3],
+            ]
+        }
+        DecodedYamuxHeader::GoAway { error_code } => {
+            let code = match error_code {
+                GoAwayErrorCode::NormalTermination => 0,
+                GoAwayErrorCode::ProtocolError => 1,
+                GoAwayErrorCode::InternalError => 2,
+            };
+
+            [0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, code]
+        }
+    }
+}
+
 /// Decodes a Yamux header.
 pub fn decode_yamux_header(bytes: &[u8]) -> Result<DecodedYamuxHeader, YamuxHeaderDecodeError> {
     match nom::combinator::all_consuming(nom::combinator::complete(decode))(bytes) {

@@ -1047,7 +1047,7 @@ impl<T> Yamux<T> {
 
                     // Handle any message other than data or window size.
                     match decoded_header {
-                        header::DecodedYamuxHeader::PingRequest { .. } => {
+                        header::DecodedYamuxHeader::PingRequest { opaque_value } => {
                             // Ping. In order to queue the pong message, the outgoing queue must
                             // be empty. If it is not the case, we simply leave the ping header
                             // there and prevent any further data from being read.
@@ -1057,28 +1057,10 @@ impl<T> Yamux<T> {
                             }
 
                             self.inner.outgoing = Outgoing::Header {
-                                header: {
-                                    let mut header = arrayvec::ArrayVec::new();
-                                    header
-                                        .try_extend_from_slice(
-                                            &[
-                                                0,
-                                                2,
-                                                0x0,
-                                                0x2,
-                                                0,
-                                                0,
-                                                0,
-                                                0,
-                                                incoming_header[8],
-                                                incoming_header[9],
-                                                incoming_header[10],
-                                                incoming_header[11],
-                                            ][..],
-                                        )
-                                        .unwrap();
-                                    header
-                                },
+                                header: header::encode(&header::DecodedYamuxHeader::PingResponse {
+                                    opaque_value,
+                                })
+                                .into(),
                                 substream_data_frame: None,
                                 is_goaway: false,
                             };
@@ -1296,18 +1278,16 @@ impl<T> Yamux<T> {
                             // automatically rejected.
                             if !matches!(self.inner.outgoing_goaway, OutgoingGoAway::NotRequired) {
                                 // Send the `RST` frame.
-                                let mut header = arrayvec::ArrayVec::new();
-                                header.push(0);
-                                header.push(1);
-                                header.try_extend_from_slice(&0x8u16.to_be_bytes()).unwrap();
-                                header
-                                    .try_extend_from_slice(&stream_id.get().to_be_bytes())
-                                    .unwrap();
-                                header.try_extend_from_slice(&0u32.to_be_bytes()).unwrap();
-                                debug_assert_eq!(header.len(), 12);
-
                                 self.inner.outgoing = Outgoing::Header {
-                                    header,
+                                    header: header::encode(&header::DecodedYamuxHeader::Window {
+                                        syn: false,
+                                        ack: false,
+                                        fin: false,
+                                        rst: true,
+                                        stream_id,
+                                        length: 0,
+                                    })
+                                    .into(),
                                     substream_data_frame: None,
                                     is_goaway: false,
                                 };
@@ -1553,26 +1533,12 @@ impl<T> Yamux<T> {
 
                 Outgoing::Idle => {
                     // Send a `GoAway` frame if demanded.
-                    if let OutgoingGoAway::Required(code) = self.inner.outgoing_goaway {
-                        let mut header = arrayvec::ArrayVec::new();
-                        header.push(0);
-                        header.push(3);
-                        header.try_extend_from_slice(&0u16.to_be_bytes()).unwrap();
-                        header.try_extend_from_slice(&0u32.to_be_bytes()).unwrap();
-                        header
-                            .try_extend_from_slice(
-                                &match code {
-                                    GoAwayErrorCode::NormalTermination => 0u32,
-                                    GoAwayErrorCode::ProtocolError => 1u32,
-                                    GoAwayErrorCode::InternalError => 2u32,
-                                }
-                                .to_be_bytes(),
-                            )
-                            .unwrap();
-                        debug_assert_eq!(header.len(), 12);
-
+                    if let OutgoingGoAway::Required(error_code) = self.inner.outgoing_goaway {
                         self.inner.outgoing = Outgoing::Header {
-                            header,
+                            header: header::encode(&header::DecodedYamuxHeader::GoAway {
+                                error_code,
+                            })
+                            .into(),
                             substream_data_frame: None,
                             is_goaway: true,
                         };
@@ -1582,18 +1548,16 @@ impl<T> Yamux<T> {
 
                     // Send RST frames.
                     if let Some(substream_id) = self.inner.rsts_to_send.pop_front() {
-                        let mut header = arrayvec::ArrayVec::new();
-                        header.push(0);
-                        header.push(1);
-                        header.try_extend_from_slice(&8u16.to_be_bytes()).unwrap();
-                        header
-                            .try_extend_from_slice(&substream_id.get().to_be_bytes())
-                            .unwrap();
-                        header.try_extend_from_slice(&0u32.to_be_bytes()).unwrap();
-                        debug_assert_eq!(header.len(), 12);
-
                         self.inner.outgoing = Outgoing::Header {
-                            header,
+                            header: header::encode(&header::DecodedYamuxHeader::Window {
+                                syn: false,
+                                ack: false,
+                                fin: false,
+                                rst: true,
+                                stream_id: substream_id,
+                                length: 0,
+                            })
+                            .into(),
                             substream_data_frame: None,
                             is_goaway: false,
                         };
@@ -1801,19 +1765,17 @@ impl<T> Yamux<T> {
                     fin,
                 };
 
-                let mut header = arrayvec::ArrayVec::new();
-                header.push(0);
-                header.push(1);
-                header.try_extend_from_slice(&0x8u16.to_be_bytes()).unwrap();
-                header
-                    .try_extend_from_slice(&substream_id.0.get().to_be_bytes())
-                    .unwrap();
-                header.try_extend_from_slice(&0u32.to_be_bytes()).unwrap();
-                debug_assert_eq!(header.len(), 12);
-
                 debug_assert!(matches!(self.inner.outgoing, Outgoing::Idle));
                 self.inner.outgoing = Outgoing::Header {
-                    header,
+                    header: header::encode(&header::DecodedYamuxHeader::Window {
+                        syn: false,
+                        ack: false,
+                        fin: false,
+                        rst: true,
+                        stream_id: substream_id.0,
+                        length: 0,
+                    })
+                    .into(),
                     substream_data_frame: None,
                     is_goaway: false,
                 };
@@ -1837,34 +1799,19 @@ impl<T> Yamux<T> {
     ) {
         assert!(matches!(self.inner.outgoing, Outgoing::Idle));
 
-        let mut flags: u16 = 0;
-        if syn_ack_flag {
-            if (substream_id.get() % 2) == (self.inner.next_outbound_substream.get() % 2) {
-                // SYN
-                flags |= 0x1;
-            } else {
-                // ACK
-                flags |= 0x2;
-            }
-        }
-        if fin_flag {
-            flags |= 0x4;
-        }
-
-        let mut header = arrayvec::ArrayVec::new();
-        header.push(0);
-        header.push(0);
-        header.try_extend_from_slice(&flags.to_be_bytes()).unwrap();
-        header
-            .try_extend_from_slice(&substream_id.get().to_be_bytes())
-            .unwrap();
-        header
-            .try_extend_from_slice(&data_length.to_be_bytes())
-            .unwrap();
-        debug_assert_eq!(header.len(), 12);
+        let is_outbound =
+            (substream_id.get() % 2) == (self.inner.next_outbound_substream.get() % 2);
 
         self.inner.outgoing = Outgoing::Header {
-            header,
+            header: header::encode(&header::DecodedYamuxHeader::Data {
+                syn: syn_ack_flag && is_outbound,
+                ack: syn_ack_flag && !is_outbound,
+                fin: fin_flag,
+                rst: false,
+                stream_id: substream_id,
+                length: data_length,
+            })
+            .into(),
             is_goaway: false,
             substream_data_frame: NonZeroUsize::new(usize::try_from(data_length).unwrap()).map(
                 |length| {
@@ -1891,31 +1838,19 @@ impl<T> Yamux<T> {
     ) {
         assert!(matches!(self.inner.outgoing, Outgoing::Idle));
 
-        let mut flags: u16 = 0;
-        if syn_ack_flag {
-            if (substream_id.get() % 2) == (self.inner.next_outbound_substream.get() % 2) {
-                // SYN
-                flags |= 0x1;
-            } else {
-                // ACK
-                flags |= 0x2;
-            }
-        }
-
-        let mut header = arrayvec::ArrayVec::new();
-        header.push(0);
-        header.push(1);
-        header.try_extend_from_slice(&flags.to_be_bytes()).unwrap();
-        header
-            .try_extend_from_slice(&substream_id.get().to_be_bytes())
-            .unwrap();
-        header
-            .try_extend_from_slice(&window_size.to_be_bytes())
-            .unwrap();
-        debug_assert_eq!(header.len(), 12);
+        let is_outbound =
+            (substream_id.get() % 2) == (self.inner.next_outbound_substream.get() % 2);
 
         self.inner.outgoing = Outgoing::Header {
-            header,
+            header: header::encode(&header::DecodedYamuxHeader::Window {
+                syn: syn_ack_flag && is_outbound,
+                ack: syn_ack_flag && !is_outbound,
+                fin: false,
+                rst: false,
+                stream_id: substream_id,
+                length: window_size,
+            })
+            .into(),
             substream_data_frame: None,
             is_goaway: false,
         };
@@ -1929,19 +1864,9 @@ impl<T> Yamux<T> {
     ///
     fn queue_ping_request_header(&mut self, opaque_value: u32) {
         assert!(matches!(self.inner.outgoing, Outgoing::Idle));
-
-        let mut header = arrayvec::ArrayVec::new();
-        header.push(0);
-        header.push(2);
-        header.try_extend_from_slice(&[0, 1]).unwrap();
-        header.try_extend_from_slice(&[0, 0, 0, 0]).unwrap();
-        header
-            .try_extend_from_slice(&opaque_value.to_be_bytes())
-            .unwrap();
-        debug_assert_eq!(header.len(), 12);
-
         self.inner.outgoing = Outgoing::Header {
-            header,
+            header: header::encode(&header::DecodedYamuxHeader::PingRequest { opaque_value })
+                .into(),
             substream_data_frame: None,
             is_goaway: false,
         };
