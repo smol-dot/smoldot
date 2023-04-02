@@ -1032,16 +1032,20 @@ impl<T> Yamux<T> {
                         data = &data[1..];
                     }
 
-                    // Not enough data to finish receiving header. Nothing more can be done.
-                    if incoming_header.len() != 12 {
-                        debug_assert!(data.is_empty());
-                        break;
-                    }
+                    // Decode the header in `incoming_header`.
+                    let decoded_header = {
+                        let Ok(full_header) = <&[u8; 12]>::try_from(&incoming_header[..])
+                        else {
+                            // Not enough data to finish receiving header. Nothing more can be
+                            // done.
+                            debug_assert!(data.is_empty());
+                            break;
+                        };
 
-                    // Full header available to decode in `incoming_header`.
-                    let decoded_header = match header::decode_yamux_header(incoming_header) {
-                        Ok(h) => h,
-                        Err(err) => return Err(Error::HeaderDecode(err)),
+                        match header::decode_yamux_header(full_header) {
+                            Ok(h) => h,
+                            Err(err) => return Err(Error::HeaderDecode(err)),
+                        }
                     };
 
                     // Handle any message other than data or window size.

@@ -160,7 +160,7 @@ pub fn encode(header: &DecodedYamuxHeader) -> [u8; 12] {
 }
 
 /// Decodes a Yamux header.
-pub fn decode_yamux_header(bytes: &[u8]) -> Result<DecodedYamuxHeader, YamuxHeaderDecodeError> {
+pub fn decode_yamux_header(bytes: &[u8; 12]) -> Result<DecodedYamuxHeader, YamuxHeaderDecodeError> {
     match nom::combinator::all_consuming(nom::combinator::complete(decode))(bytes) {
         Ok((_, h)) => Ok(h),
         Err(nom::Err::Incomplete(_)) => unreachable!(),
@@ -348,12 +348,5 @@ mod tests {
     fn version_check() {
         assert!(super::decode_yamux_header(&[0, 0, 0, 1, 0, 0, 0, 15, 0, 0, 2, 65]).is_ok());
         assert!(super::decode_yamux_header(&[2, 0, 0, 1, 0, 0, 0, 15, 0, 0, 2, 65]).is_err());
-    }
-
-    #[test]
-    fn length_check() {
-        assert!(super::decode_yamux_header(&[0, 0, 0, 1, 0, 0, 0, 15, 0, 0, 2, 65]).is_ok());
-        assert!(super::decode_yamux_header(&[0, 0, 0, 1, 0, 0, 0, 15, 0, 0, 2, 65, 0]).is_err());
-        assert!(super::decode_yamux_header(&[0, 0, 0, 1, 0, 0, 0, 15, 0, 0, 2]).is_err());
     }
 }
