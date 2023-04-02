@@ -236,11 +236,6 @@ enum Outgoing {
         /// If `Some`, then the header is data frame header and we must then transition the
         /// state to [`Outgoing::SubstreamData`].
         substream_data_frame: Option<(OutgoingSubstreamData, NonZeroUsize)>,
-
-        /// `true` if this header contains a `GoAway` frame. This indicates that
-        /// [`Yamux::outgoing_goaway`] must be transitioned to [`OutgoingGoAway::Sent`] after
-        /// this header has been extracted.
-        is_goaway: bool,
     },
 
     /// Writing out data from a substream.
@@ -1064,7 +1059,6 @@ impl<T> Yamux<T> {
                                 header: header::DecodedYamuxHeader::PingResponse { opaque_value },
                                 header_already_sent: 0,
                                 substream_data_frame: None,
-                                is_goaway: false,
                             };
 
                             self.inner.incoming = Incoming::Header(arrayvec::ArrayVec::new());
@@ -1291,7 +1285,6 @@ impl<T> Yamux<T> {
                                     },
                                     header_already_sent: 0,
                                     substream_data_frame: None,
-                                    is_goaway: false,
                                 };
 
                                 self.inner.incoming = if !is_data {
@@ -1431,7 +1424,6 @@ impl<T> Yamux<T> {
                     ref mut header,
                     ref mut header_already_sent,
                     ref mut substream_data_frame,
-                    ref is_goaway,
                 } => {
                     // Finish writing the header.
                     debug_assert!(*header_already_sent < 12);
@@ -1443,7 +1435,7 @@ impl<T> Yamux<T> {
                         let out =
                             arrayvec::ArrayVec::<u8, 12>::try_from(encoded_header_remains_to_write)
                                 .unwrap();
-                        if *is_goaway {
+                        if matches!(header, header::DecodedYamuxHeader::GoAway { .. }) {
                             debug_assert!(matches!(
                                 self.inner.outgoing_goaway,
                                 OutgoingGoAway::Queued
@@ -1546,7 +1538,6 @@ impl<T> Yamux<T> {
                             header: header::DecodedYamuxHeader::GoAway { error_code },
                             header_already_sent: 0,
                             substream_data_frame: None,
-                            is_goaway: true,
                         };
                         self.inner.outgoing_goaway = OutgoingGoAway::Queued;
                         continue;
@@ -1565,7 +1556,6 @@ impl<T> Yamux<T> {
                             },
                             header_already_sent: 0,
                             substream_data_frame: None,
-                            is_goaway: false,
                         };
                         continue;
                     }
@@ -1783,7 +1773,6 @@ impl<T> Yamux<T> {
                     },
                     header_already_sent: 0,
                     substream_data_frame: None,
-                    is_goaway: false,
                 };
             }
             _ => panic!(),
@@ -1818,7 +1807,6 @@ impl<T> Yamux<T> {
                 length: data_length,
             },
             header_already_sent: 0,
-            is_goaway: false,
             substream_data_frame: NonZeroUsize::new(usize::try_from(data_length).unwrap()).map(
                 |length| {
                     (
@@ -1858,7 +1846,6 @@ impl<T> Yamux<T> {
             },
             header_already_sent: 0,
             substream_data_frame: None,
-            is_goaway: false,
         };
     }
 
@@ -1874,7 +1861,6 @@ impl<T> Yamux<T> {
             header: header::DecodedYamuxHeader::PingRequest { opaque_value },
             header_already_sent: 0,
             substream_data_frame: None,
-            is_goaway: false,
         };
     }
 }
