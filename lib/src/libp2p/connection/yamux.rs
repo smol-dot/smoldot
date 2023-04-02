@@ -1266,6 +1266,7 @@ impl<T> Yamux<T> {
                             // rejection message later.
                             // If it is not the case, we simply leave the header there and prevent
                             // any further data from being read.
+                            // TODO: could deadlock if the write buffer is very small
                             if !matches!(self.inner.outgoing, Outgoing::Idle) {
                                 break;
                             }
