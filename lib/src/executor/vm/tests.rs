@@ -841,4 +841,185 @@ fn memory_zeroed_after_prepare() {
     }
 }
 
+#[test]
+fn feature_disabled_signext() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 0 4096))
+        (func (export "hello") (result i64)
+            (i64.const 2)
+            i64.extend32_s
+        )
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        // TODO: wasmtime doesn't allow disabling sign-ext /!\ test is faulty /!\ figure out what to do
+        // TODO: see https://github.com/paritytech/substrate/issues/10707#issuecomment-1494081313
+        if Some(exec_hint) == super::ExecHint::force_wasmtime_if_available() {
+            continue;
+        }
+
+        assert!(super::VirtualMachinePrototype::new(super::Config {
+            module_bytes: &module_bytes,
+            exec_hint,
+            symbols: &mut |_, _, _| Ok(0),
+        })
+        .is_err());
+    }
+}
+
+#[test]
+fn feature_disabled_saturated_float_to_int() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 0 4096))
+        (func (export "hello") (result i64)
+            (f32.const 2)
+            i64.trunc_sat_f32_s
+        )
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        // TODO: wasmtime doesn't allow disabling this feature /!\ test is faulty /!\ figure out what to do
+        // TODO: see https://github.com/paritytech/substrate/issues/10707#issuecomment-1494081313
+        if Some(exec_hint) == super::ExecHint::force_wasmtime_if_available() {
+            continue;
+        }
+
+        assert!(super::VirtualMachinePrototype::new(super::Config {
+            module_bytes: &module_bytes,
+            exec_hint,
+            symbols: &mut |_, _, _| Ok(0),
+        })
+        .is_err());
+    }
+}
+
+#[test]
+fn feature_disabled_threads() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 0 4096))
+        (func (export "hello") (result i64)
+            (atomic.fence)
+            i64.const 2
+        )
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        assert!(super::VirtualMachinePrototype::new(super::Config {
+            module_bytes: &module_bytes,
+            exec_hint,
+            symbols: &mut |_, _, _| Ok(0),
+        })
+        .is_err());
+    }
+}
+
+#[test]
+fn feature_disabled_reference_type() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 0 4096))
+        (func (export "hello") (result externref) unreachable)
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        assert!(super::VirtualMachinePrototype::new(super::Config {
+            module_bytes: &module_bytes,
+            exec_hint,
+            symbols: &mut |_, _, _| Ok(0),
+        })
+        .is_err());
+    }
+}
+
+#[test]
+fn feature_disabled_bulk_memory() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 0 4096))
+        (func (export "hello") (result i64)
+            (memory.fill (i32.const 0) (i32.const 0) (i32.const 0))
+            i64.const 2
+        )
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        assert!(super::VirtualMachinePrototype::new(super::Config {
+            module_bytes: &module_bytes,
+            exec_hint,
+            symbols: &mut |_, _, _| Ok(0),
+        })
+        .is_err());
+    }
+}
+
+#[test]
+fn feature_disabled_multi_value() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 0 4096))
+        (func (export "hello") (param i64 i64) (result i64 i64 i64)
+	        (local.get 0) (local.get 1) (local.get 0)
+        )
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        assert!(super::VirtualMachinePrototype::new(super::Config {
+            module_bytes: &module_bytes,
+            exec_hint,
+            symbols: &mut |_, _, _| Ok(0),
+        })
+        .is_err());
+    }
+}
+
+#[test]
+fn feature_disabled_memory64() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem i64 0 4096))
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        assert!(super::VirtualMachinePrototype::new(super::Config {
+            module_bytes: &module_bytes,
+            exec_hint,
+            symbols: &mut |_, _, _| Ok(0),
+        })
+        .is_err());
+    }
+}
+
+// TODO: several wasm feature checks are missing
+
 // TODO: test for memory reads and writes, including within host functions
