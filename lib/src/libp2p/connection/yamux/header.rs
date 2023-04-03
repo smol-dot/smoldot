@@ -66,6 +66,7 @@ pub enum GoAwayErrorCode {
     InternalError = 0x2,
 }
 
+/// Encodes a Yamux header.
 pub fn encode(header: &DecodedYamuxHeader) -> [u8; 12] {
     match header {
         DecodedYamuxHeader::Data {
@@ -272,7 +273,7 @@ mod tests {
     use core::num::NonZeroU32;
 
     #[test]
-    fn basic_data() {
+    fn decode_data_frame() {
         assert_eq!(
             super::decode_yamux_header(&[0, 0, 0, 1, 0, 0, 0, 15, 0, 0, 2, 65]).unwrap(),
             super::DecodedYamuxHeader::Data {
@@ -287,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn basic_ping() {
+    fn decode_ping_frame() {
         assert_eq!(
             super::decode_yamux_header(&[0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 1, 12]).unwrap(),
             super::DecodedYamuxHeader::PingRequest { opaque_value: 268 }
@@ -313,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn basic_goaway() {
+    fn decode_goaway() {
         assert_eq!(
             super::decode_yamux_header(&[0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
             super::DecodedYamuxHeader::GoAway {
@@ -348,5 +349,69 @@ mod tests {
     fn version_check() {
         assert!(super::decode_yamux_header(&[0, 0, 0, 1, 0, 0, 0, 15, 0, 0, 2, 65]).is_ok());
         assert!(super::decode_yamux_header(&[2, 0, 0, 1, 0, 0, 0, 15, 0, 0, 2, 65]).is_err());
+    }
+
+    macro_rules! check_encode_reendoces {
+        ($payload:expr) => {{
+            let payload = $payload;
+            assert_eq!(
+                super::decode_yamux_header(&super::encode(&payload)).unwrap(),
+                payload
+            );
+        }};
+    }
+
+    #[test]
+    fn encode_data() {
+        for _ in 0..500 {
+            check_encode_reendoces!(super::DecodedYamuxHeader::Data {
+                syn: rand::random(),
+                ack: rand::random(),
+                fin: rand::random(),
+                rst: rand::random(),
+                stream_id: rand::random(),
+                length: rand::random()
+            });
+        }
+    }
+
+    #[test]
+    fn encode_window() {
+        for _ in 0..500 {
+            check_encode_reendoces!(super::DecodedYamuxHeader::Window {
+                syn: rand::random(),
+                ack: rand::random(),
+                fin: rand::random(),
+                rst: rand::random(),
+                stream_id: rand::random(),
+                length: rand::random()
+            });
+        }
+    }
+
+    #[test]
+    fn encode_ping() {
+        check_encode_reendoces!(super::DecodedYamuxHeader::PingRequest {
+            opaque_value: rand::random(),
+        });
+
+        check_encode_reendoces!(super::DecodedYamuxHeader::PingResponse {
+            opaque_value: rand::random(),
+        });
+    }
+
+    #[test]
+    fn encode_goaway() {
+        check_encode_reendoces!(super::DecodedYamuxHeader::GoAway {
+            error_code: super::GoAwayErrorCode::NormalTermination,
+        });
+
+        check_encode_reendoces!(super::DecodedYamuxHeader::GoAway {
+            error_code: super::GoAwayErrorCode::ProtocolError,
+        });
+
+        check_encode_reendoces!(super::DecodedYamuxHeader::GoAway {
+            error_code: super::GoAwayErrorCode::InternalError,
+        });
     }
 }
