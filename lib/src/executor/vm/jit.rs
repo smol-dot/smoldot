@@ -78,6 +78,18 @@ impl JitPrototype {
         // environment variables whatsoever. Whether to use `Enable` or `Disable` below isn't
         // very important, so long as it is not `Environment`.
         config.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Enable);
+
+        // Disable all post-MVP wasm features.
+        // Some of these configuration options are `true` by default while some others are `false`
+        // by default, but we just disable them all to be sure.
+        config.wasm_threads(false);
+        config.wasm_reference_types(false);
+        config.wasm_simd(false);
+        config.wasm_bulk_memory(false);
+        config.wasm_multi_value(false);
+        config.wasm_multi_memory(false);
+        config.wasm_memory64(false);
+
         let engine =
             wasmtime::Engine::new(&config).map_err(|err| NewErr::InvalidWasm(err.to_string()))?;
 

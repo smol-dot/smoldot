@@ -6,6 +6,10 @@
 
 - Removed support for the `ls` message in the multistream-select protocol, in accordance with the rest of the libp2p ecosystem. This message was in practice never used, and removing support for it simplifies the implementation. ([#379](https://github.com/smol-dot/smoldot/pull/379))
 
+### Fixed
+
+- Post-MVP WebAssembly features are now properly disabled when compiling runtimes. This rejects runtimes that Substrate would consider as invalid as well. ([#386](https://github.com/smol-dot/smoldot/pull/386))
+
 ## 1.0.1 - 2023-03-29
 
 ### Changed

@@ -52,6 +52,16 @@
 //!
 //! The first variant used to be the default model when compiling to WebAssembly, but the second
 //! variant (importing memory objects) is preferred nowadays.
+//!
+//! # Wasm features
+//!
+//! The WebAssembly specification is a moving one. The specification as it was when it launched
+//! in 2017 is commonly referred to as "the MVP" (minimum viable product). Since then, various
+//! extensions have been added to the WebAssembly format.
+//!
+//! The code in this module, however, doesn't allow any of the feature that were added post-MVP.
+//! Trying to use WebAssembly code that uses one of these features will result in an error.
+//!
 
 mod interpreter;
 #[cfg(all(target_arch = "x86_64", feature = "std"))]

@@ -54,7 +54,22 @@ impl InterpreterPrototype {
         module_bytes: &[u8],
         symbols: &mut dyn FnMut(&str, &str, &Signature) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
-        let engine = wasmi::Engine::default(); // TODO: investigate config
+        let engine = {
+            let mut config = wasmi::Config::default();
+
+            // Disable all the post-MVP wasm features.
+            config.wasm_sign_extension(false);
+            config.wasm_reference_types(false);
+            config.wasm_bulk_memory(false);
+            config.wasm_multi_value(false);
+            config.wasm_extended_const(false);
+            config.wasm_mutable_global(false);
+            config.wasm_saturating_float_to_int(false);
+            config.wasm_tail_call(false);
+
+            wasmi::Engine::new(&config)
+        };
+
         let module = wasmi::Module::new(&engine, module_bytes)
             .map_err(|err| NewErr::InvalidWasm(err.to_string()))?;
 
