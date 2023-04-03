@@ -1049,6 +1049,42 @@ fn feature_disabled_mutable_globals() {
     }
 }
 
-// TODO: several wasm feature checks are missing
+#[test]
+fn feature_disabled_tail_call() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 0 4096))
+        (func $fac (param $x i64) (result i64)
+            (return_call $fac-aux (get_local $x) (i64.const 1))
+        )
+        (func $fac-aux (param $x i64) (param $r i64) (result i64)
+          (if (i64.eqz (get_local $x))
+            (then (return (get_local $r)))
+            (else
+              (return_call $fac-aux
+                (i64.sub (get_local $x) (i64.const 1))
+                (i64.mul (get_local $x) (get_local $r))
+              )
+            )
+          )
+        )
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        assert!(super::VirtualMachinePrototype::new(super::Config {
+            module_bytes: &module_bytes,
+            exec_hint,
+            symbols: &mut |_, _, _| Ok(0),
+        })
+        .is_err());
+    }
+}
+
+// TODO: check that the SIMD feature is disabled: https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md
+// TODO: check that the extended-const feature is disabled: https://github.com/WebAssembly/extended-const/blob/master/proposals/extended-const/Overview.md
 
 // TODO: test for memory reads and writes, including within host functions
