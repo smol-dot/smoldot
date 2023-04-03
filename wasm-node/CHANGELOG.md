@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Post-MVP WebAssembly features are now properly disabled when compiling runtimes. This rejects runtimes that Substrate would consider as invalid as well.
+- Post-MVP WebAssembly features are now properly disabled when compiling runtimes. This rejects runtimes that Substrate would consider as invalid as well. ([#386](https://github.com/smol-dot/smoldot/pull/386))
 
 ## 1.0.1 - 2023-03-29
 
