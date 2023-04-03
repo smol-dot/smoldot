@@ -59,7 +59,7 @@ use super::{
 
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
 use core::{
-    fmt, iter,
+    fmt,
     num::NonZeroUsize,
     ops::{Add, Sub},
     time::Duration,
@@ -331,25 +331,19 @@ where
                         continue;
                     }
 
-                    let supported_protocols = self
+                    let max_protocol_name_len = self
                         .inner
                         .request_protocols
                         .iter()
                         .filter(|p| p.inbound_allowed)
-                        .map(|p| p.name.clone())
-                        .chain(
-                            self.inner
-                                .notifications_protocols
-                                .iter()
-                                .map(|p| p.name.clone()),
-                        )
-                        .chain(iter::once(self.inner.ping_protocol.clone()))
-                        .collect::<Vec<_>>();
+                        .map(|p| p.name.len())
+                        .max()
+                        .unwrap_or(0);
 
                     self.inner
                         .yamux
                         .accept_pending_substream(Some(substream::Substream::ingoing(
-                            supported_protocols,
+                            max_protocol_name_len,
                         )));
                 }
 
@@ -628,13 +622,13 @@ where
                     let substream = inner.yamux.user_data_mut(substream_id).as_mut().unwrap();
 
                     if protocol == inner.ping_protocol {
-                        substream.set_inbound_ty(substream::InboundTy::Ping);
+                        substream.accept_inbound(substream::InboundTy::Ping);
                     } else if let Some(protocol_index) = inner
                         .request_protocols
                         .iter()
                         .position(|p| p.name == protocol)
                     {
-                        substream.set_inbound_ty(substream::InboundTy::Request {
+                        substream.accept_inbound(substream::InboundTy::Request {
                             protocol_index,
                             request_max_size: if let ConfigRequestResponseIn::Payload { max_size } =
                                 inner.request_protocols[protocol_index].inbound_config
@@ -649,13 +643,13 @@ where
                         .iter()
                         .position(|p| p.name == protocol)
                     {
-                        substream.set_inbound_ty(substream::InboundTy::Notifications {
+                        substream.accept_inbound(substream::InboundTy::Notifications {
                             protocol_index,
                             max_handshake_size: inner.notifications_protocols[protocol_index]
                                 .max_handshake_size,
                         });
                     } else {
-                        unreachable!();
+                        substream.reject_inbound();
                     }
 
                     continue;
