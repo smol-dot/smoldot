@@ -45,6 +45,32 @@ For technologies other than Rust or JavaScript, the second solution has obviousl
 
 While it is not excluded to add Flutter/React Native/etc. packages to this repository that make it as easy as possible to integrate smoldot, the main maintainer of this repository unfortunately doesn't know enough about mobile development to create or maintain these packages.
 
+## How can I attack smoldot?
+
+Smoldot has the following known vulnerabilities:
+
+- **Eclipse attacks** (full nodes and light clients both affected). A blockchain consists in a peer-to-peer network, and smoldot tries to connect to a variety of nodes of this network. If all the nodes smoldot is connected to were to refuse sending data to smoldot, it would effectively isolate smoldot from the network. While smoldot tries to remedy to the situation by connecting to multiple randomly-chosen nodes, the way it learns which nodes exist is from the nodes themselves. If smoldot is only ever connected to malicious nodes, it won't ever be able to reach non-malicious nodes. This is important in the case of bootnodes, as they are the set of nodes that smoldot initially knows. In other words, if the list of bootnodes only contains malicious nodes, smoldot will never be able to reach any non-malicious node. If the list of bootnodes contains a single honest node, then smoldot will be able to reach the whole network. Unless it is combined with one of the other attacks explained below, this attack is effectively a denial-of-service, as it will prevent smoldot from accessing the chain.
+
+- **Long-range attacks** (full nodes and light clients both affected). If more than 2/3rds of the validators collaborate they can fork a chain starting from a block where they were validator, even if they are no longer part of the active validators at the head of the chain. If some validators were to fork a chain, the equivocation system would punish them by stealing their staked tokens. However, they cannot be punished if they unstake their tokens (which takes 7 days for Kusama or 28 days for Polkadot) before creating the fork. If smoldot hasn't been online since the starting point of the fork, it can be tricked (through an eclipse attack) into following the illegitimate fork. In order to not be vulnerable, smoldot shouldn't stay offline for more than the unstaking delay (7 days for Kusama or 28 days for Polkadot) in a row. Alternatively, smoldot isn't vulnerable if the checkpoint provided in the chain specification is not older than the unstaking delay. Given that this attack requires the collaboration of many validators, is "all-in", detectable ahead of time, requires being combined with an eclipse attack, and that it doesn't offer any direct reward, it is considered not a realistic threat.
+
+- **Invalid best block** (light clients only). Light clients don't verify whether blocks are valid but only whether blocks are *authentic*. A block is authentic if it has been authored by a legitimate validator at a time when it was authorized to author a block. A validator could author a block that smoldot considers as authentic, but that contains completely arbitrary data. Invalid blocks aren't propagated by honest full nodes on the gossiping network, but it is possible for the validator to send the block to the smoldot instance(s) that are directly connected to it or its complicits. While this attack requires a validator to be malicious and that it doesn't offer any direct reward it is unlikely to happen, but it is still a realistic threat. For this reason, when using a light client, **do not assume any storage data coming from a best that hasn't been finalized yet to be accurate**. Once a block has been finalized, it means that at least 2/3rds of the validators consider the block valid. While it is still possible for a finalized block to be invalid, this would require the collaboration of 2/3rds of the validators. If that happens, then the chain has basically been taken over, and whether smoldot shows inaccurate data doesn't really matter anymore. When it comes to UIs built on top of a light client, it is suggested to always show the state of the finalized block, and show the state of the best block *in addition to* the one of the finalized block if it differs.
+
+Note that none of these attacks are specific to the smoldot implementation, but are rather known ways to attack a Substrate/Polkadot node in general. All implementations are affected by all these attacks.
+
+## Is it safe to use smoldot?
+
+The smoldot light client does in no way have access to any private key (with the exception of the networking private key, which is automatically rotated and isn't sensitive). Any transaction (such as a balance transfer) is signed *before* being provided to smoldot. While it is possible for smoldot to contain for example a remote code execution issue that could lead to an attacker reading a private key, this type of issue is extremely unlikely to happen. When it comes to getting your keys/funds stolen, using the smoldot light client isn't inherently more risky than using a JSON-RPC server.
+
+On the other hand, when connecting to a chain through a JSON-RPC server (like is the case for example on PolkadotJS by default) you run the risk of being shown inaccurate data, as the UI blindly trusts the JSON-RPC server to be honest. Smoldot does in no way trust the full nodes to be honest.
+
+In most likelihood, the worst that could happen when using smoldot is "it's not working".
+
+## I've tried using smoldot and it's very slow!
+
+If you are using smoldot through PolkadotJS, it is likely that the issue you are suffering from isn't smoldot's fault. The JSON-RPC protocol used by PolkadotJS to talk to smoldot is generally poorly designed and is completely inadapted to light clients, and the smoldot light client has to use a lot of guesswork to understand what PolkadotJS desires. [A new JSON-RPC protocol](https://github.com/paritytech/json-rpc-interface-spec/) has been developed and is supported by both smoldot and Substrate, but higher-level libraries or UIs haven't updated to it yet.
+
+However, please open an issue nonetheless. We unfortunately can't magically discover the issues that you see, especially when it comes to poor performances.
+
 # About the repository
 
 ## License
@@ -66,8 +92,6 @@ Anyone contributing to this project pledges to propose a welcoming, constructive
 ## Security
 
 While the light client is fully maintained, please be aware that at the moment the full node is completely experimental. While none of the source code in this repository comes with any guarantee, it is even more true for the full node. You are at the moment strongly encouraged to not run a validator using the smoldot full node in a production environment, as it could result in a loss of money.
-
-The smoldot light client does in no way have access to any private key (with the exception of the networking private key, which isn't sensitive). Any transaction (such as a balance transfer) is signed *before* being provided to smoldot. While it is possible for smoldot to contain for example a remote code execution issue that could lead to an attacker reading a private key, this type of issue is extremely unlikely to happen. Using the smoldot light client isn't inherently more risky than using a JSON-RPC server, and in most likelihood the worst that could happen is "things aren't working".
 
 **The following are considered critical security issues**. If you find such an issue, please use the GitHub private disclosure feature found at <https://github.com/smol-dot/smoldot/security/advisories>:
 
