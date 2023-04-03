@@ -308,7 +308,7 @@ fn unsupported_signature() {
     let module_bytes = wat::parse_str(
         r#"
     (module
-        (import "host" "hello" (func $host_hello (param i32) (param externref) (result i32)))
+        (import "host" "hello" (func $host_hello (param i32) (param f64) (result i32)))
         (import "env" "memory" (memory $mem 0 4096))
         (func (export "hello") (result i32) i32.const 0)
     )
@@ -460,7 +460,7 @@ fn call_signature_not_supported() {
         r#"
     (module
         (import "env" "memory" (memory $mem 0 4096))
-        (func (export "hello") (result externref) unreachable)
+        (func (export "hello") (result f64) unreachable)
     )
     "#,
     )
@@ -725,7 +725,8 @@ fn memory_grow_detects_limit_within_host_function() {
     }
 }
 
-#[test]
+//  TODO: re-enable this test if the `mutable-globals` feature is enabled
+/*#[test]
 fn globals_reinitialized_after_reset() {
     let module_bytes = wat::parse_str(
         r#"
@@ -762,7 +763,7 @@ fn globals_reinitialized_after_reset() {
         let mut prototype = vm.into_prototype();
         assert_eq!(prototype.global_value("myglob").unwrap(), 5);
     }
-}
+}*/
 
 #[test]
 fn memory_zeroed_after_reset() {
@@ -1011,6 +1012,34 @@ fn feature_disabled_memory64() {
     .unwrap();
 
     for exec_hint in super::ExecHint::available_engines() {
+        assert!(super::VirtualMachinePrototype::new(super::Config {
+            module_bytes: &module_bytes,
+            exec_hint,
+            symbols: &mut |_, _, _| Ok(0),
+        })
+        .is_err());
+    }
+}
+
+#[test]
+fn feature_disabled_mutable_globals() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 0 4096))
+        (global $myglob (export "myglob") (mut i32) (i32.const 5))
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        // TODO: wasmtime doesn't allow disabling this feature /!\ test is faulty /!\ figure out what to do
+        // TODO: see https://github.com/paritytech/substrate/issues/10707#issuecomment-1494081313
+        if Some(exec_hint) == super::ExecHint::force_wasmtime_if_available() {
+            continue;
+        }
+
         assert!(super::VirtualMachinePrototype::new(super::Config {
             module_bytes: &module_bytes,
             exec_hint,
