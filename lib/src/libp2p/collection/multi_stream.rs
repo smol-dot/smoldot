@@ -100,7 +100,7 @@ enum MultiStreamConnectionTaskInner<TNow, TSubId> {
         notifications_in_open_cancel_acknowledgments: VecDeque<established::SubstreamId>,
     },
 
-    /// Connection has finished its shutdown. A [`ConnectionToCoordinatorInner::ShutdownFinished`]
+    /// Connection has finished its shutdown. A [`ConnectionToCoordinatorInner::Shutdown`]
     /// message has been sent and is waiting to be acknowledged.
     ShutdownWaitingAck {
         /// What has initiated the shutdown.
@@ -110,7 +110,7 @@ enum MultiStreamConnectionTaskInner<TNow, TSubId> {
         /// been sent to the coordinator. `Some` if the message hasn't been sent yet.
         start_shutdown_message_to_send: Option<Option<ShutdownCause>>,
 
-        /// `true` if the [`ConnectionToCoordinatorInner::ShutdownFinished`] message has already
+        /// `true` if the [`ConnectionToCoordinatorInner::Shutdown`] message has already
         /// been sent to the coordinator.
         shutdown_finish_message_sent: bool,
     },
@@ -237,7 +237,7 @@ where
                             shutdown_finish_message_sent: false,
                             initiator: ShutdownInitiator::Coordinator,
                         };
-                        Some(ConnectionToCoordinatorInner::StartShutdown(None))
+                        Some(ConnectionToCoordinatorInner::NewOutboundSubstreamsForbidden(None))
                     }
                     Some(established::Event::InboundError(err)) => {
                         Some(ConnectionToCoordinatorInner::InboundError(err))
@@ -330,7 +330,7 @@ where
                     (
                         Some(self),
                         Some(ConnectionToCoordinator {
-                            inner: ConnectionToCoordinatorInner::StartShutdown(reason),
+                            inner: ConnectionToCoordinatorInner::NewOutboundSubstreamsForbidden(reason),
                         }),
                     )
                 } else if !*shutdown_finish_message_sent {
@@ -339,7 +339,7 @@ where
                     (
                         Some(self),
                         Some(ConnectionToCoordinator {
-                            inner: ConnectionToCoordinatorInner::ShutdownFinished,
+                            inner: ConnectionToCoordinatorInner::Shutdown,
                         }),
                     )
                 } else {
@@ -505,7 +505,7 @@ where
                 }
             }
             (
-                CoordinatorToConnectionInner::StartShutdown { .. },
+                CoordinatorToConnectionInner::Rst { .. },
                 MultiStreamConnectionTaskInner::Handshake { .. }
                 | MultiStreamConnectionTaskInner::Established { .. },
             ) => {
@@ -538,7 +538,7 @@ where
                 MultiStreamConnectionTaskInner::ShutdownWaitingAck { .. },
             )
             | (
-                CoordinatorToConnectionInner::StartShutdown,
+                CoordinatorToConnectionInner::Rst,
                 MultiStreamConnectionTaskInner::ShutdownWaitingAck {
                     initiator: ShutdownInitiator::Api,
                     ..
@@ -550,7 +550,7 @@ where
                 // messages are simply ignored by the connection task.
             }
             (
-                CoordinatorToConnectionInner::ShutdownFinishedAck,
+                CoordinatorToConnectionInner::ShutdownAck,
                 MultiStreamConnectionTaskInner::ShutdownWaitingAck {
                     start_shutdown_message_to_send: start_shutdown_message_sent,
                     shutdown_finish_message_sent,
@@ -565,14 +565,14 @@ where
                 };
             }
             (
-                CoordinatorToConnectionInner::StartShutdown,
+                CoordinatorToConnectionInner::Rst,
                 MultiStreamConnectionTaskInner::ShutdownWaitingAck {
                     initiator: ShutdownInitiator::Coordinator,
                     ..
                 }
                 | MultiStreamConnectionTaskInner::ShutdownAcked { .. },
             ) => unreachable!(),
-            (CoordinatorToConnectionInner::ShutdownFinishedAck, _) => unreachable!(),
+            (CoordinatorToConnectionInner::ShutdownAck, _) => unreachable!(),
         }
     }
 

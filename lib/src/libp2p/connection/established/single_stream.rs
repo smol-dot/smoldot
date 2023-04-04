@@ -761,6 +761,15 @@ where
             .send_goaway(yamux::GoAwayErrorCode::NormalTermination)
     }
 
+    /// Returns `true` if no [`Event::NewOutboundSubstreamsForbidden`] event has been generated
+    /// yet.
+    ///
+    /// If `true`, it is possible to start requests and open new notification substreams. If
+    /// `false`, attempting to do so will panic.
+    pub fn accepts_new_outbound_substreams(&self) -> bool {
+        self.inner.yamux.received_goaway().is_none()
+    }
+
     /// Sends a request to the remote.
     ///
     /// Must pass the index of the protocol within [`Config::request_protocols`].
@@ -781,6 +790,7 @@ where
     /// # Panic
     ///
     /// Panics if a [`Event::NewOutboundSubstreamsForbidden`] event has been generated in the past.
+    /// Use [`SingleStream::accepts_new_outbound_substreams`] to check if that is the case.
     ///
     pub fn add_request(
         &mut self,
@@ -867,6 +877,7 @@ where
     /// # Panic
     ///
     /// Panics if a [`Event::NewOutboundSubstreamsForbidden`] event has been generated in the past.
+    /// Use [`SingleStream::accepts_new_outbound_substreams`] to check if that is the case.
     ///
     pub fn open_notifications_substream(
         &mut self,

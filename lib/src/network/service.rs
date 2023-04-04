@@ -725,11 +725,7 @@ where
                     }
                 }
 
-                peers::Event::Shutdown { .. } => {
-                    // TODO:
-                }
-
-                peers::Event::StartShutdown {
+                peers::Event::Shutdown {
                     connection_id,
                     peer:
                         peers::ShutdownPeer::Established {
@@ -771,7 +767,7 @@ where
                         chain_indices,
                     });
                 }
-                peers::Event::StartShutdown {
+                peers::Event::Shutdown {
                     connection_id,
                     peer: peers::ShutdownPeer::Established { peer_id, .. },
                     ..
@@ -787,7 +783,7 @@ where
                         }
                     }
                 }
-                peers::Event::StartShutdown {
+                peers::Event::Shutdown {
                     connection_id,
                     peer:
                         peers::ShutdownPeer::OutgoingHandshake {
@@ -803,7 +799,7 @@ where
                         addresses.set_disconnected(address);
                     }
                 }
-                peers::Event::StartShutdown {
+                peers::Event::Shutdown {
                     peer: peers::ShutdownPeer::IngoingHandshake,
                     ..
                 } => {}

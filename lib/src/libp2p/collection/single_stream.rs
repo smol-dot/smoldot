@@ -105,7 +105,7 @@ enum SingleStreamConnectionTaskInner<TNow> {
         notifications_in_open_cancel_acknowledgments: VecDeque<established::SubstreamId>,
     },
 
-    /// Connection has finished its shutdown. A [`ConnectionToCoordinatorInner::ShutdownFinished`]
+    /// Connection has finished its shutdown. A [`ConnectionToCoordinatorInner::Shutdown`]
     /// message has been sent and is waiting to be acknowledged.
     ShutdownWaitingAck {
         /// What has initiated the shutdown.
@@ -125,7 +125,7 @@ enum SingleStreamConnectionTaskInner<TNow> {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum ShutdownInitiator {
-    /// The coordinator sent a [`CoordinatorToConnectionInner::StartShutdown`] message.
+    /// The coordinator sent a [`CoordinatorToConnectionInner::Rst`] message.
     Coordinator,
     /// [`SingleStreamConnectionTask::reset`] has been called.
     Api,
@@ -235,6 +235,17 @@ where
                     ..
                 },
             ) => {
+                // It might be that the remote has asked to deny new substreams. In that case,
+                // we immediately reject the request.
+                if !established.accepts_new_outbound_substreams() {
+                    self.pending_messages
+                        .push_back(ConnectionToCoordinatorInner::Response {
+                            response: Err(todo!()), // TODO: /!\
+                            id: substream_id,
+                        });
+                    return;
+                }
+
                 let inner_substream_id = match established.add_request(
                     protocol_index,
                     request_data,
@@ -265,6 +276,18 @@ where
                     ..
                 },
             ) => {
+                // It might be that the remote has asked to deny new substreams. In that case,
+                // we immediately reject the substream.
+                if !established.accepts_new_outbound_substreams() {
+                    self.pending_messages.push_back(
+                        ConnectionToCoordinatorInner::NotificationsOutResult {
+                            result: Err(todo!()), // TODO: /!\
+                            id: outer_substream_id,
+                        },
+                    );
+                    return;
+                }
+
                 let inner_substream_id = established.open_notifications_substream(
                     overlay_network_index,
                     handshake,
@@ -369,15 +392,13 @@ where
                 }
             }
             (
-                CoordinatorToConnectionInner::StartShutdown { .. },
+                CoordinatorToConnectionInner::Rst { .. },
                 SingleStreamConnectionTaskInner::Established { .. }
                 | SingleStreamConnectionTaskInner::Handshake { .. },
             ) => {
-                // TODO: implement proper shutdown
+                // TODO: no lol /!\
                 self.pending_messages
-                    .push_back(ConnectionToCoordinatorInner::StartShutdown(None));
-                self.pending_messages
-                    .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
+                    .push_back(ConnectionToCoordinatorInner::Shutdown(None));
                 self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
                     initiator: ShutdownInitiator::Coordinator,
                 };
@@ -404,7 +425,7 @@ where
                 SingleStreamConnectionTaskInner::ShutdownWaitingAck { .. },
             )
             | (
-                CoordinatorToConnectionInner::StartShutdown,
+                CoordinatorToConnectionInner::Rst,
                 SingleStreamConnectionTaskInner::ShutdownWaitingAck {
                     initiator: ShutdownInitiator::Api | ShutdownInitiator::Remote,
                 },
@@ -415,7 +436,7 @@ where
                 // messages are simply ignored by the connection task.
             }
             (
-                CoordinatorToConnectionInner::ShutdownFinishedAck,
+                CoordinatorToConnectionInner::ShutdownAck,
                 SingleStreamConnectionTaskInner::ShutdownWaitingAck { initiator },
             ) => {
                 self.connection = SingleStreamConnectionTaskInner::ShutdownAcked {
@@ -423,14 +444,14 @@ where
                 };
             }
             (
-                CoordinatorToConnectionInner::StartShutdown,
+                CoordinatorToConnectionInner::Rst,
                 SingleStreamConnectionTaskInner::ShutdownWaitingAck {
                     initiator: ShutdownInitiator::Coordinator,
                     ..
                 }
                 | SingleStreamConnectionTaskInner::ShutdownAcked { .. },
             ) => unreachable!(),
-            (CoordinatorToConnectionInner::ShutdownFinishedAck, _) => unreachable!(),
+            (CoordinatorToConnectionInner::ShutdownAck, _) => unreachable!(),
             (_, SingleStreamConnectionTaskInner::Poisoned) => unreachable!(),
         }
     }
@@ -467,17 +488,31 @@ where
                 // Mark the initiator as being the API in order to track proper API usage.
                 *initiator = ShutdownInitiator::Api;
             }
-            _ => {
+            SingleStreamConnectionTaskInner::Handshake { .. } => {
                 self.pending_messages
-                    .push_back(ConnectionToCoordinatorInner::StartShutdown(Some(
+                    .push_back(ConnectionToCoordinatorInner::Shutdown(Some(
                         ShutdownCause::RemoteReset,
                     )));
-                self.pending_messages
-                    .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
                 self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
                     initiator: ShutdownInitiator::Api,
                 };
             }
+            SingleStreamConnectionTaskInner::Established {
+                established,
+                outbound_substreams_map,
+                outbound_substreams_reverse,
+                notifications_in_open_cancel_acknowledgments,
+            } => {
+                // TODO: no /!\ must close substreams
+                self.pending_messages
+                    .push_back(ConnectionToCoordinatorInner::Shutdown(Some(
+                        ShutdownCause::RemoteReset,
+                    )));
+                self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
+                    initiator: ShutdownInitiator::Api,
+                };
+            }
+            SingleStreamConnectionTaskInner::Poisoned => unreachable!(),
         }
     }
 
@@ -525,13 +560,11 @@ where
             } => match established.read_write(read_write) {
                 Ok((connection, event)) => {
                     if read_write.is_dead() && event.is_none() {
-                        self.pending_messages.push_back(
-                            ConnectionToCoordinatorInner::StartShutdown(Some(
-                                ShutdownCause::CleanShutdown,
-                            )),
-                        );
+                        // TODO: add debug_asserts regarding substreams being closed
                         self.pending_messages
-                            .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
+                            .push_back(ConnectionToCoordinatorInner::Shutdown(Some(
+                                ShutdownCause::CleanShutdown,
+                            )));
                         self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
                             initiator: ShutdownInitiator::Remote,
                         };
@@ -540,17 +573,9 @@ where
 
                     match event {
                         Some(established::Event::NewOutboundSubstreamsForbidden) => {
-                            // TODO: handle properly
                             self.pending_messages.push_back(
-                                ConnectionToCoordinatorInner::StartShutdown(Some(
-                                    ShutdownCause::CleanShutdown,
-                                )),
+                                ConnectionToCoordinatorInner::NewOutboundSubstreamsForbidden,
                             );
-                            self.pending_messages
-                                .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
-                            self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
-                                initiator: ShutdownInitiator::Remote,
-                            };
                             return;
                         }
                         Some(established::Event::InboundError(err)) => {
@@ -663,12 +688,11 @@ where
                     };
                 }
                 Err(err) => {
+                    // TODO: report all substreams as closed
                     self.pending_messages
-                        .push_back(ConnectionToCoordinatorInner::StartShutdown(Some(
+                        .push_back(ConnectionToCoordinatorInner::Shutdown(Some(
                             ShutdownCause::ProtocolError(err),
                         )));
-                    self.pending_messages
-                        .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
                     self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
                         initiator: ShutdownInitiator::Remote,
                     };
@@ -697,11 +721,9 @@ where
                 // way through.
                 if timeout < read_write.now {
                     self.pending_messages
-                        .push_back(ConnectionToCoordinatorInner::StartShutdown(Some(
+                        .push_back(ConnectionToCoordinatorInner::Shutdown(Some(
                             ShutdownCause::HandshakeTimeout,
                         )));
-                    self.pending_messages
-                        .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
                     self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
                         initiator: ShutdownInitiator::Remote,
                     };
@@ -720,12 +742,10 @@ where
                         Ok(rw) => rw,
                         Err(err) => {
                             self.pending_messages.push_back(
-                                ConnectionToCoordinatorInner::StartShutdown(Some(
+                                ConnectionToCoordinatorInner::Shutdown(Some(
                                     ShutdownCause::HandshakeError(err),
                                 )),
                             );
-                            self.pending_messages
-                                .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
                             self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
                                 initiator: ShutdownInitiator::Remote,
                             };

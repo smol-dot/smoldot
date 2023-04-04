@@ -203,11 +203,6 @@ pub struct Network<TConn, TNow> {
     /// List of all connections in the data structure.
     connections: hashbrown::HashMap<ConnectionId, Connection<TConn>, fnv::FnvBuildHasher>,
 
-    /// If `Some`, the given connection is in the process of shutting down. Calling
-    /// [`Network::next_event`] will cancel all ongoing requests and notification substreams
-    /// that concern this connection before processing any other incoming message.
-    shutting_down_connection: Option<ConnectionId>,
-
     /// List of all outgoing notification substreams that we have opened. Can be either pending
     /// (waiting for the connection task to say whether it has been accepted or not) or fully
     /// open.
@@ -277,18 +272,15 @@ enum InnerConnectionState {
     /// The connection is still in its handshaking state.
     Handshaking,
     /// The connection is fully established.
-    Established,
-    /// The connection is in the process of shutting down.
+    Established {
+        /// Forbidden to open new outbound substreams.
+        new_outbound_substreams_denied: bool,
+    },
+    /// The connection is in the process of shutting down because the user called
+    /// [`Network::reset_connection`].
     ShuttingDown {
         /// `true` if the state before the shutdown was [`InnerConnectionState::Established`].
         was_established: bool,
-
-        /// `true` if [`Network::start_shutdown`] has been called on this connection.
-        ///
-        /// Even if the remote starts the shutdown at the same time, from an API perspective if
-        /// this flag is `true` it will be considered as if the API user had initiated the
-        /// shutdown.
-        api_initiated: bool,
     },
 }
 
@@ -335,7 +327,6 @@ where
                 config.capacity,
                 Default::default(),
             ),
-            shutting_down_connection: None,
             outgoing_requests: BTreeSet::new(),
             ingoing_requests: hashbrown::HashMap::with_capacity_and_hasher(
                 config.request_response_protocols.len() * config.capacity,
@@ -481,15 +472,16 @@ where
 
     /// Switches the connection to a state where it will shut down soon.
     ///
-    /// Calling this function does **not** generate a [`Event::StartShutdown`] event for this
-    /// connection. The event is implied.
+    /// A [`Event::Shutdown`] event will later be generated for this connection.
     ///
+    /// Calling this function does **not** generate a [`Event::NewOutboundSubstreamsForbidden`]
+    /// event for this connection, but the event is implied.
     /// It is no longer possible to start requests, open notifications substreams, or send
-    /// notifications. No new incoming requests or notification substreams will be reported. The
-    /// incoming notifications that were sent by the remote before the shutdown started will still
-    /// be reported.
+    /// notifications. New incoming requests or notification substreams are automatically rejected
+    /// and will be reported as events. The incoming notifications that were sent by the remote
+    /// before the shutdown started will still be reported.
     ///
-    /// It is possible to call this method on connection that are still in their handshaking
+    /// It is possible to call this method on connections that are still in their handshaking
     /// phase.
     ///
     /// This function generates a message destined to the connection. Use
@@ -497,11 +489,11 @@ where
     ///
     /// # Panic
     ///
-    /// Panics if the connection is already shutting down, either because
-    /// [`Network::start_shutdown`] was called or a [`Event::StartShutdown`] event was yielded.
+    /// Panics if [`Network::reset_connection`] was already called in the past.
+    /// Panics if the [`ConnectionId`̀] is invalid.
     ///
     #[track_caller]
-    pub fn start_shutdown(&mut self, connection_id: ConnectionId) {
+    pub fn reset_connection(&mut self, connection_id: ConnectionId) {
         let connection = match self.connections.get_mut(&connection_id) {
             Some(c) => c,
             None => panic!(),
@@ -509,24 +501,47 @@ where
 
         let is_established = match connection.state {
             InnerConnectionState::Handshaking => false,
-            InnerConnectionState::Established => true,
-            InnerConnectionState::ShuttingDown {
-                api_initiated: true,
-                ..
-            } => panic!("start_shutdown called twice on same connection"), // Forbidden.
-            InnerConnectionState::ShuttingDown {
-                api_initiated: false,
-                ..
-            } => panic!("start_shutdown called after StartShutdown event"), // Forbidden.
+            InnerConnectionState::Established { .. } => true,
+            InnerConnectionState::ShuttingDown { .. } => {
+                // Forbidden.
+                panic!("reset_connection called twice on same connection")
+            }
         };
 
         connection.state = InnerConnectionState::ShuttingDown {
             was_established: is_established,
-            api_initiated: true,
         };
 
         self.messages_to_connections
-            .push_back((connection_id, CoordinatorToConnectionInner::StartShutdown));
+            .push_back((connection_id, CoordinatorToConnectionInner::Rst));
+    }
+
+    /// Close the incoming substreams of this connection, automatically denying any new substream
+    /// request from the remote.
+    ///
+    /// Note that this does not prevent incoming-substreams-related events
+    /// (such as [`Event::RequestIn`]) from being generated, as it is possible that the remote has
+    /// already opened a substream but has no sent all the necessary handshake messages yet.
+    ///
+    /// # Panic
+    ///
+    /// Panic if this function has been called before. It is illegal to call
+    /// [`Network::deny_new_incoming_substreams`] more than one on the same connections.
+    /// Panics if [`Network::reset_connection`] was already called in the past on this connection.
+    /// Panics if the [`ConnectionId`̀] is invalid.
+    ///
+    pub fn deny_new_incoming_substreams(&mut self, connection_id: ConnectionId) {
+        let connection = match self.connections.get_mut(&connection_id) {
+            Some(c) => c,
+            None => panic!(),
+        };
+
+        // TODO: check and update local state
+
+        self.messages_to_connections.push_back((
+            connection_id,
+            CoordinatorToConnectionInner::DenyNewIncomingSubstreams,
+        ));
     }
 
     /// Returns true if the collection doesn't contain any connection.
@@ -634,7 +649,9 @@ where
         };
         assert!(matches!(
             connection.state,
-            InnerConnectionState::Established
+            InnerConnectionState::Established {
+                new_outbound_substreams_denied: false,
+            }
         ));
 
         let request_data = request_data.into();
@@ -703,7 +720,9 @@ where
         };
         assert!(matches!(
             connection.state,
-            InnerConnectionState::Established
+            InnerConnectionState::Established {
+                new_outbound_substreams_denied: false,
+            }
         ));
 
         assert!(self
@@ -982,7 +1001,8 @@ where
     /// [`Network::inject_connection_message`].
     pub fn next_event(&mut self) -> Option<Event<TConn>> {
         loop {
-            // When a connection starts its shutdown, its id is put in `shutting_down_connection`.
+            // TODO: remove this block of code once finished with changes
+            /*// When a connection starts its shutdown, its id is put in `shutting_down_connection`.
             // When that happens, we go through the local state and clean up all requests and
             // notification substreams that are in progress/open and return the cancellations
             // as events.
@@ -1088,79 +1108,87 @@ where
                 // substream that is still in progress or open. The connection is successfully
                 // shut down.
                 self.shutting_down_connection = None;
-            }
+            }*/
 
             // Now actually process messages.
             let (connection_id, message) = self.pending_incoming_messages.pop_front()?;
             let connection = &mut self.connections.get_mut(&connection_id).unwrap();
 
             break Some(match message {
-                ConnectionToCoordinatorInner::StartShutdown(reason) => {
-                    // The `ConnectionToCoordinator` message contains a shutdown reason if
-                    // and only if it sends `StartShutdown` as a response to a shutdown
-                    // initiated by the remote. If the shutdown was initiated locally
-                    // (`api_initiated` is `true`), then it can contain `None`, but it can also
-                    // contain `Some` in case the shutdown was initiated by the remote at the same
-                    // time as it was initiated locally.
-
+                ConnectionToCoordinatorInner::NewOutboundSubstreamsForbidden => {
                     let report_event = match &mut connection.state {
-                        InnerConnectionState::ShuttingDown {
-                            api_initiated: true,
-                            ..
-                        } => false,
-                        InnerConnectionState::ShuttingDown {
-                            api_initiated: false,
-                            ..
-                        } => unreachable!(),
-                        st @ InnerConnectionState::Handshaking => {
-                            *st = InnerConnectionState::ShuttingDown {
-                                api_initiated: false,
-                                was_established: false,
-                            };
+                        InnerConnectionState::ShuttingDown { .. } => false,
+                        InnerConnectionState::Established {
+                            new_outbound_substreams_denied,
+                        } => {
+                            debug_assert!(!*new_outbound_substreams_denied);
+                            *new_outbound_substreams_denied = true;
                             true
                         }
-                        st @ InnerConnectionState::Established => {
-                            *st = InnerConnectionState::ShuttingDown {
-                                api_initiated: false,
-                                was_established: true,
-                            };
-                            true
+                        InnerConnectionState::Handshaking => {
+                            unreachable!()
                         }
                     };
 
-                    // Control flow can't reach here if `shutting_down_connection` is ̀`Some`.
-                    debug_assert!(self.shutting_down_connection.is_none());
-                    self.shutting_down_connection = Some(connection_id);
-
                     if !report_event {
-                        // No `StartShutdown` event is generated if the API user has started
-                        // the shutdown themselves. In that case, `StartShutdown` is merely a
-                        // confirmation.
+                        // No `NewOutboundSubstreamsForbidden` event is generated if the API user
+                        // has started the shutdown themselves in the meanwhile.
                         continue;
                     } else {
-                        Event::StartShutdown {
-                            id: connection_id,
-                            reason: reason.unwrap(), // See comment above.
-                        }
+                        Event::NewOutboundSubstreamsForbidden { id: connection_id }
                     }
                 }
-                ConnectionToCoordinatorInner::ShutdownFinished => {
+                ConnectionToCoordinatorInner::Shutdown(reason) => {
+                    debug_assert_eq!(
+                        self.ingoing_notification_substreams_by_connection
+                            .range(
+                                (connection_id, established::SubstreamId::min_value())
+                                    ..=(connection_id, established::SubstreamId::max_value())
+                            )
+                            .count(),
+                        0
+                    );
+                    debug_assert_eq!(
+                        self.outgoing_notification_substreams_by_connection
+                            .range(
+                                (connection_id, SubstreamId::min_value())
+                                    ..=(connection_id, SubstreamId::max_value())
+                            )
+                            .count(),
+                        0
+                    );
+                    debug_assert_eq!(
+                        self.ingoing_requests_by_connection
+                            .range(
+                                (connection_id, SubstreamId::min_value())
+                                    ..=(connection_id, SubstreamId::max_value())
+                            )
+                            .count(),
+                        0
+                    );
+
+                    // The `ConnectionToCoordinator` message contains a shutdown reason if
+                    // and only if it sends `Shutdown` as a response to a shutdown initiated by the
+                    // remote. If the shutdown was initiated locally, then it can contain `None`,
+                    // but could also contain `Some` in case the shutdown was initiated by the
+                    // remote at the same time as it was initiated locally.
+
                     let was_established = match &connection.state {
+                        InnerConnectionState::Handshaking => false,
+                        InnerConnectionState::Established { .. } => true,
                         InnerConnectionState::ShuttingDown {
                             was_established, ..
                         } => *was_established,
-                        _ => unreachable!(),
                     };
 
                     let user_data = self.connections.remove(&connection_id).unwrap().user_data;
-                    self.messages_to_connections.push_back((
-                        connection_id,
-                        CoordinatorToConnectionInner::ShutdownFinishedAck,
-                    ));
+                    self.messages_to_connections
+                        .push_back((connection_id, CoordinatorToConnectionInner::ShutdownAck));
                     Event::Shutdown {
                         id: connection_id,
                         was_established,
                         user_data,
+                        reason: reason.unwrap(), // TODO: don't unwrap /!\
                     }
                 }
                 ConnectionToCoordinatorInner::HandshakeFinished(peer_id) => {
@@ -1193,18 +1221,18 @@ where
                     );
 
                     match &mut connection.state {
-                        InnerConnectionState::ShuttingDown {
-                            was_established,
-                            api_initiated,
-                        } => {
+                        InnerConnectionState::ShuttingDown { was_established } => {
                             debug_assert!(!*was_established);
-                            debug_assert!(*api_initiated);
+                            // Don't report the event if the API user has asked to reset the
+                            // connection.
                             continue;
                         }
                         st @ InnerConnectionState::Handshaking => {
-                            *st = InnerConnectionState::Established
+                            *st = InnerConnectionState::Established {
+                                new_outbound_substreams_denied: false,
+                            }
                         }
-                        InnerConnectionState::Established => unreachable!(),
+                        InnerConnectionState::Established { .. } => unreachable!(),
                     }
 
                     Event::HandshakeFinished {
@@ -1214,10 +1242,7 @@ where
                 }
                 ConnectionToCoordinatorInner::InboundError(error) => {
                     // Ignore events if a shutdown has been initiated by the coordinator.
-                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
-                        connection.state
-                    {
-                        debug_assert!(api_initiated);
+                    if let InnerConnectionState::ShuttingDown { .. } = connection.state {
                         continue;
                     }
 
@@ -1232,10 +1257,7 @@ where
                     request,
                 } => {
                     // Ignore events if a shutdown has been initiated by the coordinator.
-                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
-                        connection.state
-                    {
-                        debug_assert!(api_initiated);
+                    if let InnerConnectionState::ShuttingDown { .. } = connection.state {
                         continue;
                     }
 
@@ -1260,10 +1282,7 @@ where
                     ..
                 } => {
                     // Ignore events if a shutdown has been initiated by the coordinator.
-                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
-                        connection.state
-                    {
-                        debug_assert!(api_initiated);
+                    if let InnerConnectionState::ShuttingDown { .. } = connection.state {
                         continue;
                     }
 
@@ -1283,10 +1302,7 @@ where
                     handshake,
                 } => {
                     // Ignore events if a shutdown has been initiated by the coordinator.
-                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
-                        connection.state
-                    {
-                        debug_assert!(api_initiated);
+                    if let InnerConnectionState::ShuttingDown { .. } = connection.state {
                         continue;
                     }
 
@@ -1312,10 +1328,8 @@ where
                     ..
                 } => {
                     // Ignore events if a shutdown has been initiated by the coordinator.
-                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
-                        connection.state
-                    {
-                        debug_assert!(api_initiated);
+                    // TODO: tricky! might be that the shutdown happened between the opening and the cancel, need to look in internal state and decide
+                    if let InnerConnectionState::ShuttingDown { .. } = connection.state {
                         continue;
                     }
 
@@ -1357,14 +1371,6 @@ where
                     id: inner_substream_id,
                     notification,
                 } => {
-                    // Ignore events if a shutdown has been initiated by the coordinator.
-                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
-                        connection.state
-                    {
-                        debug_assert!(api_initiated);
-                        continue;
-                    }
-
                     let substream_id = *self
                         .ingoing_notification_substreams_by_connection
                         .get(&(connection_id, inner_substream_id))
@@ -1380,14 +1386,6 @@ where
                     outcome,
                     ..
                 } => {
-                    // Ignore events if a shutdown has been initiated by the coordinator.
-                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
-                        connection.state
-                    {
-                        debug_assert!(api_initiated);
-                        continue;
-                    }
-
                     let substream_id = self
                         .ingoing_notification_substreams_by_connection
                         .remove(&(connection_id, inner_substream_id))
@@ -1405,6 +1403,7 @@ where
                     result,
                 } => {
                     // Ignore events if a shutdown has been initiated by the coordinator.
+                    // TODO: tricky!
                     if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
                         connection.state
                     {
@@ -1445,10 +1444,7 @@ where
                     ..
                 } => {
                     // Ignore events if a shutdown has been initiated by the coordinator.
-                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
-                        connection.state
-                    {
-                        debug_assert!(api_initiated);
+                    if let InnerConnectionState::ShuttingDown { .. } = connection.state {
                         continue;
                     }
 
@@ -1467,14 +1463,6 @@ where
                     Event::NotificationsOutCloseDemanded { substream_id }
                 }
                 ConnectionToCoordinatorInner::NotificationsOutReset { id: substream_id } => {
-                    // Ignore events if a shutdown has been initiated by the coordinator.
-                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
-                        connection.state
-                    {
-                        debug_assert!(api_initiated);
-                        continue;
-                    }
-
                     match self.outgoing_notification_substreams.remove(&substream_id) {
                         Some((_connection_id, _substream_state)) => {
                             debug_assert_eq!(_connection_id, connection_id);
@@ -1496,10 +1484,7 @@ where
                 }
                 ConnectionToCoordinatorInner::PingOutSuccess => {
                     // Ignore events if a shutdown has been initiated by the coordinator.
-                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
-                        connection.state
-                    {
-                        debug_assert!(api_initiated);
+                    if let InnerConnectionState::ShuttingDown { .. } = connection.state {
                         continue;
                     }
 
@@ -1507,10 +1492,7 @@ where
                 }
                 ConnectionToCoordinatorInner::PingOutFailed => {
                     // Ignore events if a shutdown has been initiated by the coordinator.
-                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
-                        connection.state
-                    {
-                        debug_assert!(api_initiated);
+                    if let InnerConnectionState::ShuttingDown { .. } = connection.state {
                         continue;
                     }
 
@@ -1543,12 +1525,19 @@ pub enum StartRequestError {
 
 /// See [`Network::connection_state`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct ConnectionState {
-    /// If `true`, the connection has finished its handshaking phase.
-    pub established: bool,
+pub enum ConnectionState {
+    Handshaking,
+    Established,
+    EstablishedRefusingNewOutboundSubstreams,
+}
 
-    /// If `true`, the connection is shutting down.
-    pub shutting_down: bool,
+impl ConnectionState {
+    /// Returns `true` if the connection would accept new outbound substreams.
+    ///
+    /// This is a shortcut for checking equality against [`ConnectionState::Established`].
+    pub fn accepts_substreams(&self) -> bool {
+        matches!(self, ConnectionState::Established)
+    }
 }
 
 /// Message from a connection task destined to the coordinator.
@@ -1633,18 +1622,21 @@ enum ConnectionToCoordinatorInner {
     /// See the corresponding event in [`established::Event`].
     PingOutFailed,
 
-    /// Sent either in response to [`ConnectionToCoordinatorInner::StartShutdown`] (in which case
+    // TODO: doc and explain
+    NewOutboundSubstreamsForbidden,
+
+    /// The connection has shut down.
+    ///
+    /// All substreams are guaranteed to have been closed (through other messages) prior to this
+    /// message being sent.
+    ///
+    /// Sent either in response to [`ConnectionToCoordinatorInner::Rst`] (in which case
     /// the content is `None`) or if the remote has initiated the shutdown (in which case the
     /// content is `Some`). After this, no more [`ConnectionToCoordinatorInner`] will be sent
-    /// anymore except for [`ConnectionToCoordinatorInner::ShutdownFinished`].
-    StartShutdown(Option<ShutdownCause>),
-
-    /// Shutdown has now finished. Always sent after
-    /// [`ConnectionToCoordinatorInner::StartShutdown`]. No message is sent by the connection
-    /// task anymore after that.
+    /// anymore.
     ///
-    /// Must be confirmed with a [`CoordinatorToConnectionInner::ShutdownFinishedAck`].
-    ShutdownFinished,
+    /// Must be confirmed with a [`CoordinatorToConnectionInner::ShutdownAck`].
+    Shutdown(Option<ShutdownCause>),
 }
 
 /// Message from the coordinator destined to a connection task.
@@ -1654,16 +1646,22 @@ pub struct CoordinatorToConnection<TNow> {
 
 enum CoordinatorToConnectionInner<TNow> {
     /// Connection task must terminate. This is always sent back after a
-    /// [`ConnectionToCoordinatorInner::ShutdownFinished`].
+    /// [`ConnectionToCoordinatorInner::Shutdown`].
     ///
     /// This final message is necessary in order to make sure that the coordinator doesn't
     /// generate messages destined to a connection that isn't alive anymore.
-    ShutdownFinishedAck,
+    ShutdownAck,
 
-    /// Connection must start shutting down if it is not already the case.
-    /// Before of concurrency, it is possible for this message to be sent/received *after* a
-    /// [`ConnectionToCoordinatorInner::StartShutdown`] has been sent.
-    StartShutdown,
+    /// Connection must start refusing new incoming substreams.
+    ///
+    /// Due to the asynchronous nature of communications, the connection task can still send
+    /// events about new incoming substreams. The coordinator must simply ignore these events.
+    DenyNewIncomingSubstreams,
+
+    /// Connection must abruptly shut down if it isn't already.
+    /// Because of concurrency, it is possible for this message to be sent/received *after* a
+    /// [`ConnectionToCoordinatorInner::Shutdown`] has been sent.
+    Rst,
 
     StartRequest {
         protocol_index: usize,
@@ -1727,28 +1725,26 @@ pub enum Event<TConn> {
         peer_id: PeerId,
     },
 
-    /// A transport-level connection (e.g. a TCP socket) is starting its shutdown.
+    /// A transport-level connection (e.g. a TCP socket) no longer accepts new outgoing substreams.
     ///
     /// It is no longer possible to start requests, open notification substreams, or open
-    /// notifications on this connection, and no new incoming requests or notification substreams
-    /// will be reported as events.
+    /// notifications on this connection.
     ///
-    /// Further events will close all existing substreams (requests and notifications) one by one.
-    /// Once all substreams have been closed, a [`Event::Shutdown`] is reported.
-    ///
-    /// Keep in mind that this event can also happen for connections that haven't finished their
-    /// handshake.
-    ///
-    /// This event is **not** generated when [`Network::start_shutdown`] is called.
-    StartShutdown {
-        /// Identifier of the connection that is starting its shutdown.
+    /// This event can never happen for connections that haven't finished their handshake.
+    NewOutboundSubstreamsForbidden {
+        /// Identifier of the connection.
         id: ConnectionId,
-        /// Reason why the connection is starting its shutdown. Because this event is not generated
-        /// when the shutdown is initiated locally, the reason is always cause by the remote.
-        reason: ShutdownCause,
     },
 
     /// A transport-level connection (e.g. a TCP socket) has been shut down.
+    ///
+    /// This event happens if all substreams have been closed and both sides refuse new substreams,
+    /// or if a protocol error has happened on the connection, of if the remote has abruptly
+    /// closed the connection.
+    /// It is guaranteed that all substreams that were open on that connection have been closed.
+    ///
+    /// Keep in mind that this event can also happen for connections that haven't finished their
+    /// handshake.
     ///
     /// This [`ConnectionId`] is no longer valid, and using it will result in panics.
     Shutdown {
@@ -1756,6 +1752,9 @@ pub enum Event<TConn> {
         id: ConnectionId,
         /// `true` if the connection was in its established phase before the shutdown.
         was_established: bool,
+        /// Reason why the connection is starting its shutdown. Because this event is not generated
+        /// when the shutdown is initiated locally, the reason is always caused by the remote.
+        reason: ShutdownCause,
         /// User data that was stored in the state machine for this connection.
         user_data: TConn,
     },
