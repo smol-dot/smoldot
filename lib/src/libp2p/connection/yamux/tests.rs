@@ -155,6 +155,7 @@ fn substream_opened_back_after_rst() {
         randomness_seed: [0; 32],
     });
 
+    // One SYN frame, one RST frame, one SYN frame again. All using the same substream ID.
     let data = [
         0, 0, 0, 1, 0, 0, 0, 84, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 84, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0,
         0, 84, 0, 0, 0, 0,
@@ -170,12 +171,18 @@ fn substream_opened_back_after_rst() {
                 if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
                     yamux.accept_pending_substream(());
                 }
+
+                let dead_substream = yamux.dead_substreams().next().map(|(s, ..)| s);
+                if let Some(substream_id) = dead_substream {
+                    yamux.remove_dead_substream(substream_id);
+                }
             }
             Err(_) => panic!(),
         }
     }
 
     // Test success.
+    assert_eq!(cursor, data.len());
 }
 
 #[test]
