@@ -33,12 +33,12 @@
 //! Call [`Yamux::incoming_data`] when data is available on the socket. This function parses
 //! the received data, updates the internal state machine, and possibly returns an
 //! [`IncomingDataDetail`].
-//! Call [`Yamux::extract_out`] when the remote is ready to accept more data.
+//! Call [`Yamux::extract_next`] when the remote is ready to accept more data.
 //!
 //! The generic parameter of [`Yamux`] is an opaque "user data" associated to each substream.
 //!
 //! When [`Yamux::write`] is called, the buffer of data to send out is stored within the
-//! [`Yamux`] object. This data will then be progressively returned by [`Yamux::extract_out`].
+//! [`Yamux`] object. This data will then be progressively returned by [`Yamux::extract_next`].
 //!
 //! It is the responsibility of the user to enforce a bound to the amount of enqueued data, as
 //! the [`Yamux`] itself doesn't enforce any limit. Enforcing such a bound must be done based
@@ -263,7 +263,7 @@ enum OutgoingGoAway {
     /// A `GoAway` frame has been queued into [`Yamux::outgoing`] in the past.
     Queued,
 
-    /// A `GoAway` frame has been extracted through [`Yamux::extract_out`].
+    /// A `GoAway` frame has been extracted through [`Yamux::extract_next`].
     Sent,
 }
 
@@ -286,7 +286,7 @@ enum OutgoingSubstreamData {
 }
 
 /// Maximum number of simultaneous outgoing pings allowed.
-const MAX_PINGS: usize = 100000;
+pub const MAX_PINGS: usize = 100000;
 
 impl<T> Yamux<T> {
     /// Initializes a new Yamux state machine.
@@ -744,13 +744,13 @@ impl<T> Yamux<T> {
     /// Returns `true` if [`Yamux::send_goaway`] has been called in the past.
     ///
     /// In other words, returns `true` if a `GoAway` frame has been either queued for sending
-    /// (and is available through [`Yamux::extract_out`]) or has already been sent out.
+    /// (and is available through [`Yamux::extract_next`]) or has already been sent out.
     pub fn goaway_queued_or_sent(&self) -> bool {
         !matches!(self.inner.outgoing_goaway, OutgoingGoAway::NotRequired)
     }
 
     /// Returns `true` if [`Yamux::send_goaway`] has been called in the past and that this
-    /// `GoAway` frame has been extracted through [`Yamux::extract_out`].
+    /// `GoAway` frame has been extracted through [`Yamux::extract_next`].
     pub fn goaway_sent(&self) -> bool {
         matches!(self.inner.outgoing_goaway, OutgoingGoAway::Sent)
     }
