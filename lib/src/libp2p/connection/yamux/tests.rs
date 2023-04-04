@@ -78,6 +78,8 @@ fn ack_sent() {
         }
     }
 
+    yamux.write(opened_substream.unwrap(), b"foo".to_vec());
+
     let mut output = Vec::new();
     while let Some(out) = yamux.extract_next(usize::max_value()) {
         output.extend_from_slice(out.as_ref());
