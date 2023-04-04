@@ -63,6 +63,7 @@ use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 pub use header::GoAwayErrorCode;
 
 mod header;
+mod tests;
 mod write_queue;
 
 /// Name of the protocol, typically used when negotiated it using *multistream-select*.
@@ -1193,6 +1194,16 @@ impl<T> Yamux<T> {
                             length,
                             ..
                         } => {
+                            // The initiator should only allocate uneven substream IDs, and the
+                            // other side only even IDs. We don't know anymore whether we're
+                            // initiator at this point, but we can compare with the even-ness of
+                            // the IDs that we allocate locally.
+                            if (self.inner.next_outbound_substream.get() % 2)
+                                == (stream_id.get() % 2)
+                            {
+                                return Err(Error::InvalidInboundStreamId(stream_id));
+                            }
+
                             // Remote has sent a SYN flag. A new substream is to be opened.
                             match self.inner.substreams.get(&stream_id) {
                                 Some(Substream {
@@ -1863,6 +1874,8 @@ pub enum IncomingDataDetail {
 pub enum Error {
     /// Failed to decode an incoming Yamux header.
     HeaderDecode(header::YamuxHeaderDecodeError),
+    /// Received a SYN flag with a substream ID that is of the same side as the local side.
+    InvalidInboundStreamId(NonZeroU32),
     /// Received a SYN flag with a known substream ID.
     #[display(fmt = "Received a SYN flag with a known substream ID")]
     UnexpectedSyn(NonZeroU32),
