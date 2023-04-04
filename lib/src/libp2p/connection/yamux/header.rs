@@ -351,7 +351,7 @@ mod tests {
         assert!(super::decode_yamux_header(&[2, 0, 0, 1, 0, 0, 0, 15, 0, 0, 2, 65]).is_err());
     }
 
-    macro_rules! check_encode_reendoces {
+    macro_rules! check_encode_redecodes {
         ($payload:expr) => {{
             let payload = $payload;
             assert_eq!(
@@ -364,7 +364,7 @@ mod tests {
     #[test]
     fn encode_data() {
         for _ in 0..500 {
-            check_encode_reendoces!(super::DecodedYamuxHeader::Data {
+            check_encode_redecodes!(super::DecodedYamuxHeader::Data {
                 syn: rand::random(),
                 ack: rand::random(),
                 fin: rand::random(),
@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn encode_window() {
         for _ in 0..500 {
-            check_encode_reendoces!(super::DecodedYamuxHeader::Window {
+            check_encode_redecodes!(super::DecodedYamuxHeader::Window {
                 syn: rand::random(),
                 ack: rand::random(),
                 fin: rand::random(),
@@ -391,26 +391,26 @@ mod tests {
 
     #[test]
     fn encode_ping() {
-        check_encode_reendoces!(super::DecodedYamuxHeader::PingRequest {
+        check_encode_redecodes!(super::DecodedYamuxHeader::PingRequest {
             opaque_value: rand::random(),
         });
 
-        check_encode_reendoces!(super::DecodedYamuxHeader::PingResponse {
+        check_encode_redecodes!(super::DecodedYamuxHeader::PingResponse {
             opaque_value: rand::random(),
         });
     }
 
     #[test]
     fn encode_goaway() {
-        check_encode_reendoces!(super::DecodedYamuxHeader::GoAway {
+        check_encode_redecodes!(super::DecodedYamuxHeader::GoAway {
             error_code: super::GoAwayErrorCode::NormalTermination,
         });
 
-        check_encode_reendoces!(super::DecodedYamuxHeader::GoAway {
+        check_encode_redecodes!(super::DecodedYamuxHeader::GoAway {
             error_code: super::GoAwayErrorCode::ProtocolError,
         });
 
-        check_encode_reendoces!(super::DecodedYamuxHeader::GoAway {
+        check_encode_redecodes!(super::DecodedYamuxHeader::GoAway {
             error_code: super::GoAwayErrorCode::InternalError,
         });
     }
