@@ -506,7 +506,8 @@ where
                 // Extract outgoing data that is buffered within yamux.
                 // TODO: don't allocate an intermediary buffer, but instead pass them directly to the encryption
                 let mut buffers = Vec::with_capacity(32);
-                while let Some(buffer) = self.inner.yamux.extract_next(unencrypted_bytes_to_extract) {
+                while let Some(buffer) = self.inner.yamux.extract_next(unencrypted_bytes_to_extract)
+                {
                     let buffer = buffer.as_ref();
                     unencrypted_bytes_to_extract -= buffer.len();
                     buffers.push(buffer.to_vec()); // TODO: copy
