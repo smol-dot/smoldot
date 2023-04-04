@@ -99,7 +99,8 @@ struct YamuxInner<T> {
     /// that it is returned by [`Yamux::dead_substreams`].
     dead_substreams: hashbrown::HashSet<NonZeroU32, SipHasherBuild>,
 
-    /// Number of substreams within [`Yamux::substreams`] whose [`Substream::inbound`] is `true`.
+    /// Number of substreams within [`YamuxInner::substreams`] whose [`Substream::inbound`] is
+    /// `true`.
     num_inbound: usize,
 
     /// `Some` if a `GoAway` frame has been received in the past.
@@ -195,7 +196,7 @@ enum Incoming {
     /// A header referring to a new substream has been received. The reception of any further data
     /// is blocked waiting for the API user to accept or reject this substream.
     ///
-    /// Note that [`Yamux::outgoing`] must always be [`Outgoing::Idle`], in order to give the
+    /// Note that [`YamuxInner::outgoing`] must always be [`Outgoing::Idle`], in order to give the
     /// possibility to send back a RST frame for the new substream.
     PendingIncomingSubstream {
         /// Identifier of the pending substream.
@@ -252,10 +253,10 @@ enum OutgoingGoAway {
     NotRequired,
 
     /// API user has asked to send a `GoAway` frame. This frame hasn't been queued into
-    /// [`Yamux::outgoing`] yet.
+    /// [`YamuxInner::outgoing`] yet.
     Required(GoAwayErrorCode),
 
-    /// A `GoAway` frame has been queued into [`Yamux::outgoing`] in the past.
+    /// A `GoAway` frame has been queued into [`YamuxInner::outgoing`] in the past.
     Queued,
 
     /// A `GoAway` frame has been extracted through [`Yamux::extract_next`].
