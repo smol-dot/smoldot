@@ -63,6 +63,7 @@ use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 pub use header::GoAwayErrorCode;
 
 mod header;
+mod write_queue;
 
 /// Name of the protocol, typically used when negotiated it using *multistream-select*.
 pub const PROTOCOL_NAME: &str = "/yamux/1.0.0";
@@ -163,13 +164,7 @@ enum SubstreamState {
         /// True if the writing side of the remote node is closed for this substream.
         remote_write_closed: bool,
         /// Buffer of buffers to be written out to the socket.
-        // TODO: is it a good idea to have an unbounded VecDeque?
-        // TODO: call shrink_to_fit from time to time?
-        // TODO: instead of storing `Vec<u8>`s, consider storing a generic `B` and let the user manually write a `B` to the output buffer
-        write_buffers: VecDeque<Vec<u8>>,
-        /// Number of bytes in `self.write_buffers[0]` has have already been written out to the
-        /// socket.
-        first_write_buffer_offset: usize,
+        write_queue: write_queue::WriteQueue,
     },
 
     /// The substream has been reset, either locally or by the remote. Its entire purpose is to
@@ -277,11 +272,7 @@ enum OutgoingSubstreamData {
     /// Data is coming from a substream in a reset state.
     Obsolete {
         /// Buffer of buffers to be written out to the socket.
-        write_buffers: VecDeque<Vec<u8>>,
-
-        /// Number of bytes in `self.inner.write_buffers[0]` has have already been written out to
-        /// the socket.
-        first_write_buffer_offset: usize,
+        write_queue: write_queue::WriteQueue,
     },
 }
 
@@ -422,8 +413,7 @@ impl<T> Yamux<T> {
                 allowed_window: DEFAULT_FRAME_SIZE,
                 local_write_close: SubstreamStateLocalWrite::Open,
                 remote_write_closed: false,
-                write_buffers: VecDeque::with_capacity(16),
-                first_write_buffer_offset: 0,
+                write_queue: write_queue::WriteQueue::new(),
             },
             inbound: false,
             user_data,
@@ -511,14 +501,11 @@ impl<T> Yamux<T> {
             SubstreamState::Reset => {}
             SubstreamState::Healthy {
                 local_write_close: local_write,
-                write_buffers,
-                first_write_buffer_offset,
+                write_queue,
                 ..
             } => {
-                debug_assert!(!write_buffers.is_empty() || *first_write_buffer_offset == 0);
-
                 if matches!(local_write, SubstreamStateLocalWrite::Open) {
-                    write_buffers.push_back(data);
+                    write_queue.push_back(data);
                 }
             }
         }
@@ -586,11 +573,7 @@ impl<T> Yamux<T> {
             .unwrap_or_else(|| panic!())
             .state
         {
-            SubstreamState::Healthy {
-                write_buffers,
-                first_write_buffer_offset,
-                ..
-            } => write_buffers.iter().fold(0, |n, buf| n + buf.len()) - first_write_buffer_offset,
+            SubstreamState::Healthy { write_queue, .. } => write_queue.queued_bytes(),
             SubstreamState::Reset => 0,
         }
     }
@@ -707,16 +690,9 @@ impl<T> Yamux<T> {
                     data: data @ OutgoingSubstreamData::Healthy(_),
                     ..
                 },
-                SubstreamState::Healthy {
-                    write_buffers,
-                    first_write_buffer_offset,
-                    ..
-                },
+                SubstreamState::Healthy { write_queue, .. },
             ) if *data == OutgoingSubstreamData::Healthy(substream_id) => {
-                *data = OutgoingSubstreamData::Obsolete {
-                    write_buffers,
-                    first_write_buffer_offset,
-                };
+                *data = OutgoingSubstreamData::Obsolete { write_queue };
             }
             _ => {}
         }
@@ -820,17 +796,13 @@ impl<T> Yamux<T> {
                     SubstreamState::Healthy {
                         local_write_close,
                         remote_write_closed,
-                        write_buffers,
-                        first_write_buffer_offset,
+                        write_queue,
                         ..
                     } => {
                         debug_assert!(
                             matches!(local_write_close, SubstreamStateLocalWrite::FinQueued)
                                 && *remote_write_closed
-                                && (write_buffers.is_empty() // TODO: cumbersome
-                            || (write_buffers.len() == 1
-                                && write_buffers[0].len()
-                                    <= *first_write_buffer_offset))
+                                && write_queue.is_empty()
                         );
 
                         (
@@ -924,8 +896,7 @@ impl<T> Yamux<T> {
                             SubstreamState::Healthy {
                                 remote_write_closed: remote_write_closed @ false,
                                 local_write_close,
-                                write_buffers,
-                                first_write_buffer_offset,
+                                write_queue,
                                 ..
                             },
                         ..
@@ -934,10 +905,7 @@ impl<T> Yamux<T> {
                     *remote_write_closed = true;
 
                     if matches!(*local_write_close, SubstreamStateLocalWrite::FinQueued)
-                        && (write_buffers.is_empty() // TODO: cumbersome
-                    || (write_buffers.len() == 1
-                        && write_buffers[0].len()
-                            <= *first_write_buffer_offset))
+                        && write_queue.is_empty()
                     {
                         let _was_inserted = self.inner.dead_substreams.insert(substream_id.0);
                         debug_assert!(_was_inserted);
@@ -1119,20 +1087,13 @@ impl<T> Yamux<T> {
                                             data: data @ OutgoingSubstreamData::Healthy(_),
                                             ..
                                         },
-                                        SubstreamState::Healthy {
-                                            write_buffers,
-                                            first_write_buffer_offset,
-                                            ..
-                                        },
+                                        SubstreamState::Healthy { write_queue, .. },
                                     ) if *data
                                         == OutgoingSubstreamData::Healthy(SubstreamId(
                                             *substream_id,
                                         )) =>
                                     {
-                                        *data = OutgoingSubstreamData::Obsolete {
-                                            write_buffers,
-                                            first_write_buffer_offset,
-                                        };
+                                        *data = OutgoingSubstreamData::Obsolete { write_queue };
                                     }
                                     _ => {}
                                 }
@@ -1197,18 +1158,11 @@ impl<T> Yamux<T> {
                                         data: data @ OutgoingSubstreamData::Healthy(_),
                                         ..
                                     },
-                                    SubstreamState::Healthy {
-                                        write_buffers,
-                                        first_write_buffer_offset,
-                                        ..
-                                    },
+                                    SubstreamState::Healthy { write_queue, .. },
                                 ) if *data
                                     == OutgoingSubstreamData::Healthy(SubstreamId(stream_id)) =>
                                 {
-                                    *data = OutgoingSubstreamData::Obsolete {
-                                        write_buffers,
-                                        first_write_buffer_offset,
-                                    };
+                                    *data = OutgoingSubstreamData::Obsolete { write_queue };
                                 }
                                 _ => {}
                             }
@@ -1460,7 +1414,7 @@ impl<T> Yamux<T> {
                         let to_add = encoded_header_remains_to_write.to_vec();
                         *header_already_sent += u8::try_from(size_bytes).unwrap();
                         debug_assert!(*header_already_sent < 12);
-                        return Some(either::Right(VecWithOffset(to_add, 0)));
+                        return Some(either::Right(write_queue::VecWithOffset(to_add, 0)));
                     }
                 }
 
@@ -1468,71 +1422,56 @@ impl<T> Yamux<T> {
                     remaining_bytes: ref mut remain,
                     ref mut data,
                 } => {
-                    let (write_buffers, first_write_buffer_offset, substream_id) = match data {
+                    let (write_queue, substream_id) = match data {
                         OutgoingSubstreamData::Healthy(id) => {
-                            let substream = self.inner.substreams.get_mut(&id.0).unwrap();
                             if let SubstreamState::Healthy {
-                                ref mut write_buffers,
-                                ref mut first_write_buffer_offset,
+                                ref mut write_queue,
                                 ..
-                            } = &mut substream.state
+                            } = &mut self.inner.substreams.get_mut(&id.0).unwrap().state
                             {
-                                (write_buffers, first_write_buffer_offset, Some(*id))
+                                (write_queue, Some(*id))
                             } else {
                                 unreachable!()
                             }
                         }
                         OutgoingSubstreamData::Obsolete {
-                            ref mut write_buffers,
-                            ref mut first_write_buffer_offset,
-                        } => (write_buffers, first_write_buffer_offset, None),
+                            ref mut write_queue,
+                        } => (write_queue, None),
                     };
 
-                    let first_buf_avail = write_buffers[0].len() - *first_write_buffer_offset;
-                    let out = if first_buf_avail <= remain.get() && first_buf_avail <= size_bytes {
-                        let out = VecWithOffset(
-                            write_buffers.pop_front().unwrap(),
-                            *first_write_buffer_offset,
-                        );
-                        *first_write_buffer_offset = 0;
-                        let write_buffers_empty = write_buffers.is_empty();
-                        match NonZeroUsize::new(remain.get() - first_buf_avail) {
-                            Some(r) => *remain = r,
-                            None => self.inner.outgoing = Outgoing::Idle,
-                        };
-                        if write_buffers_empty {
-                            if let Some(id) = substream_id {
-                                if let SubstreamState::Healthy {
-                                    local_write_close: SubstreamStateLocalWrite::FinQueued,
-                                    remote_write_closed: true,
-                                    ..
-                                } = self.inner.substreams.get(&id.0).unwrap().state
-                                {
-                                    let _was_inserted = self.inner.dead_substreams.insert(id.0);
-                                    debug_assert!(_was_inserted);
-                                }
+                    // We only reach here if `size_bytes` and `remain` are non-zero.
+                    // Also, `write_queue` must always have a size >= `remain`.
+                    // Consequently, `out` can also never be empty.
+                    debug_assert!(write_queue.queued_bytes() >= remain.get());
+                    let out = write_queue.extract_some(cmp::min(remain.get(), size_bytes));
+                    debug_assert!(!out.as_ref().is_empty());
+
+                    // Since we are sure that `write_queue` wasn't empty beforehand, if it is
+                    // now empty it means that we have sent out all the queued data. If a `FIN`
+                    // was received and queued in the past, the substream is now dead.
+                    if write_queue.is_empty() {
+                        if let Some(id) = substream_id {
+                            if let SubstreamState::Healthy {
+                                local_write_close: SubstreamStateLocalWrite::FinQueued,
+                                remote_write_closed: true,
+                                ..
+                            } = self.inner.substreams.get(&id.0).unwrap().state
+                            {
+                                let _was_inserted = self.inner.dead_substreams.insert(id.0);
+                                debug_assert!(_was_inserted);
                             }
                         }
-                        either::Right(out)
-                    } else if remain.get() <= size_bytes {
-                        let out = VecWithOffset(
-                            write_buffers[0][*first_write_buffer_offset..][..remain.get()].to_vec(),
-                            0,
-                        );
-                        *first_write_buffer_offset += remain.get();
-                        self.inner.outgoing = Outgoing::Idle;
-                        either::Right(out)
-                    } else {
-                        let out = VecWithOffset(
-                            write_buffers[0][*first_write_buffer_offset..][..size_bytes].to_vec(),
-                            0,
-                        );
-                        *first_write_buffer_offset += size_bytes;
-                        *remain = NonZeroUsize::new(remain.get() - size_bytes).unwrap();
-                        either::Right(out)
-                    };
+                    }
 
-                    return Some(out);
+                    if let Some(still_some_remain) =
+                        NonZeroUsize::new(remain.get() - out.as_ref().len())
+                    {
+                        *remain = still_some_remain;
+                    } else {
+                        self.inner.outgoing = Outgoing::Idle;
+                    }
+
+                    return Some(either::Right(out));
                 }
 
                 Outgoing::Idle => {
@@ -1640,11 +1579,11 @@ impl<T> Yamux<T> {
                         .iter_mut()
                         .find(|(_, s)| match &s.state {
                             SubstreamState::Healthy {
-                                write_buffers,
+                                write_queue,
                                 local_write_close: local_write,
                                 ..
                             } => {
-                                !write_buffers.is_empty()
+                                !write_queue.is_empty()
                                     || matches!(local_write, SubstreamStateLocalWrite::FinDesired)
                             }
                             _ => false,
@@ -1655,11 +1594,11 @@ impl<T> Yamux<T> {
                             first_message_queued,
                             allowed_window,
                             local_write_close: local_write,
-                            write_buffers,
+                            write_queue,
                             ..
                         } = &mut sub.state
                         {
-                            let pending_len = write_buffers.iter().fold(0, |l, b| l + b.len());
+                            let pending_len = write_queue.queued_bytes();
                             let len_out = cmp::min(
                                 u32::try_from(pending_len).unwrap_or(u32::max_value()),
                                 u32::try_from(*allowed_window).unwrap_or(u32::max_value()),
@@ -1736,8 +1675,7 @@ impl<T> Yamux<T> {
                             allowed_window: DEFAULT_FRAME_SIZE + u64::from(extra_window),
                             local_write_close: SubstreamStateLocalWrite::Open,
                             remote_write_closed: data_frame_size == 0 && fin,
-                            write_buffers: VecDeque::new(),
-                            first_write_buffer_offset: 0,
+                            write_queue: write_queue::WriteQueue::new(),
                         },
                         inbound: true,
                         user_data,
@@ -1835,14 +1773,6 @@ where
         f.debug_struct("Yamux")
             .field("substreams", &List(self))
             .finish()
-    }
-}
-
-#[derive(Clone)]
-struct VecWithOffset(Vec<u8>, usize);
-impl AsRef<[u8]> for VecWithOffset {
-    fn as_ref(&self) -> &[u8] {
-        &self.0[self.1..]
     }
 }
 
