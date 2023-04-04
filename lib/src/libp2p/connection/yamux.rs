@@ -1270,6 +1270,10 @@ impl<T> Yamux<T> {
                                 continue;
                             }
 
+                            if is_data && u64::from(length) > DEFAULT_FRAME_SIZE {
+                                return Err(Error::CreditsExceeded);
+                            }
+
                             self.inner.incoming = Incoming::PendingIncomingSubstream {
                                 substream_id: SubstreamId(stream_id),
                                 extra_window: if !is_data { length } else { 0 },
@@ -1676,13 +1680,15 @@ impl<T> Yamux<T> {
                 data_frame_size,
                 fin,
             } => {
+                debug_assert!(u64::from(data_frame_size) <= DEFAULT_FRAME_SIZE);
+
                 let _was_before = self.inner.substreams.insert(
                     substream_id.0,
                     Substream {
                         state: SubstreamState::Healthy {
                             first_message_queued: false,
                             remote_syn_acked: true,
-                            remote_allowed_window: DEFAULT_FRAME_SIZE,
+                            remote_allowed_window: DEFAULT_FRAME_SIZE - u64::from(data_frame_size),
                             remote_window_pending_increase: 0,
                             allowed_window: DEFAULT_FRAME_SIZE + u64::from(extra_window),
                             local_write_close: SubstreamStateLocalWrite::Open,
