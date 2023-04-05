@@ -137,10 +137,8 @@ struct YamuxInner<T> {
     /// Number of pings to send out that haven't been queued yet.
     pings_to_send: usize,
 
-    /// List of pings that have been sent out but haven't been replied yet. Each ping has as key
-    /// the opaque value that has been sent out and that must be matched by the remote.
-    /// Since the opaque values are generated locally and randomly, we can use the `FNV` hasher.
-    pings_waiting_reply: hashbrown::HashSet<u32, fnv::FnvBuildHasher>,
+    /// List of pings that have been sent out but haven't been replied yet.
+    pings_waiting_reply: VecDeque<u32>,
 
     /// List of opaque values corresponding to ping requests sent by the remote. For each entry,
     /// a PONG header should be sent to the remote.
@@ -331,7 +329,7 @@ impl<T> Yamux<T> {
                 },
                 pings_to_send: 0,
                 // We leave the initial capacity at 0, as it is likely that no ping is sent at all.
-                pings_waiting_reply: hashbrown::HashSet::with_hasher(Default::default()),
+                pings_waiting_reply: VecDeque::with_capacity(0),
                 pongs_to_send: VecDeque::with_capacity(4),
                 max_simultaneous_queued_pongs: config.max_simultaneous_queued_pongs,
                 rsts_to_send: VecDeque::with_capacity(4),
@@ -390,7 +388,10 @@ impl<T> Yamux<T> {
     ///
     pub fn open_substream(&mut self, user_data: T) -> SubstreamId {
         // It is forbidden to open new substreams if a `GoAway` frame has been received.
-        assert!(self.inner.received_goaway.is_none(), "can't open substream after goaway");
+        assert!(
+            self.inner.received_goaway.is_none(),
+            "can't open substream after goaway"
+        );
 
         // Make sure that the `loop` below can finish.
         assert!(
@@ -1046,7 +1047,7 @@ impl<T> Yamux<T> {
                             self.inner.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                         }
                         header::DecodedYamuxHeader::PingResponse { opaque_value } => {
-                            if !self.inner.pings_waiting_reply.remove(&opaque_value) {
+                            if self.inner.pings_waiting_reply.pop_front() != Some(opaque_value) {
                                 return Err(Error::PingResponseNotMatching);
                             }
 
@@ -1576,19 +1577,13 @@ impl<T> Yamux<T> {
                     // Send outgoing pings.
                     if self.inner.pings_to_send > 0 {
                         self.inner.pings_to_send -= 1;
-                        // Generate opaque values in a loop until we don't hit a duplicate.
-                        loop {
-                            let opaque_value: u32 = self.inner.randomness.gen();
-                            if !self.inner.pings_waiting_reply.insert(opaque_value) {
-                                continue;
-                            }
-                            self.inner.outgoing = Outgoing::Header {
-                                header: header::DecodedYamuxHeader::PingRequest { opaque_value },
-                                header_already_sent: 0,
-                                substream_data_frame: None,
-                            };
-                            break;
-                        }
+                        let opaque_value: u32 = self.inner.randomness.gen();
+                        self.inner.pings_waiting_reply.push_back(opaque_value);
+                        self.inner.outgoing = Outgoing::Header {
+                            header: header::DecodedYamuxHeader::PingRequest { opaque_value },
+                            header_already_sent: 0,
+                            substream_data_frame: None,
+                        };
                         debug_assert!(self.inner.pings_waiting_reply.len() <= MAX_PINGS);
                         continue;
                     }
@@ -1921,7 +1916,9 @@ pub enum IncomingDataDetail {
     },
 
     /// Received a response to a ping that has been sent out earlier.
-    // TODO: associate some data with the ping? in case they're answered in a different order?
+    ///
+    /// If multiple pings have been sent out simultaneously, they are always answered in the same
+    /// order as they have been sent out.
     PingResponse,
 }
 

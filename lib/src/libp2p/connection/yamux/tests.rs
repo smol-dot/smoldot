@@ -1132,6 +1132,46 @@ fn remote_pong_wrong_opaque_value() {
 }
 
 #[test]
+fn pings_answered_in_wrong_order() {
+    let mut yamux = Yamux::<()>::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+        max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
+    });
+
+    yamux.queue_ping();
+    yamux.queue_ping();
+
+    let mut output = Vec::new();
+    while let Some(out) = yamux.extract_next(usize::max_value()) {
+        output.extend_from_slice(out.as_ref());
+    }
+    assert_eq!(&output[0..8], &[0, 2, 0, 1, 0, 0, 0, 0]);
+    assert_eq!(&output[12..20], &[0, 2, 0, 1, 0, 0, 0, 0]);
+
+    // Ping response frame of the second ping.
+    let mut data = vec![0, 2, 0, 2, 0, 0, 0, 0];
+    data.extend_from_slice(&output[20..24]);
+
+    let mut cursor = 0;
+    while cursor < data.len() {
+        match yamux.incoming_data(&data[cursor..]) {
+            Ok(outcome) => {
+                yamux = outcome.yamux;
+                cursor += outcome.bytes_read;
+            }
+            Err(Error::PingResponseNotMatching) => return,
+            Err(_) => panic!(),
+        }
+    }
+
+    // Test failed.
+    panic!()
+}
+
+#[test]
 fn remote_pong_out_of_nowhere() {
     let mut yamux = Yamux::<()>::new(Config {
         capacity: 0,
