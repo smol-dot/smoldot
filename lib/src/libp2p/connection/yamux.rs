@@ -801,6 +801,7 @@ impl<T> Yamux<T> {
     ///
     /// All follow-up requests for new substreams from the remote are automatically rejected.
     /// [`IncomingDataDetail::IncomingSubstream`] events can no longer happen.
+    ///
     pub fn send_goaway(&mut self, code: GoAwayErrorCode) -> Result<(), SendGoAwayError> {
         match self.inner.outgoing_goaway {
             OutgoingGoAway::NotRequired => {
@@ -1782,9 +1783,7 @@ impl<T> Yamux<T> {
     /// the substream is either accepted or rejected. This function should thus be called as
     /// soon as possible.
     ///
-    /// # Panic
-    ///
-    /// Panics if no incoming substream is currently pending.
+    /// Returns an error if no incoming substream is currently pending.
     ///
     pub fn accept_pending_substream(
         &mut self,
@@ -1847,9 +1846,7 @@ impl<T> Yamux<T> {
     /// the substream is either accepted or rejected. This function should thus be called as
     /// soon as possible.
     ///
-    /// # Panic
-    ///
-    /// Panics if no incoming substream is currently pending.
+    /// Returns an error if no incoming substream is currently pending.
     ///
     pub fn reject_pending_substream(&mut self) -> Result<(), PendingSubstreamError> {
         match self.inner.incoming {
