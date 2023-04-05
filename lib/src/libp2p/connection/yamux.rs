@@ -83,6 +83,12 @@ pub struct Config {
     /// which the data on substreams is sent out.
     pub randomness_seed: [u8; 32],
 
+    /// When the remote sends a ping, we need to send out a pong. However, the remote could refuse
+    /// to read any additional data from the socket and continue sending pings, thus increasing
+    /// the local buffer size indefinitely. In order to protect against this attack, there exists
+    /// a maximum number of queued pongs, after which the connection will be shut down abruptly.
+    pub max_simultaneous_queued_pongs: NonZeroUsize,
+
     /// When the remote sends a substream, and this substream gets rejected by the API user, some
     /// data needs to be sent out. However, the remote could refuse reading any additional data
     /// and continue sending new substream requests, thus increasing the local buffer size
@@ -135,6 +141,13 @@ struct YamuxInner<T> {
     /// the opaque value that has been sent out and that must be matched by the remote.
     /// Since the opaque values are generated locally and randomly, we can use the `FNV` hasher.
     pings_waiting_reply: hashbrown::HashSet<u32, fnv::FnvBuildHasher>,
+
+    /// List of opaque values corresponding to ping requests sent by the remote. For each entry,
+    /// a PONG header should be sent to the remote.
+    pongs_to_send: VecDeque<u32>,
+
+    /// See [`Config::max_simultaneous_queued_pongs`].
+    max_simultaneous_queued_pongs: NonZeroUsize,
 
     /// List of substream IDs that have been reset locally. For each entry, a RST header should
     /// be sent to the remote.
@@ -319,6 +332,8 @@ impl<T> Yamux<T> {
                 pings_to_send: 0,
                 // We leave the initial capacity at 0, as it is likely that no ping is sent at all.
                 pings_waiting_reply: hashbrown::HashSet::with_hasher(Default::default()),
+                pongs_to_send: VecDeque::with_capacity(4),
+                max_simultaneous_queued_pongs: config.max_simultaneous_queued_pongs,
                 rsts_to_send: VecDeque::with_capacity(4),
                 max_simultaneous_rst_substreams: config.max_simultaneous_rst_substreams,
                 randomness,
@@ -1021,20 +1036,13 @@ impl<T> Yamux<T> {
 
                     match decoded_header {
                         header::DecodedYamuxHeader::PingRequest { opaque_value } => {
-                            // Ping. In order to queue the pong message, the outgoing queue must
-                            // be empty. If it is not the case, we simply leave the ping header
-                            // there and prevent any further data from being read.
-                            if !matches!(self.inner.outgoing, Outgoing::Idle) {
-                                // TODO: this could trigger a deadlock if the send buffer is very small
-                                break;
+                            if self.inner.pongs_to_send.len()
+                                >= self.inner.max_simultaneous_queued_pongs.get()
+                            {
+                                return Err(Error::MaxSimultaneousPingsExceeded);
                             }
 
-                            self.inner.outgoing = Outgoing::Header {
-                                header: header::DecodedYamuxHeader::PingResponse { opaque_value },
-                                header_already_sent: 0,
-                                substream_data_frame: None,
-                            };
-
+                            self.inner.pongs_to_send.push_back(opaque_value);
                             self.inner.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                         }
                         header::DecodedYamuxHeader::PingResponse { opaque_value } => {
@@ -1588,6 +1596,16 @@ impl<T> Yamux<T> {
                         continue;
                     }
 
+                    // Send outgoing pongs.
+                    if let Some(opaque_value) = self.inner.pongs_to_send.pop_front() {
+                        self.inner.outgoing = Outgoing::Header {
+                            header: header::DecodedYamuxHeader::PingResponse { opaque_value },
+                            header_already_sent: 0,
+                            substream_data_frame: None,
+                        };
+                        continue;
+                    }
+
                     // Send window update frames.
                     // TODO: O(n)
                     if let Some((id, sub)) = self
@@ -1933,6 +1951,8 @@ pub enum Error {
     PingResponseNotMatching,
     /// Maximum number of simultaneous RST frames to send out has been exceeded.
     MaxSimultaneousRstSubstreamsExceeded,
+    /// Maximum number of simultaneous PONG frames to send out has been exceeded.
+    MaxSimultaneousPingsExceeded,
     /// The remote should have sent an ACK flag but didn't.
     ExpectedAck,
     /// The remote sent an ACK flag but shouldn't have.
