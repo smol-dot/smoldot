@@ -5,6 +5,7 @@
 ### Changed
 
 - Removed support for the `ls` message in the multistream-select protocol, in accordance with the rest of the libp2p ecosystem. This message was in practice never used, and removing support for it simplifies the implementation. ([#379](https://github.com/smol-dot/smoldot/pull/379))
+- Yamux now considers answering pings in the wrong order as invalid.
 
 ### Fixed
 
