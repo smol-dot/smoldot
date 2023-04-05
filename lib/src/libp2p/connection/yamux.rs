@@ -756,7 +756,8 @@ impl<T> Yamux<T> {
             _ => panic!("send_goaway called multiple times"),
         }
 
-        // If the remote is currently opening a substream, automatically reject it.
+        // If the remote is currently opening a substream, ignore it. The remote understands when
+        // receiving the GoAway that the substream has been rejected.
         if let Incoming::PendingIncomingSubstream {
             substream_id,
             data_frame_size,
@@ -1272,10 +1273,9 @@ impl<T> Yamux<T> {
                                 matches!(decoded_header, header::DecodedYamuxHeader::Data { .. });
 
                             // If we have queued or sent a GoAway frame, then the substream is
-                            // automatically rejected.
+                            // ignored. The remote understands when receiving the GoAway that the
+                            // substream has been rejected.
                             if !matches!(self.inner.outgoing_goaway, OutgoingGoAway::NotRequired) {
-                                self.inner.rsts_to_send.push_back(stream_id);
-
                                 self.inner.incoming = if !is_data {
                                     Incoming::Header(arrayvec::ArrayVec::new())
                                 } else {

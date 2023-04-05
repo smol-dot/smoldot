@@ -17,7 +17,7 @@
 
 #![cfg(test)]
 
-use super::{Config, Error, IncomingDataDetail, Yamux};
+use super::{Config, Error, GoAwayErrorCode, IncomingDataDetail, Yamux};
 use core::num::NonZeroUsize;
 
 #[test]
@@ -1168,4 +1168,38 @@ fn receive_multiple_goaways() {
 
     // Test failed.
     panic!()
+}
+
+#[test]
+fn ignore_incoming_substreams_after_goaway() {
+    let mut yamux = Yamux::<()>::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
+    });
+
+    yamux.send_goaway(GoAwayErrorCode::NormalTermination);
+
+    // New substream.
+    let data = [0, 0, 0, 1, 0, 0, 0, 84, 0, 0, 0, 0];
+    let mut cursor = 0;
+    while cursor < data.len() {
+        let outcome = yamux.incoming_data(&data[cursor..]).unwrap();
+        yamux = outcome.yamux;
+        cursor += outcome.bytes_read;
+        match outcome.detail {
+            Some(IncomingDataDetail::IncomingSubstream) => panic!(),
+            _ => {}
+        }
+    }
+
+    let mut output = Vec::new();
+    while let Some(out) = yamux.extract_next(usize::max_value()) {
+        output.extend_from_slice(out.as_ref());
+    }
+    assert_eq!(
+        output,
+        &[0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    );
 }
