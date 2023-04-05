@@ -82,6 +82,13 @@ pub struct Config {
     /// Seed used for the randomness. Used to avoid HashDoS attack and determines the order in
     /// which the data on substreams is sent out.
     pub randomness_seed: [u8; 32],
+
+    /// When the remote sends a substream, and this substream gets rejected by the API user, some
+    /// data needs to be sent out. However, the remote could refuse reading any additional data
+    /// and continue sending new substream requests, thus increasing the local buffer size
+    /// indefinitely. In order to protect against this attack, there exists a maximum number of
+    /// queued substream rejections after which the connection will be shut down abruptly.
+    pub max_simultaneous_rst_substreams: NonZeroUsize,
 }
 
 pub struct Yamux<T> {
@@ -130,8 +137,11 @@ struct YamuxInner<T> {
     pings_waiting_reply: hashbrown::HashSet<u32, fnv::FnvBuildHasher>,
 
     /// List of substream IDs that have been reset locally. For each entry, a RST header should
-    /// be sent to the remote and the entry removed.
+    /// be sent to the remote.
     rsts_to_send: VecDeque<NonZeroU32>,
+
+    /// See [`Config::max_simultaneous_rst_substreams`].
+    max_simultaneous_rst_substreams: NonZeroUsize,
 
     /// Source of randomness used for various purposes.
     randomness: ChaCha20Rng,
@@ -309,7 +319,8 @@ impl<T> Yamux<T> {
                 pings_to_send: 0,
                 // We leave the initial capacity at 0, as it is likely that no ping is sent at all.
                 pings_waiting_reply: hashbrown::HashSet::with_hasher(Default::default()),
-                rsts_to_send: VecDeque::with_capacity(config.capacity),
+                rsts_to_send: VecDeque::with_capacity(4),
+                max_simultaneous_rst_substreams: config.max_simultaneous_rst_substreams,
                 randomness,
             }),
         }
@@ -648,6 +659,9 @@ impl<T> Yamux<T> {
             .unwrap_or_else(|| panic!())
             .state
         {
+            // Note that we intentionally don't check the size against
+            // `max_simultaneous_rst_substreams`, as locally-emitted RST frames aren't the
+            // remote's fault.
             self.inner.rsts_to_send.push_back(substream_id.0);
         }
         // TODO: else { panic!() } ?!
@@ -1213,14 +1227,14 @@ impl<T> Yamux<T> {
                                 None => {}
                             }
 
-                            // When receiving a new substream, the outgoing state must always be
-                            // `Outgoing::Idle`, in order to potentially queue the substream
-                            // rejection message later.
-                            // If it is not the case, we simply leave the header there and prevent
-                            // any further data from being read.
-                            // TODO: could deadlock if the write buffer is very small
-                            if !matches!(self.inner.outgoing, Outgoing::Idle) {
-                                break;
+                            // When receiving a new substream, we might have to potentially queue
+                            // a substream rejection message later.
+                            // In order to ensure that there is enough space in `rsts_to_send`,
+                            // we check it against the limit now.
+                            if self.inner.rsts_to_send.len()
+                                >= self.inner.max_simultaneous_rst_substreams.get()
+                            {
+                                return Err(Error::MaxSimultaneousRstSubstreamsExceeded);
                             }
 
                             let is_data =
@@ -1229,19 +1243,7 @@ impl<T> Yamux<T> {
                             // If we have queued or sent a GoAway frame, then the substream is
                             // automatically rejected.
                             if !matches!(self.inner.outgoing_goaway, OutgoingGoAway::NotRequired) {
-                                // Send the `RST` frame.
-                                self.inner.outgoing = Outgoing::Header {
-                                    header: header::DecodedYamuxHeader::Window {
-                                        syn: false,
-                                        ack: false,
-                                        fin: false,
-                                        rst: true,
-                                        stream_id,
-                                        length: 0,
-                                    },
-                                    header_already_sent: 0,
-                                    substream_data_frame: None,
-                                };
+                                self.inner.rsts_to_send.push_back(stream_id);
 
                                 self.inner.incoming = if !is_data {
                                     Incoming::Header(arrayvec::ArrayVec::new())
@@ -1723,11 +1725,6 @@ impl<T> Yamux<T> {
     /// Panics if no incoming substream is currently pending.
     ///
     pub fn reject_pending_substream(&mut self) {
-        // Implementation note: the rejection mechanism could alternatively be implemented by
-        // queuing the substream rejection, rather than immediately putting it in `self.inner.outgoing`.
-        // However, this could open a DoS attack vector, as the remote could send a huge number
-        // of substream open request which would inevitably increase the memory consumption of the
-        // local node.
         match self.inner.incoming {
             Incoming::PendingIncomingSubstream {
                 substream_id,
@@ -1741,19 +1738,7 @@ impl<T> Yamux<T> {
                     fin,
                 };
 
-                debug_assert!(matches!(self.inner.outgoing, Outgoing::Idle));
-                self.inner.outgoing = Outgoing::Header {
-                    header: header::DecodedYamuxHeader::Window {
-                        syn: false,
-                        ack: false,
-                        fin: false,
-                        rst: true,
-                        stream_id: substream_id.0,
-                        length: 0,
-                    },
-                    header_already_sent: 0,
-                    substream_data_frame: None,
-                };
+                self.inner.rsts_to_send.push_back(substream_id.0);
             }
             _ => panic!(),
         }
@@ -1885,6 +1870,8 @@ pub enum Error {
     /// Remote has sent a ping response, but its opaque data didn't match any of the ping that
     /// have been sent out in the past.
     PingResponseNotMatching,
+    /// Maximum number of simultaneous RST frames to send out has been exceeded.
+    MaxSimultaneousRstSubstreamsExceeded,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]

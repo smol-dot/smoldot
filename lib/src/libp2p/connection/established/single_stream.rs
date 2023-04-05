@@ -1116,6 +1116,7 @@ impl ConnectionPrototype {
             is_initiator: self.encryption.is_initiator(),
             capacity: 64, // TODO: ?
             randomness_seed: randomness.sample(rand::distributions::Standard),
+            max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
         });
 
         let outgoing_pings = yamux.open_substream(Some(substream::Substream::ping_out(

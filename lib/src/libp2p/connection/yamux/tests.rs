@@ -18,6 +18,7 @@
 #![cfg(test)]
 
 use super::{Config, Error, IncomingDataDetail, Yamux};
+use core::num::NonZeroUsize;
 
 #[test]
 fn bad_header_data() {
@@ -25,6 +26,7 @@ fn bad_header_data() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     {
@@ -52,6 +54,7 @@ fn not_immediate_data_send_when_opening_substream() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     let _ = yamux.open_substream(());
@@ -64,6 +67,7 @@ fn syn_sent() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     let substream_id = yamux.open_substream(());
@@ -84,6 +88,7 @@ fn extract_bytes_one_by_one() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     let substream_id = yamux.open_substream(());
@@ -105,6 +110,7 @@ fn inject_bytes_one_by_one() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     let data = [0, 0, 0, 1, 0, 0, 0, 84, 0, 0, 0, 5, 255, 255, 255];
@@ -140,6 +146,7 @@ fn ack_sent() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     let mut opened_substream = None;
@@ -180,6 +187,7 @@ fn rst_sent_when_rejecting() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     {
@@ -205,11 +213,47 @@ fn rst_sent_when_rejecting() {
 }
 
 #[test]
+fn max_simultaneous_rst_substreams() {
+    let mut yamux = Yamux::<()>::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(16).unwrap(),
+    });
+
+    let mut data = Vec::new();
+
+    // Queue many new substreams.
+    for n in 1..32 {
+        data.extend_from_slice(&[0, 0, 0, 1]);
+        data.extend_from_slice(&u32::to_be_bytes(n * 2)[..]);
+        data.extend_from_slice(&[0, 0, 0, 0]);
+    }
+
+    let mut cursor = 0;
+    while cursor < data.len() {
+        match yamux.incoming_data(&data[cursor..]) {
+            Ok(outcome) => {
+                yamux = outcome.yamux;
+                cursor += outcome.bytes_read;
+                match outcome.detail {
+                    Some(IncomingDataDetail::IncomingSubstream) => yamux.reject_pending_substream(),
+                    _ => {}
+                }
+            }
+            Err(Error::MaxSimultaneousRstSubstreamsExceeded) => return,
+            Err(_) => panic!(),
+        }
+    }
+}
+
+#[test]
 fn invalid_inbound_substream_id() {
     let mut yamux = Yamux::<()>::new(Config {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     let data = [0, 0, 0, 1, 0, 0, 0, 83, 0, 0, 0, 0];
@@ -235,6 +279,7 @@ fn substream_opened_twice() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     let data = [
@@ -266,6 +311,7 @@ fn substream_opened_back_after_rst() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     // One SYN frame, one RST frame, one SYN frame again. All using the same substream ID.
@@ -304,6 +350,7 @@ fn multiple_writes_combined_into_one() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     let substream_id = yamux.open_substream(());
@@ -330,6 +377,7 @@ fn close_before_syn_sent() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     let substream_id = yamux.open_substream(());
@@ -352,6 +400,7 @@ fn write_after_close_illegal() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     let substream_id = yamux.open_substream(());
@@ -369,6 +418,7 @@ fn credits_exceeded_checked_before_data_is_received() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     // Data frame with a SYN flag, then data frame with a ton of data.
@@ -405,6 +455,7 @@ fn credits_exceeded_checked_at_the_syn() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     // Data frame with a SYN flag and a ton of data.
@@ -439,6 +490,7 @@ fn data_coming_with_the_syn_taken_into_account() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     // Data frame with a SYN flag and 200kiB of data, followed with data frame with 100kiB of
@@ -476,6 +528,7 @@ fn add_remote_window_works() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     // Data frame with a SYN flag and 200kiB of data, followed with data frame with 100kiB of
@@ -523,6 +576,7 @@ fn add_remote_window_doesnt_immediately_raise_limit() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     // Data frame with a SYN flag and 200kiB of data, followed with data frame with 100kiB of
@@ -563,6 +617,7 @@ fn remote_default_window_respected() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     let substream_id = yamux.open_substream(());
@@ -587,6 +642,7 @@ fn remote_window_frames_respected() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     // Window frame with a SYN flag and 5 bytes of window.
@@ -633,6 +689,7 @@ fn write_after_fin() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     // Data frame with SYN|FIN flags, then data frame again.
@@ -666,6 +723,7 @@ fn write_after_fin_even_with_empty_frame() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     // Data frame with SYN|FIN flags, then empty data frame.
@@ -699,6 +757,7 @@ fn window_frame_with_fin_after_fin() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     // Data frame with SYN|FIN flags, then window frame with FIN flag.
@@ -732,6 +791,7 @@ fn window_frame_without_fin_after_fin() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
     // Data frame with SYN|FIN flags, then window frame without FIN flag.
