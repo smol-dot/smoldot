@@ -60,7 +60,7 @@ use super::{
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
 use core::{
     fmt,
-    num::NonZeroUsize,
+    num::{NonZeroU32, NonZeroUsize},
     ops::{Add, Sub},
     time::Duration,
 };
@@ -185,17 +185,14 @@ where
 
             // It might be that the remote has reset the ping substream, in which case the out ping
             // substream no longer exists and we immediately consider the ping as failed.
-            if let Some(substream) = self
-                .inner
-                .yamux
-                .substream_by_id_mut(self.inner.outgoing_pings)
-            {
+            if self.inner.yamux.has_substream(self.inner.outgoing_pings) {
                 let payload = self
                     .inner
                     .ping_payload_randomness
                     .sample(rand::distributions::Standard);
-                substream
-                    .into_user_data()
+                self.inner
+                    .yamux
+                    .user_data_mut(self.inner.outgoing_pings)
                     .as_mut()
                     .unwrap()
                     .queue_ping(&payload, read_write.now.clone() + self.inner.ping_timeout);
@@ -236,7 +233,7 @@ where
             // but this time update the state machine specific to that substream.
             if let Some((substream_id, bytes_remaining)) = self.inner.current_data_frame {
                 // It might be that the substream has been closed in `process_substream`.
-                if self.inner.yamux.substream_by_id_mut(substream_id).is_none() {
+                if !self.inner.yamux.has_substream(substream_id) {
                     self.encryption.consume_inbound_data(bytes_remaining.get());
                     self.inner.current_data_frame = None;
                     continue;
@@ -255,6 +252,12 @@ where
 
                 // Discard the data from the decrypted data buffer.
                 self.encryption.consume_inbound_data(num_read);
+
+                // Give the possibility for the remote to send more data.
+                // TODO: only do that for notification substreams? because for requests we already set the value to the maximum when the substream is created
+                self.inner
+                    .yamux
+                    .add_remote_window_saturating(substream_id, u64::try_from(num_read).unwrap());
 
                 if let Some(event) = event {
                     return Ok((self, Some(event)));
@@ -324,7 +327,12 @@ where
                     // subtle way. At the time of writing of this comment the limit should be
                     // properly enforced, however it is not considered problematic if it weren't.
                     if self.inner.yamux.num_inbound() >= self.inner.max_inbound_substreams {
-                        self.inner.yamux.reject_pending_substream();
+                        // Can only panic if there's no incoming substream, which we know for sure
+                        // is the case here.
+                        self.inner
+                            .yamux
+                            .reject_pending_substream()
+                            .unwrap_or_else(|_| panic!());
                         continue;
                     }
 
@@ -337,11 +345,14 @@ where
                         .max()
                         .unwrap_or(0);
 
+                    // Can only panic if there's no incoming substream, which we know for sure
+                    // is the case here.
                     self.inner
                         .yamux
                         .accept_pending_substream(Some(substream::Substream::ingoing(
                             max_protocol_name_len,
-                        )));
+                        )))
+                        .unwrap_or_else(|_| panic!());
                 }
 
                 Some(
@@ -424,12 +435,8 @@ where
 
                         // Mutable reference to the substream state machine within the yamux
                         // state machine.
-                        let state_machine_refmut = self
-                            .inner
-                            .yamux
-                            .substream_by_id_mut(dead_substream_id)
-                            .unwrap()
-                            .into_user_data();
+                        let state_machine_refmut =
+                            self.inner.yamux.user_data_mut(dead_substream_id);
 
                         // Extract the substream state machine, maybe putting it back later.
                         let state_machine_extracted = match state_machine_refmut.take() {
@@ -499,7 +506,7 @@ where
             // Calculate number of bytes that we can extract from yamux. This is similar but not
             // exactly the same as the size of the outgoing buffer, as noise adds some headers to
             // the data.
-            let unencrypted_bytes_to_extract = self
+            let mut unencrypted_bytes_to_extract = self
                 .encryption
                 .encrypt_size_conv(read_write.outgoing_buffer_available());
 
@@ -507,9 +514,11 @@ where
                 // Extract outgoing data that is buffered within yamux.
                 // TODO: don't allocate an intermediary buffer, but instead pass them directly to the encryption
                 let mut buffers = Vec::with_capacity(32);
-                let mut extract_out = self.inner.yamux.extract_out(unencrypted_bytes_to_extract);
-                while let Some(buffer) = extract_out.extract_next() {
-                    buffers.push(buffer.as_ref().to_vec()); // TODO: copy
+                while let Some(buffer) = self.inner.yamux.extract_next(unencrypted_bytes_to_extract)
+                {
+                    let buffer = buffer.as_ref();
+                    unencrypted_bytes_to_extract -= buffer.len();
+                    buffers.push(buffer.to_vec()); // TODO: copy
                 }
 
                 if !buffers.is_empty() {
@@ -523,7 +532,6 @@ where
                             None => (&mut [], &mut []),
                         },
                     );
-                    debug_assert!(_read <= unencrypted_bytes_to_extract);
                     read_write.advance_write(written);
                 }
             }
@@ -560,15 +568,13 @@ where
         let mut total_read = 0;
 
         loop {
-            let mut substream = inner.yamux.substream_by_id_mut(substream_id).unwrap();
-
-            let state_machine = match substream.user_data_mut().take() {
+            let state_machine = match inner.yamux.user_data_mut(substream_id).take() {
                 Some(s) => s,
                 None => break (total_read, None),
             };
 
-            let read_is_closed = !substream.can_receive();
-            let write_is_closed = !substream.can_send();
+            let read_is_closed = !inner.yamux.can_receive(substream_id);
+            let write_is_closed = !inner.yamux.can_send(substream_id);
 
             let mut substream_read_write = ReadWrite {
                 now: outer_read_write.now.clone(),
@@ -599,23 +605,25 @@ where
             let written_bytes = substream_read_write.written_bytes;
             if written_bytes != 0 {
                 debug_assert!(!write_is_closed);
-                substream.write(inner.intermediary_buffer[..written_bytes].to_vec());
+                inner
+                    .yamux
+                    .write(
+                        substream_id,
+                        inner.intermediary_buffer[..written_bytes].to_vec(),
+                    )
+                    .unwrap();
             }
             if !write_is_closed && closed_after {
                 debug_assert_eq!(written_bytes, 0);
-                substream.close();
+                inner.yamux.close(substream_id).unwrap();
             }
 
             match substream_update {
-                Some(s) => *substream.user_data_mut() = Some(s),
+                Some(s) => *inner.yamux.user_data_mut(substream_id) = Some(s),
                 None => {
                     if !closed_after || !read_is_closed {
                         // TODO: what we do here is definitely correct, but the docs of `reset()` seem sketchy, investigate
-                        inner
-                            .yamux
-                            .substream_by_id_mut(substream_id)
-                            .unwrap()
-                            .reset();
+                        inner.yamux.reset(substream_id).unwrap();
                     }
                 }
             };
@@ -623,13 +631,7 @@ where
             let event_to_yield = match event {
                 None => None,
                 Some(substream::Event::InboundNegotiated(protocol)) => {
-                    let substream = inner
-                        .yamux
-                        .substream_by_id_mut(substream_id)
-                        .unwrap()
-                        .into_user_data()
-                        .as_mut()
-                        .unwrap();
+                    let substream = inner.yamux.user_data_mut(substream_id).as_mut().unwrap();
 
                     if protocol == inner.ping_protocol {
                         substream.accept_inbound(substream::InboundTy::Ping);
@@ -759,6 +761,7 @@ where
         self.inner
             .yamux
             .send_goaway(yamux::GoAwayErrorCode::NormalTermination)
+            .unwrap()
     }
 
     /// Sends a request to the remote.
@@ -804,29 +807,32 @@ where
             }
         };
 
-        let mut substream =
-            self.inner
-                .yamux
-                .open_substream(Some(substream::Substream::request_out(
-                    self.inner.request_protocols[protocol_index].name.clone(), // TODO: clone :-/
-                    timeout,
-                    if has_length_prefix {
-                        Some(request)
-                    } else {
-                        None
-                    },
-                    self.inner.request_protocols[protocol_index].max_response_size,
-                    user_data,
-                )));
+        let substream_id = self
+            .inner
+            .yamux
+            .open_substream(Some(substream::Substream::request_out(
+                self.inner.request_protocols[protocol_index].name.clone(), // TODO: clone :-/
+                timeout,
+                if has_length_prefix {
+                    Some(request)
+                } else {
+                    None
+                },
+                self.inner.request_protocols[protocol_index].max_response_size,
+                user_data,
+            )))
+            .unwrap(); // TODO: consider not panicking
 
         // TODO: we add some bytes due to the length prefix, this is a bit hacky as we should ask this information from the substream
-        substream.reserve_window(
+        self.inner.yamux.add_remote_window_saturating(
+            substream_id,
             u64::try_from(self.inner.request_protocols[protocol_index].max_response_size)
                 .unwrap_or(u64::max_value())
-                .saturating_add(64),
+                .saturating_add(64)
+                .saturating_sub(yamux::NEW_SUBSTREAMS_FRAME_SIZE),
         );
 
-        Ok(SubstreamId(SubstreamIdInner::SingleStream(substream.id())))
+        Ok(SubstreamId(SubstreamIdInner::SingleStream(substream_id)))
     }
 
     /// Returns the user data associated to a notifications substream.
@@ -841,10 +847,13 @@ where
             _ => return None,
         };
 
+        if !self.inner.yamux.has_substream(id) {
+            return None;
+        }
+
         self.inner
             .yamux
-            .substream_by_id_mut(id)?
-            .into_user_data()
+            .user_data_mut(id)
             .as_mut()
             .unwrap()
             .notifications_substream_user_data_mut()
@@ -881,20 +890,21 @@ where
         // TODO: turn this assert into something that can't panic?
         assert!(handshake.len() <= max_handshake_size);
 
-        let substream =
-            self.inner
-                .yamux
-                .open_substream(Some(substream::Substream::notifications_out(
-                    timeout,
-                    self.inner.notifications_protocols[protocol_index]
-                        .name
-                        .clone(), // TODO: clone :-/,
-                    handshake,
-                    max_handshake_size,
-                    user_data,
-                )));
+        let substream = self
+            .inner
+            .yamux
+            .open_substream(Some(substream::Substream::notifications_out(
+                timeout,
+                self.inner.notifications_protocols[protocol_index]
+                    .name
+                    .clone(), // TODO: clone :-/,
+                handshake,
+                max_handshake_size,
+                user_data,
+            )))
+            .unwrap(); // TODO: consider not panicking
 
-        SubstreamId(SubstreamIdInner::SingleStream(substream.id()))
+        SubstreamId(SubstreamIdInner::SingleStream(substream))
     }
 
     /// Accepts an inbound notifications protocol. Must be called in response to a
@@ -919,9 +929,7 @@ where
                                                       // TODO: self.inner.notifications_protocols[protocol_index].max_notification_size;
         self.inner
             .yamux
-            .substream_by_id_mut(substream_id)
-            .unwrap()
-            .into_user_data()
+            .user_data_mut(substream_id)
             .as_mut()
             .unwrap()
             .accept_in_notifications_substream(handshake, max_notification_size, user_data);
@@ -942,9 +950,7 @@ where
 
         self.inner
             .yamux
-            .substream_by_id_mut(substream_id)
-            .unwrap()
-            .into_user_data()
+            .user_data_mut(substream_id)
             .as_mut()
             .unwrap()
             .reject_in_notifications_substream();
@@ -979,9 +985,7 @@ where
 
         self.inner
             .yamux
-            .substream_by_id_mut(substream_id)
-            .unwrap()
-            .into_user_data()
+            .user_data_mut(substream_id)
             .as_mut()
             .unwrap()
             .write_notification_unbounded(notification);
@@ -1002,10 +1006,11 @@ where
             _ => panic!(),
         };
 
-        let substream = self.inner.yamux.substream_by_id(substream_id).unwrap();
-        let already_queued = substream.queued_bytes();
-        let from_substream = substream
-            .into_user_data()
+        let already_queued = self.inner.yamux.queued_bytes(substream_id);
+        let from_substream = self
+            .inner
+            .yamux
+            .user_data(substream_id)
             .as_ref()
             .unwrap()
             .notification_substream_queued_bytes();
@@ -1030,11 +1035,13 @@ where
             _ => panic!(),
         };
 
+        if !self.inner.yamux.has_substream(substream_id) {
+            panic!()
+        }
+
         self.inner
             .yamux
-            .substream_by_id_mut(substream_id)
-            .unwrap()
-            .into_user_data()
+            .user_data_mut(substream_id)
             .as_mut()
             .unwrap()
             .close_notifications_substream();
@@ -1056,11 +1063,13 @@ where
             _ => return Err(RespondInRequestError::SubstreamClosed),
         };
 
+        if !self.inner.yamux.has_substream(substream_id) {
+            return Err(RespondInRequestError::SubstreamClosed);
+        }
+
         self.inner
             .yamux
-            .substream_by_id_mut(substream_id)
-            .ok_or(RespondInRequestError::SubstreamClosed)?
-            .into_user_data()
+            .user_data_mut(substream_id)
             .as_mut()
             .unwrap()
             .respond_in_request(response)
@@ -1121,13 +1130,18 @@ impl ConnectionPrototype {
             is_initiator: self.encryption.is_initiator(),
             capacity: 64, // TODO: ?
             randomness_seed: randomness.sample(rand::distributions::Standard),
+            max_out_data_frame_size: NonZeroU32::new(8192).unwrap(), // TODO: make configurable?
+            max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
+            max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
         });
 
         let outgoing_pings = yamux
             .open_substream(Some(substream::Substream::ping_out(
                 config.ping_protocol.clone(),
             )))
-            .id();
+            // Can only panic if a `GoAway` has been received, or if there are too many substreams
+            // already open, which we know for sure can't happen here
+            .unwrap_or_else(|_| panic!());
 
         SingleStream {
             encryption: self.encryption,

@@ -66,8 +66,102 @@ pub enum GoAwayErrorCode {
     InternalError = 0x2,
 }
 
+/// Encodes a Yamux header.
+pub fn encode(header: &DecodedYamuxHeader) -> [u8; 12] {
+    match header {
+        DecodedYamuxHeader::Data {
+            syn,
+            ack,
+            fin,
+            rst,
+            stream_id,
+            length,
+        }
+        | DecodedYamuxHeader::Window {
+            syn,
+            ack,
+            fin,
+            rst,
+            stream_id,
+            length,
+        } => {
+            let ty = match header {
+                DecodedYamuxHeader::Data { .. } => 0,
+                DecodedYamuxHeader::Window { .. } => 1,
+                _ => unreachable!(),
+            };
+
+            let mut flags: u8 = 0;
+            if *syn {
+                flags |= 0x1;
+            }
+            if *ack {
+                flags |= 0x2;
+            }
+            if *fin {
+                flags |= 0x4;
+            }
+            if *rst {
+                flags |= 0x8;
+            }
+
+            let stream_id = stream_id.get().to_be_bytes();
+            let length = length.to_be_bytes();
+
+            [
+                0,
+                ty,
+                0,
+                flags,
+                stream_id[0],
+                stream_id[1],
+                stream_id[2],
+                stream_id[3],
+                length[0],
+                length[1],
+                length[2],
+                length[3],
+            ]
+        }
+        DecodedYamuxHeader::PingRequest { opaque_value }
+        | DecodedYamuxHeader::PingResponse { opaque_value } => {
+            let flags = match header {
+                DecodedYamuxHeader::PingRequest { .. } => 1,
+                DecodedYamuxHeader::PingResponse { .. } => 2,
+                _ => unreachable!(),
+            };
+
+            let opaque_value = opaque_value.to_be_bytes();
+
+            [
+                0,
+                2,
+                0,
+                flags,
+                0,
+                0,
+                0,
+                0,
+                opaque_value[0],
+                opaque_value[1],
+                opaque_value[2],
+                opaque_value[3],
+            ]
+        }
+        DecodedYamuxHeader::GoAway { error_code } => {
+            let code = match error_code {
+                GoAwayErrorCode::NormalTermination => 0,
+                GoAwayErrorCode::ProtocolError => 1,
+                GoAwayErrorCode::InternalError => 2,
+            };
+
+            [0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, code]
+        }
+    }
+}
+
 /// Decodes a Yamux header.
-pub fn decode_yamux_header(bytes: &[u8]) -> Result<DecodedYamuxHeader, YamuxHeaderDecodeError> {
+pub fn decode_yamux_header(bytes: &[u8; 12]) -> Result<DecodedYamuxHeader, YamuxHeaderDecodeError> {
     match nom::combinator::all_consuming(nom::combinator::complete(decode))(bytes) {
         Ok((_, h)) => Ok(h),
         Err(nom::Err::Incomplete(_)) => unreachable!(),
@@ -179,7 +273,7 @@ mod tests {
     use core::num::NonZeroU32;
 
     #[test]
-    fn basic_data() {
+    fn decode_data_frame() {
         assert_eq!(
             super::decode_yamux_header(&[0, 0, 0, 1, 0, 0, 0, 15, 0, 0, 2, 65]).unwrap(),
             super::DecodedYamuxHeader::Data {
@@ -194,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn basic_ping() {
+    fn decode_ping_frame() {
         assert_eq!(
             super::decode_yamux_header(&[0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 1, 12]).unwrap(),
             super::DecodedYamuxHeader::PingRequest { opaque_value: 268 }
@@ -220,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn basic_goaway() {
+    fn decode_goaway() {
         assert_eq!(
             super::decode_yamux_header(&[0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
             super::DecodedYamuxHeader::GoAway {
@@ -257,10 +351,67 @@ mod tests {
         assert!(super::decode_yamux_header(&[2, 0, 0, 1, 0, 0, 0, 15, 0, 0, 2, 65]).is_err());
     }
 
+    macro_rules! check_encode_redecodes {
+        ($payload:expr) => {{
+            let payload = $payload;
+            assert_eq!(
+                super::decode_yamux_header(&super::encode(&payload)).unwrap(),
+                payload
+            );
+        }};
+    }
+
     #[test]
-    fn length_check() {
-        assert!(super::decode_yamux_header(&[0, 0, 0, 1, 0, 0, 0, 15, 0, 0, 2, 65]).is_ok());
-        assert!(super::decode_yamux_header(&[0, 0, 0, 1, 0, 0, 0, 15, 0, 0, 2, 65, 0]).is_err());
-        assert!(super::decode_yamux_header(&[0, 0, 0, 1, 0, 0, 0, 15, 0, 0, 2]).is_err());
+    fn encode_data() {
+        for _ in 0..500 {
+            check_encode_redecodes!(super::DecodedYamuxHeader::Data {
+                syn: rand::random(),
+                ack: rand::random(),
+                fin: rand::random(),
+                rst: rand::random(),
+                stream_id: rand::random(),
+                length: rand::random()
+            });
+        }
+    }
+
+    #[test]
+    fn encode_window() {
+        for _ in 0..500 {
+            check_encode_redecodes!(super::DecodedYamuxHeader::Window {
+                syn: rand::random(),
+                ack: rand::random(),
+                fin: rand::random(),
+                rst: rand::random(),
+                stream_id: rand::random(),
+                length: rand::random()
+            });
+        }
+    }
+
+    #[test]
+    fn encode_ping() {
+        check_encode_redecodes!(super::DecodedYamuxHeader::PingRequest {
+            opaque_value: rand::random(),
+        });
+
+        check_encode_redecodes!(super::DecodedYamuxHeader::PingResponse {
+            opaque_value: rand::random(),
+        });
+    }
+
+    #[test]
+    fn encode_goaway() {
+        check_encode_redecodes!(super::DecodedYamuxHeader::GoAway {
+            error_code: super::GoAwayErrorCode::NormalTermination,
+        });
+
+        check_encode_redecodes!(super::DecodedYamuxHeader::GoAway {
+            error_code: super::GoAwayErrorCode::ProtocolError,
+        });
+
+        check_encode_redecodes!(super::DecodedYamuxHeader::GoAway {
+            error_code: super::GoAwayErrorCode::InternalError,
+        });
     }
 }
