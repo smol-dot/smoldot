@@ -45,8 +45,6 @@
 //! on the logic of the higher-level protocols. Failing to do so might lead to potential DoS
 //! attack vectors.
 
-// TODO: write example
-
 use crate::util::SipHasherBuild;
 
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
@@ -107,6 +105,7 @@ pub struct Config {
     pub max_simultaneous_rst_substreams: NonZeroUsize,
 }
 
+/// Yamux state machine. See [the module-level documentation](..) for more information.
 pub struct Yamux<T> {
     /// The actual fields are wrapped in a `Box` because the `Yamux` object is moved around pretty
     /// often.
