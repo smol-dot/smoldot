@@ -79,6 +79,62 @@ fn syn_sent() {
 }
 
 #[test]
+fn extract_bytes_one_by_one() {
+    let mut yamux = Yamux::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+    });
+
+    let substream_id = yamux.open_substream(());
+    yamux.write(substream_id, b"foo".to_vec());
+
+    let mut output = Vec::new();
+    while let Some(out) = yamux.extract_next(1) {
+        assert_eq!(out.as_ref().len(), 1);
+        output.extend_from_slice(out.as_ref());
+    }
+
+    assert!(output.starts_with(&[0, 0, 0, 1]));
+    assert!(output.ends_with(&[0, 0, 0, 3, 102, 111, 111]));
+}
+
+#[test]
+fn inject_bytes_one_by_one() {
+    let mut yamux = Yamux::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+    });
+
+    let data = [0, 0, 0, 1, 0, 0, 0, 84, 0, 0, 0, 5, 255, 255, 255];
+    let mut cursor = 0;
+
+    while cursor < data.len() {
+        let outcome = yamux.incoming_data(&data[cursor..][..1]).unwrap();
+        yamux = outcome.yamux;
+        assert_eq!(outcome.bytes_read, 1);
+
+        match outcome.detail {
+            Some(IncomingDataDetail::IncomingSubstream) => {
+                assert_eq!(cursor, 11); // We've read 12 bytes but `cursor` is still 11
+                yamux.accept_pending_substream(());
+            }
+            Some(IncomingDataDetail::DataFrame { start_offset, .. }) => {
+                assert_eq!(start_offset, 0);
+                assert!(cursor >= 12);
+                assert_eq!(data[cursor], 255);
+            }
+            _ => {}
+        }
+
+        cursor += 1;
+    }
+
+    assert_eq!(cursor, data.len());
+}
+
+#[test]
 fn ack_sent() {
     let mut yamux = Yamux::new(Config {
         capacity: 0,
@@ -266,6 +322,45 @@ fn multiple_writes_combined_into_one() {
 
     assert!(output.starts_with(&[0, 0, 0, 1]));
     assert!(output.ends_with(&[0, 0, 0, 12, 97, 97, 97, 97, 99, 99, 98, 98, 98, 98, 98, 98]));
+}
+
+#[test]
+fn close_before_syn_sent() {
+    let mut yamux = Yamux::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+    });
+
+    let substream_id = yamux.open_substream(());
+    yamux.write(substream_id, b"foo".to_vec());
+    yamux.close(substream_id);
+
+    let mut output = Vec::new();
+    while let Some(out) = yamux.extract_next(usize::max_value()) {
+        output.extend_from_slice(out.as_ref());
+    }
+
+    assert!(output.starts_with(&[0, 0, 0, 1 | 4]));
+    assert!(output.ends_with(&[0, 0, 0, 3, 102, 111, 111]));
+}
+
+#[test]
+#[should_panic = "write after close"]
+fn write_after_close_illegal() {
+    let mut yamux = Yamux::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+    });
+
+    let substream_id = yamux.open_substream(());
+    yamux.write(substream_id, b"foo".to_vec());
+    assert!(yamux.can_send(substream_id));
+    yamux.close(substream_id);
+    assert!(!yamux.can_send(substream_id));
+
+    yamux.write(substream_id, b"test".to_vec());
 }
 
 #[test]

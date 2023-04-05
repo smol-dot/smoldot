@@ -498,17 +498,18 @@ impl<T> Yamux<T> {
             .inner
             .substreams
             .get_mut(&substream_id.0)
-            .unwrap_or_else(|| panic!());
+            .unwrap_or_else(|| panic!("invalid substream"));
         match &mut substream.state {
             SubstreamState::Reset => {}
             SubstreamState::Healthy {
-                local_write_close: local_write,
+                local_write_close: SubstreamStateLocalWrite::Open,
                 write_queue,
                 ..
             } => {
-                if matches!(local_write, SubstreamStateLocalWrite::Open) {
-                    write_queue.push_back(data);
-                }
+                write_queue.push_back(data);
+            }
+            SubstreamState::Healthy { .. } => {
+                panic!("write after close")
             }
         }
     }
