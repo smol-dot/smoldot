@@ -1212,6 +1212,9 @@ impl<T> Yamux<T> {
                             // always keep traces of old substreams, we have no way to know whether
                             // this is the case or not.
                             let Some(s) = self.inner.substreams.get_mut(&stream_id) else { continue };
+                            if !matches!(s.state, SubstreamState::Healthy { .. }) {
+                                continue;
+                            }
 
                             let _was_inserted = self.inner.dead_substreams.insert(stream_id);
                             debug_assert!(_was_inserted);
