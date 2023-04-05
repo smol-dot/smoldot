@@ -54,7 +54,6 @@ use core::{
     cmp, fmt, mem,
     num::{NonZeroU32, NonZeroUsize},
 };
-use hashbrown::hash_map::Entry;
 use rand::{seq::IteratorRandom as _, Rng as _};
 use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 
@@ -401,77 +400,46 @@ impl<T> Yamux<T> {
     /// >           protocol, all substreams in the context of libp2p start with a
     /// >           multistream-select negotiation, and this scenario can therefore never happen.
     ///
-    /// # Panic
+    /// Returns an error if a [`IncomingDataDetail::GoAway`] event has been generated. This can
+    /// also be checked by calling [`Yamux::received_goaway`].
     ///
-    /// Panics if all possible substream IDs are already taken. This happen if there exists more
-    /// than approximately `2^31` substreams, which is very unlikely to happen unless there exists
-    /// a bug in the code.
+    /// Returns an error if all possible substream IDs are already taken. This happen if there
+    /// exists more than approximately `2^31` substreams, which is very unlikely to happen unless
+    /// there exists a bug in the code.
     ///
-    /// Panics if a [`IncomingDataDetail::GoAway`] event has been generated. This can also be
-    /// checked by calling [`Yamux::received_goaway`].
-    ///
-    pub fn open_substream(&mut self, user_data: T) -> SubstreamId {
-        // It is forbidden to open new substreams if a `GoAway` frame has been received.
-        assert!(
-            self.inner.received_goaway.is_none(),
-            "can't open substream after goaway"
-        );
+    pub fn open_substream(&mut self, user_data: T) -> Result<SubstreamId, OpenSubstreamError> {
+        if self.inner.received_goaway.is_some() {
+            return Err(OpenSubstreamError::GoAwayReceived);
+        }
 
-        // Make sure that the `loop` below can finish.
-        assert!(
-            usize::try_from(u32::max_value() / 2 - 1).map_or(true, |full_len| self
-                .inner
-                .substreams
-                .len()
-                < full_len)
-        );
+        let substream_id = self.inner.next_outbound_substream.clone();
 
-        // Grab a `VacantEntry` in `self.inner.substreams`.
-        let entry = loop {
-            // Allocating a substream ID is surprisingly difficult because overflows in the
-            // identifier are possible if the software runs for a very long time.
-            // Rather than naively incrementing the id by two and assuming that no substream with
-            // this ID exists, the code below properly handles wrapping around and ignores IDs
-            // already in use.
-            let id_attempt = self.inner.next_outbound_substream;
-            self.inner.next_outbound_substream = {
-                let mut id = self.inner.next_outbound_substream.get();
-                loop {
-                    // Odd ids are reserved for the initiator and even ids are reserved for the
-                    // listener. Assuming that the current id is valid, incrementing by 2 will
-                    // lead to a valid id as well.
-                    id = id.wrapping_add(2);
-                    // However, the substream ID `0` is always invalid.
-                    match NonZeroU32::new(id) {
-                        Some(v) => break v,
-                        None => continue,
-                    }
-                }
-            };
-            if let Entry::Vacant(e) = self.inner.substreams.entry(id_attempt) {
-                break e;
-            }
+        self.inner.next_outbound_substream = match self.inner.next_outbound_substream.checked_add(1)
+        {
+            Some(new_id) => new_id,
+            None => return Err(OpenSubstreamError::NoFreeSubstreamId),
         };
 
-        // ID that was just allocated.
-        let substream_id = SubstreamId(*entry.key());
-
-        entry.insert(Substream {
-            state: SubstreamState::Healthy {
-                first_message_queued: false,
-                remote_syn_acked: false,
-                remote_allowed_window: NEW_SUBSTREAMS_FRAME_SIZE,
-                remote_window_pending_increase: 0,
-                allowed_window: NEW_SUBSTREAMS_FRAME_SIZE,
-                local_write_close: SubstreamStateLocalWrite::Open,
-                remote_write_closed: false,
-                write_queue: write_queue::WriteQueue::new(),
+        let _prev_value = self.inner.substreams.insert(
+            substream_id,
+            Substream {
+                state: SubstreamState::Healthy {
+                    first_message_queued: false,
+                    remote_syn_acked: false,
+                    remote_allowed_window: NEW_SUBSTREAMS_FRAME_SIZE,
+                    remote_window_pending_increase: 0,
+                    allowed_window: NEW_SUBSTREAMS_FRAME_SIZE,
+                    local_write_close: SubstreamStateLocalWrite::Open,
+                    remote_write_closed: false,
+                    write_queue: write_queue::WriteQueue::new(),
+                },
+                inbound: false,
+                user_data,
             },
-            inbound: false,
-            user_data,
-        });
+        );
+        debug_assert!(_prev_value.is_none());
 
-        substream_id
+        Ok(SubstreamId(substream_id))
     }
 
     /// Returns `Some` if a [`IncomingDataDetail::GoAway`] event has been generated in the past,
@@ -537,20 +505,21 @@ impl<T> Yamux<T> {
 
     /// Appends data to the buffer of data to send out on this substream.
     ///
+    /// Returns an error if [`Yamux::close`] or [`Yamux::reset`] has been called on this substream,
+    /// or if the substream has been reset by the remote.
+    ///
     /// # Panic
     ///
     /// Panics if the [`SubstreamId`] is invalid.
-    /// Panics if [`Yamux::close`] has already been called on this substream.
     ///
-    // TODO: doc obsolete
-    pub fn write(&mut self, substream_id: SubstreamId, data: Vec<u8>) {
+    pub fn write(&mut self, substream_id: SubstreamId, data: Vec<u8>) -> Result<(), WriteError> {
         let substream = self
             .inner
             .substreams
             .get_mut(&substream_id.0)
-            .unwrap_or_else(|| panic!("invalid substream"));
+            .unwrap_or_else(|| panic!());
+
         match &mut substream.state {
-            SubstreamState::Reset => {}
             SubstreamState::Healthy {
                 local_write_close: SubstreamStateLocalWrite::Open,
                 write_queue,
@@ -559,7 +528,7 @@ impl<T> Yamux<T> {
             } => {
                 // Don't push empty data onto the queue.
                 if data.is_empty() {
-                    return;
+                    return Ok(());
                 }
 
                 // If the write queue switches from empty to non-empty, queue the substream for
@@ -571,10 +540,14 @@ impl<T> Yamux<T> {
                 }
 
                 write_queue.push_back(data);
+                Ok(())
             }
-            SubstreamState::Healthy { .. } => {
-                panic!("write after close")
-            }
+            SubstreamState::Reset => Err(WriteError::Reset),
+            SubstreamState::Healthy {
+                local_write_close:
+                    SubstreamStateLocalWrite::FinDesired | SubstreamStateLocalWrite::FinQueued,
+                ..
+            } => Err(WriteError::Closed),
         }
     }
 
@@ -598,6 +571,8 @@ impl<T> Yamux<T> {
     /// >           remote is allowed. That's because it would be ambiguous whether bytes possibly
     /// >           in the send or receive queue should be counted or not.
     ///
+    /// Has no effect if the remote has already closed their writing side.
+    ///
     /// # Panic
     ///
     /// Panics if the [`SubstreamId`] is invalid.
@@ -605,6 +580,7 @@ impl<T> Yamux<T> {
     pub fn add_remote_window_saturating(&mut self, substream_id: SubstreamId, bytes: u64) {
         if let SubstreamState::Healthy {
             remote_window_pending_increase,
+            remote_write_closed: false,
             ..
         } = &mut self
             .inner
@@ -625,6 +601,9 @@ impl<T> Yamux<T> {
     /// Returns the number of bytes queued for writing on this substream.
     ///
     /// Returns 0 if the substream is in a reset state.
+    ///
+    /// > **Note**: Might return non-zero even if [`Yamux::close`] has been called, as this counts
+    /// >           the number of bytes still waiting to be written out.
     ///
     /// # Panic
     ///
@@ -682,27 +661,37 @@ impl<T> Yamux<T> {
 
     /// Marks the substream as closed. It is no longer possible to write data on it.
     ///
+    /// Returns an error if the local writing side is already closed, which can happen if
+    /// [`Yamux::close`] has already been called on this substream.
+    /// Returns an error if [`Yamux::reset`] has been called on this substream, or if the remote
+    /// has reset the substream in the past.
+    ///
     /// # Panic
     ///
     /// Panics if the [`SubstreamId`] is invalid.
-    /// Panics if the local writing side is already closed, which can happen if [`Yamux::close`]
-    /// has already been called on this substream or if the remote has reset the substream in the
-    /// past.
     ///
-    // TODO: doc obsolete
-    pub fn close(&mut self, substream_id: SubstreamId) {
+    pub fn close(&mut self, substream_id: SubstreamId) -> Result<(), CloseError> {
         let substream = self
             .inner
             .substreams
             .get_mut(&substream_id.0)
             .unwrap_or_else(|| panic!());
-        if let SubstreamState::Healthy {
-            local_write_close: ref mut local_write @ SubstreamStateLocalWrite::Open,
-            ..
-        } = substream.state
-        {
-            *local_write = SubstreamStateLocalWrite::FinDesired;
-            self.inner.outgoing_req_substreams.insert(substream_id.0);
+
+        match substream.state {
+            SubstreamState::Healthy {
+                local_write_close: ref mut local_write @ SubstreamStateLocalWrite::Open,
+                ..
+            } => {
+                *local_write = SubstreamStateLocalWrite::FinDesired;
+                self.inner.outgoing_req_substreams.insert(substream_id.0);
+                Ok(())
+            }
+            SubstreamState::Healthy {
+                local_write_close:
+                    SubstreamStateLocalWrite::FinDesired | SubstreamStateLocalWrite::FinQueued,
+                ..
+            } => Err(CloseError::AlreadyClosed),
+            SubstreamState::Reset => Err(CloseError::Reset),
         }
     }
 
@@ -710,14 +699,14 @@ impl<T> Yamux<T> {
     ///
     /// Use this method when a protocol error happens on a substream.
     ///
+    /// Returns an error if [`Yamux::reset`] has already been called on this substream or if the
+    /// remote has reset the substream in the past.
+    ///
     /// # Panic
     ///
     /// Panics if the [`SubstreamId`] is invalid.
-    /// Panics if the local writing side is already closed, which can happen if [`Yamux::close`]
-    /// has already been called on this substream or if the remote has reset the substream in the
-    /// past.
     ///
-    pub fn reset(&mut self, substream_id: SubstreamId) {
+    pub fn reset(&mut self, substream_id: SubstreamId) -> Result<(), ResetError> {
         // Add an entry to the list of RST headers to send to the remote.
         if let SubstreamState::Healthy { .. } = self
             .inner
@@ -730,8 +719,9 @@ impl<T> Yamux<T> {
             // `max_simultaneous_rst_substreams`, as locally-emitted RST frames aren't the
             // remote's fault.
             self.inner.rsts_to_send.push_back(substream_id.0);
+        } else {
+            return Err(ResetError::AlreadyReset);
         }
-        // TODO: else { panic!() } ?!
 
         let _was_inserted = self.inner.dead_substreams.insert(substream_id.0);
         debug_assert!(_was_inserted);
@@ -767,6 +757,8 @@ impl<T> Yamux<T> {
             }
             _ => {}
         }
+
+        Ok(())
     }
 
     /// Queues sending out a ping to the remote.
@@ -810,19 +802,12 @@ impl<T> Yamux<T> {
     ///
     /// All follow-up requests for new substreams from the remote are automatically rejected.
     /// [`IncomingDataDetail::IncomingSubstream`] events can no longer happen.
-    ///
-    /// # Panic
-    ///
-    /// Panics if this function has already been called in the past. This can be verified using
-    /// [`Yamux::goaway_queued_or_sent`]. It is illegal to call this function more than once on
-    /// the same instance of [`Yamux`].
-    ///
-    pub fn send_goaway(&mut self, code: GoAwayErrorCode) {
+    pub fn send_goaway(&mut self, code: GoAwayErrorCode) -> Result<(), SendGoAwayError> {
         match self.inner.outgoing_goaway {
             OutgoingGoAway::NotRequired => {
                 self.inner.outgoing_goaway = OutgoingGoAway::Required(code)
             }
-            _ => panic!("send_goaway called multiple times"),
+            _ => return Err(SendGoAwayError::AlreadySent),
         }
 
         // If the remote is currently opening a substream, ignore it. The remote understands when
@@ -844,6 +829,8 @@ impl<T> Yamux<T> {
                 }
             };
         }
+
+        Ok(())
     }
 
     /// Returns the list of all substreams that have been closed or reset.
@@ -1796,7 +1783,10 @@ impl<T> Yamux<T> {
     ///
     /// Panics if no incoming substream is currently pending.
     ///
-    pub fn accept_pending_substream(&mut self, user_data: T) -> SubstreamId {
+    pub fn accept_pending_substream(
+        &mut self,
+        user_data: T,
+    ) -> Result<SubstreamId, PendingSubstreamError> {
         match self.inner.incoming {
             Incoming::PendingIncomingSubstream {
                 substream_id,
@@ -1838,9 +1828,9 @@ impl<T> Yamux<T> {
                     }
                 };
 
-                substream_id
+                Ok(substream_id)
             }
-            _ => panic!(),
+            _ => Err(PendingSubstreamError::NoPendingSubstream),
         }
     }
 
@@ -1858,7 +1848,7 @@ impl<T> Yamux<T> {
     ///
     /// Panics if no incoming substream is currently pending.
     ///
-    pub fn reject_pending_substream(&mut self) {
+    pub fn reject_pending_substream(&mut self) -> Result<(), PendingSubstreamError> {
         match self.inner.incoming {
             Incoming::PendingIncomingSubstream {
                 substream_id,
@@ -1873,8 +1863,9 @@ impl<T> Yamux<T> {
                 };
 
                 self.inner.rsts_to_send.push_back(substream_id.0);
+                Ok(())
             }
-            _ => panic!(),
+            _ => Err(PendingSubstreamError::NoPendingSubstream),
         }
     }
 }
@@ -1983,6 +1974,55 @@ pub enum IncomingDataDetail {
     /// If multiple pings have been sent out simultaneously, they are always answered in the same
     /// order as they have been sent out.
     PingResponse,
+}
+
+/// Error potentially returned by [`Yamux::open_substream`].
+#[derive(Debug, derive_more::Display)]
+pub enum OpenSubstreamError {
+    /// A `GoAway` frame has been received in the past.
+    GoAwayReceived,
+    /// Impossible to allocate a new substream.
+    NoFreeSubstreamId,
+}
+
+/// Error potentially returned by [`Yamux::write`].
+#[derive(Debug, derive_more::Display)]
+pub enum WriteError {
+    /// Substream was already closed.
+    Closed,
+    /// Substream was reset.
+    Reset,
+}
+
+/// Error potentially returned by [`Yamux::close`].
+#[derive(Debug, derive_more::Display)]
+pub enum CloseError {
+    /// Substream was already closed.
+    AlreadyClosed,
+    /// Substream was reset.
+    Reset,
+}
+
+/// Error potentially returned by [`Yamux::reset`].
+#[derive(Debug, derive_more::Display)]
+pub enum ResetError {
+    /// Substream was already reset.
+    AlreadyReset,
+}
+
+/// Error potentially returned by [`Yamux::send_goaway`].
+#[derive(Debug, derive_more::Display)]
+pub enum SendGoAwayError {
+    /// A `GoAway` has already been sent.
+    AlreadySent,
+}
+
+/// Error potentially returned by [`Yamux::accept_pending_substream`] or
+/// [`Yamux::reject_pending_substream`].
+#[derive(Debug, derive_more::Display)]
+pub enum PendingSubstreamError {
+    /// No substream is pending.
+    NoPendingSubstream,
 }
 
 /// Error while decoding the Yamux stream.

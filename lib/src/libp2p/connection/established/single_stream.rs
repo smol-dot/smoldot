@@ -327,7 +327,12 @@ where
                     // subtle way. At the time of writing of this comment the limit should be
                     // properly enforced, however it is not considered problematic if it weren't.
                     if self.inner.yamux.num_inbound() >= self.inner.max_inbound_substreams {
-                        self.inner.yamux.reject_pending_substream();
+                        // Can only panic if there's no incoming substream, which we know for sure
+                        // is the case here.
+                        self.inner
+                            .yamux
+                            .reject_pending_substream()
+                            .unwrap_or_else(|_| panic!());
                         continue;
                     }
 
@@ -340,11 +345,14 @@ where
                         .max()
                         .unwrap_or(0);
 
+                    // Can only panic if there's no incoming substream, which we know for sure
+                    // is the case here.
                     self.inner
                         .yamux
                         .accept_pending_substream(Some(substream::Substream::ingoing(
                             max_protocol_name_len,
-                        )));
+                        )))
+                        .unwrap_or_else(|_| panic!());
                 }
 
                 Some(
@@ -597,14 +605,17 @@ where
             let written_bytes = substream_read_write.written_bytes;
             if written_bytes != 0 {
                 debug_assert!(!write_is_closed);
-                inner.yamux.write(
-                    substream_id,
-                    inner.intermediary_buffer[..written_bytes].to_vec(),
-                );
+                inner
+                    .yamux
+                    .write(
+                        substream_id,
+                        inner.intermediary_buffer[..written_bytes].to_vec(),
+                    )
+                    .unwrap();
             }
             if !write_is_closed && closed_after {
                 debug_assert_eq!(written_bytes, 0);
-                inner.yamux.close(substream_id);
+                inner.yamux.close(substream_id).unwrap();
             }
 
             match substream_update {
@@ -612,7 +623,7 @@ where
                 None => {
                     if !closed_after || !read_is_closed {
                         // TODO: what we do here is definitely correct, but the docs of `reset()` seem sketchy, investigate
-                        inner.yamux.reset(substream_id);
+                        inner.yamux.reset(substream_id).unwrap();
                     }
                 }
             };
@@ -750,6 +761,7 @@ where
         self.inner
             .yamux
             .send_goaway(yamux::GoAwayErrorCode::NormalTermination)
+            .unwrap()
     }
 
     /// Sends a request to the remote.
@@ -795,20 +807,21 @@ where
             }
         };
 
-        let substream_id =
-            self.inner
-                .yamux
-                .open_substream(Some(substream::Substream::request_out(
-                    self.inner.request_protocols[protocol_index].name.clone(), // TODO: clone :-/
-                    timeout,
-                    if has_length_prefix {
-                        Some(request)
-                    } else {
-                        None
-                    },
-                    self.inner.request_protocols[protocol_index].max_response_size,
-                    user_data,
-                )));
+        let substream_id = self
+            .inner
+            .yamux
+            .open_substream(Some(substream::Substream::request_out(
+                self.inner.request_protocols[protocol_index].name.clone(), // TODO: clone :-/
+                timeout,
+                if has_length_prefix {
+                    Some(request)
+                } else {
+                    None
+                },
+                self.inner.request_protocols[protocol_index].max_response_size,
+                user_data,
+            )))
+            .unwrap(); // TODO: consider not panicking
 
         // TODO: we add some bytes due to the length prefix, this is a bit hacky as we should ask this information from the substream
         self.inner.yamux.add_remote_window_saturating(
@@ -877,18 +890,19 @@ where
         // TODO: turn this assert into something that can't panic?
         assert!(handshake.len() <= max_handshake_size);
 
-        let substream =
-            self.inner
-                .yamux
-                .open_substream(Some(substream::Substream::notifications_out(
-                    timeout,
-                    self.inner.notifications_protocols[protocol_index]
-                        .name
-                        .clone(), // TODO: clone :-/,
-                    handshake,
-                    max_handshake_size,
-                    user_data,
-                )));
+        let substream = self
+            .inner
+            .yamux
+            .open_substream(Some(substream::Substream::notifications_out(
+                timeout,
+                self.inner.notifications_protocols[protocol_index]
+                    .name
+                    .clone(), // TODO: clone :-/,
+                handshake,
+                max_handshake_size,
+                user_data,
+            )))
+            .unwrap(); // TODO: consider not panicking
 
         SubstreamId(SubstreamIdInner::SingleStream(substream))
     }
@@ -1121,9 +1135,13 @@ impl ConnectionPrototype {
             max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
         });
 
-        let outgoing_pings = yamux.open_substream(Some(substream::Substream::ping_out(
-            config.ping_protocol.clone(),
-        )));
+        let outgoing_pings = yamux
+            .open_substream(Some(substream::Substream::ping_out(
+                config.ping_protocol.clone(),
+            )))
+            // Can only panic if a `GoAway` has been received, or if there are too many substreams
+            // already open, which we know for sure can't happen here
+            .unwrap_or_else(|_| panic!());
 
         SingleStream {
             encryption: self.encryption,

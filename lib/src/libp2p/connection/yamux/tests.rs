@@ -17,7 +17,11 @@
 
 #![cfg(test)]
 
-use super::{Config, Error, GoAwayErrorCode, IncomingDataDetail, Yamux};
+use super::{
+    CloseError, Config, Error, GoAwayErrorCode, IncomingDataDetail, OpenSubstreamError, WriteError,
+    Yamux,
+};
+
 use core::{
     cmp,
     num::{NonZeroU32, NonZeroUsize},
@@ -64,7 +68,7 @@ fn not_immediate_data_send_when_opening_substream() {
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
-    let _ = yamux.open_substream(());
+    let _ = yamux.open_substream(()).unwrap();
     assert!(yamux.extract_next(usize::max_value()).is_none())
 }
 
@@ -79,8 +83,8 @@ fn syn_sent() {
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
-    let substream_id = yamux.open_substream(());
-    yamux.write(substream_id, b"foo".to_vec());
+    let substream_id = yamux.open_substream(()).unwrap();
+    yamux.write(substream_id, b"foo".to_vec()).unwrap();
 
     let mut output = Vec::new();
     while let Some(out) = yamux.extract_next(usize::max_value()) {
@@ -102,8 +106,8 @@ fn max_out_data_frame_size_works() {
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
-    let substream_id = yamux.open_substream(());
-    yamux.write(substream_id, b"foo".to_vec());
+    let substream_id = yamux.open_substream(()).unwrap();
+    yamux.write(substream_id, b"foo".to_vec()).unwrap();
 
     let mut output = Vec::new();
     while let Some(out) = yamux.extract_next(usize::max_value()) {
@@ -128,8 +132,8 @@ fn extract_bytes_one_by_one() {
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
-    let substream_id = yamux.open_substream(());
-    yamux.write(substream_id, b"foo".to_vec());
+    let substream_id = yamux.open_substream(()).unwrap();
+    yamux.write(substream_id, b"foo".to_vec()).unwrap();
 
     let mut output = Vec::new();
     while let Some(out) = yamux.extract_next(1) {
@@ -163,7 +167,7 @@ fn inject_bytes_one_by_one() {
         match outcome.detail {
             Some(IncomingDataDetail::IncomingSubstream) => {
                 assert_eq!(cursor, 11); // We've read 12 bytes but `cursor` is still 11
-                yamux.accept_pending_substream(());
+                yamux.accept_pending_substream(()).unwrap();
             }
             Some(IncomingDataDetail::DataFrame { start_offset, .. }) => {
                 assert_eq!(start_offset, 0);
@@ -202,14 +206,16 @@ fn ack_sent() {
             match outcome.detail {
                 Some(IncomingDataDetail::IncomingSubstream) => {
                     assert!(opened_substream.is_none());
-                    opened_substream = Some(yamux.accept_pending_substream(()))
+                    opened_substream = Some(yamux.accept_pending_substream(()).unwrap())
                 }
                 _ => {}
             }
         }
     }
 
-    yamux.write(opened_substream.unwrap(), b"foo".to_vec());
+    yamux
+        .write(opened_substream.unwrap(), b"foo".to_vec())
+        .unwrap();
 
     let mut output = Vec::new();
     while let Some(out) = yamux.extract_next(usize::max_value()) {
@@ -306,7 +312,7 @@ fn data_with_rst() {
 
                 match outcome.detail {
                     Some(IncomingDataDetail::IncomingSubstream) => {
-                        yamux.accept_pending_substream(());
+                        yamux.accept_pending_substream(()).unwrap();
                     }
                     _ => {}
                 }
@@ -345,7 +351,7 @@ fn empty_data_frame_with_rst() {
 
                 match outcome.detail {
                     Some(IncomingDataDetail::IncomingSubstream) => {
-                        yamux.accept_pending_substream(());
+                        yamux.accept_pending_substream(()).unwrap();
                     }
                     _ => {}
                 }
@@ -376,7 +382,9 @@ fn rst_sent_when_rejecting() {
             yamux = outcome.yamux;
             cursor += outcome.bytes_read;
             match outcome.detail {
-                Some(IncomingDataDetail::IncomingSubstream) => yamux.reject_pending_substream(),
+                Some(IncomingDataDetail::IncomingSubstream) => {
+                    yamux.reject_pending_substream().unwrap()
+                }
                 _ => {}
             }
         }
@@ -417,7 +425,9 @@ fn max_simultaneous_rst_substreams() {
                 yamux = outcome.yamux;
                 cursor += outcome.bytes_read;
                 match outcome.detail {
-                    Some(IncomingDataDetail::IncomingSubstream) => yamux.reject_pending_substream(),
+                    Some(IncomingDataDetail::IncomingSubstream) => {
+                        yamux.reject_pending_substream().unwrap()
+                    }
                     _ => {}
                 }
             }
@@ -477,7 +487,7 @@ fn substream_opened_twice() {
                 cursor += outcome.bytes_read;
 
                 if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
-                    yamux.accept_pending_substream(());
+                    yamux.accept_pending_substream(()).unwrap();
                 }
             }
             Err(Error::UnexpectedSyn(v)) if v.get() == 84 => return,
@@ -514,7 +524,7 @@ fn substream_opened_back_after_rst() {
                 cursor += outcome.bytes_read;
 
                 if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
-                    yamux.accept_pending_substream(());
+                    yamux.accept_pending_substream(()).unwrap();
                 }
 
                 let dead_substream = yamux.dead_substreams().next().map(|(s, ..)| s);
@@ -552,10 +562,10 @@ fn substream_opened_back_after_graceful_closing() {
                 cursor += outcome.bytes_read;
 
                 if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
-                    let substream_id = yamux.accept_pending_substream(());
+                    let substream_id = yamux.accept_pending_substream(()).unwrap();
 
                     // Close the substream gracefully.
-                    yamux.close(substream_id);
+                    yamux.close(substream_id).unwrap();
                 }
             }
             Err(_) => panic!(),
@@ -613,8 +623,8 @@ fn missing_ack() {
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
-    let substream_id = yamux.open_substream(());
-    yamux.write(substream_id, b"hello world".to_vec());
+    let substream_id = yamux.open_substream(()).unwrap();
+    yamux.write(substream_id, b"hello world".to_vec()).unwrap();
 
     let mut output = Vec::new();
     while let Some(out) = yamux.extract_next(usize::max_value()) {
@@ -654,8 +664,8 @@ fn multiple_acks() {
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
-    let substream_id = yamux.open_substream(());
-    yamux.write(substream_id, b"hello world".to_vec());
+    let substream_id = yamux.open_substream(()).unwrap();
+    yamux.write(substream_id, b"hello world".to_vec()).unwrap();
 
     let mut output = Vec::new();
     while let Some(out) = yamux.extract_next(usize::max_value()) {
@@ -698,12 +708,12 @@ fn multiple_writes_combined_into_one() {
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
-    let substream_id = yamux.open_substream(());
+    let substream_id = yamux.open_substream(()).unwrap();
 
     // Write multiple times. All these writes should be combined into a single data frame.
-    yamux.write(substream_id, b"aaaa".to_vec());
-    yamux.write(substream_id, b"cc".to_vec());
-    yamux.write(substream_id, b"bbbbbb".to_vec());
+    yamux.write(substream_id, b"aaaa".to_vec()).unwrap();
+    yamux.write(substream_id, b"cc".to_vec()).unwrap();
+    yamux.write(substream_id, b"bbbbbb".to_vec()).unwrap();
 
     let mut output = Vec::new();
     // We read 7 bytes at a time, in order to land in-between the buffers.
@@ -727,9 +737,9 @@ fn close_before_syn_sent() {
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
-    let substream_id = yamux.open_substream(());
-    yamux.write(substream_id, b"foo".to_vec());
-    yamux.close(substream_id);
+    let substream_id = yamux.open_substream(()).unwrap();
+    yamux.write(substream_id, b"foo".to_vec()).unwrap();
+    yamux.close(substream_id).unwrap();
 
     let mut output = Vec::new();
     while let Some(out) = yamux.extract_next(usize::max_value()) {
@@ -741,7 +751,41 @@ fn close_before_syn_sent() {
 }
 
 #[test]
-#[should_panic = "write after close"]
+fn close_twice() {
+    let mut yamux = Yamux::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(u32::max_value()).unwrap(),
+        max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
+    });
+
+    let substream_id = yamux.open_substream(()).unwrap();
+    yamux.close(substream_id).unwrap();
+    assert!(matches!(
+        yamux.close(substream_id),
+        Err(CloseError::AlreadyClosed)
+    ));
+}
+
+#[test]
+fn close_after_reset() {
+    let mut yamux = Yamux::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(u32::max_value()).unwrap(),
+        max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
+    });
+
+    let substream_id = yamux.open_substream(()).unwrap();
+    yamux.reset(substream_id).unwrap();
+    assert!(matches!(yamux.close(substream_id), Err(CloseError::Reset)));
+}
+
+#[test]
 fn write_after_close_illegal() {
     let mut yamux = Yamux::new(Config {
         capacity: 0,
@@ -752,13 +796,16 @@ fn write_after_close_illegal() {
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
-    let substream_id = yamux.open_substream(());
-    yamux.write(substream_id, b"foo".to_vec());
+    let substream_id = yamux.open_substream(()).unwrap();
+    yamux.write(substream_id, b"foo".to_vec()).unwrap();
     assert!(yamux.can_send(substream_id));
-    yamux.close(substream_id);
+    yamux.close(substream_id).unwrap();
     assert!(!yamux.can_send(substream_id));
 
-    yamux.write(substream_id, b"test".to_vec());
+    assert!(matches!(
+        yamux.write(substream_id, b"test".to_vec()),
+        Err(WriteError::Closed)
+    ));
 }
 
 #[test]
@@ -788,7 +835,7 @@ fn credits_exceeded_checked_before_data_is_received() {
                 cursor += outcome.bytes_read;
 
                 if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
-                    yamux.accept_pending_substream(());
+                    yamux.accept_pending_substream(()).unwrap();
                 }
             }
             Err(Error::CreditsExceeded) => return,
@@ -825,7 +872,7 @@ fn credits_exceeded_checked_at_the_syn() {
                 cursor += outcome.bytes_read;
 
                 if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
-                    yamux.accept_pending_substream(());
+                    yamux.accept_pending_substream(()).unwrap();
                 }
             }
             Err(Error::CreditsExceeded) => return,
@@ -865,7 +912,7 @@ fn data_coming_with_the_syn_taken_into_account() {
                 cursor += outcome.bytes_read;
 
                 if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
-                    yamux.accept_pending_substream(());
+                    yamux.accept_pending_substream(()).unwrap();
                 }
             }
             Err(Error::CreditsExceeded) => return,
@@ -905,7 +952,7 @@ fn add_remote_window_works() {
                 cursor += outcome.bytes_read;
 
                 if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
-                    let substream_id = yamux.accept_pending_substream(());
+                    let substream_id = yamux.accept_pending_substream(()).unwrap();
 
                     // `add_remote_window` doesn't immediately raise the limit, so we flush the
                     // output buffer in order to obtain a window frame.
@@ -955,7 +1002,7 @@ fn add_remote_window_doesnt_immediately_raise_limit() {
                 cursor += outcome.bytes_read;
 
                 if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
-                    let substream_id = yamux.accept_pending_substream(());
+                    let substream_id = yamux.accept_pending_substream(()).unwrap();
 
                     // `add_remote_window` shouldn't immediately raise the limit.
                     yamux.add_remote_window_saturating(substream_id, 100 * 1024);
@@ -981,7 +1028,7 @@ fn add_remote_window_saturates() {
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
-    let substream_id = yamux.open_substream(());
+    let substream_id = yamux.open_substream(()).unwrap();
 
     // Check that `add_remote_window_saturating` doesn't panic.
     yamux.add_remote_window_saturating(substream_id, u64::max_value());
@@ -998,8 +1045,8 @@ fn remote_default_window_respected() {
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
-    let substream_id = yamux.open_substream(());
-    yamux.write(substream_id, vec![255; 300 * 1024]); // Exceeds default limit.
+    let substream_id = yamux.open_substream(()).unwrap();
+    yamux.write(substream_id, vec![255; 300 * 1024]).unwrap(); // Exceeds default limit.
 
     let mut output = Vec::new();
     while let Some(out) = yamux.extract_next(usize::max_value()) {
@@ -1036,7 +1083,7 @@ fn remote_window_frames_respected() {
 
                 if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
                     assert!(accepted_substream.is_none());
-                    accepted_substream = Some(yamux.accept_pending_substream(()));
+                    accepted_substream = Some(yamux.accept_pending_substream(()).unwrap());
                 }
             }
             Err(_) => panic!(),
@@ -1045,7 +1092,7 @@ fn remote_window_frames_respected() {
 
     let substream_id = accepted_substream.unwrap();
 
-    yamux.write(substream_id, vec![255; 300 * 1024]); // Exceeds default limit.
+    yamux.write(substream_id, vec![255; 300 * 1024]).unwrap(); // Exceeds default limit.
 
     let mut output = Vec::new();
     while let Some(out) = yamux.extract_next(usize::max_value()) {
@@ -1084,7 +1131,7 @@ fn write_after_fin() {
                 cursor += outcome.bytes_read;
 
                 if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
-                    yamux.accept_pending_substream(());
+                    yamux.accept_pending_substream(()).unwrap();
                 }
             }
             Err(Error::WriteAfterFin) => return,
@@ -1120,7 +1167,7 @@ fn write_after_fin_even_with_empty_frame() {
                 cursor += outcome.bytes_read;
 
                 if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
-                    yamux.accept_pending_substream(());
+                    yamux.accept_pending_substream(()).unwrap();
                 }
             }
             Err(Error::WriteAfterFin) => return,
@@ -1158,7 +1205,7 @@ fn window_frame_with_fin_after_fin() {
                 cursor += outcome.bytes_read;
 
                 if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
-                    yamux.accept_pending_substream(());
+                    yamux.accept_pending_substream(()).unwrap();
                 }
             }
             Err(_) => panic!(),
@@ -1194,7 +1241,7 @@ fn window_frame_without_fin_after_fin() {
                 cursor += outcome.bytes_read;
 
                 if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
-                    yamux.accept_pending_substream(());
+                    yamux.accept_pending_substream(()).unwrap();
                 }
             }
             Err(_) => panic!(),
@@ -1471,8 +1518,8 @@ fn dont_send_syn_after_goaway() {
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
-    let substream_id = yamux.open_substream(());
-    yamux.write(substream_id, b"foo".to_vec());
+    let substream_id = yamux.open_substream(()).unwrap();
+    yamux.write(substream_id, b"foo".to_vec()).unwrap();
     assert!(yamux.can_send(substream_id));
 
     // GoAway frame.
@@ -1504,8 +1551,8 @@ fn substream_reset_on_goaway_if_not_acked() {
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
-    let substream_id = yamux.open_substream(());
-    yamux.write(substream_id, b"foo".to_vec());
+    let substream_id = yamux.open_substream(()).unwrap();
+    yamux.write(substream_id, b"foo".to_vec()).unwrap();
     while let Some(_) = yamux.extract_next(usize::max_value()) {}
 
     // GoAway frame.
@@ -1536,8 +1583,8 @@ fn can_still_send_after_goaway_if_acked() {
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
-    let substream_id = yamux.open_substream(());
-    yamux.write(substream_id, b"hello world".to_vec());
+    let substream_id = yamux.open_substream(()).unwrap();
+    yamux.write(substream_id, b"hello world".to_vec()).unwrap();
 
     let mut output = Vec::new();
     while let Some(out) = yamux.extract_next(usize::max_value()) {
@@ -1563,7 +1610,7 @@ fn can_still_send_after_goaway_if_acked() {
 
     assert!(yamux.can_send(substream_id));
 
-    yamux.write(substream_id, b"foo".to_vec());
+    yamux.write(substream_id, b"foo".to_vec()).unwrap();
 
     let mut output = Vec::new();
     while let Some(out) = yamux.extract_next(usize::max_value()) {
@@ -1614,7 +1661,9 @@ fn ignore_incoming_substreams_after_goaway() {
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
-    yamux.send_goaway(GoAwayErrorCode::NormalTermination);
+    yamux
+        .send_goaway(GoAwayErrorCode::NormalTermination)
+        .unwrap();
 
     // New substream.
     let data = [0, 0, 0, 1, 0, 0, 0, 84, 0, 0, 0, 0];
@@ -1637,7 +1686,6 @@ fn ignore_incoming_substreams_after_goaway() {
 }
 
 #[test]
-#[should_panic = "can't open substream after goaway"]
 fn opening_forbidden_after_goaway() {
     let mut yamux = Yamux::new(Config {
         capacity: 0,
@@ -1661,6 +1709,8 @@ fn opening_forbidden_after_goaway() {
         }
     }
 
-    // Panics.
-    yamux.open_substream(());
+    assert!(matches!(
+        yamux.open_substream(()),
+        Err(OpenSubstreamError::GoAwayReceived)
+    ));
 }
