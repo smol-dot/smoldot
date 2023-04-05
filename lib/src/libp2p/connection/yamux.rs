@@ -1504,7 +1504,11 @@ impl<T> Yamux<T> {
     /// >           however, this would be rather sub-optimal considering that buffers to send out
     /// >           are already stored in their final form in the state machine.
     pub fn extract_next(&'_ mut self, size_bytes: usize) -> Option<impl AsRef<[u8]> + '_> {
-        while size_bytes != 0 {
+        if size_bytes == 0 {
+            return None;
+        }
+
+        loop {
             match self.inner.outgoing {
                 Outgoing::Header {
                     ref mut header,
