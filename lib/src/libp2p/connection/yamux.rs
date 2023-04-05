@@ -410,9 +410,9 @@ impl<T> Yamux<T> {
             state: SubstreamState::Healthy {
                 first_message_queued: false,
                 remote_syn_acked: false,
-                remote_allowed_window: DEFAULT_FRAME_SIZE,
+                remote_allowed_window: NEW_SUBSTREAMS_FRAME_SIZE,
                 remote_window_pending_increase: 0,
-                allowed_window: DEFAULT_FRAME_SIZE,
+                allowed_window: NEW_SUBSTREAMS_FRAME_SIZE,
                 local_write_close: SubstreamStateLocalWrite::Open,
                 remote_write_closed: false,
                 write_queue: write_queue::WriteQueue::new(),
@@ -516,6 +516,14 @@ impl<T> Yamux<T> {
     /// Adds `bytes` to the number of bytes the remote is allowed to send at once in the next
     /// packet.
     ///
+    /// > **Note**: When a substream has just been opened or accepted, it starts with an initial
+    /// >           window of [`NEW_SUBSTREAMS_FRAME_SIZE`].
+    ///
+    /// > **Note**: It is only possible to add more bytes to the window and not set or reduce this
+    /// >           number of bytes, and it is also not possible to obtain the number of bytes the
+    /// >           remote is allowed. That's because it would be ambiguous whether bytes possibly
+    /// >           in the receive queue should be counted or not.
+    ///
     /// # Panic
     ///
     /// Panics if the [`SubstreamId`] is invalid.
@@ -533,29 +541,6 @@ impl<T> Yamux<T> {
             .state
         {
             *remote_window_pending_increase = remote_window_pending_increase.saturating_add(bytes);
-        }
-    }
-
-    /// Similar to [`Yamux::add_remote_window`], but sets the number of allowed bytes to be at
-    /// least this value. In other words, if this method was to be twice with the same parameter,
-    /// the second call would have no effect.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SubstreamId`] is invalid.
-    ///
-    pub fn reserve_window(&mut self, substream_id: SubstreamId, bytes: u64) {
-        if let SubstreamState::Healthy {
-            remote_window_pending_increase,
-            ..
-        } = &mut self
-            .inner
-            .substreams
-            .get_mut(&substream_id.0)
-            .unwrap_or_else(|| panic!())
-            .state
-        {
-            *remote_window_pending_increase = cmp::max(*remote_window_pending_increase, bytes);
         }
     }
 
@@ -1270,7 +1255,7 @@ impl<T> Yamux<T> {
                                 continue;
                             }
 
-                            if is_data && u64::from(length) > DEFAULT_FRAME_SIZE {
+                            if is_data && u64::from(length) > NEW_SUBSTREAMS_FRAME_SIZE {
                                 return Err(Error::CreditsExceeded);
                             }
 
@@ -1680,7 +1665,7 @@ impl<T> Yamux<T> {
                 data_frame_size,
                 fin,
             } => {
-                debug_assert!(u64::from(data_frame_size) <= DEFAULT_FRAME_SIZE);
+                debug_assert!(u64::from(data_frame_size) <= NEW_SUBSTREAMS_FRAME_SIZE);
 
                 let _was_before = self.inner.substreams.insert(
                     substream_id.0,
@@ -1688,9 +1673,10 @@ impl<T> Yamux<T> {
                         state: SubstreamState::Healthy {
                             first_message_queued: false,
                             remote_syn_acked: true,
-                            remote_allowed_window: DEFAULT_FRAME_SIZE - u64::from(data_frame_size),
+                            remote_allowed_window: NEW_SUBSTREAMS_FRAME_SIZE
+                                - u64::from(data_frame_size),
                             remote_window_pending_increase: 0,
-                            allowed_window: DEFAULT_FRAME_SIZE + u64::from(extra_window),
+                            allowed_window: NEW_SUBSTREAMS_FRAME_SIZE + u64::from(extra_window),
                             local_write_close: SubstreamStateLocalWrite::Open,
                             remote_write_closed: data_frame_size == 0 && fin,
                             write_queue: write_queue::WriteQueue::new(),
@@ -1905,4 +1891,4 @@ pub enum DeadSubstreamTy {
 }
 
 /// By default, all new substreams have this implicit window size.
-const DEFAULT_FRAME_SIZE: u64 = 256 * 1024;
+pub const NEW_SUBSTREAMS_FRAME_SIZE: u64 = 256 * 1024;

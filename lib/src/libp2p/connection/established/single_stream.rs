@@ -811,11 +811,12 @@ where
                 )));
 
         // TODO: we add some bytes due to the length prefix, this is a bit hacky as we should ask this information from the substream
-        self.inner.yamux.reserve_window(
+        self.inner.yamux.add_remote_window(
             substream_id,
             u64::try_from(self.inner.request_protocols[protocol_index].max_response_size)
                 .unwrap_or(u64::max_value())
-                .saturating_add(64),
+                .saturating_add(64)
+                .saturating_sub(yamux::NEW_SUBSTREAMS_FRAME_SIZE),
         );
 
         Ok(SubstreamId(SubstreamIdInner::SingleStream(substream_id)))
