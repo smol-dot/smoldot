@@ -625,9 +625,6 @@ fn remote_default_window_respected() {
 
     let mut output = Vec::new();
     while let Some(out) = yamux.extract_next(usize::max_value()) {
-        if output.len() >= 50 {
-            panic!("{:?}", out.as_ref().len())
-        }
         output.extend_from_slice(out.as_ref());
     }
 
