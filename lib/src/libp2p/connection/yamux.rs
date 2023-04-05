@@ -83,6 +83,19 @@ pub struct Config {
     /// which the data on substreams is sent out.
     pub randomness_seed: [u8; 32],
 
+    /// Maximum size of data frames to send out.
+    ///
+    /// A higher value increases the variance of the latency of the data sent on the substreams,
+    /// which is undesirable. A lower value increases the overhead of the Yamux protocol. This
+    /// overhead is equal to `1200 / (max_out_data_frame_size + 12)` %, for example setting
+    /// `max_out_data_frame_size` to 24 incurs a 33% overhead.
+    ///
+    /// The "best" value depends on the bandwidth speed of the underlying connection, and is thus
+    /// impossible to tell.
+    ///
+    /// A typical value is `8192`.
+    pub max_out_data_frame_size: NonZeroU32,
+
     /// When the remote sends a ping, we need to send out a pong. However, the remote could refuse
     /// to read any additional data from the socket and continue sending pings, thus increasing
     /// the local buffer size indefinitely. In order to protect against this attack, there exists
@@ -128,6 +141,9 @@ struct YamuxInner<T> {
 
     /// Whether to send out a `GoAway` frame.
     outgoing_goaway: OutgoingGoAway,
+
+    /// See [`Config::max_out_data_frame_size`].
+    max_out_data_frame_size: NonZeroU32,
 
     /// Id of the next outgoing substream to open.
     /// This implementation allocates identifiers linearly. Every time a substream is open, its
@@ -322,6 +338,7 @@ impl<T> Yamux<T> {
                 incoming: Incoming::Header(arrayvec::ArrayVec::new()),
                 outgoing: Outgoing::Idle,
                 outgoing_goaway: OutgoingGoAway::NotRequired,
+                max_out_data_frame_size: config.max_out_data_frame_size,
                 next_outbound_substream: if config.is_initiator {
                     NonZeroU32::new(1).unwrap()
                 } else {
@@ -1680,8 +1697,11 @@ impl<T> Yamux<T> {
                         {
                             let pending_len = write_queue.queued_bytes();
                             let len_out = cmp::min(
-                                u32::try_from(pending_len).unwrap_or(u32::max_value()),
-                                u32::try_from(*allowed_window).unwrap_or(u32::max_value()),
+                                self.inner.max_out_data_frame_size.get(),
+                                cmp::min(
+                                    u32::try_from(pending_len).unwrap_or(u32::max_value()),
+                                    u32::try_from(*allowed_window).unwrap_or(u32::max_value()),
+                                ),
                             );
                             let len_out_usize = usize::try_from(len_out).unwrap();
                             *allowed_window -= u64::from(len_out);

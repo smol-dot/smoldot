@@ -60,7 +60,7 @@ use super::{
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
 use core::{
     fmt,
-    num::NonZeroUsize,
+    num::{NonZeroU32, NonZeroUsize},
     ops::{Add, Sub},
     time::Duration,
 };
@@ -1116,6 +1116,7 @@ impl ConnectionPrototype {
             is_initiator: self.encryption.is_initiator(),
             capacity: 64, // TODO: ?
             randomness_seed: randomness.sample(rand::distributions::Standard),
+            max_out_data_frame_size: NonZeroU32::new(8192).unwrap(), // TODO: make configurable?
             max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
             max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
         });

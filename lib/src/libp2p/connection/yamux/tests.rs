@@ -18,7 +18,10 @@
 #![cfg(test)]
 
 use super::{Config, Error, GoAwayErrorCode, IncomingDataDetail, Yamux};
-use core::{cmp, num::NonZeroUsize};
+use core::{
+    cmp,
+    num::{NonZeroU32, NonZeroUsize},
+};
 
 #[test]
 fn bad_header_data() {
@@ -26,6 +29,7 @@ fn bad_header_data() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -55,6 +59,7 @@ fn not_immediate_data_send_when_opening_substream() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -69,6 +74,7 @@ fn syn_sent() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -86,11 +92,38 @@ fn syn_sent() {
 }
 
 #[test]
+fn max_out_data_frame_size_works() {
+    let mut yamux = Yamux::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(2).unwrap(),
+        max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
+    });
+
+    let substream_id = yamux.open_substream(());
+    yamux.write(substream_id, b"foo".to_vec());
+
+    let mut output = Vec::new();
+    while let Some(out) = yamux.extract_next(usize::max_value()) {
+        output.extend_from_slice(out.as_ref());
+    }
+
+    assert_eq!(&output[0..4], &[0, 0, 0, 1]);
+    assert_eq!(&output[8..14], &[0, 0, 0, 2, 102, 111]);
+    assert_eq!(&output[14..18], &[0, 0, 0, 0]);
+    assert_eq!(&output[22..27], &[0, 0, 0, 1, 111]);
+    assert_eq!(output.len(), 27);
+}
+
+#[test]
 fn extract_bytes_one_by_one() {
     let mut yamux = Yamux::new(Config {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -114,6 +147,7 @@ fn inject_bytes_one_by_one() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -151,6 +185,7 @@ fn ack_sent() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -193,6 +228,7 @@ fn syn_and_ack_together() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -220,6 +256,7 @@ fn syn_and_rst_together() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -247,6 +284,7 @@ fn rst_sent_when_rejecting() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -279,6 +317,7 @@ fn max_simultaneous_rst_substreams() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(16).unwrap(),
     });
@@ -315,6 +354,7 @@ fn invalid_inbound_substream_id() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -342,6 +382,7 @@ fn substream_opened_twice() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -375,6 +416,7 @@ fn substream_opened_back_after_rst() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -415,6 +457,7 @@ fn substream_opened_back_after_graceful_closing() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -486,6 +529,7 @@ fn missing_ack() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -526,6 +570,7 @@ fn multiple_acks() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -569,6 +614,7 @@ fn multiple_writes_combined_into_one() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -597,6 +643,7 @@ fn close_before_syn_sent() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -621,6 +668,7 @@ fn write_after_close_illegal() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -640,6 +688,7 @@ fn credits_exceeded_checked_before_data_is_received() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -678,6 +727,7 @@ fn credits_exceeded_checked_at_the_syn() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -714,6 +764,7 @@ fn data_coming_with_the_syn_taken_into_account() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -753,6 +804,7 @@ fn add_remote_window_works() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -802,6 +854,7 @@ fn add_remote_window_doesnt_immediately_raise_limit() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -844,6 +897,7 @@ fn add_remote_window_saturates() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -860,6 +914,7 @@ fn remote_default_window_respected() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -883,6 +938,7 @@ fn remote_window_frames_respected() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -931,6 +987,7 @@ fn write_after_fin() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -966,6 +1023,7 @@ fn write_after_fin_even_with_empty_frame() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -1001,6 +1059,7 @@ fn window_frame_with_fin_after_fin() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -1036,6 +1095,7 @@ fn window_frame_without_fin_after_fin() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -1071,6 +1131,7 @@ fn send_ping() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -1112,6 +1173,7 @@ fn remote_pong_wrong_opaque_value() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -1153,6 +1215,7 @@ fn pings_answered_in_wrong_order() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -1193,6 +1256,7 @@ fn remote_pong_out_of_nowhere() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -1222,6 +1286,7 @@ fn answer_remote_ping() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -1253,6 +1318,7 @@ fn max_simultaneous_queued_pongs() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -1286,6 +1352,7 @@ fn simultaneous_pongs_flushed() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -1320,6 +1387,7 @@ fn dont_send_syn_after_goaway() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -1352,6 +1420,7 @@ fn substream_reset_on_goaway_if_not_acked() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -1383,6 +1452,7 @@ fn can_still_send_after_goaway_if_acked() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -1429,6 +1499,7 @@ fn receive_multiple_goaways() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -1459,6 +1530,7 @@ fn ignore_incoming_substreams_after_goaway() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
@@ -1492,6 +1564,7 @@ fn opening_forbidden_after_goaway() {
         capacity: 0,
         is_initiator: true,
         randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(8192).unwrap(),
         max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
