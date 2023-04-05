@@ -1112,12 +1112,14 @@ impl<T> Yamux<T> {
                         }
                         header::DecodedYamuxHeader::Data {
                             rst: true,
+                            ack,
                             stream_id,
                             length,
                             ..
                         }
                         | header::DecodedYamuxHeader::Window {
                             rst: true,
+                            ack,
                             stream_id,
                             length,
                             ..
@@ -1142,6 +1144,18 @@ impl<T> Yamux<T> {
 
                             let _was_inserted = self.inner.dead_substreams.insert(stream_id);
                             debug_assert!(_was_inserted);
+
+                            // Check whether the remote has ACKed multiple times.
+                            if matches!(
+                                s.state,
+                                SubstreamState::Healthy {
+                                    remote_syn_acked: true,
+                                    ..
+                                }
+                            ) && ack
+                            {
+                                return Err(Error::UnexpectedAck);
+                            }
 
                             // We might be currently writing a frame of data of the substream
                             // being reset. If that happens, we need to update some internal
@@ -1176,6 +1190,20 @@ impl<T> Yamux<T> {
                                     substream_id: SubstreamId(stream_id),
                                 }),
                             });
+                        }
+
+                        header::DecodedYamuxHeader::Data {
+                            syn: true,
+                            ack: true,
+                            ..
+                        }
+                        | header::DecodedYamuxHeader::Window {
+                            syn: true,
+                            ack: true,
+                            ..
+                        } => {
+                            // You're never supposed to send a SYN and ACK at the same time.
+                            return Err(Error::UnexpectedAck);
                         }
 
                         header::DecodedYamuxHeader::Data {
@@ -1281,6 +1309,7 @@ impl<T> Yamux<T> {
                             rst: false,
                             stream_id,
                             length,
+                            ack,
                             fin,
                             ..
                         } => {
@@ -1295,11 +1324,19 @@ impl<T> Yamux<T> {
                                     SubstreamState::Healthy {
                                         remote_write_closed,
                                         remote_allowed_window,
+                                        remote_syn_acked,
                                         ..
                                     },
                                 ..
                             }) = self.inner.substreams.get_mut(&stream_id)
                             {
+                                match (ack, remote_syn_acked) {
+                                    (false, true) => {}
+                                    (true, acked @ false) => *acked = true,
+                                    (true, true) => return Err(Error::UnexpectedAck),
+                                    (false, false) => return Err(Error::ExpectedAck),
+                                }
+
                                 if *remote_write_closed {
                                     return Err(Error::WriteAfterFin);
                                 }
@@ -1326,6 +1363,7 @@ impl<T> Yamux<T> {
                             rst: false,
                             stream_id,
                             length,
+                            ack,
                             fin,
                             ..
                         } => {
@@ -1336,10 +1374,22 @@ impl<T> Yamux<T> {
                             // id is discarded and doesn't result in an error, under the
                             // presumption that we are in this situation.
                             if let Some(Substream {
-                                state: SubstreamState::Healthy { allowed_window, .. },
+                                state:
+                                    SubstreamState::Healthy {
+                                        remote_syn_acked,
+                                        allowed_window,
+                                        ..
+                                    },
                                 ..
                             }) = self.inner.substreams.get_mut(&stream_id)
                             {
+                                match (ack, remote_syn_acked) {
+                                    (false, true) => {}
+                                    (true, acked @ false) => *acked = true,
+                                    (true, true) => return Err(Error::UnexpectedAck),
+                                    (false, false) => return Err(Error::ExpectedAck),
+                                }
+
                                 *allowed_window = allowed_window
                                     .checked_add(u64::from(length))
                                     .ok_or(Error::LocalCreditsOverflow)?;
@@ -1872,6 +1922,10 @@ pub enum Error {
     PingResponseNotMatching,
     /// Maximum number of simultaneous RST frames to send out has been exceeded.
     MaxSimultaneousRstSubstreamsExceeded,
+    /// The remote should have sent an ACK flag but didn't.
+    ExpectedAck,
+    /// The remote sent an ACK flag but shouldn't have.
+    UnexpectedAck,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]

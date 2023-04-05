@@ -345,6 +345,87 @@ fn substream_opened_back_after_rst() {
 }
 
 #[test]
+fn missing_ack() {
+    let mut yamux = Yamux::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
+    });
+
+    let substream_id = yamux.open_substream(());
+    yamux.write(substream_id, b"hello world".to_vec());
+
+    let mut output = Vec::new();
+    while let Some(out) = yamux.extract_next(usize::max_value()) {
+        output.extend_from_slice(out.as_ref());
+    }
+
+    // Data frame without an ACK.
+    let mut data = Vec::new();
+    data.extend_from_slice(&[0, 0, 0, 0]);
+    data.extend_from_slice(&output[4..8]);
+    data.extend_from_slice(&[0, 0, 0, 1, 0xff]);
+
+    let mut cursor = 0;
+    while cursor < data.len() {
+        match yamux.incoming_data(&data[cursor..]) {
+            Ok(outcome) => {
+                yamux = outcome.yamux;
+                cursor += outcome.bytes_read;
+            }
+            Err(Error::ExpectedAck) => return,
+            Err(_) => panic!(),
+        }
+    }
+
+    // Test failed.
+    panic!()
+}
+
+#[test]
+fn multiple_acks() {
+    let mut yamux = Yamux::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
+    });
+
+    let substream_id = yamux.open_substream(());
+    yamux.write(substream_id, b"hello world".to_vec());
+
+    let mut output = Vec::new();
+    while let Some(out) = yamux.extract_next(usize::max_value()) {
+        output.extend_from_slice(out.as_ref());
+    }
+
+    // Two data frames with an ACK.
+    let mut data = Vec::new();
+    data.extend_from_slice(&[0, 0, 0, 2]);
+    data.extend_from_slice(&output[4..8]);
+    data.extend_from_slice(&[0, 0, 0, 1, 0xff]);
+    data.extend_from_slice(&[0, 0, 0, 2]);
+    data.extend_from_slice(&output[4..8]);
+    data.extend_from_slice(&[0, 0, 0, 1, 0xff]);
+
+    let mut cursor = 0;
+    while cursor < data.len() {
+        match yamux.incoming_data(&data[cursor..]) {
+            Ok(outcome) => {
+                yamux = outcome.yamux;
+                cursor += outcome.bytes_read;
+            }
+            Err(Error::UnexpectedAck) => return,
+            Err(_) => panic!(),
+        }
+    }
+
+    // Test failed.
+    panic!()
+}
+
+#[test]
 fn multiple_writes_combined_into_one() {
     let mut yamux = Yamux::new(Config {
         capacity: 0,
@@ -952,4 +1033,108 @@ fn answer_remote_ping() {
         output.extend_from_slice(out.as_ref());
     }
     assert_eq!(output, &[0, 2, 0, 2, 0, 0, 0, 0, 1, 2, 3, 4]);
+}
+
+#[test]
+fn dont_send_syn_after_goaway() {
+    let mut yamux = Yamux::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
+    });
+
+    let substream_id = yamux.open_substream(());
+    yamux.write(substream_id, b"foo".to_vec());
+    assert!(yamux.can_send(substream_id));
+
+    // GoAway frame.
+    let data = &[0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let mut cursor = 0;
+    while cursor < data.len() {
+        match yamux.incoming_data(&data[cursor..]) {
+            Ok(outcome) => {
+                yamux = outcome.yamux;
+                cursor += outcome.bytes_read;
+            }
+            Err(_) => panic!(),
+        }
+    }
+
+    assert!(!yamux.can_send(substream_id));
+    assert!(yamux.extract_next(usize::max_value()).is_none());
+}
+
+#[test]
+fn substream_reset_on_goaway_if_not_acked() {
+    let mut yamux = Yamux::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
+    });
+
+    let substream_id = yamux.open_substream(());
+    yamux.write(substream_id, b"foo".to_vec());
+    while let Some(_) = yamux.extract_next(usize::max_value()) {}
+
+    // GoAway frame.
+    let data = &[0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let mut cursor = 0;
+    while cursor < data.len() {
+        match yamux.incoming_data(&data[cursor..]) {
+            Ok(outcome) => {
+                yamux = outcome.yamux;
+                cursor += outcome.bytes_read;
+            }
+            Err(_) => panic!(),
+        }
+    }
+
+    assert!(!yamux.can_send(substream_id));
+}
+
+#[test]
+fn can_still_send_after_goaway_if_acked() {
+    let mut yamux = Yamux::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
+    });
+
+    let substream_id = yamux.open_substream(());
+    yamux.write(substream_id, b"hello world".to_vec());
+
+    let mut output = Vec::new();
+    while let Some(out) = yamux.extract_next(usize::max_value()) {
+        output.extend_from_slice(out.as_ref());
+    }
+
+    // ACK frame followed with GoAway frame.
+    let mut data = Vec::new();
+    data.extend_from_slice(&[0, 0, 0, 2]);
+    data.extend_from_slice(&output[4..8]);
+    data.extend_from_slice(&[0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+    let mut cursor = 0;
+    while cursor < data.len() {
+        match yamux.incoming_data(&data[cursor..]) {
+            Ok(outcome) => {
+                yamux = outcome.yamux;
+                cursor += outcome.bytes_read;
+            }
+            Err(_) => panic!(),
+        }
+    }
+
+    assert!(yamux.can_send(substream_id));
+
+    yamux.write(substream_id, b"foo".to_vec());
+
+    let mut output = Vec::new();
+    while let Some(out) = yamux.extract_next(usize::max_value()) {
+        output.extend_from_slice(out.as_ref());
+    }
+    assert!(output.ends_with(&[3, 101, 101, 101]));
 }
