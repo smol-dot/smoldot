@@ -20,6 +20,33 @@
 use super::{Config, Error, IncomingDataDetail, Yamux};
 
 #[test]
+fn bad_header_data() {
+    let mut yamux = Yamux::<()>::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+    });
+
+    {
+        let data = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        let mut cursor = 0;
+        while cursor < data.len() {
+            match yamux.incoming_data(&data[cursor..]) {
+                Ok(outcome) => {
+                    yamux = outcome.yamux;
+                    cursor += outcome.bytes_read;
+                }
+                Err(Error::HeaderDecode(_)) => return,
+                Err(_) => panic!(),
+            }
+        }
+    }
+
+    // Test failed.
+    panic!()
+}
+
+#[test]
 fn not_immediate_data_send_when_opening_substream() {
     let mut yamux = Yamux::new(Config {
         capacity: 0,
@@ -323,7 +350,7 @@ fn data_coming_with_the_syn_taken_into_account() {
 }
 
 #[test]
-fn reserve_window_works() {
+fn add_remote_window_works() {
     let mut yamux = Yamux::<()>::new(Config {
         capacity: 0,
         is_initiator: true,
@@ -349,9 +376,9 @@ fn reserve_window_works() {
                 if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
                     let substream_id = yamux.accept_pending_substream(());
 
-                    // `reserve_window` doesn't immediately raise the limit, so we flush the
+                    // `add_remote_window` doesn't immediately raise the limit, so we flush the
                     // output buffer in order to obtain a window frame.
-                    yamux.reserve_window(substream_id, 100 * 1024);
+                    yamux.add_remote_window(substream_id, 100 * 1024);
 
                     let mut output = Vec::new();
                     while let Some(out) = yamux.extract_next(usize::max_value()) {
@@ -370,7 +397,7 @@ fn reserve_window_works() {
 }
 
 #[test]
-fn reserve_window_doesnt_immediately_raise_limit() {
+fn add_remote_window_doesnt_immediately_raise_limit() {
     let mut yamux = Yamux::<()>::new(Config {
         capacity: 0,
         is_initiator: true,
@@ -396,8 +423,8 @@ fn reserve_window_doesnt_immediately_raise_limit() {
                 if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
                     let substream_id = yamux.accept_pending_substream(());
 
-                    // `reserve_window` shouldn't immediately raise the limit.
-                    yamux.reserve_window(substream_id, 100 * 1024);
+                    // `add_remote_window` shouldn't immediately raise the limit.
+                    yamux.add_remote_window(substream_id, 100 * 1024);
                 }
             }
             Err(Error::CreditsExceeded) => return,
