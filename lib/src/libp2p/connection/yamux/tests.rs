@@ -243,6 +243,32 @@ fn substream_opened_back_after_rst() {
 }
 
 #[test]
+fn multiple_writes_combined_into_one() {
+    let mut yamux = Yamux::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+    });
+
+    let substream_id = yamux.open_substream(());
+
+    // Write multiple times. All these writes should be combined into a single data frame.
+    yamux.write(substream_id, b"aaaa".to_vec());
+    yamux.write(substream_id, b"cc".to_vec());
+    yamux.write(substream_id, b"bbbbbb".to_vec());
+
+    let mut output = Vec::new();
+    // We read 7 bytes at a time, in order to land in-between the buffers.
+    while let Some(out) = yamux.extract_next(7) {
+        assert!(out.as_ref().len() <= 7);
+        output.extend_from_slice(out.as_ref());
+    }
+
+    assert!(output.starts_with(&[0, 0, 0, 1]));
+    assert!(output.ends_with(&[0, 0, 0, 12, 97, 97, 97, 97, 99, 99, 98, 98, 98, 98, 98, 98]));
+}
+
+#[test]
 fn credits_exceeded_checked_before_data_is_received() {
     let mut yamux = Yamux::<()>::new(Config {
         capacity: 0,

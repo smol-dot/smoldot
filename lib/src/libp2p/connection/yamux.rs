@@ -1412,7 +1412,7 @@ impl<T> Yamux<T> {
                             };
                         return Some(either::Left(out));
                     } else {
-                        let to_add = encoded_header_remains_to_write.to_vec();
+                        let to_add = encoded_header_remains_to_write[..size_bytes].to_vec();
                         *header_already_sent += u8::try_from(size_bytes).unwrap();
                         debug_assert!(*header_already_sent < 12);
                         return Some(either::Right(write_queue::VecWithOffset(to_add, 0)));
