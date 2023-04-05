@@ -92,6 +92,36 @@ fn ack_sent() {
 }
 
 #[test]
+fn rst_sent_when_rejecting() {
+    let mut yamux = Yamux::<()>::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+    });
+
+    {
+        let data = [0, 0, 0, 1, 0, 0, 0, 84, 0, 0, 0, 0];
+        let mut cursor = 0;
+        while cursor < data.len() {
+            let outcome = yamux.incoming_data(&data[cursor..]).unwrap();
+            yamux = outcome.yamux;
+            cursor += outcome.bytes_read;
+            match outcome.detail {
+                Some(IncomingDataDetail::IncomingSubstream) => yamux.reject_pending_substream(),
+                _ => {}
+            }
+        }
+    }
+
+    let mut output = Vec::new();
+    while let Some(out) = yamux.extract_next(usize::max_value()) {
+        output.extend_from_slice(out.as_ref());
+    }
+
+    assert!(output.ends_with(&[0, 8, 0, 0, 0, 84, 0, 0, 0, 0]));
+}
+
+#[test]
 fn invalid_inbound_substream_id() {
     let mut yamux = Yamux::<()>::new(Config {
         capacity: 0,
@@ -281,6 +311,93 @@ fn data_coming_with_the_syn_taken_into_account() {
 
                 if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
                     yamux.accept_pending_substream(());
+                }
+            }
+            Err(Error::CreditsExceeded) => return,
+            Err(_) => panic!(),
+        }
+    }
+
+    // Test failed.
+    panic!()
+}
+
+#[test]
+fn reserve_window_works() {
+    let mut yamux = Yamux::<()>::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+    });
+
+    // Data frame with a SYN flag and 200kiB of data, followed with data frame with 100kiB of
+    // data. The limit is 256kiB, so the combination of both exceeds the limit.
+    let mut data = [0, 0, 0, 1, 0, 0, 0, 84].to_vec();
+    data.extend_from_slice(&(200 * 1024u32).to_be_bytes()[..]);
+    data.extend((0..200 * 1024).map(|_| 0u8));
+    data.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 84]);
+    data.extend_from_slice(&(100 * 1024u32).to_be_bytes()[..]);
+    data.extend((0..100 * 1024).map(|_| 0u8));
+
+    let mut cursor = 0;
+    while cursor < data.len() {
+        match yamux.incoming_data(&data[cursor..]) {
+            Ok(outcome) => {
+                yamux = outcome.yamux;
+                cursor += outcome.bytes_read;
+
+                if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
+                    let substream_id = yamux.accept_pending_substream(());
+
+                    // `reserve_window` doesn't immediately raise the limit, so we flush the
+                    // output buffer in order to obtain a window frame.
+                    yamux.reserve_window(substream_id, 100 * 1024);
+
+                    let mut output = Vec::new();
+                    while let Some(out) = yamux.extract_next(usize::max_value()) {
+                        output.extend_from_slice(out.as_ref());
+                    }
+                    // `[0, 1, 144, 0]` is 102400
+                    assert_eq!(output, &[0, 1, 0, 2, 0, 0, 0, 84, 0, 1, 144, 0]);
+                }
+            }
+            Err(_) => panic!(),
+        }
+    }
+
+    // Test succeeded.
+    assert_eq!(cursor, data.len());
+}
+
+#[test]
+fn reserve_window_doesnt_immediately_raise_limit() {
+    let mut yamux = Yamux::<()>::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+    });
+
+    // Data frame with a SYN flag and 200kiB of data, followed with data frame with 100kiB of
+    // data. The limit is 256kiB, so the combination of both exceeds the limit.
+    let mut data = [0, 0, 0, 1, 0, 0, 0, 84].to_vec();
+    data.extend_from_slice(&(200 * 1024u32).to_be_bytes()[..]);
+    data.extend((0..200 * 1024).map(|_| 0u8));
+    data.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 84]);
+    data.extend_from_slice(&(100 * 1024u32).to_be_bytes()[..]);
+    data.extend((0..100 * 1024).map(|_| 0u8));
+
+    let mut cursor = 0;
+    while cursor < data.len() {
+        match yamux.incoming_data(&data[cursor..]) {
+            Ok(outcome) => {
+                yamux = outcome.yamux;
+                cursor += outcome.bytes_read;
+
+                if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
+                    let substream_id = yamux.accept_pending_substream(());
+
+                    // `reserve_window` shouldn't immediately raise the limit.
+                    yamux.reserve_window(substream_id, 100 * 1024);
                 }
             }
             Err(Error::CreditsExceeded) => return,
