@@ -57,7 +57,7 @@ use core::{
     num::{NonZeroU32, NonZeroUsize},
 };
 use hashbrown::hash_map::Entry;
-use rand::Rng as _;
+use rand::{seq::IteratorRandom as _, Rng as _};
 use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 
 pub use header::GoAwayErrorCode;
@@ -1629,13 +1629,14 @@ impl<T> Yamux<T> {
                         .inner
                         .substreams
                         .iter_mut()
-                        .find(|(_, s)| {
+                        .filter(|(_, s)| {
                             matches!(&s.state,
                             SubstreamState::Healthy {
                                 remote_window_pending_increase,
                                 ..
                             } if *remote_window_pending_increase != 0)
                         })
+                        .choose(&mut self.inner.randomness)
                         .map(|(id, sub)| (*id, sub))
                     {
                         if let SubstreamState::Healthy {
@@ -1672,12 +1673,11 @@ impl<T> Yamux<T> {
 
                     // Start writing more data from another substream.
                     // TODO: O(n)
-                    // TODO: choose substreams in some sort of round-robin way
                     if let Some((id, sub)) = self
                         .inner
                         .substreams
                         .iter_mut()
-                        .find(|(_, s)| match &s.state {
+                        .filter(|(_, s)| match &s.state {
                             SubstreamState::Healthy {
                                 write_queue,
                                 local_write_close: local_write,
@@ -1689,6 +1689,7 @@ impl<T> Yamux<T> {
                             }
                             _ => false,
                         })
+                        .choose(&mut self.inner.randomness)
                         .map(|(id, sub)| (*id, sub))
                     {
                         if let SubstreamState::Healthy {
