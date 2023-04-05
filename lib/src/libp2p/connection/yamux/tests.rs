@@ -626,3 +626,135 @@ fn remote_window_frames_respected() {
     assert_eq!(&output[8..12], &[0, 4, 0, 5]); // 256 * 1024 + 5
     assert_eq!(output.len(), 12 + 256 * 1024 + 5);
 }
+
+#[test]
+fn write_after_fin() {
+    let mut yamux = Yamux::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+    });
+
+    // Data frame with SYN|FIN flags, then data frame again.
+    let data = [
+        0, 0, 0, 5, 0, 0, 0, 84, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 84, 0, 0, 0, 2, 0, 0,
+    ];
+
+    let mut cursor = 0;
+    while cursor < data.len() {
+        match yamux.incoming_data(&data[cursor..]) {
+            Ok(outcome) => {
+                yamux = outcome.yamux;
+                cursor += outcome.bytes_read;
+
+                if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
+                    yamux.accept_pending_substream(());
+                }
+            }
+            Err(Error::WriteAfterFin) => return,
+            Err(_) => panic!(),
+        }
+    }
+
+    // Test failed.
+    panic!()
+}
+
+#[test]
+fn write_after_fin_even_with_empty_frame() {
+    let mut yamux = Yamux::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+    });
+
+    // Data frame with SYN|FIN flags, then empty data frame.
+    let data = [
+        0, 0, 0, 5, 0, 0, 0, 84, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 84, 0, 0, 0, 0,
+    ];
+
+    let mut cursor = 0;
+    while cursor < data.len() {
+        match yamux.incoming_data(&data[cursor..]) {
+            Ok(outcome) => {
+                yamux = outcome.yamux;
+                cursor += outcome.bytes_read;
+
+                if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
+                    yamux.accept_pending_substream(());
+                }
+            }
+            Err(Error::WriteAfterFin) => return,
+            Err(_) => panic!(),
+        }
+    }
+
+    // Test failed.
+    panic!()
+}
+
+#[test]
+fn window_frame_with_fin_after_fin() {
+    let mut yamux = Yamux::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+    });
+
+    // Data frame with SYN|FIN flags, then window frame with FIN flag.
+    // The spec is really ambiguous about whether post-FIN window frames must have a FIN flag as
+    // well, so when in doubt we accept it.
+    let data = [
+        0, 0, 0, 5, 0, 0, 0, 84, 0, 0, 0, 2, 0, 0, 0, 1, 0, 4, 0, 0, 0, 84, 0, 0, 0, 5,
+    ];
+
+    let mut cursor = 0;
+    while cursor < data.len() {
+        match yamux.incoming_data(&data[cursor..]) {
+            Ok(outcome) => {
+                yamux = outcome.yamux;
+                cursor += outcome.bytes_read;
+
+                if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
+                    yamux.accept_pending_substream(());
+                }
+            }
+            Err(_) => panic!(),
+        }
+    }
+
+    assert_eq!(cursor, data.len());
+}
+
+#[test]
+fn window_frame_without_fin_after_fin() {
+    let mut yamux = Yamux::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+    });
+
+    // Data frame with SYN|FIN flags, then window frame without FIN flag.
+    // The spec is really ambiguous about whether post-FIN window frames must have a FIN flag as
+    // well, so when in doubt we accept it.
+    let data = [
+        0, 0, 0, 5, 0, 0, 0, 84, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 0, 0, 84, 0, 0, 0, 5,
+    ];
+
+    let mut cursor = 0;
+    while cursor < data.len() {
+        match yamux.incoming_data(&data[cursor..]) {
+            Ok(outcome) => {
+                yamux = outcome.yamux;
+                cursor += outcome.bytes_read;
+
+                if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
+                    yamux.accept_pending_substream(());
+                }
+            }
+            Err(_) => panic!(),
+        }
+    }
+
+    assert_eq!(cursor, data.len());
+}
