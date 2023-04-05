@@ -261,13 +261,55 @@ fn syn_and_rst_together() {
         max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
     });
 
+    // SYN and RST together. The new substream is simply ignored.
     let data = [0, 0, 0, 1 | 8, 0, 0, 0, 84, 0, 0, 0, 0];
+
     let mut cursor = 0;
     while cursor < data.len() {
         match yamux.incoming_data(&data[cursor..]) {
             Ok(outcome) => {
                 yamux = outcome.yamux;
                 cursor += outcome.bytes_read;
+
+                assert!(!matches!(
+                    outcome.detail,
+                    Some(IncomingDataDetail::IncomingSubstream)
+                ));
+            }
+            Err(_) => panic!(),
+        }
+    }
+
+    // Test succeeded.
+}
+
+#[test]
+fn data_with_rst() {
+    let mut yamux = Yamux::<()>::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(u32::max_value()).unwrap(),
+        max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
+    });
+
+    let data = [
+        0, 0, 0, 1, 0, 0, 0, 84, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 84, 0, 0, 0, 2, 255, 255,
+    ];
+    let mut cursor = 0;
+    while cursor < data.len() {
+        match yamux.incoming_data(&data[cursor..]) {
+            Ok(outcome) => {
+                yamux = outcome.yamux;
+                cursor += outcome.bytes_read;
+
+                match outcome.detail {
+                    Some(IncomingDataDetail::IncomingSubstream) => {
+                        yamux.accept_pending_substream(());
+                    }
+                    _ => {}
+                }
             }
             Err(Error::DataWithRst) => return,
             Err(_) => panic!(),
@@ -276,6 +318,43 @@ fn syn_and_rst_together() {
 
     // Test failed.
     panic!()
+}
+
+#[test]
+fn empty_data_frame_with_rst() {
+    let mut yamux = Yamux::<()>::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+        max_out_data_frame_size: NonZeroU32::new(u32::max_value()).unwrap(),
+        max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
+    });
+
+    // Normal SYN frame then normal RST frame.
+    let data = [
+        0, 0, 0, 1, 0, 0, 0, 84, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 84, 0, 0, 0, 0,
+    ];
+
+    let mut cursor = 0;
+    while cursor < data.len() {
+        match yamux.incoming_data(&data[cursor..]) {
+            Ok(outcome) => {
+                yamux = outcome.yamux;
+                cursor += outcome.bytes_read;
+
+                match outcome.detail {
+                    Some(IncomingDataDetail::IncomingSubstream) => {
+                        yamux.accept_pending_substream(());
+                    }
+                    _ => {}
+                }
+            }
+            Err(_) => panic!(),
+        }
+    }
+
+    // Test succeeded.
 }
 
 #[test]
