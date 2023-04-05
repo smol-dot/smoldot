@@ -1063,6 +1063,7 @@ fn dont_send_syn_after_goaway() {
 
     assert!(!yamux.can_send(substream_id));
     assert!(yamux.extract_next(usize::max_value()).is_none());
+    assert_eq!(yamux.dead_substreams().next().unwrap().0, substream_id);
 }
 
 #[test]
@@ -1092,6 +1093,7 @@ fn substream_reset_on_goaway_if_not_acked() {
     }
 
     assert!(!yamux.can_send(substream_id));
+    assert_eq!(yamux.dead_substreams().next().unwrap().0, substream_id);
 }
 
 #[test]
@@ -1137,4 +1139,33 @@ fn can_still_send_after_goaway_if_acked() {
         output.extend_from_slice(out.as_ref());
     }
     assert!(output.ends_with(&[3, 102, 111, 111]));
+}
+
+#[test]
+fn receive_multiple_goaways() {
+    let mut yamux = Yamux::<()>::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
+    });
+
+    // Two GoAway frames.
+    let data = &[
+        0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let mut cursor = 0;
+    while cursor < data.len() {
+        match yamux.incoming_data(&data[cursor..]) {
+            Ok(outcome) => {
+                yamux = outcome.yamux;
+                cursor += outcome.bytes_read;
+            }
+            Err(Error::MultipleGoAways) => return,
+            Err(_) => panic!(),
+        }
+    }
+
+    // Test failed.
+    panic!()
 }

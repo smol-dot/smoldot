@@ -1049,8 +1049,11 @@ impl<T> Yamux<T> {
                             });
                         }
                         header::DecodedYamuxHeader::GoAway { error_code } => {
+                            if self.inner.received_goaway.is_some() {
+                                return Err(Error::MultipleGoAways);
+                            }
+
                             self.inner.incoming = Incoming::Header(arrayvec::ArrayVec::new());
-                            // TODO: error if we have received one in the past before?
                             self.inner.received_goaway = Some(error_code);
 
                             let mut reset_substreams =
@@ -1926,6 +1929,8 @@ pub enum Error {
     ExpectedAck,
     /// The remote sent an ACK flag but shouldn't have.
     UnexpectedAck,
+    /// Received multiple GoAway frames.
+    MultipleGoAways,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
