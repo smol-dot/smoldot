@@ -1428,3 +1428,31 @@ fn ignore_incoming_substreams_after_goaway() {
     }
     assert_eq!(output, &[0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 }
+
+#[test]
+#[should_panic = "can't open substream after goaway"]
+fn opening_forbidden_after_goaway() {
+    let mut yamux = Yamux::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+        max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
+    });
+
+    // GoAway frame.
+    let data = &[0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let mut cursor = 0;
+    while cursor < data.len() {
+        match yamux.incoming_data(&data[cursor..]) {
+            Ok(outcome) => {
+                yamux = outcome.yamux;
+                cursor += outcome.bytes_read;
+            }
+            Err(_) => panic!(),
+        }
+    }
+
+    // Panics.
+    yamux.open_substream(());
+}

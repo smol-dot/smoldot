@@ -390,7 +390,7 @@ impl<T> Yamux<T> {
     ///
     pub fn open_substream(&mut self, user_data: T) -> SubstreamId {
         // It is forbidden to open new substreams if a `GoAway` frame has been received.
-        assert!(self.inner.received_goaway.is_none());
+        assert!(self.inner.received_goaway.is_none(), "can't open substream after goaway");
 
         // Make sure that the `loop` below can finish.
         assert!(
