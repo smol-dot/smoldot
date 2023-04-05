@@ -1136,5 +1136,5 @@ fn can_still_send_after_goaway_if_acked() {
     while let Some(out) = yamux.extract_next(usize::max_value()) {
         output.extend_from_slice(out.as_ref());
     }
-    assert!(output.ends_with(&[3, 101, 101, 101]));
+    assert!(output.ends_with(&[3, 102, 111, 111]));
 }
