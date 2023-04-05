@@ -413,7 +413,7 @@ impl<T> Yamux<T> {
 
         let substream_id = self.inner.next_outbound_substream.clone();
 
-        self.inner.next_outbound_substream = match self.inner.next_outbound_substream.checked_add(1)
+        self.inner.next_outbound_substream = match self.inner.next_outbound_substream.checked_add(2)
         {
             Some(new_id) => new_id,
             None => return Err(OpenSubstreamError::NoFreeSubstreamId),
