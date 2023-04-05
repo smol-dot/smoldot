@@ -556,3 +556,73 @@ fn add_remote_window_doesnt_immediately_raise_limit() {
     // Test failed.
     panic!()
 }
+
+#[test]
+fn remote_default_window_respected() {
+    let mut yamux = Yamux::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+    });
+
+    let substream_id = yamux.open_substream(());
+    yamux.write(substream_id, vec![255; 300 * 1024]); // Exceeds default limit.
+
+    let mut output = Vec::new();
+    while let Some(out) = yamux.extract_next(usize::max_value()) {
+        if output.len() >= 50 {
+            panic!("{:?}", out.as_ref().len())
+        }
+        output.extend_from_slice(out.as_ref());
+    }
+
+    assert!(output.starts_with(&[0, 0, 0, 1]));
+    assert_eq!(&output[8..12], &[0, 4, 0, 0]); // 256 * 1024
+    assert_eq!(output.len(), 12 + 256 * 1024);
+}
+
+#[test]
+fn remote_window_frames_respected() {
+    let mut yamux = Yamux::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+    });
+
+    // Window frame with a SYN flag and 5 bytes of window.
+    let data = [0, 1, 0, 1, 0, 0, 0, 84, 0, 0, 0, 5];
+
+    let mut accepted_substream = None;
+
+    let mut cursor = 0;
+    while cursor < data.len() {
+        match yamux.incoming_data(&data[cursor..]) {
+            Ok(outcome) => {
+                yamux = outcome.yamux;
+                cursor += outcome.bytes_read;
+
+                if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
+                    assert!(accepted_substream.is_none());
+                    accepted_substream = Some(yamux.accept_pending_substream(()));
+                }
+            }
+            Err(_) => panic!(),
+        }
+    }
+
+    let substream_id = accepted_substream.unwrap();
+
+    yamux.write(substream_id, vec![255; 300 * 1024]); // Exceeds default limit.
+
+    let mut output = Vec::new();
+    while let Some(out) = yamux.extract_next(usize::max_value()) {
+        if output.len() >= 50 {
+            panic!("{:?}", out.as_ref().len())
+        }
+        output.extend_from_slice(out.as_ref());
+    }
+
+    assert!(output.starts_with(&[0, 0, 0, 2]));
+    assert_eq!(&output[8..12], &[0, 4, 0, 5]); // 256 * 1024 + 5
+    assert_eq!(output.len(), 12 + 256 * 1024 + 5);
+}

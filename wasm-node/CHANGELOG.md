@@ -10,6 +10,7 @@
 
 - Properly check whether Yamux substream IDs allocated by the remote are valid.
 - Fix the size of the data of Yamux frames with the `SYN` flag not being verified against the allowed credits.
+- Fix Yamux repeatedly sending empty data frames when the allowed window size is 0.
 
 ## 1.0.1 - 2023-03-29
 

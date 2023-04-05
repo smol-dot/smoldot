@@ -1583,9 +1583,10 @@ impl<T> Yamux<T> {
                             SubstreamState::Healthy {
                                 write_queue,
                                 local_write_close: local_write,
+                                allowed_window,
                                 ..
                             } => {
-                                !write_queue.is_empty()
+                                (*allowed_window != 0 && !write_queue.is_empty())
                                     || matches!(local_write, SubstreamStateLocalWrite::FinDesired)
                             }
                             _ => false,
@@ -1605,6 +1606,7 @@ impl<T> Yamux<T> {
                                 u32::try_from(pending_len).unwrap_or(u32::max_value()),
                                 u32::try_from(*allowed_window).unwrap_or(u32::max_value()),
                             );
+                            debug_assert_ne!(len_out, 0);
                             let len_out_usize = usize::try_from(len_out).unwrap();
                             *allowed_window -= u64::from(len_out);
                             let syn_ack_flag = !*first_message_queued;
