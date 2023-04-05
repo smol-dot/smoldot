@@ -1126,23 +1126,20 @@ impl<T> Yamux<T> {
                             rst: true,
                             ack,
                             stream_id,
-                            length,
                             ..
                         }
                         | header::DecodedYamuxHeader::Window {
                             rst: true,
                             ack,
                             stream_id,
-                            length,
                             ..
                         } => {
                             // Frame with the `RST` flag set. Destroy the substream.
 
-                            // It is invalid to have the `RST` flag set and data at the same time.
-                            // TODO: why is it invalid?
-                            if matches!(decoded_header, header::DecodedYamuxHeader::Data { .. })
-                                && length != 0
-                            {
+                            // Sending a `RST` flag and data together is a weird corner case and
+                            // is difficult to handle. It is unclear whether it is allowed at all.
+                            // We thus consider it as invalid.
+                            if matches!(decoded_header, header::DecodedYamuxHeader::Data { .. }) {
                                 return Err(Error::DataWithRst);
                             }
 
