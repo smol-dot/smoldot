@@ -126,6 +126,11 @@ struct YamuxInner<T> {
     /// that it is returned by [`Yamux::dead_substreams`].
     dead_substreams: hashbrown::HashSet<NonZeroU32, SipHasherBuild>,
 
+    /// Subset of the content of [`YamuxInner::substreams`] that requires some outgoing data to
+    /// be sent out, either because they have data to send out or because they have a window
+    /// update to send out.
+    outgoing_req_substreams: hashbrown::HashSet<NonZeroU32, SipHasherBuild>,
+
     /// Number of substreams within [`YamuxInner::substreams`] whose [`Substream::inbound`] is
     /// `true`.
     num_inbound: usize,
@@ -330,6 +335,10 @@ impl<T> Yamux<T> {
                     SipHasherBuild::new(randomness.gen()),
                 ),
                 dead_substreams: hashbrown::HashSet::with_capacity_and_hasher(
+                    config.capacity,
+                    SipHasherBuild::new(randomness.gen()),
+                ),
+                outgoing_req_substreams: hashbrown::HashSet::with_capacity_and_hasher(
                     config.capacity,
                     SipHasherBuild::new(randomness.gen()),
                 ),
@@ -548,8 +557,22 @@ impl<T> Yamux<T> {
             SubstreamState::Healthy {
                 local_write_close: SubstreamStateLocalWrite::Open,
                 write_queue,
+                allowed_window,
                 ..
             } => {
+                // Don't push empty data onto the queue.
+                if data.is_empty() {
+                    return;
+                }
+
+                // If the write queue switches from empty to non-empty, queue the substream for
+                // writing.
+                if *allowed_window != 0 && write_queue.is_empty() {
+                    // Note that the substream might already be queued if it has a window update
+                    // to write.
+                    self.inner.outgoing_req_substreams.insert(substream_id.0);
+                }
+
                 write_queue.push_back(data);
             }
             SubstreamState::Healthy { .. } => {
@@ -589,6 +612,11 @@ impl<T> Yamux<T> {
             .unwrap_or_else(|| panic!())
             .state
         {
+            if *remote_window_pending_increase == 0 && bytes != 0 {
+                // Note that the substream might already be queued if it has data to write.
+                self.inner.outgoing_req_substreams.insert(substream_id.0);
+            }
+
             *remote_window_pending_increase = remote_window_pending_increase.saturating_add(bytes);
         }
     }
@@ -673,6 +701,7 @@ impl<T> Yamux<T> {
         } = substream.state
         {
             *local_write = SubstreamStateLocalWrite::FinDesired;
+            self.inner.outgoing_req_substreams.insert(substream_id.0);
         }
     }
 
@@ -705,6 +734,8 @@ impl<T> Yamux<T> {
 
         let _was_inserted = self.inner.dead_substreams.insert(substream_id.0);
         debug_assert!(_was_inserted);
+
+        self.inner.outgoing_req_substreams.remove(&substream_id.0);
 
         // We might be currently writing a frame of data of the substream being reset.
         // If that happens, we need to update some internal state regarding this frame of data.
@@ -877,6 +908,8 @@ impl<T> Yamux<T> {
         if !was_in {
             panic!()
         }
+
+        debug_assert!(!self.inner.outgoing_req_substreams.contains(&id.0));
 
         let substream = self.inner.substreams.remove(&id.0).unwrap();
 
@@ -1106,6 +1139,8 @@ impl<T> Yamux<T> {
                                     self.inner.dead_substreams.insert(*substream_id);
                                 debug_assert!(_was_inserted);
 
+                                self.inner.outgoing_req_substreams.remove(substream_id);
+
                                 // We might be currently writing a frame of data of the substream
                                 // being reset. If that happens, we need to update some internal
                                 // state regarding this frame of data.
@@ -1179,6 +1214,8 @@ impl<T> Yamux<T> {
 
                             let _was_inserted = self.inner.dead_substreams.insert(stream_id);
                             debug_assert!(_was_inserted);
+
+                            self.inner.outgoing_req_substreams.remove(&stream_id);
 
                             // Check whether the remote has ACKed multiple times.
                             if matches!(
@@ -1420,6 +1457,7 @@ impl<T> Yamux<T> {
                                     SubstreamState::Healthy {
                                         remote_syn_acked,
                                         allowed_window,
+                                        write_queue,
                                         ..
                                     },
                                 ..
@@ -1430,6 +1468,10 @@ impl<T> Yamux<T> {
                                     (true, acked @ false) => *acked = true,
                                     (true, true) => return Err(Error::UnexpectedAck),
                                     (false, false) => return Err(Error::ExpectedAck),
+                                }
+
+                                if *allowed_window == 0 && length != 0 && !write_queue.is_empty() {
+                                    self.inner.outgoing_req_substreams.insert(stream_id);
                                 }
 
                                 *allowed_window = allowed_window
@@ -1623,29 +1665,31 @@ impl<T> Yamux<T> {
                         continue;
                     }
 
-                    // Send window update frames.
-                    // TODO: O(n)
-                    if let Some((id, sub)) = self
+                    // Send either window update frames or data frames.
+                    if let Some(substream_id) = self
                         .inner
-                        .substreams
-                        .iter_mut()
-                        .filter(|(_, s)| {
-                            matches!(&s.state,
-                            SubstreamState::Healthy {
-                                remote_window_pending_increase,
-                                ..
-                            } if *remote_window_pending_increase != 0)
-                        })
+                        .outgoing_req_substreams
+                        .iter()
                         .choose(&mut self.inner.randomness)
-                        .map(|(id, sub)| (*id, sub))
+                        .cloned()
                     {
-                        if let SubstreamState::Healthy {
+                        let sub = self.inner.substreams.get_mut(&substream_id).unwrap();
+
+                        let SubstreamState::Healthy {
                             first_message_queued,
                             remote_window_pending_increase,
                             remote_allowed_window,
+                            write_queue,
+                            local_write_close: local_write,
+                            allowed_window,
                             ..
-                        } = &mut sub.state
-                        {
+                        } = &mut sub.state else { unreachable!() };
+
+                        let has_data_to_write = (*allowed_window != 0 && !write_queue.is_empty())
+                            || matches!(local_write, SubstreamStateLocalWrite::FinDesired);
+                        let has_window_size_update_to_write = *remote_window_pending_increase != 0;
+
+                        if has_window_size_update_to_write {
                             let syn_ack_flag = !*first_message_queued;
                             *first_message_queued = true;
 
@@ -1653,61 +1697,32 @@ impl<T> Yamux<T> {
                                 .unwrap_or(u32::max_value());
                             *remote_window_pending_increase -= u64::from(update);
                             *remote_allowed_window += u64::from(update);
+
+                            if *remote_window_pending_increase == 0 && !has_data_to_write {
+                                self.inner.outgoing_req_substreams.remove(&substream_id);
+                            }
+
                             self.inner.outgoing = Outgoing::Header {
                                 header: header::DecodedYamuxHeader::Window {
                                     syn: syn_ack_flag && !sub.inbound,
                                     ack: syn_ack_flag && sub.inbound,
                                     fin: false,
                                     rst: false,
-                                    stream_id: id,
+                                    stream_id: substream_id,
                                     length: update,
                                 },
                                 header_already_sent: 0,
                                 substream_data_frame: None,
                             };
                             continue;
-                        } else {
-                            unreachable!()
-                        }
-                    }
-
-                    // Start writing more data from another substream.
-                    // TODO: O(n)
-                    if let Some((id, sub)) = self
-                        .inner
-                        .substreams
-                        .iter_mut()
-                        .filter(|(_, s)| match &s.state {
-                            SubstreamState::Healthy {
-                                write_queue,
-                                local_write_close: local_write,
-                                allowed_window,
-                                ..
-                            } => {
-                                (*allowed_window != 0 && !write_queue.is_empty())
-                                    || matches!(local_write, SubstreamStateLocalWrite::FinDesired)
-                            }
-                            _ => false,
-                        })
-                        .choose(&mut self.inner.randomness)
-                        .map(|(id, sub)| (*id, sub))
-                    {
-                        if let SubstreamState::Healthy {
-                            first_message_queued,
-                            allowed_window,
-                            local_write_close: local_write,
-                            write_queue,
-                            ..
-                        } = &mut sub.state
-                        {
+                        } else if has_data_to_write {
                             let pending_len = write_queue.queued_bytes();
-                            let len_out = cmp::min(
-                                self.inner.max_out_data_frame_size.get(),
-                                cmp::min(
-                                    u32::try_from(pending_len).unwrap_or(u32::max_value()),
-                                    u32::try_from(*allowed_window).unwrap_or(u32::max_value()),
-                                ),
+                            let max_possible = cmp::min(
+                                u32::try_from(pending_len).unwrap_or(u32::max_value()),
+                                u32::try_from(*allowed_window).unwrap_or(u32::max_value()),
                             );
+                            let len_out =
+                                cmp::min(self.inner.max_out_data_frame_size.get(), max_possible);
                             let len_out_usize = usize::try_from(len_out).unwrap();
                             *allowed_window -= u64::from(len_out);
                             let syn_ack_flag = !*first_message_queued;
@@ -1718,13 +1733,18 @@ impl<T> Yamux<T> {
                                 *local_write = SubstreamStateLocalWrite::FinQueued;
                             }
                             debug_assert!(len_out != 0 || fin_flag);
+
+                            if max_possible == len_out && !has_window_size_update_to_write {
+                                self.inner.outgoing_req_substreams.remove(&substream_id);
+                            }
+
                             self.inner.outgoing = Outgoing::Header {
                                 header: header::DecodedYamuxHeader::Data {
                                     syn: syn_ack_flag && !sub.inbound,
                                     ack: syn_ack_flag && sub.inbound,
                                     fin: fin_flag,
                                     rst: false,
-                                    stream_id: id,
+                                    stream_id: substream_id,
                                     length: len_out,
                                 },
                                 header_already_sent: 0,
@@ -1732,15 +1752,25 @@ impl<T> Yamux<T> {
                                     usize::try_from(len_out).unwrap(),
                                 )
                                 .map(|length| {
-                                    (OutgoingSubstreamData::Healthy(SubstreamId(id)), length)
+                                    (
+                                        OutgoingSubstreamData::Healthy(SubstreamId(substream_id)),
+                                        length,
+                                    )
                                 }),
                             };
+
+                            continue;
                         } else {
-                            unreachable!()
+                            // Substream was queued but there's nothing to do. Should never
+                            // happen. We use a `debug_assert!` as to not panic in that situation,
+                            // as the queue is just a cache and not a critical state.
+                            debug_assert!(false);
+                            self.inner.outgoing_req_substreams.remove(&substream_id);
                         }
-                    } else {
-                        break;
                     }
+
+                    // Nothing to send out.
+                    break;
                 }
             }
         }
