@@ -47,8 +47,6 @@
 
 // TODO: write example
 
-// TODO: the code of this module is rather complicated; either simplify it or write a lot of tests, including fuzzing tests
-
 use crate::util::SipHasherBuild;
 
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
@@ -434,8 +432,7 @@ impl<T> Yamux<T> {
             // identifier are possible if the software runs for a very long time.
             // Rather than naively incrementing the id by two and assuming that no substream with
             // this ID exists, the code below properly handles wrapping around and ignores IDs
-            // already in use .
-            // TODO: simply skill whole connection if overflow
+            // already in use.
             let id_attempt = self.inner.next_outbound_substream;
             self.inner.next_outbound_substream = {
                 let mut id = self.inner.next_outbound_substream.get();
