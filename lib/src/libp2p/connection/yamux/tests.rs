@@ -381,13 +381,28 @@ fn substream_opened_back_after_graceful_closing() {
     let data = [0, 0, 0, 1, 0, 0, 0, 84, 0, 0, 0, 1, 255];
 
     let mut cursor = 0;
+    let mut killed_substream = false;
+
     while cursor < data.len() {
         match yamux.incoming_data(&data[cursor..]) {
             Ok(outcome) => {
                 yamux = outcome.yamux;
+
+                // Because we can't have two substreams with the same ID at the same time, the
+                // reading of the new SYN frame will be blocked until we've removed the dead
+                // substream.
+                if outcome.bytes_read == 0 {
+                    let substream_id = yamux.dead_substreams().next().unwrap().0;
+                    yamux.remove_dead_substream(substream_id);
+                    killed_substream = true;
+                    continue;
+                }
+
                 cursor += outcome.bytes_read;
 
                 if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
+                    // Make sure we've removed the dead substream.
+                    assert!(killed_substream);
                     return;
                 }
             }
