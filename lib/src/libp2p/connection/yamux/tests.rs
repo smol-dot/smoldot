@@ -345,6 +345,61 @@ fn substream_opened_back_after_rst() {
 }
 
 #[test]
+fn substream_opened_back_after_graceful_closing() {
+    let mut yamux = Yamux::<()>::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
+    });
+
+    // One SYN|FIN frame.
+    let data = [0, 0, 0, 1 | 4, 0, 0, 0, 84, 0, 0, 0, 1, 255];
+
+    let mut cursor = 0;
+    while cursor < data.len() {
+        match yamux.incoming_data(&data[cursor..]) {
+            Ok(outcome) => {
+                yamux = outcome.yamux;
+                cursor += outcome.bytes_read;
+
+                if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
+                    let substream_id = yamux.accept_pending_substream(());
+
+                    // Close the substream gracefully.
+                    yamux.close(substream_id);
+                }
+            }
+            Err(_) => panic!(),
+        }
+    }
+
+    // Flush the queue in order to send out the FIN.
+    while yamux.extract_next(usize::max_value()).is_some() {}
+
+    // One SYN frame again, using the same substream ID as earlier.
+    let data = [0, 0, 0, 1, 0, 0, 0, 84, 0, 0, 0, 1, 255];
+
+    let mut cursor = 0;
+    while cursor < data.len() {
+        match yamux.incoming_data(&data[cursor..]) {
+            Ok(outcome) => {
+                yamux = outcome.yamux;
+                cursor += outcome.bytes_read;
+
+                if matches!(outcome.detail, Some(IncomingDataDetail::IncomingSubstream)) {
+                    return;
+                }
+            }
+            Err(_) => panic!(),
+        }
+    }
+
+    // Test failure.
+    panic!()
+}
+
+#[test]
 fn missing_ack() {
     let mut yamux = Yamux::new(Config {
         capacity: 0,
@@ -1198,8 +1253,5 @@ fn ignore_incoming_substreams_after_goaway() {
     while let Some(out) = yamux.extract_next(usize::max_value()) {
         output.extend_from_slice(out.as_ref());
     }
-    assert_eq!(
-        output,
-        &[0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    );
+    assert_eq!(output, &[0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 }

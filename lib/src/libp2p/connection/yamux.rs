@@ -1239,10 +1239,14 @@ impl<T> Yamux<T> {
                             // Remote has sent a SYN flag. A new substream is to be opened.
                             match self.inner.substreams.get(&stream_id) {
                                 Some(Substream {
-                                    state: SubstreamState::Healthy { .. },
+                                    state:
+                                        SubstreamState::Healthy {
+                                            local_write_close: SubstreamStateLocalWrite::FinQueued,
+                                            remote_write_closed: true,
+                                            ..
+                                        },
                                     ..
                                 }) => {
-                                    // TODO: also check whether substream is still open
                                     return Err(Error::UnexpectedSyn(stream_id));
                                 }
                                 Some(Substream {
@@ -1256,7 +1260,11 @@ impl<T> Yamux<T> {
                                     // substream.
                                     break;
                                 }
-                                None => {}
+                                Some(Substream {
+                                    state: SubstreamState::Healthy { .. },
+                                    ..
+                                })
+                                | None => {}
                             }
 
                             // When receiving a new substream, we might have to potentially queue
@@ -1661,7 +1669,6 @@ impl<T> Yamux<T> {
                                 u32::try_from(pending_len).unwrap_or(u32::max_value()),
                                 u32::try_from(*allowed_window).unwrap_or(u32::max_value()),
                             );
-                            debug_assert_ne!(len_out, 0);
                             let len_out_usize = usize::try_from(len_out).unwrap();
                             *allowed_window -= u64::from(len_out);
                             let syn_ack_flag = !*first_message_queued;
@@ -1671,6 +1678,7 @@ impl<T> Yamux<T> {
                             if fin_flag {
                                 *local_write = SubstreamStateLocalWrite::FinQueued;
                             }
+                            debug_assert!(len_out != 0 || fin_flag);
                             self.inner.outgoing = Outgoing::Header {
                                 header: header::DecodedYamuxHeader::Data {
                                     syn: syn_ack_flag && !sub.inbound,
