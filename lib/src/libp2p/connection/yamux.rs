@@ -572,7 +572,7 @@ impl<T> Yamux<T> {
     /// > **Note**: It is only possible to add more bytes to the window and not set or reduce this
     /// >           number of bytes, and it is also not possible to obtain the number of bytes the
     /// >           remote is allowed. That's because it would be ambiguous whether bytes possibly
-    /// >           in the receive queue should be counted or not.
+    /// >           in the send or receive queue should be counted or not.
     ///
     /// # Panic
     ///
