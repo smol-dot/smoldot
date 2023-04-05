@@ -1238,6 +1238,7 @@ impl<T> Yamux<T> {
 
                             // Remote has sent a SYN flag. A new substream is to be opened.
                             match self.inner.substreams.get(&stream_id) {
+                                None => {}
                                 Some(Substream {
                                     state:
                                         SubstreamState::Healthy {
@@ -1246,10 +1247,8 @@ impl<T> Yamux<T> {
                                             ..
                                         },
                                     ..
-                                }) => {
-                                    return Err(Error::UnexpectedSyn(stream_id));
-                                }
-                                Some(Substream {
+                                })
+                                | Some(Substream {
                                     state: SubstreamState::Reset,
                                     ..
                                 }) => {
@@ -1263,8 +1262,9 @@ impl<T> Yamux<T> {
                                 Some(Substream {
                                     state: SubstreamState::Healthy { .. },
                                     ..
-                                })
-                                | None => {}
+                                }) => {
+                                    return Err(Error::UnexpectedSyn(stream_id));
+                                }
                             }
 
                             // When receiving a new substream, we might have to potentially queue
