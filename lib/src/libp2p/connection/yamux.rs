@@ -85,8 +85,8 @@ pub struct Config {
     ///
     /// A higher value increases the variance of the latency of the data sent on the substreams,
     /// which is undesirable. A lower value increases the overhead of the Yamux protocol. This
-    /// overhead is equal to `1200 / (max_out_data_frame_size + 12)` %, for example setting
-    /// `max_out_data_frame_size` to 24 incurs a 33% overhead.
+    /// overhead is equal to `1200 / (max_out_data_frame_size + 12)` per cent, for example setting
+    /// `max_out_data_frame_size` to 24 incurs a `33%` overhead.
     ///
     /// The "best" value depends on the bandwidth speed of the underlying connection, and is thus
     /// impossible to tell.
@@ -582,9 +582,13 @@ impl<T> Yamux<T> {
     /// packet.
     ///
     /// The counter saturates if its maximum is reached. This could cause stalls if the
-    /// remote sends more data than the maximum. However, the number of bytes is stored in a `u64`,
-    /// the remote would have to send 2^64 bytes in order to reach this situation, making it
-    /// basically impossible.
+    /// remote sends a ton of data. However, given that the number of bytes is stored in a `u64`,
+    /// the remote would have to send at least  `2^64` bytes in order to reach this situation,
+    /// making it basically impossible.
+    ///
+    /// It is, furthermore, a bad idea to increase this counter by an immense number ahead of
+    /// time, as the remote can shut down the connection if its own counter overflows. The way
+    /// this counter is supposed to be used is in a "streaming" way.
     ///
     /// > **Note**: When a substream has just been opened or accepted, it starts with an initial
     /// >           window of [`NEW_SUBSTREAMS_FRAME_SIZE`].
@@ -2007,7 +2011,7 @@ pub enum Error {
     ExpectedAck,
     /// The remote sent an ACK flag but shouldn't have.
     UnexpectedAck,
-    /// Received multiple GoAway frames.
+    /// Received multiple `GoAway` frames.
     MultipleGoAways,
 }
 
