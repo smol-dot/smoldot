@@ -778,7 +778,7 @@ fn add_remote_window_works() {
 
                     // `add_remote_window` doesn't immediately raise the limit, so we flush the
                     // output buffer in order to obtain a window frame.
-                    yamux.add_remote_window(substream_id, 100 * 1024);
+                    yamux.add_remote_window_saturating(substream_id, 100 * 1024);
 
                     let mut output = Vec::new();
                     while let Some(out) = yamux.extract_next(usize::max_value()) {
@@ -826,7 +826,7 @@ fn add_remote_window_doesnt_immediately_raise_limit() {
                     let substream_id = yamux.accept_pending_substream(());
 
                     // `add_remote_window` shouldn't immediately raise the limit.
-                    yamux.add_remote_window(substream_id, 100 * 1024);
+                    yamux.add_remote_window_saturating(substream_id, 100 * 1024);
                 }
             }
             Err(Error::CreditsExceeded) => return,
@@ -836,6 +836,22 @@ fn add_remote_window_doesnt_immediately_raise_limit() {
 
     // Test failed.
     panic!()
+}
+
+#[test]
+fn add_remote_window_saturates() {
+    let mut yamux = Yamux::new(Config {
+        capacity: 0,
+        is_initiator: true,
+        randomness_seed: [0; 32],
+        max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
+        max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),
+    });
+
+    let substream_id = yamux.open_substream(());
+
+    // Check that `add_remote_window_saturating` doesn't panic.
+    yamux.add_remote_window_saturating(substream_id, u64::max_value());
 }
 
 #[test]

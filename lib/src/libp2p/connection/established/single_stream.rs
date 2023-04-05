@@ -257,7 +257,7 @@ where
                 // TODO: only do that for notification substreams? because for requests we already set the value to the maximum when the substream is created
                 self.inner
                     .yamux
-                    .add_remote_window(substream_id, u64::try_from(num_read).unwrap());
+                    .add_remote_window_saturating(substream_id, u64::try_from(num_read).unwrap());
 
                 if let Some(event) = event {
                     return Ok((self, Some(event)));
@@ -811,7 +811,7 @@ where
                 )));
 
         // TODO: we add some bytes due to the length prefix, this is a bit hacky as we should ask this information from the substream
-        self.inner.yamux.add_remote_window(
+        self.inner.yamux.add_remote_window_saturating(
             substream_id,
             u64::try_from(self.inner.request_protocols[protocol_index].max_response_size)
                 .unwrap_or(u64::max_value())

@@ -544,6 +544,11 @@ impl<T> Yamux<T> {
     /// Adds `bytes` to the number of bytes the remote is allowed to send at once in the next
     /// packet.
     ///
+    /// The counter saturates if its maximum is reached. This could cause stalls if the
+    /// remote sends more data than the maximum. However, the number of bytes is stored in a `u64`,
+    /// the remote would have to send 2^64 bytes in order to reach this situation, making it
+    /// basically impossible.
+    ///
     /// > **Note**: When a substream has just been opened or accepted, it starts with an initial
     /// >           window of [`NEW_SUBSTREAMS_FRAME_SIZE`].
     ///
@@ -556,8 +561,7 @@ impl<T> Yamux<T> {
     ///
     /// Panics if the [`SubstreamId`] is invalid.
     ///
-    // TODO: properly define behavior in case of overflow?
-    pub fn add_remote_window(&mut self, substream_id: SubstreamId, bytes: u64) {
+    pub fn add_remote_window_saturating(&mut self, substream_id: SubstreamId, bytes: u64) {
         if let SubstreamState::Healthy {
             remote_window_pending_increase,
             ..
