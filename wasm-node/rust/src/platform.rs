@@ -20,7 +20,7 @@ use crate::{bindings, timers::Delay};
 use smoldot::libp2p::multihash;
 use smoldot_light::platform::{ConnectError, PlatformSubstreamDirection};
 
-use core::{mem, pin, slice, str, task, time::Duration};
+use core::{mem, pin, str, task, time::Duration};
 use futures::prelude::*;
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -106,30 +106,24 @@ impl smoldot_light::platform::Platform for Platform {
         let connection_id = lock.next_connection_id;
         lock.next_connection_id += 1;
 
-        let mut error_ptr = [0u8; 9];
+        let mut error_buffer_index = [0u8; 5];
 
         let ret_code = unsafe {
             bindings::connection_new(
                 connection_id,
                 u32::try_from(url.as_bytes().as_ptr() as usize).unwrap(),
                 u32::try_from(url.as_bytes().len()).unwrap(),
-                u32::try_from(&mut error_ptr as *mut [u8; 9] as usize).unwrap(),
+                u32::try_from(&mut error_buffer_index as *mut [u8; 5] as usize).unwrap(),
             )
         };
 
         let result = if ret_code != 0 {
-            let ptr = u32::from_le_bytes(<[u8; 4]>::try_from(&error_ptr[0..4]).unwrap());
-            let len = u32::from_le_bytes(<[u8; 4]>::try_from(&error_ptr[4..8]).unwrap());
-            let error_message: Box<[u8]> = unsafe {
-                Box::from_raw(slice::from_raw_parts_mut(
-                    usize::try_from(ptr).unwrap() as *mut u8,
-                    usize::try_from(len).unwrap(),
-                ))
-            };
-
+            let error_message = bindings::get_buffer(u32::from_le_bytes(
+                <[u8; 4]>::try_from(&error_buffer_index[0..4]).unwrap(),
+            ));
             Err(ConnectError {
                 message: str::from_utf8(&error_message).unwrap().to_owned(),
-                is_bad_addr: error_ptr[8] != 0,
+                is_bad_addr: error_buffer_index[4] != 0,
             })
         } else {
             let _prev_value = lock.connections.insert(
@@ -693,22 +687,7 @@ pub(crate) fn connection_open_single_stream(
     connection.something_happened.notify(usize::max_value());
 }
 
-pub(crate) fn connection_open_multi_stream(
-    connection_id: u32,
-    handshake_ty_ptr: u32,
-    handshake_ty_len: u32,
-) {
-    let handshake_ty: Box<[u8]> = {
-        let handshake_ty_ptr = usize::try_from(handshake_ty_ptr).unwrap();
-        let handshake_ty_len = usize::try_from(handshake_ty_len).unwrap();
-        unsafe {
-            Box::from_raw(slice::from_raw_parts_mut(
-                handshake_ty_ptr as *mut u8,
-                handshake_ty_len,
-            ))
-        }
-    };
-
+pub(crate) fn connection_open_multi_stream(connection_id: u32, handshake_ty: Vec<u8>) {
     let (_, (local_tls_certificate_multihash, remote_tls_certificate_multihash)) =
         nom::sequence::preceded(
             nom::bytes::complete::tag::<_, _, nom::error::Error<&[u8]>>(&[0]),
@@ -777,7 +756,7 @@ pub(crate) fn stream_writable_bytes(connection_id: u32, stream_id: u32, bytes: u
     stream.something_happened.notify(usize::max_value());
 }
 
-pub(crate) fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, len: u32) {
+pub(crate) fn stream_message(connection_id: u32, stream_id: u32, message: Vec<u8>) {
     let mut lock = STATE.try_lock().unwrap();
 
     let connection = lock.connections.get_mut(&connection_id).unwrap();
@@ -796,13 +775,7 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, len: 
         .unwrap();
     debug_assert!(!stream.reset);
 
-    let ptr = usize::try_from(ptr).unwrap();
-    let len_usize = usize::try_from(len).unwrap();
-
-    TOTAL_BYTES_RECEIVED.fetch_add(u64::from(len), Ordering::Relaxed);
-
-    let message: Box<[u8]> =
-        unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr as *mut u8, len_usize)) };
+    TOTAL_BYTES_RECEIVED.fetch_add(u64::try_from(message.len()).unwrap(), Ordering::Relaxed);
 
     // Ignore empty message to avoid all sorts of problems.
     if message.is_empty() {
@@ -830,7 +803,7 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, len: 
     }
 
     stream.messages_queue_total_size += message.len();
-    stream.messages_queue.push_back(message);
+    stream.messages_queue.push_back(message.into_boxed_slice());
     stream.something_happened.notify(usize::max_value());
 }
 
@@ -880,7 +853,7 @@ pub(crate) fn connection_stream_opened(
     }
 }
 
-pub(crate) fn connection_reset(connection_id: u32, ptr: u32, len: u32) {
+pub(crate) fn connection_reset(connection_id: u32, message: Vec<u8>) {
     let mut lock = STATE.try_lock().unwrap();
     let connection = lock.connections.get_mut(&connection_id).unwrap();
 
@@ -896,13 +869,9 @@ pub(crate) fn connection_reset(connection_id: u32, ptr: u32, len: u32) {
 
     connection.inner = ConnectionInner::Reset {
         connection_handles_alive,
-        message: {
-            let ptr = usize::try_from(ptr).unwrap();
-            let len = usize::try_from(len).unwrap();
-            let message: Box<[u8]> =
-                unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr as *mut u8, len)) };
-            str::from_utf8(&message).unwrap().to_owned()
-        },
+        message: str::from_utf8(&message)
+            .unwrap_or_else(|_| panic!("non-UTF-8 message"))
+            .to_owned(),
     };
 
     connection.something_happened.notify(usize::max_value());
