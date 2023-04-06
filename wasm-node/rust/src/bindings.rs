@@ -60,7 +60,7 @@
 //! the guest.
 //!
 //! It is, however, important when the value needs to be interpreted from the host side, such as
-//! for example the `message_ptr` parameter of [`panic`]. When using JavaScript as the host, you
+//! for example the `message_ptr` parameter of [`panic()`]. When using JavaScript as the host, you
 //! must do `>>> 0` on all the `u32` values before interpreting them, in order to be certain than
 //! they are treated as unsigned integers by the JavaScript.
 //!
@@ -194,7 +194,7 @@ extern "C" {
     /// >           keep in mind that exceptions should be caught and turned into an error code.
     ///
     /// If an error happened, assign a so-called "buffer index" (a `u32`) representing the buffer
-    /// containing the UTF-8 error message, then write this buffer index as little endian to the
+    /// containing the UTF-8 error message, then write this buffer index as little-endian to the
     /// memory of the WebAssembly indicated by `error_buffer_index_ptr`. The Rust code will call
     /// [`buffer_size`] and [`buffer_copy`] in order to obtain the content of this buffer. The
     /// buffer index should remain assigned and buffer alive until the next time the JavaScript
