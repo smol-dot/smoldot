@@ -250,6 +250,10 @@ export function start(configMessage: Config, platformBindings: instance.Platform
           bufferIndices[2] = potentialRelayChainsEncoded
           const chainId = instance.exports.add_chain(0, 1, disableJsonRpc ? 0 : 1, 2);
 
+          delete bufferIndices[0]
+          delete bufferIndices[1]
+          delete bufferIndices[2]
+
           if (instance.exports.chain_is_ok(chainId) != 0) {
             console.assert(!chains.has(chainId));
             chains.set(chainId, {

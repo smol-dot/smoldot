@@ -376,6 +376,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                                     handshakeTy.set(info.remoteTlsCertificateMultihash, 1 + info.localTlsCertificateMultihash.length)
                                     config.bufferIndices[0] = handshakeTy;
                                     instance.exports.connection_open_multi_stream(connectionId, 0);
+                                    delete config.bufferIndices[0]
                                     break
                                 }
                             }
@@ -386,6 +387,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                         try {
                             config.bufferIndices[0] = new TextEncoder().encode(message);
                             instance.exports.connection_reset(connectionId, 0);
+                            delete config.bufferIndices[0]
                         } catch(_error) {}
                     },
                     onWritableBytes: (numExtra, streamId) => {
@@ -403,6 +405,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                         try {
                             config.bufferIndices[0] = message;
                             instance.exports.stream_message(connectionId, streamId || 0, 0);
+                            delete config.bufferIndices[0]
                         } catch(_error) {}
                     },
                     onStreamOpened: (streamId: number, direction: 'inbound' | 'outbound', initialWritableBytes) => {
