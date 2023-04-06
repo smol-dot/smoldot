@@ -4,6 +4,7 @@
 
 ### Changed
 
+- As NodeJS v14 reaches its end of life on April 30th 2023, the minimum NodeJS version required to run smoldot is now v16. The smoldot Wasm binary now has SIMD enabled, meaning that the minimum Deno version required to run smoldot is now v1.9.
 - Removed support for the `ls` message in the multistream-select protocol, in accordance with the rest of the libp2p ecosystem. This message was in practice never used, and removing support for it simplifies the implementation. ([#379](https://github.com/smol-dot/smoldot/pull/379))
 - Yamux now considers answering pings in the wrong order as invalid. ([#383](https://github.com/smol-dot/smoldot/pull/383))
 
