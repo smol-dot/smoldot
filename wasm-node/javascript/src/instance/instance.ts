@@ -76,7 +76,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
   // - At initialization, it is a Promise containing the Wasm VM is still initializing.
   // - After the Wasm VM has finished initialization, contains the `WebAssembly.Instance` object.
   //
-  let state: { initialized: false, promise: Promise<[SmoldotWasmInstance, Array<ArrayBuffer>]> } | { initialized: true, instance: SmoldotWasmInstance, bufferIndices: Array<ArrayBuffer>, unregisterCallback: () => void };
+  let state: { initialized: false, promise: Promise<[SmoldotWasmInstance, Array<Uint8Array>]> } | { initialized: true, instance: SmoldotWasmInstance, bufferIndices: Array<Uint8Array>, unregisterCallback: () => void };
 
   const crashError: { error?: CrashError } = {};
 
@@ -153,7 +153,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
     })
   };
 
-  async function queueOperation<T>(operation: (instance: SmoldotWasmInstance, bufferIndices: Array<ArrayBuffer>) => T): Promise<T> {
+  async function queueOperation<T>(operation: (instance: SmoldotWasmInstance, bufferIndices: Array<Uint8Array>) => T): Promise<T> {
     // What to do depends on the type of `state`.
     // See the documentation of the `state` variable for information.
     if (!state.initialized) {
@@ -179,8 +179,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
 
       let retVal;
       try {
-        const encoded = new TextEncoder().encode(request)
-        state.bufferIndices[0] = encoded.buffer
+        state.bufferIndices[0] = new TextEncoder().encode(request)
         retVal = state.instance.exports.json_rpc_send(0, chainId) >>> 0;
       } catch (_error) {
         console.assert(crashError.error);
@@ -242,13 +241,11 @@ export function start(configMessage: Config, platformBindings: instance.Platform
           // id will refer to an *erroneous* chain. `chain_is_ok` is used below to determine whether it
           // has succeeeded or not.
           // Note that `add_chain` properly de-allocates buffers even if it failed.
-          const chainSpecEncoded = new TextEncoder().encode(chainSpec)
-          bufferIndices[0] = chainSpecEncoded.buffer
-          const databaseContentEncoded = new TextEncoder().encode(databaseContent)
-          bufferIndices[1] = databaseContentEncoded.buffer
-          const potentialRelayChainsEncoded = new ArrayBuffer(potentialRelayChains.length * 4)
+          bufferIndices[0] = new TextEncoder().encode(chainSpec)
+          bufferIndices[1] = new TextEncoder().encode(databaseContent)
+          const potentialRelayChainsEncoded = new Uint8Array(potentialRelayChains.length * 4)
           for (let idx = 0; idx < potentialRelayChains.length; ++idx) {
-            buffer.writeUInt32LE(new Uint8Array(potentialRelayChainsEncoded), idx * 4, potentialRelayChains[idx]!);
+            buffer.writeUInt32LE(potentialRelayChainsEncoded, idx * 4, potentialRelayChains[idx]!);
           }
           bufferIndices[2] = potentialRelayChainsEncoded
           const chainId = instance.exports.add_chain(0, 1, disableJsonRpc ? 0 : 1, 2);

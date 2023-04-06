@@ -91,7 +91,7 @@ export interface PlatformBindings {
      connect(config: ConnectionConfig): Connection;
 }
 
-export async function startInstance(config: Config, platformBindings: PlatformBindings): Promise<[SmoldotWasmInstance, Array<ArrayBuffer>]> {
+export async function startInstance(config: Config, platformBindings: PlatformBindings): Promise<[SmoldotWasmInstance, Array<Uint8Array>]> {
     // The actual Wasm bytecode is base64-decoded then deflate-decoded from a constant found in a
     // different file.
     // This is suboptimal compared to using `instantiateStreaming`, but it is the most

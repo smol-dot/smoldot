@@ -31,7 +31,7 @@ export interface Config {
      *
      * When `buffer_size` or `buffer_index` are called, the buffer is found here.
      */
-    bufferIndices: Array<ArrayBuffer>,
+    bufferIndices: Array<Uint8Array>,
 
     /**
      * Returns the number of milliseconds since an arbitrary epoch.
@@ -271,7 +271,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
             targetPtr = targetPtr >>> 0;
 
             const buf = config.bufferIndices[bufferIndex]!;
-            new Uint8Array(instance.exports.memory.buffer).set(new Uint8Array(buf), targetPtr);
+            new Uint8Array(instance.exports.memory.buffer).set(buf, targetPtr);
         },
 
         // Used by the Rust side to notify that a JSON-RPC response or subscription notification
@@ -370,11 +370,10 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                                     break
                                 }
                                 case 'multi-stream': {
-                                    const handshakeTy = new ArrayBuffer(1 + info.localTlsCertificateMultihash.length + info.remoteTlsCertificateMultihash.length);
-                                    const handshakeTyArray = new Uint8Array(handshakeTy);
-                                    buffer.writeUInt8(handshakeTyArray, 0, 0);
-                                    handshakeTyArray.set(info.localTlsCertificateMultihash, 1)
-                                    handshakeTyArray.set(info.remoteTlsCertificateMultihash, 1 + info.localTlsCertificateMultihash.length)
+                                    const handshakeTy = new Uint8Array(1 + info.localTlsCertificateMultihash.length + info.remoteTlsCertificateMultihash.length);
+                                    buffer.writeUInt8(handshakeTy, 0, 0);
+                                    handshakeTy.set(info.localTlsCertificateMultihash, 1)
+                                    handshakeTy.set(info.remoteTlsCertificateMultihash, 1 + info.localTlsCertificateMultihash.length)
                                     config.bufferIndices[0] = handshakeTy;
                                     instance.exports.connection_open_multi_stream(connectionId, 0);
                                     break
@@ -385,8 +384,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                     onConnectionReset: (message: string) => {
                         if (killedTracked.killed) return;
                         try {
-                            const encoded = new TextEncoder().encode(message)
-                            config.bufferIndices[0] = encoded.buffer;
+                            config.bufferIndices[0] = new TextEncoder().encode(message);
                             instance.exports.connection_reset(connectionId, 0);
                         } catch(_error) {}
                     },
@@ -403,7 +401,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                     onMessage: (message: Uint8Array, streamId?: number) => {
                         if (killedTracked.killed) return;
                         try {
-                            config.bufferIndices[0] = message.buffer;
+                            config.bufferIndices[0] = message;
                             instance.exports.stream_message(connectionId, streamId || 0, 0);
                         } catch(_error) {}
                     },
@@ -436,10 +434,9 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                 if (error instanceof Error) {
                     errorStr = error.toString();
                 }
-                const encoded = new TextEncoder().encode(errorStr)
-                config.bufferIndices[0] = encoded.buffer;
 
                 const mem = new Uint8Array(instance.exports.memory.buffer);
+                config.bufferIndices[0] = new TextEncoder().encode(errorStr)
                 buffer.writeUInt32LE(mem, errorBufferIndexPtr, 0);
                 buffer.writeUInt8(mem, errorBufferIndexPtr + 4, isBadAddress ? 1 : 0);
                 return 1;
