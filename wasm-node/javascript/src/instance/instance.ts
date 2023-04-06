@@ -76,7 +76,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
   // - At initialization, it is a Promise containing the Wasm VM is still initializing.
   // - After the Wasm VM has finished initialization, contains the `WebAssembly.Instance` object.
   //
-  let state: { initialized: false, promise: Promise<SmoldotWasmInstance> } | { initialized: true, instance: SmoldotWasmInstance, unregisterCallback: () => void };
+  let state: { initialized: false, promise: Promise<[SmoldotWasmInstance, Array<ArrayBuffer>]> } | { initialized: true, instance: SmoldotWasmInstance, bufferIndices: Array<ArrayBuffer>, unregisterCallback: () => void };
 
   const crashError: { error?: CrashError } = {};
 
@@ -127,7 +127,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
   };
 
   state = {
-    initialized: false, promise: instance.startInstance(config, platformBindings).then((instance) => {
+    initialized: false, promise: instance.startInstance(config, platformBindings).then(([instance, bufferIndices]) => {
       // `config.cpuRateLimit` is a floating point that should be between 0 and 1, while the value
       // to pass as parameter must be between `0` and `2^32-1`.
       // The few lines of code below should handle all possible values of `number`, including
@@ -148,22 +148,22 @@ export function start(configMessage: Config, platformBindings: instance.Platform
       });
       instance.exports.init(configMessage.maxLogLevel, configMessage.enableCurrentTask ? 1 : 0, cpuRateLimit, periodicallyYield ? 1 : 0);
 
-      state = { initialized: true, instance, unregisterCallback };
-      return instance;
+      state = { initialized: true, instance, bufferIndices, unregisterCallback };
+      return [instance, bufferIndices];
     })
   };
 
-  async function queueOperation<T>(operation: (instance: SmoldotWasmInstance) => T): Promise<T> {
+  async function queueOperation<T>(operation: (instance: SmoldotWasmInstance, bufferIndices: Array<ArrayBuffer>) => T): Promise<T> {
     // What to do depends on the type of `state`.
     // See the documentation of the `state` variable for information.
     if (!state.initialized) {
       // A message has been received while the Wasm VM is still initializing. Queue it for when
       // initialization is over.
-      return state.promise.then((instance) => operation(instance))
+      return state.promise.then(([instance, bufferIndices]) => operation(instance, bufferIndices))
 
     } else {
       // Everything is already initialized. Process the message synchronously.
-      return operation(state.instance)
+      return operation(state.instance, state.bufferIndices)
     }
   }
 
@@ -180,9 +180,8 @@ export function start(configMessage: Config, platformBindings: instance.Platform
       let retVal;
       try {
         const encoded = new TextEncoder().encode(request)
-        const ptr = state.instance.exports.alloc(encoded.length) >>> 0;
-        new Uint8Array(state.instance.exports.memory.buffer).set(encoded, ptr);
-        retVal = state.instance.exports.json_rpc_send(ptr, encoded.length, chainId) >>> 0;
+        state.bufferIndices[0] = encoded.buffer
+        retVal = state.instance.exports.json_rpc_send(0, chainId) >>> 0;
       } catch (_error) {
         console.assert(crashError.error);
         throw crashError.error
@@ -234,38 +233,25 @@ export function start(configMessage: Config, platformBindings: instance.Platform
     },
 
     addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean): Promise<{ success: true, chainId: number } | { success: false, error: string }> => {
-      return queueOperation((instance) => {
+      return queueOperation((instance, bufferIndices) => {
         if (crashError.error)
           throw crashError.error;
 
         try {
-          // Write the chain specification into memory.
-          const chainSpecEncoded = new TextEncoder().encode(chainSpec)
-          const chainSpecPtr = instance.exports.alloc(chainSpecEncoded.length) >>> 0;
-          new Uint8Array(instance.exports.memory.buffer).set(chainSpecEncoded, chainSpecPtr);
-
-          // Write the database content into memory.
-          const databaseContentEncoded = new TextEncoder().encode(databaseContent)
-          const databaseContentPtr = instance.exports.alloc(databaseContentEncoded.length) >>> 0;
-          new Uint8Array(instance.exports.memory.buffer).set(databaseContentEncoded, databaseContentPtr);
-
-          // Write the potential relay chains into memory.
-          const potentialRelayChainsLen = potentialRelayChains.length;
-          const potentialRelayChainsPtr = instance.exports.alloc(potentialRelayChainsLen * 4) >>> 0;
-          for (let idx = 0; idx < potentialRelayChains.length; ++idx) {
-            buffer.writeUInt32LE(new Uint8Array(instance.exports.memory.buffer), potentialRelayChainsPtr + idx * 4, potentialRelayChains[idx]!);
-          }
-
           // `add_chain` unconditionally allocates a chain id. If an error occurs, however, this chain
           // id will refer to an *erroneous* chain. `chain_is_ok` is used below to determine whether it
           // has succeeeded or not.
           // Note that `add_chain` properly de-allocates buffers even if it failed.
-          const chainId = instance.exports.add_chain(
-            chainSpecPtr, chainSpecEncoded.length,
-            databaseContentPtr, databaseContentEncoded.length,
-            disableJsonRpc ? 0 : 1,
-            potentialRelayChainsPtr, potentialRelayChainsLen
-          );
+          const chainSpecEncoded = new TextEncoder().encode(chainSpec)
+          bufferIndices[0] = chainSpecEncoded.buffer
+          const databaseContentEncoded = new TextEncoder().encode(databaseContent)
+          bufferIndices[1] = databaseContentEncoded.buffer
+          const potentialRelayChainsEncoded = new ArrayBuffer(potentialRelayChains.length * 4)
+          for (let idx = 0; idx < potentialRelayChains.length; ++idx) {
+            buffer.writeUInt32LE(new Uint8Array(potentialRelayChainsEncoded), idx * 4, potentialRelayChains[idx]!);
+          }
+          bufferIndices[2] = potentialRelayChainsEncoded
+          const chainId = instance.exports.add_chain(0, 1, disableJsonRpc ? 0 : 1, 2);
 
           if (instance.exports.chain_is_ok(chainId) != 0) {
             console.assert(!chains.has(chainId));

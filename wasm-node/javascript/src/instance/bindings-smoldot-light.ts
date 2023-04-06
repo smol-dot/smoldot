@@ -27,6 +27,13 @@ export interface Config {
     instance?: SmoldotWasmInstance,
 
     /**
+     * Array used to store the buffers provided to the Rust code.
+     *
+     * When `buffer_size` or `buffer_index` are called, the buffer is found here.
+     */
+    bufferIndices: Array<ArrayBuffer>,
+
+    /**
      * Returns the number of milliseconds since an arbitrary epoch.
      */
     performanceNow: () => number,
@@ -254,6 +261,19 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
             config.onPanic(message);
         },
 
+        buffer_size: (bufferIndex: number) => {
+            const buf = config.bufferIndices[bufferIndex]!;
+            return buf.byteLength;
+        },
+
+        buffer_copy: (bufferIndex: number, targetPtr: number) => {
+            const instance = config.instance!;
+            targetPtr = targetPtr >>> 0;
+
+            const buf = config.bufferIndices[bufferIndex]!;
+            new Uint8Array(instance.exports.memory.buffer).set(new Uint8Array(buf), targetPtr);
+        },
+
         // Used by the Rust side to notify that a JSON-RPC response or subscription notification
         // is available in the queue of JSON-RPC responses.
         json_rpc_responses_non_empty: (chainId: number) => {
@@ -322,12 +342,12 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
 
         // Must create a new connection object. This implementation stores the created object in
         // `connections`.
-        connection_new: (connectionId: number, addrPtr: number, addrLen: number, errorPtrPtr: number) => {
+        connection_new: (connectionId: number, addrPtr: number, addrLen: number, errorBufferIndexPtr: number) => {
             const instance = config.instance!;
 
             addrPtr >>>= 0;
             addrLen >>>= 0;
-            errorPtrPtr >>>= 0;
+            errorBufferIndexPtr >>>= 0;
 
             if (!!connections[connectionId]) {
                 throw new Error("internal error: connection already allocated");
@@ -350,13 +370,13 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                                     break
                                 }
                                 case 'multi-stream': {
-                                    const bufferLen = 1 + info.localTlsCertificateMultihash.length + info.remoteTlsCertificateMultihash.length;
-                                    const ptr = instance.exports.alloc(bufferLen) >>> 0;
-                                    const mem = new Uint8Array(instance.exports.memory.buffer);
-                                    buffer.writeUInt8(mem, ptr, 0);
-                                    mem.set(info.localTlsCertificateMultihash, ptr + 1)
-                                    mem.set(info.remoteTlsCertificateMultihash, ptr + 1 + info.localTlsCertificateMultihash.length)
-                                    instance.exports.connection_open_multi_stream(connectionId, ptr, bufferLen);
+                                    const handshakeTy = new ArrayBuffer(1 + info.localTlsCertificateMultihash.length + info.remoteTlsCertificateMultihash.length);
+                                    const handshakeTyArray = new Uint8Array(handshakeTy);
+                                    buffer.writeUInt8(handshakeTyArray, 0, 0);
+                                    handshakeTyArray.set(info.localTlsCertificateMultihash, 1)
+                                    handshakeTyArray.set(info.remoteTlsCertificateMultihash, 1 + info.localTlsCertificateMultihash.length)
+                                    config.bufferIndices[0] = handshakeTy;
+                                    instance.exports.connection_open_multi_stream(connectionId, 0);
                                     break
                                 }
                             }
@@ -366,9 +386,8 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                         if (killedTracked.killed) return;
                         try {
                             const encoded = new TextEncoder().encode(message)
-                            const ptr = instance.exports.alloc(encoded.length) >>> 0;
-                            new Uint8Array(instance.exports.memory.buffer).set(encoded, ptr);
-                            instance.exports.connection_reset(connectionId, ptr, encoded.length);
+                            config.bufferIndices[0] = encoded.buffer;
+                            instance.exports.connection_reset(connectionId, 0);
                         } catch(_error) {}
                     },
                     onWritableBytes: (numExtra, streamId) => {
@@ -384,9 +403,8 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                     onMessage: (message: Uint8Array, streamId?: number) => {
                         if (killedTracked.killed) return;
                         try {
-                            const ptr = instance.exports.alloc(message.length) >>> 0;
-                            new Uint8Array(instance.exports.memory.buffer).set(message, ptr)
-                            instance.exports.stream_message(connectionId, streamId || 0, ptr, message.length);
+                            config.bufferIndices[0] = message.buffer;
+                            instance.exports.stream_message(connectionId, streamId || 0, 0);
                         } catch(_error) {}
                     },
                     onStreamOpened: (streamId: number, direction: 'inbound' | 'outbound', initialWritableBytes) => {
@@ -418,13 +436,12 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                 if (error instanceof Error) {
                     errorStr = error.toString();
                 }
-                const mem = new Uint8Array(instance.exports.memory.buffer);
                 const encoded = new TextEncoder().encode(errorStr)
-                const ptr = instance.exports.alloc(encoded.length) >>> 0;
-                mem.set(encoded, ptr);
-                buffer.writeUInt32LE(mem, errorPtrPtr, ptr);
-                buffer.writeUInt32LE(mem, errorPtrPtr + 4, encoded.length);
-                buffer.writeUInt8(mem, errorPtrPtr + 8, isBadAddress ? 1 : 0);
+                config.bufferIndices[0] = encoded.buffer;
+
+                const mem = new Uint8Array(instance.exports.memory.buffer);
+                buffer.writeUInt32LE(mem, errorBufferIndexPtr, 0);
+                buffer.writeUInt8(mem, errorBufferIndexPtr + 4, isBadAddress ? 1 : 0);
                 return 1;
             }
         },
