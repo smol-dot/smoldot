@@ -60,10 +60,12 @@
 //! the guest.
 //!
 //! It is, however, important when the value needs to be interpreted from the host side, such as
-//! for example the return value of [`alloc`]. When using JavaScript as the host, you must do
-//! `>>> 0` on all the `u32` values before interpreting them, in order to be certain than they
-//! are treated as unsigned integers by the JavaScript.
+//! for example the `message_ptr` parameter of [`panic()`]. When using JavaScript as the host, you
+//! must do `>>> 0` on all the `u32` values before interpreting them, in order to be certain than
+//! they are treated as unsigned integers by the JavaScript.
 //!
+
+use core::mem;
 
 #[link(wasm_import_module = "smoldot")]
 extern "C" {
@@ -95,6 +97,21 @@ extern "C" {
     /// Beyond the `panic` function itself, any other FFI function that throws must similarly
     /// behave like `abort` and prevent any further execution.
     pub fn panic(message_ptr: u32, message_len: u32);
+
+    /// Copies the entire content of the buffer with the given index to the memory of the
+    /// WebAssembly at offset `target_pointer`.
+    ///
+    /// In situations where a buffer must be provided from the JavaScript to the Rust code, the
+    /// JavaScript must (prior to calling the Rust function that requires the buffer) assign a
+    /// "buffer index" to the buffer it wants to provide. The Rust code then calls the
+    /// [`buffer_size`] and [`buffer_copy`] functions in order to obtain the length and content
+    /// of the buffer.
+    pub fn buffer_copy(buffer_index: u32, target_pointer: u32);
+
+    /// Returns the size (in bytes) of the buffer with the given index.
+    ///
+    /// See the documentation of [`buffer_copy`] for context.
+    pub fn buffer_size(buffer_index: u32) -> u32;
 
     /// The queue of JSON-RPC responses of the given chain is no longer empty.
     ///
@@ -176,14 +193,14 @@ extern "C" {
     /// > **Note**: If you implement this function using for example `new WebSocket()`, please
     /// >           keep in mind that exceptions should be caught and turned into an error code.
     ///
-    /// The `error_ptr_ptr` parameter should be treated as a pointer to two consecutive
-    /// little-endian 32-bits unsigned numbers and a 8-bits unsigned number. If an error happened,
-    /// call [`alloc`] to allocate memory, write a UTF-8 error message in that given location,
-    /// then write that location at the location indicated by `error_ptr_ptr` and the length of
-    /// that string at the location `error_ptr_ptr + 4`. The buffer will be de-allocated by the
-    /// client. Then, write at location `error_ptr_ptr + 8` a `1` if the error is caused by the
-    /// address being forbidden or unsupported, and `0` otherwise. If no error happens, nothing
-    /// should be written to `error_ptr_ptr`.
+    /// If an error happened, assign a so-called "buffer index" (a `u32`) representing the buffer
+    /// containing the UTF-8 error message, then write this buffer index as little-endian to the
+    /// memory of the WebAssembly indicated by `error_buffer_index_ptr`. The Rust code will call
+    /// [`buffer_size`] and [`buffer_copy`] in order to obtain the content of this buffer. The
+    /// buffer index should remain assigned and buffer alive until the next time the JavaScript
+    /// code retains control. Then, write at location `error_buffer_index_ptr + 4` a `1` if the
+    /// error is caused by the address being forbidden or unsupported, and `0` otherwise. If no
+    /// error happens, nothing should be written to `error_buffer_index_ptr`.
     ///
     /// At any time, a connection can be in one of the three following states:
     ///
@@ -205,7 +222,12 @@ extern "C" {
     /// multiplexing are handled internally by smoldot. Multi-stream connections open and close
     /// streams over time using [`connection_stream_opened`] and [`stream_reset`], and the
     /// encryption and multiplexing are handled by the user of these bindings.
-    pub fn connection_new(id: u32, addr_ptr: u32, addr_len: u32, error_ptr_ptr: u32) -> u32;
+    pub fn connection_new(
+        id: u32,
+        addr_ptr: u32,
+        addr_len: u32,
+        error_buffer_index_ptr: u32,
+    ) -> u32;
 
     /// Abruptly close a connection previously initialized with [`connection_new`].
     ///
@@ -359,40 +381,22 @@ pub extern "C" fn start_shutdown() {
     super::advance_execution();
 }
 
-/// Allocates a buffer of the given length, with an alignment of 1.
-///
-/// This must be used in the context of [`add_chain`] and other functions that similarly require
-/// passing data of variable length.
-///
-/// > **Note**: If using JavaScript as the host, you likely need to perform `>>> 0` on the return
-/// >           value. See the module-level documentation.
-#[no_mangle]
-pub extern "C" fn alloc(len: u32) -> u32 {
-    let len = usize::try_from(len).unwrap();
-    let mut vec = Vec::<u8>::with_capacity(len);
-    unsafe {
-        vec.set_len(len);
-    }
-    let ptr: *mut [u8] = Box::into_raw(vec.into_boxed_slice());
-    u32::try_from(ptr as *mut u8 as usize).unwrap()
-}
-
 /// Adds a chain to the client. The client will try to stay connected and synchronize this chain.
 ///
-/// Use [`alloc`] to allocate a buffer for the spec and the database of the chain that needs to
-/// be started. Write the chain spec and database content in these buffers as UTF-8. Then, pass
-/// the pointers and lengths (in bytes) as parameter to this function.
+/// Assign a so-called "buffer index" (a `u32`) representing the chain specification, database
+/// content, and list of potential relay chains, then provide these buffer indices to the function.
+/// The Rust code will call [`buffer_size`] and [`buffer_copy`] in order to obtain the content of
+/// these buffers. The buffer indices can be de-assigned and buffers destroyed once this function
+/// returns.
+///
+/// The content of the chain specification and database content must be in UTF-8.
 ///
 /// > **Note**: The database content is an opaque string that can be obtained by calling
 /// >           the `chainHead_unstable_finalizedDatabase` JSON-RPC function.
 ///
-/// Similarly, use [`alloc`] to allocate a buffer containing a list of 32-bits-little-endian chain
-/// ids. Pass the pointer and number of chain ids (*not* length in bytes of the buffer) to this
-/// function. If the chain specification refer to a parachain, these chain ids are the ones that
-/// will be looked up to find the corresponding relay chain.
-///
-/// These three buffers **must** have been allocated with [`alloc`]. They are freed when this
-/// function is called, even if an error code is returned.
+/// The list of potential relay chains is a buffer containing a list of 32-bits-little-endian chain
+/// ids. If the chain specification refer to a parachain, these chain ids are the ones that will be
+/// looked up to find the corresponding relay chain.
 ///
 /// If `json_rpc_running` is 0, then no JSON-RPC service will be started and it is forbidden to
 /// send JSON-RPC requests targeting this chain. This can be used to save up resources.
@@ -404,22 +408,16 @@ pub extern "C" fn alloc(len: u32) -> u32 {
 /// message.
 #[no_mangle]
 pub extern "C" fn add_chain(
-    chain_spec_pointer: u32,
-    chain_spec_len: u32,
-    database_content_pointer: u32,
-    database_content_len: u32,
+    chain_spec_buffer_index: u32,
+    database_content_buffer_index: u32,
     json_rpc_running: u32,
-    potential_relay_chains_ptr: u32,
-    potential_relay_chains_len: u32,
+    potential_relay_chains_buffer_index: u32,
 ) -> u32 {
     let success_code = super::add_chain(
-        chain_spec_pointer,
-        chain_spec_len,
-        database_content_pointer,
-        database_content_len,
+        get_buffer(chain_spec_buffer_index),
+        get_buffer(database_content_buffer_index),
         json_rpc_running,
-        potential_relay_chains_ptr,
-        potential_relay_chains_len,
+        get_buffer(potential_relay_chains_buffer_index),
     );
     super::advance_execution();
     success_code
@@ -472,8 +470,10 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 /// format of the JSON-RPC requests and notifications is described in
 /// [the standard JSON-RPC 2.0 specification](https://www.jsonrpc.org/specification).
 ///
-/// The buffer passed as parameter **must** have been allocated with [`alloc`]. It is freed when
-/// this function is called.
+/// Assign a so-called "buffer index" (a `u32`) representing the buffer containing the UTF-8
+/// request, then provide this buffer index to the function. The Rust code will call
+/// [`buffer_size`] and [`buffer_copy`] in order to obtain the content of this buffer. The buffer
+/// index can be de-assigned and buffer destroyed once this function returns.
 ///
 /// Responses and notifications are notified using [`json_rpc_responses_non_empty`], and can
 /// be read with [`json_rpc_responses_peek`].
@@ -488,8 +488,8 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 /// one.
 ///
 #[no_mangle]
-pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_id: u32) -> u32 {
-    let success_code = super::json_rpc_send(text_ptr, text_len, chain_id);
+pub extern "C" fn json_rpc_send(text_buffer_index: u32, chain_id: u32) -> u32 {
+    let success_code = super::json_rpc_send(get_buffer(text_buffer_index), chain_id);
     super::advance_execution();
     success_code
 }
@@ -550,9 +550,8 @@ pub extern "C" fn timer_finished(timer_id: u32) {
 ///
 /// See also [`connection_new`].
 ///
-/// When in the `Open` state, the connection can receive messages. When a message is received,
-/// [`alloc`] must be called in order to allocate memory for this message, then
-/// [`stream_message`] must be called with the pointer returned by [`alloc`].
+/// When in the `Open` state, the connection can receive messages. Use [`stream_message`] in order
+/// to provide to the Rust code the messages received by the connection.
 ///
 /// The `handshake_ty` parameter indicates the type of handshake. It must always be 0 at the
 /// moment, indicating a multistream-select+Noise+Yamux handshake.
@@ -582,25 +581,19 @@ pub extern "C" fn connection_open_single_stream(
 ///
 /// See also [`connection_new`].
 ///
-/// When in the `Open` state, the connection can receive messages. When a message is received,
-/// [`alloc`] must be called in order to allocate memory for this message, then
-/// [`stream_message`] must be called with the pointer returned by [`alloc`].
+/// Assign a so-called "buffer index" (a `u32`) representing the buffer containing the handshake
+/// type, then provide this buffer index to the function. The Rust code will call [`buffer_size`]
+/// and [`buffer_copy`] in order to obtain the content of this buffer. The buffer index can be
+/// de-assigned and buffer destroyed once this function returns.
 ///
-/// A "handshake type" must be provided. To do so, allocate a buffer with [`alloc`] and pass a
-/// pointer to it. This buffer is freed when this function is called.
 /// The buffer must contain a single 0 byte (indicating WebRTC), followed with the multihash
 /// representation of the hash of the local node's TLS certificate, followed with the multihash
 /// representation of the hash of the remote node's TLS certificate.
 #[no_mangle]
-pub extern "C" fn connection_open_multi_stream(
-    connection_id: u32,
-    handshake_ty_ptr: u32,
-    handshake_ty_len: u32,
-) {
+pub extern "C" fn connection_open_multi_stream(connection_id: u32, handshake_ty_buffer_index: u32) {
     crate::platform::connection_open_multi_stream(
         connection_id,
-        handshake_ty_ptr,
-        handshake_ty_len,
+        get_buffer(handshake_ty_buffer_index),
     );
     super::advance_execution();
 }
@@ -608,17 +601,19 @@ pub extern "C" fn connection_open_multi_stream(
 /// Notify of a message being received on the stream. The connection associated with that stream
 /// (and, in the case of a multi-stream connection, the stream itself) must be in the `Open` state.
 ///
+/// Assign a so-called "buffer index" (a `u32`) representing the buffer containing the message,
+/// then provide this buffer index to the function. The Rust code will call [`buffer_size`] and
+/// [`buffer_copy`] in order to obtain the content of this buffer. The buffer index can be
+/// de-assigned and buffer destroyed once this function returns.
+///
 /// If `connection_id` is a single-stream connection, then the value of `stream_id` is ignored.
 /// If `connection_id` is a multi-stream connection, then `stream_id` corresponds to the stream
 /// on which the data was received, as was provided to [`connection_stream_opened`].
 ///
 /// See also [`connection_open_single_stream`] and [`connection_open_multi_stream`].
-///
-/// The buffer **must** have been allocated with [`alloc`]. It is freed when this function is
-/// called.
 #[no_mangle]
-pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, len: u32) {
-    crate::platform::stream_message(connection_id, stream_id, ptr, len);
+pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, buffer_index: u32) {
+    crate::platform::stream_message(connection_id, stream_id, get_buffer(buffer_index));
     super::advance_execution();
 }
 
@@ -667,13 +662,15 @@ pub extern "C" fn connection_stream_opened(
 /// Must only be called once per connection object.
 /// Must never be called if [`reset_connection`] has been called on that object in the past.
 ///
-/// Must be passed a UTF-8 string indicating the reason for closing. The buffer **must** have
-/// been allocated with [`alloc`]. It is freed when this function is called.
+/// Assign a so-called "buffer index" (a `u32`) representing the buffer containing the UTF-8
+/// reason for closing, then provide this buffer index to the function. The Rust code will call
+/// [`buffer_size`] and [`buffer_copy`] in order to obtain the content of this buffer. The buffer
+/// index can be de-assigned and buffer destroyed once this function returns.
 ///
 /// See also [`connection_new`].
 #[no_mangle]
-pub extern "C" fn connection_reset(connection_id: u32, ptr: u32, len: u32) {
-    crate::platform::connection_reset(connection_id, ptr, len);
+pub extern "C" fn connection_reset(connection_id: u32, buffer_index: u32) {
+    crate::platform::connection_reset(connection_id, get_buffer(buffer_index));
     super::advance_execution();
 }
 
@@ -692,4 +689,20 @@ pub extern "C" fn connection_reset(connection_id: u32, ptr: u32, len: u32) {
 pub extern "C" fn stream_reset(connection_id: u32, stream_id: u32) {
     crate::platform::stream_reset(connection_id, stream_id);
     super::advance_execution();
+}
+
+pub(crate) fn get_buffer(buffer_index: u32) -> Vec<u8> {
+    unsafe {
+        let len = usize::try_from(buffer_size(buffer_index)).unwrap();
+
+        // TODO: consider rewriting this in a better way after all the currently unstable functions are stable: https://github.com/rust-lang/rust/issues/63291
+        let mut buffer = Vec::<mem::MaybeUninit<u8>>::with_capacity(len);
+        buffer_copy(
+            buffer_index,
+            buffer.spare_capacity_mut().as_mut_ptr() as usize as u32,
+        );
+        buffer.set_len(len);
+
+        mem::transmute::<Vec<mem::MaybeUninit<u8>>, Vec<u8>>(buffer)
+    }
 }

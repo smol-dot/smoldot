@@ -91,7 +91,7 @@ export interface PlatformBindings {
      connect(config: ConnectionConfig): Connection;
 }
 
-export async function startInstance(config: Config, platformBindings: PlatformBindings): Promise<SmoldotWasmInstance> {
+export async function startInstance(config: Config, platformBindings: PlatformBindings): Promise<[SmoldotWasmInstance, Array<Uint8Array>]> {
     // The actual Wasm bytecode is base64-decoded then deflate-decoded from a constant found in a
     // different file.
     // This is suboptimal compared to using `instantiateStreaming`, but it is the most
@@ -100,8 +100,11 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
 
     let killAll: () => void;
 
+    const bufferIndices = new Array;
+
     // Used to bind with the smoldot-light bindings. See the `bindings-smoldot-light.js` file.
     const smoldotJsConfig: SmoldotBindingsConfig = {
+        bufferIndices,
         performanceNow: platformBindings.performanceNow,
         connect: platformBindings.connect,
         onPanic: (message) => {
@@ -141,5 +144,5 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
     const instance = result.instance as SmoldotWasmInstance;
     smoldotJsConfig.instance = instance;
     wasiConfig.instance = instance;
-    return instance;
+    return [instance, bufferIndices];
 }
