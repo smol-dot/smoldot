@@ -1009,7 +1009,8 @@ impl ChainHeadFollowTask {
                 };
 
                 self.start_chain_head_body(
-                    me,
+                    &me.requests_subscriptions,
+                    &me.sync_service,
                     (&get_request_id.0, &get_request_id.1),
                     hash,
                     network_config,
@@ -1038,7 +1039,9 @@ impl ChainHeadFollowTask {
                 };
 
                 self.start_chain_head_storage(
-                    me,
+                    &me.log_target,
+                    &me.requests_subscriptions,
+                    &me.sync_service,
                     (&get_request_id.0, &get_request_id.1),
                     hash,
                     key,
@@ -1099,7 +1102,7 @@ impl ChainHeadFollowTask {
                 };
 
                 self.start_chain_head_call(
-                    me,
+                    &me.requests_subscriptions,
                     (&get_request_id.0, &get_request_id.1),
                     &function_to_call,
                     call_parameters,
@@ -1169,20 +1172,22 @@ impl ChainHeadFollowTask {
 
     async fn start_chain_head_body<TPlat: Platform>(
         &mut self,
-        me: &Arc<Background<TPlat>>,
+        requests_subscriptions: &Arc<
+            requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>,
+        >,
+        sync_service: &Arc<sync_service::SyncService<TPlat>>,
         request_id: (&str, &requests_subscriptions::RequestId),
         hash: methods::HashHexString,
         network_config: methods::NetworkConfig,
         block_number: Option<u64>,
     ) {
-        let (subscription_id, mut messages_rx, subscription_start) = match me
-            .requests_subscriptions
+        let (subscription_id, mut messages_rx, subscription_start) = match requests_subscriptions
             .start_subscription(request_id.1, 1)
             .await
         {
             Ok(v) => v,
             Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
-                me.requests_subscriptions
+                requests_subscriptions
                     .respond(
                         request_id.1,
                         json_rpc::parse::build_error_response(
@@ -1200,11 +1205,12 @@ impl ChainHeadFollowTask {
         };
 
         subscription_start.start({
-            let me = me.clone();
+            let requests_subscriptions = requests_subscriptions.clone();
+            let sync_service = sync_service.clone();
             let request_id = (request_id.0.to_owned(), request_id.1.clone());
 
             async move {
-                me.requests_subscriptions
+                requests_subscriptions
                     .respond(
                         &request_id.1,
                         methods::Response::chainHead_unstable_body((&subscription_id).into())
@@ -1214,7 +1220,7 @@ impl ChainHeadFollowTask {
 
                 let response = if let Some(block_number) = block_number {
                     // TODO: right now we query the header because the underlying function returns an error if we don't
-                    let future = me.sync_service.clone().block_query(
+                    let future = sync_service.clone().block_query(
                         block_number,
                         hash.0,
                         protocol::BlocksRequestFields {
@@ -1231,6 +1237,8 @@ impl ChainHeadFollowTask {
                     );
                     futures::pin_mut!(future);
 
+                    let requests_subscriptions = Arc::downgrade(&requests_subscriptions);
+
                     loop {
                         let outcome = {
                             let next_message = messages_rx.next();
@@ -1239,6 +1247,11 @@ impl ChainHeadFollowTask {
                                 future::Either::Left((v, _)) => either::Left(v),
                                 future::Either::Right((v, _)) => either::Right(v),
                             }
+                        };
+
+                        let requests_subscriptions = match requests_subscriptions.upgrade() {
+                            Some(rs) => rs,
+                            None => return,
                         };
 
                         match outcome {
@@ -1267,7 +1280,7 @@ impl ChainHeadFollowTask {
                                 SubscriptionMessage::StopIfChainHeadStorage { stop_request_id },
                                 confirmation_sender,
                             )) => {
-                                me.requests_subscriptions
+                                requests_subscriptions
                                     .respond(
                                         &stop_request_id.1,
                                         methods::Response::chainHead_unstable_stopBody(())
@@ -1292,7 +1305,7 @@ impl ChainHeadFollowTask {
                     .to_json_call_object_parameters(None)
                 };
 
-                me.requests_subscriptions
+                requests_subscriptions
                     .set_queued_notification(&request_id.1, &subscription_id, 0, response)
                     .await;
             }
@@ -1301,7 +1314,11 @@ impl ChainHeadFollowTask {
 
     async fn start_chain_head_storage<TPlat: Platform>(
         &mut self,
-        me: &Arc<Background<TPlat>>,
+        log_target: &str,
+        requests_subscriptions: &Arc<
+            requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>,
+        >,
+        sync_service: &Arc<sync_service::SyncService<TPlat>>,
         request_id: (&str, &requests_subscriptions::RequestId),
         hash: methods::HashHexString,
         key: methods::HexString,
@@ -1310,7 +1327,7 @@ impl ChainHeadFollowTask {
         block_scale_encoded_header: Option<Vec<u8>>,
     ) {
         if child_key.is_some() {
-            me.requests_subscriptions
+            requests_subscriptions
                 .respond(
                     request_id.1,
                     json_rpc::parse::build_error_response(
@@ -1324,21 +1341,20 @@ impl ChainHeadFollowTask {
                 )
                 .await;
             log::warn!(
-                target: &me.log_target,
+                target: &log_target,
                 "chainHead_unstable_storage with a non-null childKey has been called. \
                 This isn't supported by smoldot yet."
             );
             return;
         }
 
-        let (subscription_id, mut messages_rx, subscription_start) = match me
-            .requests_subscriptions
+        let (subscription_id, mut messages_rx, subscription_start) = match requests_subscriptions
             .start_subscription(request_id.1, 1)
             .await
         {
             Ok(v) => v,
             Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
-                me.requests_subscriptions
+                requests_subscriptions
                     .respond(
                         request_id.1,
                         json_rpc::parse::build_error_response(
@@ -1356,11 +1372,12 @@ impl ChainHeadFollowTask {
         };
 
         subscription_start.start({
-            let me = me.clone();
+            let requests_subscriptions = requests_subscriptions.clone();
+            let sync_service = sync_service.clone();
             let request_id = (request_id.0.to_owned(), request_id.1.clone());
 
             async move {
-                me.requests_subscriptions
+                requests_subscriptions
                     .respond(
                         &request_id.1,
                         methods::Response::chainHead_unstable_storage((&subscription_id).into())
@@ -1370,10 +1387,10 @@ impl ChainHeadFollowTask {
 
                 let response = match block_scale_encoded_header
                     .as_ref()
-                    .map(|h| header::decode(h, me.sync_service.block_number_bytes()))
+                    .map(|h| header::decode(h, sync_service.block_number_bytes()))
                 {
                     Some(Ok(decoded_header)) => {
-                        let future = me.sync_service.clone().storage_query(
+                        let future = sync_service.clone().storage_query(
                             decoded_header.number,
                             &hash.0,
                             decoded_header.state_root,
@@ -1387,6 +1404,8 @@ impl ChainHeadFollowTask {
                         );
                         futures::pin_mut!(future);
 
+                        let requests_subscriptions = Arc::downgrade(&requests_subscriptions);
+
                         loop {
                             let outcome = {
                                 let next_message = messages_rx.next();
@@ -1395,6 +1414,11 @@ impl ChainHeadFollowTask {
                                     future::Either::Left((v, _)) => either::Left(v),
                                     future::Either::Right((v, _)) => either::Right(v),
                                 }
+                            };
+
+                            let requests_subscriptions = match requests_subscriptions.upgrade() {
+                                Some(rs) => rs,
+                                None => return,
                             };
 
                             match outcome {
@@ -1426,7 +1450,7 @@ impl ChainHeadFollowTask {
                                     },
                                     confirmation_sender,
                                 )) => {
-                                    me.requests_subscriptions
+                                    requests_subscriptions
                                         .respond(
                                             &stop_request_id.1,
                                             methods::Response::chainHead_unstable_stopBody(())
@@ -1458,7 +1482,7 @@ impl ChainHeadFollowTask {
                     .to_json_call_object_parameters(None),
                 };
 
-                me.requests_subscriptions
+                requests_subscriptions
                     .set_queued_notification(&request_id.1, &subscription_id, 0, response)
                     .await;
             }
@@ -1467,21 +1491,22 @@ impl ChainHeadFollowTask {
 
     async fn start_chain_head_call<TPlat: Platform>(
         &mut self,
-        me: &Arc<Background<TPlat>>,
+        requests_subscriptions: &Arc<
+            requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>,
+        >,
         request_id: (&str, &requests_subscriptions::RequestId),
         function_to_call: &str,
         call_parameters: methods::HexString,
         pre_runtime_call: Option<runtime_service::RuntimeLock<TPlat>>,
         network_config: methods::NetworkConfig,
     ) {
-        let (subscription_id, mut messages_rx, subscription_start) = match me
-            .requests_subscriptions
+        let (subscription_id, mut messages_rx, subscription_start) = match requests_subscriptions
             .start_subscription(request_id.1, 1)
             .await
         {
             Ok(v) => v,
             Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
-                me.requests_subscriptions
+                requests_subscriptions
                     .respond(
                         request_id.1,
                         json_rpc::parse::build_error_response(
@@ -1499,12 +1524,12 @@ impl ChainHeadFollowTask {
         };
 
         subscription_start.start({
-            let me = me.clone();
+            let requests_subscriptions = requests_subscriptions.clone();
             let request_id = (request_id.0.to_owned(), request_id.1.clone());
             let function_to_call = function_to_call.to_owned();
 
             async move {
-                me.requests_subscriptions
+                requests_subscriptions
                     .respond(
                         &request_id.1,
                         methods::Response::chainHead_unstable_call((&subscription_id).into())
@@ -1525,6 +1550,8 @@ impl ChainHeadFollowTask {
                     );
                     futures::pin_mut!(call_future);
 
+                    let requests_subscriptions = Arc::downgrade(&requests_subscriptions);
+
                     loop {
                         let outcome = {
                             let next_message = messages_rx.next();
@@ -1535,6 +1562,11 @@ impl ChainHeadFollowTask {
                             }
                         };
 
+                        let requests_subscriptions = match requests_subscriptions.upgrade() {
+                            Some(rs) => rs,
+                            None => return,
+                        };
+
                         match outcome {
                             either::Left(outcome) => break Some(outcome),
                             either::Right((
@@ -1543,7 +1575,7 @@ impl ChainHeadFollowTask {
                                 },
                                 confirmation_sender,
                             )) => {
-                                me.requests_subscriptions
+                                requests_subscriptions
                                     .respond(
                                         &stop_request_id.1,
                                         methods::Response::chainHead_unstable_stopCall(())
@@ -1726,7 +1758,7 @@ impl ChainHeadFollowTask {
                     .to_json_call_object_parameters(None),
                 };
 
-                me.requests_subscriptions
+                requests_subscriptions
                     .push_notification(&request_id.1,
                         &subscription_id, final_notif)
                     .await;
