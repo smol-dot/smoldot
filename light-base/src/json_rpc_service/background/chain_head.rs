@@ -31,6 +31,7 @@ use alloc::{
 use core::{
     cmp, iter,
     num::{NonZeroU32, NonZeroUsize},
+    ops,
     time::Duration,
 };
 use futures::prelude::*;
@@ -1508,213 +1509,14 @@ impl ChainHeadFollowTask {
                         break;
                     }
                 }
-                future::Either::Right((
-                    (
-                        SubscriptionMessage::StopIfChainHeadFollow { stop_request_id },
-                        confirmation_sender,
-                    ),
-                    _,
-                )) => {
-                    me.requests_subscriptions
-                        .respond(
-                            &stop_request_id.1,
-                            methods::Response::chainHead_unstable_unfollow(())
-                                .to_json_response(&stop_request_id.0),
-                        )
-                        .await;
-
-                    confirmation_sender.send();
-                    break;
-                }
-                future::Either::Right((
-                    (
-                        SubscriptionMessage::ChainHeadBody {
-                            hash,
-                            get_request_id,
-                            network_config,
-                        },
-                        confirmation_sender,
-                    ),
-                    _,
-                )) => {
-                    // Determine whether the requested block hash is valid, and if yes its number.
-                    let block_number = {
-                        if let Some(header) = self.pinned_blocks_headers.get(&hash.0) {
-                            let decoded =
-                                header::decode(header, me.sync_service.block_number_bytes())
-                                    .unwrap(); // TODO: unwrap?
-                            Some(decoded.number)
-                        } else {
-                            continue;
-                        }
-                    };
-
-                    me.start_chain_head_body(
-                        (&get_request_id.0, &get_request_id.1),
-                        hash,
-                        network_config,
-                        block_number,
-                    )
-                    .await;
-                    confirmation_sender.send();
-                }
-                future::Either::Right((
-                    (
-                        SubscriptionMessage::ChainHeadStorage {
-                            hash,
-                            get_request_id,
-                            network_config,
-                            key,
-                            child_key,
-                        },
-                        confirmation_sender,
-                    ),
-                    _,
-                )) => {
-                    // Obtain the header of the requested block.
-                    // Contains `None` if the subscription is disjoint.
-                    let block_scale_encoded_header = {
-                        if let Some(header) = self.pinned_blocks_headers.get(&hash.0) {
-                            Some(header.clone())
-                        } else {
-                            continue;
-                        }
-                    };
-
-                    me.start_chain_head_storage(
-                        (&get_request_id.0, &get_request_id.1),
-                        hash,
-                        key,
-                        child_key,
-                        network_config,
-                        block_scale_encoded_header,
-                    )
-                    .await;
-                    confirmation_sender.send();
-                }
-                future::Either::Right((
-                    (
-                        SubscriptionMessage::ChainHeadCall {
-                            hash,
-                            get_request_id,
-                            network_config,
-                            function_to_call,
-                            call_parameters,
-                        },
-                        confirmation_sender,
-                    ),
-                    _,
-                )) => {
-                    // Determine whether the requested block hash is valid and start the call.
-                    let pre_runtime_call = {
-                        let runtime_service_subscribe_all = match self.runtime_subscribe_all {
-                            Some(sa) => sa,
-                            None => {
-                                me.requests_subscriptions
-                                    .respond(
-                                        &get_request_id.1,
-                                        json_rpc::parse::build_error_response(
-                                            &get_request_id.0,
-                                            json_rpc::parse::ErrorResponse::InvalidParams,
-                                            None,
-                                        ),
-                                    )
-                                    .await;
-                                return;
-                            }
-                        };
-
-                        if !self.pinned_blocks_headers.contains_key(&hash.0) {
-                            me.requests_subscriptions
-                                .respond(
-                                    &get_request_id.1,
-                                    json_rpc::parse::build_error_response(
-                                        &get_request_id.0,
-                                        json_rpc::parse::ErrorResponse::InvalidParams,
-                                        None,
-                                    ),
-                                )
-                                .await;
-                            return;
-                        }
-
-                        me.runtime_service
-                            .pinned_block_runtime_lock(runtime_service_subscribe_all, &hash.0)
-                            .await
-                            .ok()
-                    };
-
-                    me.start_chain_head_call(
-                        (&get_request_id.0, &get_request_id.1),
-                        &function_to_call,
-                        call_parameters,
-                        pre_runtime_call,
-                        network_config,
-                    )
-                    .await;
-                    confirmation_sender.send();
-                }
-                future::Either::Right((
-                    (
-                        SubscriptionMessage::ChainHeadHeader {
-                            hash,
-
-                            get_request_id,
-                        },
-                        confirmation_sender,
-                    ),
-                    _,
-                )) => {
-                    let response = { self.pinned_blocks_headers.get(&hash.0).cloned() };
-
-                    me.requests_subscriptions
-                        .respond(
-                            &get_request_id.1,
-                            methods::Response::chainHead_unstable_header(
-                                response.map(methods::HexString),
-                            )
-                            .to_json_response(&get_request_id.0),
-                        )
-                        .await;
-                    confirmation_sender.send();
-                }
-                future::Either::Right((
-                    (
-                        SubscriptionMessage::ChainHeadFollowUnpin {
-                            hash,
-                            unpin_request_id,
-                        },
-                        confirmation_sender,
-                    ),
-                    _,
-                )) => {
-                    let valid = {
-                        if self.pinned_blocks_headers.remove(&hash.0).is_some() {
-                            if let Some(runtime_subscribe_all) = self.runtime_subscribe_all {
-                                me.runtime_service
-                                    .unpin_block(runtime_subscribe_all, &hash.0)
-                                    .await;
-                            }
-                            true
-                        } else {
-                            false
-                        }
-                    };
-
-                    if valid {
-                        me.requests_subscriptions
-                            .respond(
-                                &unpin_request_id.1,
-                                methods::Response::chainHead_unstable_unpin(())
-                                    .to_json_response(&unpin_request_id.0),
-                            )
-                            .await;
-                        confirmation_sender.send();
+                future::Either::Right(((message, confirmation_sender), _)) => {
+                    match self
+                        .on_foreground_message(&me, message, confirmation_sender)
+                        .await
+                    {
+                        ops::ControlFlow::Break(()) => break,
+                        ops::ControlFlow::Continue(()) => {}
                     }
-                }
-                future::Either::Right((_, _)) => {
-                    // Any other message.
-                    // Silently discard the confirmation sender.
                 }
             }
         }
@@ -1730,5 +1532,197 @@ impl ChainHeadFollowTask {
                 .to_json_call_object_parameters(None),
             )
             .await;
+    }
+
+    async fn on_foreground_message<TPlat: Platform>(
+        &mut self,
+        me: &Arc<Background<TPlat>>,
+        message: SubscriptionMessage,
+        confirmation_sender: requests_subscriptions::ConfirmationSend,
+    ) -> ops::ControlFlow<(), ()> {
+        match message {
+            SubscriptionMessage::StopIfChainHeadFollow { stop_request_id } => {
+                me.requests_subscriptions
+                    .respond(
+                        &stop_request_id.1,
+                        methods::Response::chainHead_unstable_unfollow(())
+                            .to_json_response(&stop_request_id.0),
+                    )
+                    .await;
+
+                confirmation_sender.send();
+                ops::ControlFlow::Break(())
+            }
+            SubscriptionMessage::ChainHeadBody {
+                hash,
+                get_request_id,
+                network_config,
+            } => {
+                // Determine whether the requested block hash is valid, and if yes its number.
+                let block_number = {
+                    if let Some(header) = self.pinned_blocks_headers.get(&hash.0) {
+                        let decoded =
+                            header::decode(header, me.sync_service.block_number_bytes()).unwrap(); // TODO: unwrap?
+                        Some(decoded.number)
+                    } else {
+                        // Ignore the message without sending a confirmation.
+                        return ops::ControlFlow::Continue(());
+                    }
+                };
+
+                me.start_chain_head_body(
+                    (&get_request_id.0, &get_request_id.1),
+                    hash,
+                    network_config,
+                    block_number,
+                )
+                .await;
+                confirmation_sender.send();
+                ops::ControlFlow::Continue(())
+            }
+            SubscriptionMessage::ChainHeadStorage {
+                hash,
+                get_request_id,
+                network_config,
+                key,
+                child_key,
+            } => {
+                // Obtain the header of the requested block.
+                // Contains `None` if the subscription is disjoint.
+                let block_scale_encoded_header = {
+                    if let Some(header) = self.pinned_blocks_headers.get(&hash.0) {
+                        Some(header.clone())
+                    } else {
+                        // Ignore the message without sending a confirmation.
+                        return ops::ControlFlow::Continue(());
+                    }
+                };
+
+                me.start_chain_head_storage(
+                    (&get_request_id.0, &get_request_id.1),
+                    hash,
+                    key,
+                    child_key,
+                    network_config,
+                    block_scale_encoded_header,
+                )
+                .await;
+                confirmation_sender.send();
+                ops::ControlFlow::Continue(())
+            }
+            SubscriptionMessage::ChainHeadCall {
+                hash,
+                get_request_id,
+                network_config,
+                function_to_call,
+                call_parameters,
+            } => {
+                // Determine whether the requested block hash is valid and start the call.
+                let pre_runtime_call = {
+                    let runtime_service_subscribe_all = match self.runtime_subscribe_all {
+                        Some(sa) => sa,
+                        None => {
+                            me.requests_subscriptions
+                                .respond(
+                                    &get_request_id.1,
+                                    json_rpc::parse::build_error_response(
+                                        &get_request_id.0,
+                                        json_rpc::parse::ErrorResponse::InvalidParams,
+                                        None,
+                                    ),
+                                )
+                                .await;
+                            // Ignore the message without sending a confirmation.
+                            return ops::ControlFlow::Continue(());
+                        }
+                    };
+
+                    if !self.pinned_blocks_headers.contains_key(&hash.0) {
+                        me.requests_subscriptions
+                            .respond(
+                                &get_request_id.1,
+                                json_rpc::parse::build_error_response(
+                                    &get_request_id.0,
+                                    json_rpc::parse::ErrorResponse::InvalidParams,
+                                    None,
+                                ),
+                            )
+                            .await;
+                        // Ignore the message without sending a confirmation.
+                        return ops::ControlFlow::Continue(());
+                    }
+
+                    me.runtime_service
+                        .pinned_block_runtime_lock(runtime_service_subscribe_all, &hash.0)
+                        .await
+                        .ok()
+                };
+
+                me.start_chain_head_call(
+                    (&get_request_id.0, &get_request_id.1),
+                    &function_to_call,
+                    call_parameters,
+                    pre_runtime_call,
+                    network_config,
+                )
+                .await;
+                confirmation_sender.send();
+                ops::ControlFlow::Continue(())
+            }
+            SubscriptionMessage::ChainHeadHeader {
+                hash,
+
+                get_request_id,
+            } => {
+                let response = { self.pinned_blocks_headers.get(&hash.0).cloned() };
+
+                me.requests_subscriptions
+                    .respond(
+                        &get_request_id.1,
+                        methods::Response::chainHead_unstable_header(
+                            response.map(methods::HexString),
+                        )
+                        .to_json_response(&get_request_id.0),
+                    )
+                    .await;
+                confirmation_sender.send();
+                ops::ControlFlow::Continue(())
+            }
+            SubscriptionMessage::ChainHeadFollowUnpin {
+                hash,
+                unpin_request_id,
+            } => {
+                let valid = {
+                    if self.pinned_blocks_headers.remove(&hash.0).is_some() {
+                        if let Some(runtime_subscribe_all) = self.runtime_subscribe_all {
+                            me.runtime_service
+                                .unpin_block(runtime_subscribe_all, &hash.0)
+                                .await;
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                };
+
+                if valid {
+                    me.requests_subscriptions
+                        .respond(
+                            &unpin_request_id.1,
+                            methods::Response::chainHead_unstable_unpin(())
+                                .to_json_response(&unpin_request_id.0),
+                        )
+                        .await;
+                    confirmation_sender.send();
+                }
+
+                ops::ControlFlow::Continue(())
+            }
+            _ => {
+                // Any other message.
+                // Silently discard the confirmation sender.
+                ops::ControlFlow::Continue(())
+            }
+        }
     }
 }
