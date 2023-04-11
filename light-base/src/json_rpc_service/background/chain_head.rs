@@ -315,16 +315,16 @@ impl<TPlat: Platform> Background<TPlat> {
                 non_finalized_blocks,
                 pinned_blocks_headers,
                 runtime_subscribe_all,
+                log_target,
+                runtime_service,
+                sync_service,
             }
             .run(
+                requests_subscriptions,
                 subscribe_all,
                 subscription_id,
                 messages_rx,
                 initial_notifications,
-                log_target,
-                requests_subscriptions,
-                runtime_service,
-                sync_service,
                 request_id,
             )
         });
@@ -690,7 +690,7 @@ fn convert_runtime_spec(
     }
 }
 
-struct ChainHeadFollowTask {
+struct ChainHeadFollowTask<TPlat: Platform> {
     /// Tree of hashes of all the current non-finalized blocks. This includes unpinned blocks.
     non_finalized_blocks: fork_tree::ForkTree<[u8; 32]>,
 
@@ -698,11 +698,18 @@ struct ChainHeadFollowTask {
     pinned_blocks_headers: hashbrown::HashMap<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
 
     runtime_subscribe_all: Option<runtime_service::SubscriptionId>,
+
+    log_target: String,
+    runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
+    sync_service: Arc<sync_service::SyncService<TPlat>>,
 }
 
-impl ChainHeadFollowTask {
-    async fn run<TPlat: Platform>(
+impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
+    async fn run(
         mut self,
+        requests_subscriptions: Arc<
+            requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>,
+        >,
         mut subscribe_all: either::Either<
             runtime_service::SubscribeAll<TPlat>,
             sync_service::SubscribeAll,
@@ -710,12 +717,6 @@ impl ChainHeadFollowTask {
         subscription_id: String,
         mut messages_rx: requests_subscriptions::MessagesReceiver<SubscriptionMessage>,
         initial_notifications: Vec<String>,
-        log_target: String,
-        requests_subscriptions: Arc<
-            requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>,
-        >,
-        runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
-        sync_service: Arc<sync_service::SyncService<TPlat>>,
         request_id: (String, requests_subscriptions::RequestId),
     ) {
         requests_subscriptions
@@ -958,10 +959,7 @@ impl ChainHeadFollowTask {
                 either::Right((message, confirmation_sender)) => {
                     match self
                         .on_foreground_message(
-                            &log_target,
                             &requests_subscriptions,
-                            &runtime_service,
-                            &sync_service,
                             message,
                             confirmation_sender,
                         )
@@ -991,14 +989,11 @@ impl ChainHeadFollowTask {
         }
     }
 
-    async fn on_foreground_message<TPlat: Platform>(
+    async fn on_foreground_message(
         &mut self,
-        log_target: &str,
         requests_subscriptions: &Arc<
             requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>,
         >,
-        runtime_service: &Arc<runtime_service::RuntimeService<TPlat>>,
-        sync_service: &Arc<sync_service::SyncService<TPlat>>,
         message: SubscriptionMessage,
         confirmation_sender: requests_subscriptions::ConfirmationSend,
     ) -> ops::ControlFlow<(), ()> {
@@ -1024,7 +1019,7 @@ impl ChainHeadFollowTask {
                 let block_number = {
                     if let Some(header) = self.pinned_blocks_headers.get(&hash.0) {
                         let decoded =
-                            header::decode(header, sync_service.block_number_bytes()).unwrap(); // TODO: unwrap?
+                            header::decode(header, self.sync_service.block_number_bytes()).unwrap(); // TODO: unwrap?
                         Some(decoded.number)
                     } else {
                         // Ignore the message without sending a confirmation.
@@ -1033,8 +1028,7 @@ impl ChainHeadFollowTask {
                 };
 
                 self.start_chain_head_body(
-                    requests_subscriptions,
-                    sync_service,
+                    &requests_subscriptions,
                     (&get_request_id.0, &get_request_id.1),
                     hash,
                     network_config,
@@ -1063,9 +1057,7 @@ impl ChainHeadFollowTask {
                 };
 
                 self.start_chain_head_storage(
-                    log_target,
-                    requests_subscriptions,
-                    sync_service,
+                    &requests_subscriptions,
                     (&get_request_id.0, &get_request_id.1),
                     hash,
                     key,
@@ -1119,14 +1111,14 @@ impl ChainHeadFollowTask {
                         return ops::ControlFlow::Continue(());
                     }
 
-                    runtime_service
+                    self.runtime_service
                         .pinned_block_runtime_lock(runtime_service_subscribe_all, &hash.0)
                         .await
                         .ok()
                 };
 
                 self.start_chain_head_call(
-                    requests_subscriptions,
+                    &requests_subscriptions,
                     (&get_request_id.0, &get_request_id.1),
                     &function_to_call,
                     call_parameters,
@@ -1163,7 +1155,7 @@ impl ChainHeadFollowTask {
                 let valid = {
                     if self.pinned_blocks_headers.remove(&hash.0).is_some() {
                         if let Some(runtime_subscribe_all) = self.runtime_subscribe_all {
-                            runtime_service
+                            self.runtime_service
                                 .unpin_block(runtime_subscribe_all, &hash.0)
                                 .await;
                         }
@@ -1194,12 +1186,11 @@ impl ChainHeadFollowTask {
         }
     }
 
-    async fn start_chain_head_body<TPlat: Platform>(
+    async fn start_chain_head_body(
         &mut self,
         requests_subscriptions: &Arc<
             requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>,
         >,
-        sync_service: &Arc<sync_service::SyncService<TPlat>>,
         request_id: (&str, &requests_subscriptions::RequestId),
         hash: methods::HashHexString,
         network_config: methods::NetworkConfig,
@@ -1230,7 +1221,7 @@ impl ChainHeadFollowTask {
 
         subscription_start.start({
             let requests_subscriptions = requests_subscriptions.clone();
-            let sync_service = sync_service.clone();
+            let sync_service = self.sync_service.clone();
             let request_id = (request_id.0.to_owned(), request_id.1.clone());
 
             async move {
@@ -1336,13 +1327,11 @@ impl ChainHeadFollowTask {
         });
     }
 
-    async fn start_chain_head_storage<TPlat: Platform>(
+    async fn start_chain_head_storage(
         &mut self,
-        log_target: &str,
         requests_subscriptions: &Arc<
             requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>,
         >,
-        sync_service: &Arc<sync_service::SyncService<TPlat>>,
         request_id: (&str, &requests_subscriptions::RequestId),
         hash: methods::HashHexString,
         key: methods::HexString,
@@ -1365,7 +1354,7 @@ impl ChainHeadFollowTask {
                 )
                 .await;
             log::warn!(
-                target: &log_target,
+                target: &self.log_target,
                 "chainHead_unstable_storage with a non-null childKey has been called. \
                 This isn't supported by smoldot yet."
             );
@@ -1397,7 +1386,7 @@ impl ChainHeadFollowTask {
 
         subscription_start.start({
             let requests_subscriptions = requests_subscriptions.clone();
-            let sync_service = sync_service.clone();
+            let sync_service = self.sync_service.clone();
             let request_id = (request_id.0.to_owned(), request_id.1.clone());
 
             async move {
@@ -1513,7 +1502,7 @@ impl ChainHeadFollowTask {
         });
     }
 
-    async fn start_chain_head_call<TPlat: Platform>(
+    async fn start_chain_head_call(
         &mut self,
         requests_subscriptions: &Arc<
             requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>,
