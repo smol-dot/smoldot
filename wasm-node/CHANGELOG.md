@@ -11,7 +11,6 @@
 
 - Calling the `chainHead_unstable_call`, `chainHead_unstable_storage`, or `chainHead_unstable_body` JSON-RPC functions with the hash of an unpinned block no longer silently kills the `chainHead_follow` subscription. ([#409](https://github.com/smol-dot/smoldot/pull/409))
 - No longer generate a `chainHead_unstable_followEvent` notification with a `stop` event in response to a call to `chainHead_unstable_unfollow`. ([#409](https://github.com/smol-dot/smoldot/pull/409))
-- Fix the JSON-RPC service not being deallocated when a chain was removed with some subscriptions still active. ([#409](https://github.com/smol-dot/smoldot/pull/409), [#408](https://github.com/smol-dot/smoldot/pull/408))
 - Fix a potential undefined behavior in the way the Rust and JavaScript communicate. ([#396](https://github.com/smol-dot/smoldot/pull/396))
 - Properly check whether Yamux substream IDs allocated by the remote are valid. ([#383](https://github.com/smol-dot/smoldot/pull/383))
 - Fix the size of the data of Yamux frames with the `SYN` flag not being verified against the allowed credits. ([#383](https://github.com/smol-dot/smoldot/pull/383))
