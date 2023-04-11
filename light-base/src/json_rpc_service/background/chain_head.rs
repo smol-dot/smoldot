@@ -95,274 +95,6 @@ impl<TPlat: Platform> Background<TPlat> {
         }
     }
 
-    async fn start_chain_head_call(
-        self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
-        function_to_call: &str,
-        call_parameters: methods::HexString,
-        pre_runtime_call: Option<runtime_service::RuntimeLock<TPlat>>,
-        network_config: methods::NetworkConfig,
-    ) {
-        let (subscription_id, mut messages_rx, subscription_start) = match self
-            .requests_subscriptions
-            .start_subscription(request_id.1, 1)
-            .await
-        {
-            Ok(v) => v,
-            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
-                self.requests_subscriptions
-                    .respond(
-                        request_id.1,
-                        json_rpc::parse::build_error_response(
-                            request_id.0,
-                            json_rpc::parse::ErrorResponse::ServerError(
-                                -32000,
-                                "Too many active subscriptions",
-                            ),
-                            None,
-                        ),
-                    )
-                    .await;
-                return;
-            }
-        };
-
-        subscription_start.start({
-            let me = self.clone();
-            let request_id = (request_id.0.to_owned(), request_id.1.clone());
-            let function_to_call = function_to_call.to_owned();
-
-            async move {
-                me.requests_subscriptions
-                    .respond(
-                        &request_id.1,
-                        methods::Response::chainHead_unstable_call((&subscription_id).into())
-                            .to_json_response(&request_id.0),
-                    )
-                    .await;
-
-                let pre_runtime_call = if let Some(pre_runtime_call) = &pre_runtime_call {
-                    let call_future = pre_runtime_call.start(
-                        &function_to_call,
-                        iter::once(&call_parameters.0),
-                        cmp::min(10, network_config.total_attempts),
-                        Duration::from_millis(u64::from(cmp::min(
-                            20000,
-                            network_config.timeout_ms,
-                        ))),
-                        NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
-                    );
-                    futures::pin_mut!(call_future);
-
-                    loop {
-                        let outcome = {
-                            let next_message = messages_rx.next();
-                            futures::pin_mut!(next_message);
-                            match future::select(&mut call_future, next_message).await {
-                                future::Either::Left((v, _)) => either::Left(v),
-                                future::Either::Right((v, _)) => either::Right(v),
-                            }
-                        };
-
-                        match outcome {
-                            either::Left(outcome) => break Some(outcome),
-                            either::Right((
-                                SubscriptionMessage::StopIfChainHeadCall {
-                                    stop_request_id,
-                                },
-                                confirmation_sender,
-                            )) => {
-                                me.requests_subscriptions
-                                    .respond(
-                                        &stop_request_id.1,
-                                        methods::Response::chainHead_unstable_stopCall(())
-                                            .to_json_response(&stop_request_id.0),
-                                    )
-                                    .await;
-
-                                confirmation_sender.send();
-                                return;
-                            }
-                            either::Right(_) => {
-                                // Any other message.
-                                // Silently discard the confirmation sender.
-                            }
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                let final_notif = match pre_runtime_call {
-                    Some(Ok((runtime_call_lock, virtual_machine))) => {
-                        match runtime_host::run(runtime_host::Config {
-                            virtual_machine,
-                            function_to_call: &function_to_call,
-                            parameter: iter::once(&call_parameters.0),
-                            main_trie_root_calculation_cache: None,
-                            offchain_storage_changes: Default::default(),
-                            storage_main_trie_changes: Default::default(),
-                            max_log_level: 0,
-                        }) {
-                            Err((error, prototype)) => {
-                                runtime_call_lock.unlock(prototype);
-                                methods::ServerToClient::chainHead_unstable_callEvent {
-                                    subscription: (&subscription_id).into(),
-                                    result: methods::ChainHeadCallEvent::Error {
-                                        error: error.to_string().into(),
-                                    },
-                                }
-                                .to_json_call_object_parameters(None)
-                            }
-                            Ok(mut runtime_call) => {
-                                loop {
-                                    match runtime_call {
-                                        runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
-                                            let output =
-                                                success.virtual_machine.value().as_ref().to_owned();
-                                            runtime_call_lock
-                                                .unlock(success.virtual_machine.into_prototype());
-                                            break methods::ServerToClient::chainHead_unstable_callEvent {
-                                                    subscription: (&subscription_id).into(),
-                                                    result: methods::ChainHeadCallEvent::Done {
-                                                        output: methods::HexString(output),
-                                                    },
-                                                }
-                                                .to_json_call_object_parameters(None);
-                                        }
-                                        runtime_host::RuntimeHostVm::Finished(Err(error)) => {
-                                            runtime_call_lock.unlock(error.prototype);
-                                            break methods::ServerToClient::chainHead_unstable_callEvent {
-                                                    subscription: (&subscription_id).into(),
-                                                    result: methods::ChainHeadCallEvent::Error {
-                                                        error: error.detail.to_string().into(),
-                                                    },
-                                                }
-                                                .to_json_call_object_parameters(None);
-                                        }
-                                        runtime_host::RuntimeHostVm::StorageGet(get) => {
-                                            // TODO: what if the remote lied to us?
-                                            let storage_value =
-                                                runtime_call_lock.storage_entry(get.key().as_ref());
-                                            let storage_value = match storage_value {
-                                                Ok(v) => v,
-                                                Err(error) => {
-                                                    runtime_call_lock.unlock(
-                                                        runtime_host::RuntimeHostVm::StorageGet(
-                                                            get,
-                                                        )
-                                                        .into_prototype(),
-                                                    );
-                                                    break methods::ServerToClient::chainHead_unstable_callEvent {
-                                                            subscription: (&subscription_id).into(),
-                                                            result: methods::ChainHeadCallEvent::Inaccessible {
-                                                                error: error.to_string().into(),
-                                                            },
-                                                        }
-                                                        .to_json_call_object_parameters(None);
-                                                }
-                                            };
-                                            runtime_call = get.inject_value(
-                                                storage_value
-                                                    .map(|(val, vers)| (iter::once(val), vers)),
-                                            );
-                                        }
-                                        runtime_host::RuntimeHostVm::NextKey(nk) => {
-                                            // TODO: implement somehow
-                                            runtime_call_lock.unlock(
-                                                runtime_host::RuntimeHostVm::NextKey(nk)
-                                                    .into_prototype(),
-                                            );
-                                            break methods::ServerToClient::chainHead_unstable_callEvent {
-                                                    subscription: (&subscription_id).into(),
-                                                    result: methods::ChainHeadCallEvent::Inaccessible {
-                                                        error: "getting next key not implemented".into(),
-                                                    },
-                                                }
-                                                .to_json_call_object_parameters(None);
-                                        }
-                                        runtime_host::RuntimeHostVm::PrefixKeys(nk) => {
-                                            // TODO: implement somehow
-                                            runtime_call_lock.unlock(
-                                                runtime_host::RuntimeHostVm::PrefixKeys(nk)
-                                                    .into_prototype(),
-                                            );
-                                            break methods::ServerToClient::chainHead_unstable_callEvent {
-                                                    subscription: (&subscription_id).into(),
-                                                    result: methods::ChainHeadCallEvent::Inaccessible {
-                                                        error: "getting prefix keys not implemented".into(),
-                                                    },
-                                                }
-                                                .to_json_call_object_parameters(None);
-                                        }
-                                        runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
-                                            runtime_call = sig.verify_and_resume();
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Some(Err(runtime_service::RuntimeCallError::InvalidRuntime(error))) => {
-                        methods::ServerToClient::chainHead_unstable_callEvent {
-                            subscription: (&subscription_id).into(),
-                            result: methods::ChainHeadCallEvent::Error {
-                                error: error.to_string().into(),
-                            },
-                        }
-                        .to_json_call_object_parameters(None)
-                    }
-                    Some(Err(runtime_service::RuntimeCallError::StorageRetrieval(error))) => {
-                        methods::ServerToClient::chainHead_unstable_callEvent {
-                            subscription: (&subscription_id).into(),
-                            result: methods::ChainHeadCallEvent::Error {
-                                error: error.to_string().into(),
-                            },
-                        }
-                        .to_json_call_object_parameters(None)
-                    }
-                    Some(Err(runtime_service::RuntimeCallError::MissingProofEntry)) => {
-                        methods::ServerToClient::chainHead_unstable_callEvent {
-                            subscription: (&subscription_id).into(),
-                            result: methods::ChainHeadCallEvent::Error {
-                                error: "incomplete call proof".into(),
-                            },
-                        }
-                        .to_json_call_object_parameters(None)
-                    }
-                    Some(Err(runtime_service::RuntimeCallError::CallProof(error))) => {
-                        methods::ServerToClient::chainHead_unstable_callEvent {
-                            subscription: (&subscription_id).into(),
-                            result: methods::ChainHeadCallEvent::Error {
-                                error: error.to_string().into(),
-                            },
-                        }
-                        .to_json_call_object_parameters(None)
-                    }
-                    Some(Err(runtime_service::RuntimeCallError::StorageQuery(error))) => {
-                        methods::ServerToClient::chainHead_unstable_callEvent {
-                            subscription: (&subscription_id).into(),
-                            result: methods::ChainHeadCallEvent::Error {
-                                error: format!("failed to fetch call proof: {error}").into(),
-                            },
-                        }
-                        .to_json_call_object_parameters(None)
-                    }
-                    None => methods::ServerToClient::chainHead_unstable_callEvent {
-                        subscription: (&subscription_id).into(),
-                        result: methods::ChainHeadCallEvent::Disjoint {},
-                    }
-                    .to_json_call_object_parameters(None),
-                };
-
-                me.requests_subscriptions
-                    .push_notification(&request_id.1,
-                        &subscription_id, final_notif)
-                    .await;
-            }
-        });
-    }
-
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_follow`].
     pub(super) async fn chain_head_follow(
         self: &Arc<Self>,
@@ -642,171 +374,6 @@ impl<TPlat: Platform> Background<TPlat> {
         }
     }
 
-    async fn start_chain_head_storage(
-        self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
-        hash: methods::HashHexString,
-        key: methods::HexString,
-        child_key: Option<methods::HexString>,
-        network_config: methods::NetworkConfig,
-        block_scale_encoded_header: Option<Vec<u8>>,
-    ) {
-        if child_key.is_some() {
-            self.requests_subscriptions
-                .respond(
-                    request_id.1,
-                    json_rpc::parse::build_error_response(
-                        request_id.0,
-                        json_rpc::parse::ErrorResponse::ServerError(
-                            -32000,
-                            "Child key storage queries not supported yet",
-                        ),
-                        None,
-                    ),
-                )
-                .await;
-            log::warn!(
-                target: &self.log_target,
-                "chainHead_unstable_storage with a non-null childKey has been called. \
-                This isn't supported by smoldot yet."
-            );
-            return;
-        }
-
-        let (subscription_id, mut messages_rx, subscription_start) = match self
-            .requests_subscriptions
-            .start_subscription(request_id.1, 1)
-            .await
-        {
-            Ok(v) => v,
-            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
-                self.requests_subscriptions
-                    .respond(
-                        request_id.1,
-                        json_rpc::parse::build_error_response(
-                            request_id.0,
-                            json_rpc::parse::ErrorResponse::ServerError(
-                                -32000,
-                                "Too many active subscriptions",
-                            ),
-                            None,
-                        ),
-                    )
-                    .await;
-                return;
-            }
-        };
-
-        subscription_start.start({
-            let me = self.clone();
-            let request_id = (request_id.0.to_owned(), request_id.1.clone());
-
-            async move {
-                me.requests_subscriptions
-                    .respond(
-                        &request_id.1,
-                        methods::Response::chainHead_unstable_storage((&subscription_id).into())
-                            .to_json_response(&request_id.0),
-                    )
-                    .await;
-
-                let response = match block_scale_encoded_header
-                    .as_ref()
-                    .map(|h| header::decode(h, me.sync_service.block_number_bytes()))
-                {
-                    Some(Ok(decoded_header)) => {
-                        let future = me.sync_service.clone().storage_query(
-                            decoded_header.number,
-                            &hash.0,
-                            decoded_header.state_root,
-                            iter::once(&key.0),
-                            cmp::min(10, network_config.total_attempts),
-                            Duration::from_millis(u64::from(cmp::min(
-                                20000,
-                                network_config.timeout_ms,
-                            ))),
-                            NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
-                        );
-                        futures::pin_mut!(future);
-
-                        loop {
-                            let outcome = {
-                                let next_message = messages_rx.next();
-                                futures::pin_mut!(next_message);
-                                match future::select(&mut future, next_message).await {
-                                    future::Either::Left((v, _)) => either::Left(v),
-                                    future::Either::Right((v, _)) => either::Right(v),
-                                }
-                            };
-
-                            match outcome {
-                                either::Left(Ok(values)) => {
-                                    // `storage_query` returns a list of values because it can perform
-                                    // multiple queries at once. In our situation, we only start one query
-                                    // and as such the outcome only ever contains one element.
-                                    debug_assert_eq!(values.len(), 1);
-                                    let value = values.into_iter().next().unwrap();
-                                    let output = value.map(|v| methods::HexString(v).to_string());
-                                    break methods::ServerToClient::chainHead_unstable_storageEvent {
-                                        subscription: (&subscription_id).into(),
-                                        result: methods::ChainHeadStorageEvent::Done {
-                                            value: output,
-                                        },
-                                    }
-                                    .to_json_call_object_parameters(None)
-                                }
-                                either::Left(Err(_)) => {
-                                    break methods::ServerToClient::chainHead_unstable_storageEvent {
-                                        subscription: (&subscription_id).into(),
-                                        result: methods::ChainHeadStorageEvent::Inaccessible {},
-                                    }
-                                    .to_json_call_object_parameters(None)
-                                }
-                                either::Right((
-                                    SubscriptionMessage::StopIfChainHeadBody {
-                                        stop_request_id,
-                                    },
-                                    confirmation_sender,
-                                )) => {
-                                    me.requests_subscriptions
-                                        .respond(
-                                            &stop_request_id.1,
-                                            methods::Response::chainHead_unstable_stopBody(())
-                                                .to_json_response(&stop_request_id.0),
-                                        )
-                                        .await;
-
-                                    confirmation_sender.send();
-                                    return;
-                                }
-                                either::Right(_) => {
-                                    // Any other message.
-                                    // Silently discard the confirmation sender.
-                                }
-                            }
-                        }
-                    }
-                    Some(Err(err)) => methods::ServerToClient::chainHead_unstable_storageEvent {
-                        subscription: (&subscription_id).into(),
-                        result: methods::ChainHeadStorageEvent::Error {
-                            error: err.to_string().into(),
-                        },
-                    }
-                    .to_json_call_object_parameters(None),
-                    None => methods::ServerToClient::chainHead_unstable_storageEvent {
-                        subscription: (&subscription_id).into(),
-                        result: methods::ChainHeadStorageEvent::Disjoint {},
-                    }
-                    .to_json_call_object_parameters(None),
-                };
-
-                me.requests_subscriptions
-                    .set_queued_notification(&request_id.1, &subscription_id, 0, response)
-                    .await;
-            }
-        });
-    }
-
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_body`].
     pub(super) async fn chain_head_unstable_body(
         self: &Arc<Self>,
@@ -851,137 +418,6 @@ impl<TPlat: Platform> Background<TPlat> {
                 )
                 .await;
         }
-    }
-
-    async fn start_chain_head_body(
-        self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
-        hash: methods::HashHexString,
-        network_config: methods::NetworkConfig,
-        block_number: Option<u64>,
-    ) {
-        let (subscription_id, mut messages_rx, subscription_start) = match self
-            .requests_subscriptions
-            .start_subscription(request_id.1, 1)
-            .await
-        {
-            Ok(v) => v,
-            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
-                self.requests_subscriptions
-                    .respond(
-                        request_id.1,
-                        json_rpc::parse::build_error_response(
-                            request_id.0,
-                            json_rpc::parse::ErrorResponse::ServerError(
-                                -32000,
-                                "Too many active subscriptions",
-                            ),
-                            None,
-                        ),
-                    )
-                    .await;
-                return;
-            }
-        };
-
-        subscription_start.start({
-            let me = self.clone();
-            let request_id = (request_id.0.to_owned(), request_id.1.clone());
-
-            async move {
-                me.requests_subscriptions
-                    .respond(
-                        &request_id.1,
-                        methods::Response::chainHead_unstable_body((&subscription_id).into())
-                            .to_json_response(&request_id.0),
-                    )
-                    .await;
-
-                let response = if let Some(block_number) = block_number {
-                    // TODO: right now we query the header because the underlying function returns an error if we don't
-                    let future = me.sync_service.clone().block_query(
-                        block_number,
-                        hash.0,
-                        protocol::BlocksRequestFields {
-                            header: true,
-                            body: true,
-                            justifications: false,
-                        },
-                        cmp::min(10, network_config.total_attempts),
-                        Duration::from_millis(u64::from(cmp::min(
-                            20000,
-                            network_config.timeout_ms,
-                        ))),
-                        NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
-                    );
-                    futures::pin_mut!(future);
-
-                    loop {
-                        let outcome = {
-                            let next_message = messages_rx.next();
-                            futures::pin_mut!(next_message);
-                            match future::select(&mut future, next_message).await {
-                                future::Either::Left((v, _)) => either::Left(v),
-                                future::Either::Right((v, _)) => either::Right(v),
-                            }
-                        };
-
-                        match outcome {
-                            either::Left(Ok(block_data)) => {
-                                break methods::ServerToClient::chainHead_unstable_bodyEvent {
-                                    subscription: (&subscription_id).into(),
-                                    result: methods::ChainHeadBodyEvent::Done {
-                                        value: block_data
-                                            .body
-                                            .unwrap()
-                                            .into_iter()
-                                            .map(methods::HexString)
-                                            .collect(),
-                                    },
-                                }
-                                .to_json_call_object_parameters(None)
-                            }
-                            either::Left(Err(())) => {
-                                break methods::ServerToClient::chainHead_unstable_bodyEvent {
-                                    subscription: (&subscription_id).into(),
-                                    result: methods::ChainHeadBodyEvent::Inaccessible {},
-                                }
-                                .to_json_call_object_parameters(None)
-                            }
-                            either::Right((
-                                SubscriptionMessage::StopIfChainHeadStorage { stop_request_id },
-                                confirmation_sender,
-                            )) => {
-                                me.requests_subscriptions
-                                    .respond(
-                                        &stop_request_id.1,
-                                        methods::Response::chainHead_unstable_stopBody(())
-                                            .to_json_response(&stop_request_id.0),
-                                    )
-                                    .await;
-
-                                confirmation_sender.send();
-                                return;
-                            }
-                            either::Right(_) => {
-                                // Any other message.
-                                // Silently discard the confirmation sender.
-                            }
-                        }
-                    }
-                } else {
-                    methods::ServerToClient::chainHead_unstable_bodyEvent {
-                        subscription: (&subscription_id).into(),
-                        result: methods::ChainHeadBodyEvent::Disjoint {},
-                    }
-                    .to_json_call_object_parameters(None)
-                };
-
-                me.requests_subscriptions
-                    .set_queued_notification(&request_id.1, &subscription_id, 0, response)
-                    .await;
-            }
-        });
     }
 
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_header`].
@@ -1570,7 +1006,8 @@ impl ChainHeadFollowTask {
                     }
                 };
 
-                me.start_chain_head_body(
+                self.start_chain_head_body(
+                    me,
                     (&get_request_id.0, &get_request_id.1),
                     hash,
                     network_config,
@@ -1598,7 +1035,8 @@ impl ChainHeadFollowTask {
                     }
                 };
 
-                me.start_chain_head_storage(
+                self.start_chain_head_storage(
+                    me,
                     (&get_request_id.0, &get_request_id.1),
                     hash,
                     key,
@@ -1658,7 +1096,8 @@ impl ChainHeadFollowTask {
                         .ok()
                 };
 
-                me.start_chain_head_call(
+                self.start_chain_head_call(
+                    me,
                     (&get_request_id.0, &get_request_id.1),
                     &function_to_call,
                     call_parameters,
@@ -1724,5 +1163,572 @@ impl ChainHeadFollowTask {
                 ops::ControlFlow::Continue(())
             }
         }
+    }
+
+    async fn start_chain_head_body<TPlat: Platform>(
+        &mut self,
+        me: &Arc<Background<TPlat>>,
+        request_id: (&str, &requests_subscriptions::RequestId),
+        hash: methods::HashHexString,
+        network_config: methods::NetworkConfig,
+        block_number: Option<u64>,
+    ) {
+        let (subscription_id, mut messages_rx, subscription_start) = match me
+            .requests_subscriptions
+            .start_subscription(request_id.1, 1)
+            .await
+        {
+            Ok(v) => v,
+            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
+                me.requests_subscriptions
+                    .respond(
+                        request_id.1,
+                        json_rpc::parse::build_error_response(
+                            request_id.0,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                "Too many active subscriptions",
+                            ),
+                            None,
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        subscription_start.start({
+            let me = me.clone();
+            let request_id = (request_id.0.to_owned(), request_id.1.clone());
+
+            async move {
+                me.requests_subscriptions
+                    .respond(
+                        &request_id.1,
+                        methods::Response::chainHead_unstable_body((&subscription_id).into())
+                            .to_json_response(&request_id.0),
+                    )
+                    .await;
+
+                let response = if let Some(block_number) = block_number {
+                    // TODO: right now we query the header because the underlying function returns an error if we don't
+                    let future = me.sync_service.clone().block_query(
+                        block_number,
+                        hash.0,
+                        protocol::BlocksRequestFields {
+                            header: true,
+                            body: true,
+                            justifications: false,
+                        },
+                        cmp::min(10, network_config.total_attempts),
+                        Duration::from_millis(u64::from(cmp::min(
+                            20000,
+                            network_config.timeout_ms,
+                        ))),
+                        NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
+                    );
+                    futures::pin_mut!(future);
+
+                    loop {
+                        let outcome = {
+                            let next_message = messages_rx.next();
+                            futures::pin_mut!(next_message);
+                            match future::select(&mut future, next_message).await {
+                                future::Either::Left((v, _)) => either::Left(v),
+                                future::Either::Right((v, _)) => either::Right(v),
+                            }
+                        };
+
+                        match outcome {
+                            either::Left(Ok(block_data)) => {
+                                break methods::ServerToClient::chainHead_unstable_bodyEvent {
+                                    subscription: (&subscription_id).into(),
+                                    result: methods::ChainHeadBodyEvent::Done {
+                                        value: block_data
+                                            .body
+                                            .unwrap()
+                                            .into_iter()
+                                            .map(methods::HexString)
+                                            .collect(),
+                                    },
+                                }
+                                .to_json_call_object_parameters(None)
+                            }
+                            either::Left(Err(())) => {
+                                break methods::ServerToClient::chainHead_unstable_bodyEvent {
+                                    subscription: (&subscription_id).into(),
+                                    result: methods::ChainHeadBodyEvent::Inaccessible {},
+                                }
+                                .to_json_call_object_parameters(None)
+                            }
+                            either::Right((
+                                SubscriptionMessage::StopIfChainHeadStorage { stop_request_id },
+                                confirmation_sender,
+                            )) => {
+                                me.requests_subscriptions
+                                    .respond(
+                                        &stop_request_id.1,
+                                        methods::Response::chainHead_unstable_stopBody(())
+                                            .to_json_response(&stop_request_id.0),
+                                    )
+                                    .await;
+
+                                confirmation_sender.send();
+                                return;
+                            }
+                            either::Right(_) => {
+                                // Any other message.
+                                // Silently discard the confirmation sender.
+                            }
+                        }
+                    }
+                } else {
+                    methods::ServerToClient::chainHead_unstable_bodyEvent {
+                        subscription: (&subscription_id).into(),
+                        result: methods::ChainHeadBodyEvent::Disjoint {},
+                    }
+                    .to_json_call_object_parameters(None)
+                };
+
+                me.requests_subscriptions
+                    .set_queued_notification(&request_id.1, &subscription_id, 0, response)
+                    .await;
+            }
+        });
+    }
+
+    async fn start_chain_head_storage<TPlat: Platform>(
+        &mut self,
+        me: &Arc<Background<TPlat>>,
+        request_id: (&str, &requests_subscriptions::RequestId),
+        hash: methods::HashHexString,
+        key: methods::HexString,
+        child_key: Option<methods::HexString>,
+        network_config: methods::NetworkConfig,
+        block_scale_encoded_header: Option<Vec<u8>>,
+    ) {
+        if child_key.is_some() {
+            me.requests_subscriptions
+                .respond(
+                    request_id.1,
+                    json_rpc::parse::build_error_response(
+                        request_id.0,
+                        json_rpc::parse::ErrorResponse::ServerError(
+                            -32000,
+                            "Child key storage queries not supported yet",
+                        ),
+                        None,
+                    ),
+                )
+                .await;
+            log::warn!(
+                target: &me.log_target,
+                "chainHead_unstable_storage with a non-null childKey has been called. \
+                This isn't supported by smoldot yet."
+            );
+            return;
+        }
+
+        let (subscription_id, mut messages_rx, subscription_start) = match me
+            .requests_subscriptions
+            .start_subscription(request_id.1, 1)
+            .await
+        {
+            Ok(v) => v,
+            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
+                me.requests_subscriptions
+                    .respond(
+                        request_id.1,
+                        json_rpc::parse::build_error_response(
+                            request_id.0,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                "Too many active subscriptions",
+                            ),
+                            None,
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        subscription_start.start({
+            let me = me.clone();
+            let request_id = (request_id.0.to_owned(), request_id.1.clone());
+
+            async move {
+                me.requests_subscriptions
+                    .respond(
+                        &request_id.1,
+                        methods::Response::chainHead_unstable_storage((&subscription_id).into())
+                            .to_json_response(&request_id.0),
+                    )
+                    .await;
+
+                let response = match block_scale_encoded_header
+                    .as_ref()
+                    .map(|h| header::decode(h, me.sync_service.block_number_bytes()))
+                {
+                    Some(Ok(decoded_header)) => {
+                        let future = me.sync_service.clone().storage_query(
+                            decoded_header.number,
+                            &hash.0,
+                            decoded_header.state_root,
+                            iter::once(&key.0),
+                            cmp::min(10, network_config.total_attempts),
+                            Duration::from_millis(u64::from(cmp::min(
+                                20000,
+                                network_config.timeout_ms,
+                            ))),
+                            NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
+                        );
+                        futures::pin_mut!(future);
+
+                        loop {
+                            let outcome = {
+                                let next_message = messages_rx.next();
+                                futures::pin_mut!(next_message);
+                                match future::select(&mut future, next_message).await {
+                                    future::Either::Left((v, _)) => either::Left(v),
+                                    future::Either::Right((v, _)) => either::Right(v),
+                                }
+                            };
+
+                            match outcome {
+                                either::Left(Ok(values)) => {
+                                    // `storage_query` returns a list of values because it can perform
+                                    // multiple queries at once. In our situation, we only start one query
+                                    // and as such the outcome only ever contains one element.
+                                    debug_assert_eq!(values.len(), 1);
+                                    let value = values.into_iter().next().unwrap();
+                                    let output = value.map(|v| methods::HexString(v).to_string());
+                                    break methods::ServerToClient::chainHead_unstable_storageEvent {
+                                        subscription: (&subscription_id).into(),
+                                        result: methods::ChainHeadStorageEvent::Done {
+                                            value: output,
+                                        },
+                                    }
+                                    .to_json_call_object_parameters(None)
+                                }
+                                either::Left(Err(_)) => {
+                                    break methods::ServerToClient::chainHead_unstable_storageEvent {
+                                        subscription: (&subscription_id).into(),
+                                        result: methods::ChainHeadStorageEvent::Inaccessible {},
+                                    }
+                                    .to_json_call_object_parameters(None)
+                                }
+                                either::Right((
+                                    SubscriptionMessage::StopIfChainHeadBody {
+                                        stop_request_id,
+                                    },
+                                    confirmation_sender,
+                                )) => {
+                                    me.requests_subscriptions
+                                        .respond(
+                                            &stop_request_id.1,
+                                            methods::Response::chainHead_unstable_stopBody(())
+                                                .to_json_response(&stop_request_id.0),
+                                        )
+                                        .await;
+
+                                    confirmation_sender.send();
+                                    return;
+                                }
+                                either::Right(_) => {
+                                    // Any other message.
+                                    // Silently discard the confirmation sender.
+                                }
+                            }
+                        }
+                    }
+                    Some(Err(err)) => methods::ServerToClient::chainHead_unstable_storageEvent {
+                        subscription: (&subscription_id).into(),
+                        result: methods::ChainHeadStorageEvent::Error {
+                            error: err.to_string().into(),
+                        },
+                    }
+                    .to_json_call_object_parameters(None),
+                    None => methods::ServerToClient::chainHead_unstable_storageEvent {
+                        subscription: (&subscription_id).into(),
+                        result: methods::ChainHeadStorageEvent::Disjoint {},
+                    }
+                    .to_json_call_object_parameters(None),
+                };
+
+                me.requests_subscriptions
+                    .set_queued_notification(&request_id.1, &subscription_id, 0, response)
+                    .await;
+            }
+        });
+    }
+
+    async fn start_chain_head_call<TPlat: Platform>(
+        &mut self,
+        me: &Arc<Background<TPlat>>,
+        request_id: (&str, &requests_subscriptions::RequestId),
+        function_to_call: &str,
+        call_parameters: methods::HexString,
+        pre_runtime_call: Option<runtime_service::RuntimeLock<TPlat>>,
+        network_config: methods::NetworkConfig,
+    ) {
+        let (subscription_id, mut messages_rx, subscription_start) = match me
+            .requests_subscriptions
+            .start_subscription(request_id.1, 1)
+            .await
+        {
+            Ok(v) => v,
+            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
+                me.requests_subscriptions
+                    .respond(
+                        request_id.1,
+                        json_rpc::parse::build_error_response(
+                            request_id.0,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                "Too many active subscriptions",
+                            ),
+                            None,
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        subscription_start.start({
+            let me = me.clone();
+            let request_id = (request_id.0.to_owned(), request_id.1.clone());
+            let function_to_call = function_to_call.to_owned();
+
+            async move {
+                me.requests_subscriptions
+                    .respond(
+                        &request_id.1,
+                        methods::Response::chainHead_unstable_call((&subscription_id).into())
+                            .to_json_response(&request_id.0),
+                    )
+                    .await;
+
+                let pre_runtime_call = if let Some(pre_runtime_call) = &pre_runtime_call {
+                    let call_future = pre_runtime_call.start(
+                        &function_to_call,
+                        iter::once(&call_parameters.0),
+                        cmp::min(10, network_config.total_attempts),
+                        Duration::from_millis(u64::from(cmp::min(
+                            20000,
+                            network_config.timeout_ms,
+                        ))),
+                        NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
+                    );
+                    futures::pin_mut!(call_future);
+
+                    loop {
+                        let outcome = {
+                            let next_message = messages_rx.next();
+                            futures::pin_mut!(next_message);
+                            match future::select(&mut call_future, next_message).await {
+                                future::Either::Left((v, _)) => either::Left(v),
+                                future::Either::Right((v, _)) => either::Right(v),
+                            }
+                        };
+
+                        match outcome {
+                            either::Left(outcome) => break Some(outcome),
+                            either::Right((
+                                SubscriptionMessage::StopIfChainHeadCall {
+                                    stop_request_id,
+                                },
+                                confirmation_sender,
+                            )) => {
+                                me.requests_subscriptions
+                                    .respond(
+                                        &stop_request_id.1,
+                                        methods::Response::chainHead_unstable_stopCall(())
+                                            .to_json_response(&stop_request_id.0),
+                                    )
+                                    .await;
+
+                                confirmation_sender.send();
+                                return;
+                            }
+                            either::Right(_) => {
+                                // Any other message.
+                                // Silently discard the confirmation sender.
+                            }
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let final_notif = match pre_runtime_call {
+                    Some(Ok((runtime_call_lock, virtual_machine))) => {
+                        match runtime_host::run(runtime_host::Config {
+                            virtual_machine,
+                            function_to_call: &function_to_call,
+                            parameter: iter::once(&call_parameters.0),
+                            main_trie_root_calculation_cache: None,
+                            offchain_storage_changes: Default::default(),
+                            storage_main_trie_changes: Default::default(),
+                            max_log_level: 0,
+                        }) {
+                            Err((error, prototype)) => {
+                                runtime_call_lock.unlock(prototype);
+                                methods::ServerToClient::chainHead_unstable_callEvent {
+                                    subscription: (&subscription_id).into(),
+                                    result: methods::ChainHeadCallEvent::Error {
+                                        error: error.to_string().into(),
+                                    },
+                                }
+                                .to_json_call_object_parameters(None)
+                            }
+                            Ok(mut runtime_call) => {
+                                loop {
+                                    match runtime_call {
+                                        runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                                            let output =
+                                                success.virtual_machine.value().as_ref().to_owned();
+                                            runtime_call_lock
+                                                .unlock(success.virtual_machine.into_prototype());
+                                            break methods::ServerToClient::chainHead_unstable_callEvent {
+                                                    subscription: (&subscription_id).into(),
+                                                    result: methods::ChainHeadCallEvent::Done {
+                                                        output: methods::HexString(output),
+                                                    },
+                                                }
+                                                .to_json_call_object_parameters(None);
+                                        }
+                                        runtime_host::RuntimeHostVm::Finished(Err(error)) => {
+                                            runtime_call_lock.unlock(error.prototype);
+                                            break methods::ServerToClient::chainHead_unstable_callEvent {
+                                                    subscription: (&subscription_id).into(),
+                                                    result: methods::ChainHeadCallEvent::Error {
+                                                        error: error.detail.to_string().into(),
+                                                    },
+                                                }
+                                                .to_json_call_object_parameters(None);
+                                        }
+                                        runtime_host::RuntimeHostVm::StorageGet(get) => {
+                                            // TODO: what if the remote lied to us?
+                                            let storage_value =
+                                                runtime_call_lock.storage_entry(get.key().as_ref());
+                                            let storage_value = match storage_value {
+                                                Ok(v) => v,
+                                                Err(error) => {
+                                                    runtime_call_lock.unlock(
+                                                        runtime_host::RuntimeHostVm::StorageGet(
+                                                            get,
+                                                        )
+                                                        .into_prototype(),
+                                                    );
+                                                    break methods::ServerToClient::chainHead_unstable_callEvent {
+                                                            subscription: (&subscription_id).into(),
+                                                            result: methods::ChainHeadCallEvent::Inaccessible {
+                                                                error: error.to_string().into(),
+                                                            },
+                                                        }
+                                                        .to_json_call_object_parameters(None);
+                                                }
+                                            };
+                                            runtime_call = get.inject_value(
+                                                storage_value
+                                                    .map(|(val, vers)| (iter::once(val), vers)),
+                                            );
+                                        }
+                                        runtime_host::RuntimeHostVm::NextKey(nk) => {
+                                            // TODO: implement somehow
+                                            runtime_call_lock.unlock(
+                                                runtime_host::RuntimeHostVm::NextKey(nk)
+                                                    .into_prototype(),
+                                            );
+                                            break methods::ServerToClient::chainHead_unstable_callEvent {
+                                                    subscription: (&subscription_id).into(),
+                                                    result: methods::ChainHeadCallEvent::Inaccessible {
+                                                        error: "getting next key not implemented".into(),
+                                                    },
+                                                }
+                                                .to_json_call_object_parameters(None);
+                                        }
+                                        runtime_host::RuntimeHostVm::PrefixKeys(nk) => {
+                                            // TODO: implement somehow
+                                            runtime_call_lock.unlock(
+                                                runtime_host::RuntimeHostVm::PrefixKeys(nk)
+                                                    .into_prototype(),
+                                            );
+                                            break methods::ServerToClient::chainHead_unstable_callEvent {
+                                                    subscription: (&subscription_id).into(),
+                                                    result: methods::ChainHeadCallEvent::Inaccessible {
+                                                        error: "getting prefix keys not implemented".into(),
+                                                    },
+                                                }
+                                                .to_json_call_object_parameters(None);
+                                        }
+                                        runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
+                                            runtime_call = sig.verify_and_resume();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Some(Err(runtime_service::RuntimeCallError::InvalidRuntime(error))) => {
+                        methods::ServerToClient::chainHead_unstable_callEvent {
+                            subscription: (&subscription_id).into(),
+                            result: methods::ChainHeadCallEvent::Error {
+                                error: error.to_string().into(),
+                            },
+                        }
+                        .to_json_call_object_parameters(None)
+                    }
+                    Some(Err(runtime_service::RuntimeCallError::StorageRetrieval(error))) => {
+                        methods::ServerToClient::chainHead_unstable_callEvent {
+                            subscription: (&subscription_id).into(),
+                            result: methods::ChainHeadCallEvent::Error {
+                                error: error.to_string().into(),
+                            },
+                        }
+                        .to_json_call_object_parameters(None)
+                    }
+                    Some(Err(runtime_service::RuntimeCallError::MissingProofEntry)) => {
+                        methods::ServerToClient::chainHead_unstable_callEvent {
+                            subscription: (&subscription_id).into(),
+                            result: methods::ChainHeadCallEvent::Error {
+                                error: "incomplete call proof".into(),
+                            },
+                        }
+                        .to_json_call_object_parameters(None)
+                    }
+                    Some(Err(runtime_service::RuntimeCallError::CallProof(error))) => {
+                        methods::ServerToClient::chainHead_unstable_callEvent {
+                            subscription: (&subscription_id).into(),
+                            result: methods::ChainHeadCallEvent::Error {
+                                error: error.to_string().into(),
+                            },
+                        }
+                        .to_json_call_object_parameters(None)
+                    }
+                    Some(Err(runtime_service::RuntimeCallError::StorageQuery(error))) => {
+                        methods::ServerToClient::chainHead_unstable_callEvent {
+                            subscription: (&subscription_id).into(),
+                            result: methods::ChainHeadCallEvent::Error {
+                                error: format!("failed to fetch call proof: {error}").into(),
+                            },
+                        }
+                        .to_json_call_object_parameters(None)
+                    }
+                    None => methods::ServerToClient::chainHead_unstable_callEvent {
+                        subscription: (&subscription_id).into(),
+                        result: methods::ChainHeadCallEvent::Disjoint {},
+                    }
+                    .to_json_call_object_parameters(None),
+                };
+
+                me.requests_subscriptions
+                    .push_notification(&request_id.1,
+                        &subscription_id, final_notif)
+                    .await;
+            }
+        });
     }
 }
