@@ -34,7 +34,7 @@ use core::{
     ops,
     time::Duration,
 };
-use futures::prelude::*;
+use futures::{channel::mpsc, prelude::*};
 use hashbrown::HashMap;
 use smoldot::{
     chain::fork_tree,
@@ -125,18 +125,15 @@ impl<TPlat: Platform> Background<TPlat> {
             }
         };
 
-        let (subscribe_all, runtime_subscribe_all) = if runtime_updates {
+        let subscription = if runtime_updates {
             let subscribe_all = self
                 .runtime_service
                 .subscribe_all("chainHead_follow", 32, NonZeroUsize::new(32).unwrap())
                 .await;
             let id = subscribe_all.new_blocks.id();
-            (either::Left(subscribe_all), Some(id))
+            either::Left((subscribe_all, id))
         } else {
-            (
-                either::Right(self.sync_service.subscribe_all(32, false).await),
-                None,
-            )
+            either::Right(self.sync_service.subscribe_all(32, false).await)
         };
 
         let (
@@ -144,10 +141,10 @@ impl<TPlat: Platform> Background<TPlat> {
             initial_notifications,
             non_finalized_blocks,
             pinned_blocks_headers,
-            runtime_subscribe_all,
+            subscription,
         ) = {
-            let mut initial_notifications = Vec::with_capacity(match &subscribe_all {
-                either::Left(sa) => 1 + sa.non_finalized_blocks_ancestry_order.len(),
+            let mut initial_notifications = Vec::with_capacity(match &subscription {
+                either::Left((sa, _)) => 1 + sa.non_finalized_blocks_ancestry_order.len(),
                 either::Right(sa) => 1 + sa.non_finalized_blocks_ancestry_order.len(),
             });
 
@@ -155,8 +152,8 @@ impl<TPlat: Platform> Background<TPlat> {
                 HashMap::with_capacity_and_hasher(0, Default::default());
             let mut non_finalized_blocks = fork_tree::ForkTree::new();
 
-            match &subscribe_all {
-                either::Left(subscribe_all) => {
+            match &subscription {
+                either::Left((subscribe_all, _)) => {
                     let finalized_block_hash = header::hash_from_scale_encoded_header(
                         &subscribe_all.finalized_block_scale_encoded_header[..],
                     );
@@ -301,7 +298,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 initial_notifications,
                 non_finalized_blocks,
                 pinned_blocks_headers,
-                runtime_subscribe_all,
+                subscription,
             )
         };
 
@@ -314,14 +311,19 @@ impl<TPlat: Platform> Background<TPlat> {
             ChainHeadFollowTask {
                 non_finalized_blocks,
                 pinned_blocks_headers,
-                runtime_subscribe_all,
+                subscription: match subscription {
+                    either::Left((sub, id)) => Subscription::RuntimeUpdates {
+                        notifications: sub.new_blocks,
+                        subscription_id: id,
+                    },
+                    either::Right(sub) => Subscription::NoRuntimeUpdates(sub.new_blocks),
+                },
                 log_target,
                 runtime_service,
                 sync_service,
             }
             .run(
                 requests_subscriptions,
-                subscribe_all,
                 subscription_id,
                 messages_rx,
                 initial_notifications,
@@ -697,11 +699,20 @@ struct ChainHeadFollowTask<TPlat: Platform> {
     /// For each pinned block hash, the SCALE-encoded header of the block.
     pinned_blocks_headers: hashbrown::HashMap<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
 
-    runtime_subscribe_all: Option<runtime_service::SubscriptionId>,
+    subscription: Subscription<TPlat>,
 
     log_target: String,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
+}
+
+enum Subscription<TPlat: Platform> {
+    RuntimeUpdates {
+        notifications: runtime_service::Subscription<TPlat>,
+        subscription_id: runtime_service::SubscriptionId,
+    },
+    // TODO: better typing?
+    NoRuntimeUpdates(mpsc::Receiver<sync_service::Notification>),
 }
 
 impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
@@ -709,10 +720,6 @@ impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
         mut self,
         requests_subscriptions: Arc<
             requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>,
-        >,
-        mut subscribe_all: either::Either<
-            runtime_service::SubscribeAll<TPlat>,
-            sync_service::SubscribeAll,
         >,
         subscription_id: String,
         mut messages_rx: requests_subscriptions::MessagesReceiver<SubscriptionMessage>,
@@ -738,12 +745,12 @@ impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
 
         loop {
             let outcome = {
-                let next_block = match &mut subscribe_all {
-                    either::Left(subscribe_all) => {
-                        future::Either::Left(subscribe_all.new_blocks.next().map(either::Left))
+                let next_block = match &mut self.subscription {
+                    Subscription::RuntimeUpdates { notifications, .. } => {
+                        future::Either::Left(notifications.next().map(either::Left))
                     }
-                    either::Right(subscribe_all) => {
-                        future::Either::Right(subscribe_all.new_blocks.next().map(either::Right))
+                    Subscription::NoRuntimeUpdates(notifications) => {
+                        future::Either::Right(notifications.next().map(either::Right))
                     }
                 };
                 let next_message = messages_rx.next();
@@ -1077,10 +1084,11 @@ impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
                 call_parameters,
             } => {
                 // Determine whether the requested block hash is valid and start the call.
-                let pre_runtime_call = {
-                    let runtime_service_subscribe_all = match self.runtime_subscribe_all {
-                        Some(sa) => sa,
-                        None => {
+                let pre_runtime_call = match self.subscription {
+                    Subscription::RuntimeUpdates {
+                        subscription_id, ..
+                    } => {
+                        if !self.pinned_blocks_headers.contains_key(&hash.0) {
                             requests_subscriptions
                                 .respond(
                                     &get_request_id.1,
@@ -1094,9 +1102,13 @@ impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
                             // Ignore the message without sending a confirmation.
                             return ops::ControlFlow::Continue(());
                         }
-                    };
 
-                    if !self.pinned_blocks_headers.contains_key(&hash.0) {
+                        self.runtime_service
+                            .pinned_block_runtime_lock(subscription_id, &hash.0)
+                            .await
+                            .ok()
+                    }
+                    Subscription::NoRuntimeUpdates(_) => {
                         requests_subscriptions
                             .respond(
                                 &get_request_id.1,
@@ -1110,11 +1122,6 @@ impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
                         // Ignore the message without sending a confirmation.
                         return ops::ControlFlow::Continue(());
                     }
-
-                    self.runtime_service
-                        .pinned_block_runtime_lock(runtime_service_subscribe_all, &hash.0)
-                        .await
-                        .ok()
                 };
 
                 self.start_chain_head_call(
@@ -1154,9 +1161,12 @@ impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
             } => {
                 let valid = {
                     if self.pinned_blocks_headers.remove(&hash.0).is_some() {
-                        if let Some(runtime_subscribe_all) = self.runtime_subscribe_all {
+                        if let Subscription::RuntimeUpdates {
+                            subscription_id, ..
+                        } = self.subscription
+                        {
                             self.runtime_service
-                                .unpin_block(runtime_subscribe_all, &hash.0)
+                                .unpin_block(subscription_id, &hash.0)
                                 .await;
                         }
                         true
