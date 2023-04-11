@@ -385,7 +385,6 @@ impl<TPlat: Platform> Background<TPlat> {
         };
 
         subscription_start.start({
-            let me = self.clone();
             let log_target = self.log_target.clone();
             let sync_service = self.sync_service.clone();
             let runtime_service = self.runtime_service.clone();
@@ -490,8 +489,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                 // unfortunately doesn't provide any mechanism to deal with this
                                 // situation, and we handle it by simply not sending the
                                 // notification.
-                                let _ = me
-                                    .requests_subscriptions
+                                let _ = requests_subscriptions
                                     .try_push_notification(
                                         &request_id.1,
                                         &subscription_id,
