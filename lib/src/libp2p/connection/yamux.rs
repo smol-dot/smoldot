@@ -1673,6 +1673,8 @@ impl<T> Yamux<T> {
                         .choose(&mut self.inner.randomness)
                         .cloned()
                     {
+                        debug_assert!(!self.inner.dead_substreams.contains(&substream_id));
+
                         let sub = self.inner.substreams.get_mut(&substream_id).unwrap();
 
                         let SubstreamState::Healthy {
