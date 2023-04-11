@@ -950,7 +950,9 @@ impl ChainHeadFollowTask {
                         .on_foreground_message(&me, message, confirmation_sender)
                         .await
                     {
-                        ops::ControlFlow::Break(()) => break,
+                        // Intentionally `return` rather than `break` in order to not generate
+                        // a `stop` event.
+                        ops::ControlFlow::Break(()) => return,
                         ops::ControlFlow::Continue(()) => {}
                     }
                 }
