@@ -400,7 +400,11 @@ impl<TPlat: Platform> Background<TPlat> {
                     )
                     .await;
 
-                let requests_subscriptions = Arc::downgrade(&requests_subscriptions);
+                let requests_subscriptions = {
+                    let weak = Arc::downgrade(&requests_subscriptions);
+                    drop(requests_subscriptions);
+                    weak
+                };
 
                 'main_sub_loop: loop {
                     let mut new_blocks = {
@@ -583,7 +587,11 @@ impl<TPlat: Platform> Background<TPlat> {
                     )
                     .await;
 
-                let requests_subscriptions = Arc::downgrade(&requests_subscriptions);
+                let requests_subscriptions = {
+                    let weak = Arc::downgrade(&requests_subscriptions);
+                    drop(requests_subscriptions);
+                    weak
+                };
 
                 loop {
                     let event = {
@@ -713,7 +721,11 @@ impl<TPlat: Platform> Background<TPlat> {
                     )
                     .await;
 
-                let requests_subscriptions = Arc::downgrade(&requests_subscriptions);
+                let requests_subscriptions = {
+                    let weak = Arc::downgrade(&requests_subscriptions);
+                    drop(requests_subscriptions);
+                    weak
+                };
 
                 loop {
                     let event = {
@@ -1428,7 +1440,11 @@ impl<TPlat: Platform> Background<TPlat> {
                 let spec_changes = stream::iter(iter::once(current_spec)).chain(spec_changes);
                 futures::pin_mut!(spec_changes);
 
-                let requests_subscriptions = Arc::downgrade(&requests_subscriptions);
+                let requests_subscriptions = {
+                    let weak = Arc::downgrade(&requests_subscriptions);
+                    drop(requests_subscriptions);
+                    weak
+                };
 
                 loop {
                     let event = {
@@ -1687,7 +1703,11 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 futures::pin_mut!(storage_updates);
 
-                let requests_subscriptions = Arc::downgrade(&requests_subscriptions);
+                let requests_subscriptions = {
+                    let weak = Arc::downgrade(&requests_subscriptions);
+                    drop(requests_subscriptions);
+                    weak
+                };
 
                 loop {
                     let event = {
