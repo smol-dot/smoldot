@@ -306,7 +306,10 @@ impl<TPlat: Platform> Background<TPlat> {
         };
 
         subscription_start.start({
-            let me = self.clone();
+            let log_target = self.log_target.clone();
+            let requests_subscriptions = self.requests_subscriptions.clone();
+            let runtime_service = self.runtime_service.clone();
+            let sync_service = self.sync_service.clone();
             let request_id = (request_id.0.to_owned(), request_id.1.clone());
             ChainHeadFollowTask {
                 non_finalized_blocks,
@@ -318,7 +321,10 @@ impl<TPlat: Platform> Background<TPlat> {
                 subscription_id,
                 messages_rx,
                 initial_notifications,
-                me,
+                log_target,
+                requests_subscriptions,
+                runtime_service,
+                sync_service,
                 request_id,
             )
         });
@@ -704,10 +710,15 @@ impl ChainHeadFollowTask {
         subscription_id: String,
         mut messages_rx: requests_subscriptions::MessagesReceiver<SubscriptionMessage>,
         initial_notifications: Vec<String>,
-        me: Arc<Background<TPlat>>,
+        log_target: String,
+        requests_subscriptions: Arc<
+            requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>,
+        >,
+        runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
+        sync_service: Arc<sync_service::SyncService<TPlat>>,
         request_id: (String, requests_subscriptions::RequestId),
     ) {
-        me.requests_subscriptions
+        requests_subscriptions
             .respond(
                 &request_id.1,
                 methods::Response::chainHead_unstable_follow((&subscription_id).into())
@@ -717,31 +728,45 @@ impl ChainHeadFollowTask {
 
         // Send back to the user the initial notifications.
         for notif in initial_notifications {
-            me.requests_subscriptions
+            requests_subscriptions
                 .push_notification(&request_id.1, &subscription_id, notif)
                 .await;
         }
 
+        let requests_subscriptions = Arc::downgrade(&requests_subscriptions);
+
         loop {
-            let next_block = match &mut subscribe_all {
-                either::Left(subscribe_all) => {
-                    future::Either::Left(subscribe_all.new_blocks.next().map(either::Left))
-                }
-                either::Right(subscribe_all) => {
-                    future::Either::Right(subscribe_all.new_blocks.next().map(either::Right))
+            let outcome = {
+                let next_block = match &mut subscribe_all {
+                    either::Left(subscribe_all) => {
+                        future::Either::Left(subscribe_all.new_blocks.next().map(either::Left))
+                    }
+                    either::Right(subscribe_all) => {
+                        future::Either::Right(subscribe_all.new_blocks.next().map(either::Right))
+                    }
+                };
+                let next_message = messages_rx.next();
+                futures::pin_mut!(next_message);
+                futures::pin_mut!(next_block);
+
+                match future::select(next_block, next_message).await {
+                    future::Either::Left((v, _)) => either::Left(v),
+                    future::Either::Right((v, _)) => either::Right(v),
                 }
             };
-            let next_message = messages_rx.next();
-            futures::pin_mut!(next_message);
-            futures::pin_mut!(next_block);
+
+            let requests_subscriptions = match requests_subscriptions.upgrade() {
+                Some(rs) => rs,
+                None => return,
+            };
 
             // TODO: doesn't enforce any maximum number of pinned blocks
-            match future::select(next_block, next_message).await {
-                future::Either::Left((either::Left(None) | either::Right(None), _)) => {
+            match outcome {
+                either::Left(either::Left(None) | either::Right(None)) => {
                     // TODO: clear queue of notifications?
                     break;
                 }
-                future::Either::Left((
+                either::Left(
                     either::Left(Some(runtime_service::Notification::Finalized {
                         best_block_hash,
                         hash,
@@ -751,8 +776,7 @@ impl ChainHeadFollowTask {
                         best_block_hash,
                         hash,
                     })),
-                    _,
-                )) => {
+                ) => {
                     let mut finalized_blocks_hashes = Vec::new();
                     let mut pruned_blocks_hashes = Vec::new();
 
@@ -766,8 +790,7 @@ impl ChainHeadFollowTask {
                     }
 
                     // TODO: don't always generate
-                    if me
-                        .requests_subscriptions
+                    if requests_subscriptions
                         .try_push_notification(
                             &request_id.1,
                             &subscription_id,
@@ -785,8 +808,7 @@ impl ChainHeadFollowTask {
                         break;
                     }
 
-                    if me
-                        .requests_subscriptions
+                    if requests_subscriptions
                         .try_push_notification(
                             &request_id.1,
                             &subscription_id,
@@ -805,13 +827,11 @@ impl ChainHeadFollowTask {
                         break;
                     }
                 }
-                future::Either::Left((
+                either::Left(
                     either::Left(Some(runtime_service::Notification::BestBlockChanged { hash }))
                     | either::Right(Some(sync_service::Notification::BestBlockChanged { hash })),
-                    _,
-                )) => {
-                    let _ = me
-                        .requests_subscriptions
+                ) => {
+                    let _ = requests_subscriptions
                         .try_push_notification(
                             &request_id.1,
                             &subscription_id,
@@ -825,10 +845,7 @@ impl ChainHeadFollowTask {
                         )
                         .await;
                 }
-                future::Either::Left((
-                    either::Left(Some(runtime_service::Notification::Block(block))),
-                    _,
-                )) => {
+                either::Left(either::Left(Some(runtime_service::Notification::Block(block)))) => {
                     let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
 
                     let _was_in = self
@@ -842,8 +859,7 @@ impl ChainHeadFollowTask {
                         self.non_finalized_blocks.find(|b| *b == block.parent_hash);
                     self.non_finalized_blocks.insert(parent_node_index, hash);
 
-                    if me
-                        .requests_subscriptions
+                    if requests_subscriptions
                         .try_push_notification(
                             &request_id.1,
                             &subscription_id,
@@ -868,8 +884,7 @@ impl ChainHeadFollowTask {
                     }
 
                     if block.is_new_best
-                        && me
-                            .requests_subscriptions
+                        && requests_subscriptions
                             .try_push_notification(
                                 &request_id.1,
                                 &subscription_id,
@@ -887,10 +902,7 @@ impl ChainHeadFollowTask {
                         break;
                     }
                 }
-                future::Either::Left((
-                    either::Right(Some(sync_service::Notification::Block(block))),
-                    _,
-                )) => {
+                either::Left(either::Right(Some(sync_service::Notification::Block(block)))) => {
                     let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
 
                     let _was_in = self
@@ -904,8 +916,7 @@ impl ChainHeadFollowTask {
                         self.non_finalized_blocks.find(|b| *b == block.parent_hash);
                     self.non_finalized_blocks.insert(parent_node_index, hash);
 
-                    if me
-                        .requests_subscriptions
+                    if requests_subscriptions
                         .try_push_notification(
                             &request_id.1,
                             &subscription_id,
@@ -926,8 +937,7 @@ impl ChainHeadFollowTask {
                     }
 
                     if block.is_new_best
-                        && me
-                            .requests_subscriptions
+                        && requests_subscriptions
                             .try_push_notification(
                                 &request_id.1,
                                 &subscription_id,
@@ -945,9 +955,16 @@ impl ChainHeadFollowTask {
                         break;
                     }
                 }
-                future::Either::Right(((message, confirmation_sender), _)) => {
+                either::Right((message, confirmation_sender)) => {
                     match self
-                        .on_foreground_message(&me, message, confirmation_sender)
+                        .on_foreground_message(
+                            &log_target,
+                            &requests_subscriptions,
+                            &runtime_service,
+                            &sync_service,
+                            message,
+                            confirmation_sender,
+                        )
                         .await
                     {
                         // Intentionally `return` rather than `break` in order to not generate
@@ -959,28 +976,35 @@ impl ChainHeadFollowTask {
             }
         }
 
-        me.requests_subscriptions
-            .push_notification(
-                &request_id.1,
-                &subscription_id,
-                methods::ServerToClient::chainHead_unstable_followEvent {
-                    subscription: (&subscription_id).into(),
-                    result: methods::FollowEvent::Stop {},
-                }
-                .to_json_call_object_parameters(None),
-            )
-            .await;
+        if let Some(requests_subscriptions) = requests_subscriptions.upgrade() {
+            requests_subscriptions
+                .push_notification(
+                    &request_id.1,
+                    &subscription_id,
+                    methods::ServerToClient::chainHead_unstable_followEvent {
+                        subscription: (&subscription_id).into(),
+                        result: methods::FollowEvent::Stop {},
+                    }
+                    .to_json_call_object_parameters(None),
+                )
+                .await;
+        }
     }
 
     async fn on_foreground_message<TPlat: Platform>(
         &mut self,
-        me: &Arc<Background<TPlat>>,
+        log_target: &str,
+        requests_subscriptions: &Arc<
+            requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>,
+        >,
+        runtime_service: &Arc<runtime_service::RuntimeService<TPlat>>,
+        sync_service: &Arc<sync_service::SyncService<TPlat>>,
         message: SubscriptionMessage,
         confirmation_sender: requests_subscriptions::ConfirmationSend,
     ) -> ops::ControlFlow<(), ()> {
         match message {
             SubscriptionMessage::StopIfChainHeadFollow { stop_request_id } => {
-                me.requests_subscriptions
+                requests_subscriptions
                     .respond(
                         &stop_request_id.1,
                         methods::Response::chainHead_unstable_unfollow(())
@@ -1000,7 +1024,7 @@ impl ChainHeadFollowTask {
                 let block_number = {
                     if let Some(header) = self.pinned_blocks_headers.get(&hash.0) {
                         let decoded =
-                            header::decode(header, me.sync_service.block_number_bytes()).unwrap(); // TODO: unwrap?
+                            header::decode(header, sync_service.block_number_bytes()).unwrap(); // TODO: unwrap?
                         Some(decoded.number)
                     } else {
                         // Ignore the message without sending a confirmation.
@@ -1009,8 +1033,8 @@ impl ChainHeadFollowTask {
                 };
 
                 self.start_chain_head_body(
-                    &me.requests_subscriptions,
-                    &me.sync_service,
+                    requests_subscriptions,
+                    sync_service,
                     (&get_request_id.0, &get_request_id.1),
                     hash,
                     network_config,
@@ -1039,9 +1063,9 @@ impl ChainHeadFollowTask {
                 };
 
                 self.start_chain_head_storage(
-                    &me.log_target,
-                    &me.requests_subscriptions,
-                    &me.sync_service,
+                    log_target,
+                    requests_subscriptions,
+                    sync_service,
                     (&get_request_id.0, &get_request_id.1),
                     hash,
                     key,
@@ -1065,7 +1089,7 @@ impl ChainHeadFollowTask {
                     let runtime_service_subscribe_all = match self.runtime_subscribe_all {
                         Some(sa) => sa,
                         None => {
-                            me.requests_subscriptions
+                            requests_subscriptions
                                 .respond(
                                     &get_request_id.1,
                                     json_rpc::parse::build_error_response(
@@ -1081,7 +1105,7 @@ impl ChainHeadFollowTask {
                     };
 
                     if !self.pinned_blocks_headers.contains_key(&hash.0) {
-                        me.requests_subscriptions
+                        requests_subscriptions
                             .respond(
                                 &get_request_id.1,
                                 json_rpc::parse::build_error_response(
@@ -1095,14 +1119,14 @@ impl ChainHeadFollowTask {
                         return ops::ControlFlow::Continue(());
                     }
 
-                    me.runtime_service
+                    runtime_service
                         .pinned_block_runtime_lock(runtime_service_subscribe_all, &hash.0)
                         .await
                         .ok()
                 };
 
                 self.start_chain_head_call(
-                    &me.requests_subscriptions,
+                    requests_subscriptions,
                     (&get_request_id.0, &get_request_id.1),
                     &function_to_call,
                     call_parameters,
@@ -1120,7 +1144,7 @@ impl ChainHeadFollowTask {
             } => {
                 let response = { self.pinned_blocks_headers.get(&hash.0).cloned() };
 
-                me.requests_subscriptions
+                requests_subscriptions
                     .respond(
                         &get_request_id.1,
                         methods::Response::chainHead_unstable_header(
@@ -1139,7 +1163,7 @@ impl ChainHeadFollowTask {
                 let valid = {
                     if self.pinned_blocks_headers.remove(&hash.0).is_some() {
                         if let Some(runtime_subscribe_all) = self.runtime_subscribe_all {
-                            me.runtime_service
+                            runtime_service
                                 .unpin_block(runtime_subscribe_all, &hash.0)
                                 .await;
                         }
@@ -1150,7 +1174,7 @@ impl ChainHeadFollowTask {
                 };
 
                 if valid {
-                    me.requests_subscriptions
+                    requests_subscriptions
                         .respond(
                             &unpin_request_id.1,
                             methods::Response::chainHead_unstable_unpin(())
