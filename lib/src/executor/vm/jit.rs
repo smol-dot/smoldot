@@ -727,8 +727,6 @@ impl Jit {
             _ => unreachable!(),
         };
 
-        // TODO: check value type
-
         // Resume the coroutine execution.
         // The `Future` is polled with a no-op waker. We are in total control of when the
         // execution might be able to progress, hence the lack of need for a waker.
