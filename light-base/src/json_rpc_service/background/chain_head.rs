@@ -17,7 +17,7 @@
 
 //! All JSON-RPC method handlers that related to the `chainHead` API.
 
-use super::{Background, FollowSubscription, SubscriptionMessage};
+use super::{Background, SubscriptionMessage};
 
 use crate::{platform::Platform, runtime_service, sync_service};
 
@@ -406,7 +406,13 @@ impl<TPlat: Platform> Background<TPlat> {
             )
         };
 
-        let (subscription_id, initial_notifications, subscription_state) = {
+        let (
+            subscription_id,
+            initial_notifications,
+            non_finalized_blocks,
+            pinned_blocks_headers,
+            runtime_subscribe_all,
+        ) = {
             let mut initial_notifications = Vec::with_capacity(match &subscribe_all {
                 either::Left(sa) => 1 + sa.non_finalized_blocks_ancestry_order.len(),
                 either::Right(sa) => 1 + sa.non_finalized_blocks_ancestry_order.len(),
@@ -557,24 +563,28 @@ impl<TPlat: Platform> Background<TPlat> {
                 }
             }
 
-            let subscription_state = FollowSubscription {
+            (
+                subscription_id,
+                initial_notifications,
                 non_finalized_blocks,
                 pinned_blocks_headers,
                 runtime_subscribe_all,
-            };
-
-            (subscription_id, initial_notifications, subscription_state)
+            )
         };
 
         subscription_start.start({
             let me = self.clone();
             let request_id = (request_id.0.to_owned(), request_id.1.clone());
-            ChainHeadFollowTask {}.run(
+            ChainHeadFollowTask {
+                non_finalized_blocks,
+                pinned_blocks_headers,
+                runtime_subscribe_all,
+            }
+            .run(
                 subscribe_all,
                 subscription_id,
                 messages_rx,
                 initial_notifications,
-                subscription_state,
                 me,
                 request_id,
             )
@@ -1237,11 +1247,19 @@ fn convert_runtime_spec(
     }
 }
 
-struct ChainHeadFollowTask {}
+struct ChainHeadFollowTask {
+    /// Tree of hashes of all the current non-finalized blocks. This includes unpinned blocks.
+    non_finalized_blocks: fork_tree::ForkTree<[u8; 32]>,
+
+    /// For each pinned block hash, the SCALE-encoded header of the block.
+    pinned_blocks_headers: hashbrown::HashMap<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
+
+    runtime_subscribe_all: Option<runtime_service::SubscriptionId>,
+}
 
 impl ChainHeadFollowTask {
     async fn run<TPlat: Platform>(
-        self,
+        mut self,
         mut subscribe_all: either::Either<
             runtime_service::SubscribeAll<TPlat>,
             sync_service::SubscribeAll,
@@ -1249,7 +1267,6 @@ impl ChainHeadFollowTask {
         subscription_id: String,
         mut messages_rx: requests_subscriptions::MessagesReceiver<SubscriptionMessage>,
         initial_notifications: Vec<String>,
-        mut subscription_state: FollowSubscription,
         me: Arc<Background<TPlat>>,
         request_id: (String, requests_subscriptions::RequestId),
     ) {
@@ -1302,14 +1319,8 @@ impl ChainHeadFollowTask {
                     let mut finalized_blocks_hashes = Vec::new();
                     let mut pruned_blocks_hashes = Vec::new();
 
-                    let node_index = subscription_state
-                        .non_finalized_blocks
-                        .find(|b| *b == hash)
-                        .unwrap();
-                    for pruned in subscription_state
-                        .non_finalized_blocks
-                        .prune_ancestors(node_index)
-                    {
+                    let node_index = self.non_finalized_blocks.find(|b| *b == hash).unwrap();
+                    for pruned in self.non_finalized_blocks.prune_ancestors(node_index) {
                         if pruned.is_prune_target_ancestor {
                             finalized_blocks_hashes.push(methods::HashHexString(pruned.user_data));
                         } else {
@@ -1383,19 +1394,16 @@ impl ChainHeadFollowTask {
                 )) => {
                     let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
 
-                    let _was_in = subscription_state
+                    let _was_in = self
                         .pinned_blocks_headers
                         .insert(hash, block.scale_encoded_header);
                     debug_assert!(_was_in.is_none());
 
                     // TODO: check if it matches current finalized block
                     // TODO: O(n)
-                    let parent_node_index = subscription_state
-                        .non_finalized_blocks
-                        .find(|b| *b == block.parent_hash);
-                    subscription_state
-                        .non_finalized_blocks
-                        .insert(parent_node_index, hash);
+                    let parent_node_index =
+                        self.non_finalized_blocks.find(|b| *b == block.parent_hash);
+                    self.non_finalized_blocks.insert(parent_node_index, hash);
 
                     if me
                         .requests_subscriptions
@@ -1448,19 +1456,16 @@ impl ChainHeadFollowTask {
                 )) => {
                     let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
 
-                    let _was_in = subscription_state
+                    let _was_in = self
                         .pinned_blocks_headers
                         .insert(hash, block.scale_encoded_header);
                     debug_assert!(_was_in.is_none());
 
                     // TODO: check if it matches current finalized block
                     // TODO: O(n)
-                    let parent_node_index = subscription_state
-                        .non_finalized_blocks
-                        .find(|b| *b == block.parent_hash);
-                    subscription_state
-                        .non_finalized_blocks
-                        .insert(parent_node_index, hash);
+                    let parent_node_index =
+                        self.non_finalized_blocks.find(|b| *b == block.parent_hash);
+                    self.non_finalized_blocks.insert(parent_node_index, hash);
 
                     if me
                         .requests_subscriptions
@@ -1534,8 +1539,7 @@ impl ChainHeadFollowTask {
                 )) => {
                     // Determine whether the requested block hash is valid, and if yes its number.
                     let block_number = {
-                        if let Some(header) = subscription_state.pinned_blocks_headers.get(&hash.0)
-                        {
+                        if let Some(header) = self.pinned_blocks_headers.get(&hash.0) {
                             let decoded =
                                 header::decode(header, me.sync_service.block_number_bytes())
                                     .unwrap(); // TODO: unwrap?
@@ -1570,8 +1574,7 @@ impl ChainHeadFollowTask {
                     // Obtain the header of the requested block.
                     // Contains `None` if the subscription is disjoint.
                     let block_scale_encoded_header = {
-                        if let Some(header) = subscription_state.pinned_blocks_headers.get(&hash.0)
-                        {
+                        if let Some(header) = self.pinned_blocks_headers.get(&hash.0) {
                             Some(header.clone())
                         } else {
                             continue;
@@ -1604,28 +1607,24 @@ impl ChainHeadFollowTask {
                 )) => {
                     // Determine whether the requested block hash is valid and start the call.
                     let pre_runtime_call = {
-                        let runtime_service_subscribe_all =
-                            match subscription_state.runtime_subscribe_all {
-                                Some(sa) => sa,
-                                None => {
-                                    me.requests_subscriptions
-                                        .respond(
-                                            &get_request_id.1,
-                                            json_rpc::parse::build_error_response(
-                                                &get_request_id.0,
-                                                json_rpc::parse::ErrorResponse::InvalidParams,
-                                                None,
-                                            ),
-                                        )
-                                        .await;
-                                    return;
-                                }
-                            };
+                        let runtime_service_subscribe_all = match self.runtime_subscribe_all {
+                            Some(sa) => sa,
+                            None => {
+                                me.requests_subscriptions
+                                    .respond(
+                                        &get_request_id.1,
+                                        json_rpc::parse::build_error_response(
+                                            &get_request_id.0,
+                                            json_rpc::parse::ErrorResponse::InvalidParams,
+                                            None,
+                                        ),
+                                    )
+                                    .await;
+                                return;
+                            }
+                        };
 
-                        if !subscription_state
-                            .pinned_blocks_headers
-                            .contains_key(&hash.0)
-                        {
+                        if !self.pinned_blocks_headers.contains_key(&hash.0) {
                             me.requests_subscriptions
                                 .respond(
                                     &get_request_id.1,
@@ -1666,12 +1665,7 @@ impl ChainHeadFollowTask {
                     ),
                     _,
                 )) => {
-                    let response = {
-                        subscription_state
-                            .pinned_blocks_headers
-                            .get(&hash.0)
-                            .cloned()
-                    };
+                    let response = { self.pinned_blocks_headers.get(&hash.0).cloned() };
 
                     me.requests_subscriptions
                         .respond(
@@ -1695,14 +1689,8 @@ impl ChainHeadFollowTask {
                     _,
                 )) => {
                     let valid = {
-                        if subscription_state
-                            .pinned_blocks_headers
-                            .remove(&hash.0)
-                            .is_some()
-                        {
-                            if let Some(runtime_subscribe_all) =
-                                subscription_state.runtime_subscribe_all
-                            {
+                        if self.pinned_blocks_headers.remove(&hash.0).is_some() {
+                            if let Some(runtime_subscribe_all) = self.runtime_subscribe_all {
                                 me.runtime_service
                                     .unpin_block(runtime_subscribe_all, &hash.0)
                                     .await;
