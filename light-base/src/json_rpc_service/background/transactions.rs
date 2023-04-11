@@ -176,7 +176,11 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 // TODO: doesn't reported `validated` events
 
-                let requests_subscriptions = Arc::downgrade(&requests_subscriptions);
+                let requests_subscriptions = {
+                    let weak = Arc::downgrade(&requests_subscriptions);
+                    drop(requests_subscriptions);
+                    weak
+                };
 
                 loop {
                     let event = {
