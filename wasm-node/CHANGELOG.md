@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.2 - 2023-04-12
+
 ### Changed
 
 - Removed support for the `ls` message in the multistream-select protocol, in accordance with the rest of the libp2p ecosystem. This message was in practice never used, and removing support for it simplifies the implementation. ([#379](https://github.com/smol-dot/smoldot/pull/379))
@@ -16,9 +18,6 @@
 - Properly check whether Yamux substream IDs allocated by the remote are valid. ([#383](https://github.com/smol-dot/smoldot/pull/383))
 - Fix the size of the data of Yamux frames with the `SYN` flag not being verified against the allowed credits. ([#383](https://github.com/smol-dot/smoldot/pull/383))
 - Fix Yamux repeatedly sending empty data frames when the allowed window size is 0. ([#383](https://github.com/smol-dot/smoldot/pull/383))
-
-### Fixed
-
 - Post-MVP WebAssembly features are now properly disabled when compiling runtimes. This rejects runtimes that Substrate would consider as invalid as well. ([#386](https://github.com/smol-dot/smoldot/pull/386))
 
 ## 1.0.1 - 2023-03-29
