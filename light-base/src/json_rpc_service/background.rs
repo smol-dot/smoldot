@@ -36,9 +36,7 @@ use core::{
     time::Duration,
 };
 use futures::{lock::Mutex, prelude::*};
-use hashbrown::HashMap;
 use smoldot::{
-    chain::fork_tree,
     executor::{host, runtime_host},
     header,
     json_rpc::{self, methods, requests_subscriptions},
@@ -99,16 +97,6 @@ struct Background<TPlat: Platform> {
     /// If `true`, we have already printed a warning about usage of the legacy JSON-RPC API. This
     /// flag prevents printing this message multiple times.
     printed_legacy_json_rpc_warning: atomic::AtomicBool,
-}
-
-struct FollowSubscription {
-    /// Tree of hashes of all the current non-finalized blocks. This includes unpinned blocks.
-    non_finalized_blocks: fork_tree::ForkTree<[u8; 32]>,
-
-    /// For each pinned block hash, the SCALE-encoded header of the block.
-    pinned_blocks_headers: HashMap<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
-
-    runtime_subscribe_all: Option<runtime_service::SubscriptionId>,
 }
 
 pub(super) enum SubscriptionMessage {
