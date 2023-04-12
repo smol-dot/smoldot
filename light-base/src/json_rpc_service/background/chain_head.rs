@@ -1308,6 +1308,7 @@ impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
                                         .to_json_call_object_parameters(None),
                                     )
                                     .await;
+                                break;
                             }
                             either::Left(Err(())) => {
                                 requests_subscriptions
@@ -1322,6 +1323,7 @@ impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
                                         .to_json_call_object_parameters(None),
                                     )
                                     .await;
+                                break;
                             }
                             either::Right((
                                 SubscriptionMessage::StopIfChainHeadStorage { stop_request_id },
@@ -1494,6 +1496,7 @@ impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
                                         }
                                         .to_json_call_object_parameters(None)
                                     ).await;
+                                    break;
                                 }
                                 either::Left(Err(_)) => {
                                     requests_subscriptions.set_queued_notification(
@@ -1506,6 +1509,7 @@ impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
                                         }
                                         .to_json_call_object_parameters(None)
                                     ).await;
+                                    break;
                                 }
                                 either::Right((
                                     SubscriptionMessage::StopIfChainHeadBody { stop_request_id },
