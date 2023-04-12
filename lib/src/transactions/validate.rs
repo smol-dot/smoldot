@@ -348,6 +348,7 @@ pub fn validate_transaction(
                         a
                     },
                 ),
+                max_log_level: config.max_log_level,
             };
 
             match vm {
@@ -464,7 +465,7 @@ impl Query {
                         main_trie_root_calculation_cache: Some(
                             success.main_trie_root_calculation_cache,
                         ),
-                        max_log_level: 0,
+                        max_log_level: info.max_log_level,
                     });
 
                     match vm {
@@ -560,6 +561,8 @@ struct Stage1 {
     transaction_source: TransactionSource,
     /// Same value as [`Config::scale_encoded_transaction`].
     scale_encoded_transaction: Vec<u8>,
+    /// Same value as [`Config::max_log_level`].
+    max_log_level: u32,
 }
 
 struct Stage2 {}
