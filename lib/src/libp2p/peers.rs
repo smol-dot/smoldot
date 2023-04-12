@@ -454,20 +454,20 @@ where
                     });
                 }
 
-                collection::Event::StartShutdown { id, .. }
+                collection::Event::NewOutboundSubstreamsForbidden { id, .. }
                 | collection::Event::PingOutFailed { id } => {
                     // We react to ougoing ping failures by shutting down the connection. For this
                     // reason, a shutdown initiated by the remote and an outgoing ping failure
                     // share almost the same code.
                     let reason = match event {
-                        collection::Event::StartShutdown { reason, .. } => {
+                        collection::Event::NewOutboundSubstreamsForbidden { reason, .. } => {
                             ShutdownCause::Connection(reason)
                         }
                         collection::Event::PingOutFailed { .. } => {
                             // A `PingOutFailed` doesn't by itself cause a disconnect. The reason
                             // why it's handled the same way as `StartShutdown` is because we
                             // voluntarily call `start_shutdown` here.
-                            self.inner.start_shutdown(id);
+                            self.inner.reset_connection(id);
                             ShutdownCause::OutPingTimeout
                         }
                         _ => unreachable!(),
@@ -572,6 +572,7 @@ where
                             user_data,
                             ..
                         },
+                    reason,
                 } => {
                     // `expected_peer_index` is `None` iff the connection was an incoming
                     // connection whose handshake isn't finished yet.
@@ -804,8 +805,9 @@ where
                                     ..=(peer_index, ConnectionId::max_value()),
                             )
                             .any(|(_, connection_id)| {
-                                let state = self.inner.connection_state(*connection_id);
-                                state.established && !state.shutting_down
+                                self.inner
+                                    .connection_state(*connection_id)
+                                    .accepts_substreams()
                             })
                         {
                             let _prev_value = self
@@ -1290,8 +1292,9 @@ where
                         ..=(peer_index, ConnectionId::max_value()),
                 )
                 .any(|(_, connection_id)| {
-                    let state = self.inner.connection_state(*connection_id);
-                    state.established && !state.shutting_down
+                    self.inner
+                        .connection_state(*connection_id)
+                        .accepts_substreams()
                 })
             {
                 let _prev_value = self.unfulfilled_desired_outbound_substreams.insert(
@@ -1359,8 +1362,9 @@ where
                                 ..=(peer_index, ConnectionId::max_value()),
                         )
                         .any(|(_, connection_id)| {
-                            let state = self.inner.connection_state(*connection_id);
-                            state.established && !state.shutting_down
+                            self.inner
+                                .connection_state(*connection_id)
+                                .accepts_substreams()
                         })
                 );
             }
@@ -1837,8 +1841,8 @@ where
     pub fn can_start_requests(&self, peer_id: &PeerId) -> bool {
         self.established_peer_connections(peer_id).any(|c| {
             let state = self.connection_state(c);
-            debug_assert!(state.established); // Guaranteed by `established_peer_connections`.
-            !state.shutting_down
+            debug_assert!(!matches!(state, collection::ConnectionState::Handshaking)); // Guaranteed by `established_peer_connections`.
+            state.can_open_substreams()
         })
     }
 
@@ -2026,15 +2030,13 @@ pub enum Event<TConn> {
         num_healthy_peer_connections: NonZeroU32,
     },
 
-    StartShutdown {
-        /// Identifier of the connection that has started shutting down.
+    // TODO: doc and explain
+    NewOutboundSubstreamsForbidden {
+        /// Identifier of the connection that no longer accepts new substreams.
         connection_id: ConnectionId,
 
         /// State of the connection and identity of the remote.
         peer: ShutdownPeer,
-
-        /// Reason for the shutdown.
-        reason: ShutdownCause,
     },
 
     /// A connection has stopped.
@@ -2045,6 +2047,8 @@ pub enum Event<TConn> {
         peer: ShutdownPeer,
         /// User data that was associated to this connection.
         user_data: TConn,
+        /// Reason for the shutdown.
+        reason: ShutdownCause,
     },
 
     /// Received an incoming substream, but this substream has produced an error.
