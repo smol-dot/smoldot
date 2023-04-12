@@ -741,7 +741,11 @@ impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
                 .await;
         }
 
-        let requests_subscriptions = Arc::downgrade(&requests_subscriptions);
+        let requests_subscriptions = {
+            let weak = Arc::downgrade(&requests_subscriptions);
+            drop(requests_subscriptions);
+            weak
+        };
 
         loop {
             let outcome = {
@@ -1243,7 +1247,7 @@ impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
                     )
                     .await;
 
-                let response = if let Some(block_number) = block_number {
+                if let Some(block_number) = block_number {
                     // TODO: right now we query the header because the underlying function returns an error if we don't
                     let future = sync_service.clone().block_query(
                         block_number,
@@ -1262,7 +1266,11 @@ impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
                     );
                     futures::pin_mut!(future);
 
-                    let requests_subscriptions = Arc::downgrade(&requests_subscriptions);
+                    let requests_subscriptions = {
+                        let weak = Arc::downgrade(&requests_subscriptions);
+                        drop(requests_subscriptions);
+                        weak
+                    };
 
                     loop {
                         let outcome = {
@@ -1281,25 +1289,39 @@ impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
 
                         match outcome {
                             either::Left(Ok(block_data)) => {
-                                break methods::ServerToClient::chainHead_unstable_bodyEvent {
-                                    subscription: (&subscription_id).into(),
-                                    result: methods::ChainHeadBodyEvent::Done {
-                                        value: block_data
-                                            .body
-                                            .unwrap()
-                                            .into_iter()
-                                            .map(methods::HexString)
-                                            .collect(),
-                                    },
-                                }
-                                .to_json_call_object_parameters(None)
+                                requests_subscriptions
+                                    .set_queued_notification(
+                                        &request_id.1,
+                                        &subscription_id,
+                                        0,
+                                        methods::ServerToClient::chainHead_unstable_bodyEvent {
+                                            subscription: (&subscription_id).into(),
+                                            result: methods::ChainHeadBodyEvent::Done {
+                                                value: block_data
+                                                    .body
+                                                    .unwrap()
+                                                    .into_iter()
+                                                    .map(methods::HexString)
+                                                    .collect(),
+                                            },
+                                        }
+                                        .to_json_call_object_parameters(None),
+                                    )
+                                    .await;
                             }
                             either::Left(Err(())) => {
-                                break methods::ServerToClient::chainHead_unstable_bodyEvent {
-                                    subscription: (&subscription_id).into(),
-                                    result: methods::ChainHeadBodyEvent::Inaccessible {},
-                                }
-                                .to_json_call_object_parameters(None)
+                                requests_subscriptions
+                                    .set_queued_notification(
+                                        &request_id.1,
+                                        &subscription_id,
+                                        0,
+                                        methods::ServerToClient::chainHead_unstable_bodyEvent {
+                                            subscription: (&subscription_id).into(),
+                                            result: methods::ChainHeadBodyEvent::Inaccessible {},
+                                        }
+                                        .to_json_call_object_parameters(None),
+                                    )
+                                    .await;
                             }
                             either::Right((
                                 SubscriptionMessage::StopIfChainHeadStorage { stop_request_id },
@@ -1323,16 +1345,19 @@ impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
                         }
                     }
                 } else {
-                    methods::ServerToClient::chainHead_unstable_bodyEvent {
-                        subscription: (&subscription_id).into(),
-                        result: methods::ChainHeadBodyEvent::Disjoint {},
-                    }
-                    .to_json_call_object_parameters(None)
-                };
-
-                requests_subscriptions
-                    .set_queued_notification(&request_id.1, &subscription_id, 0, response)
-                    .await;
+                    requests_subscriptions
+                        .set_queued_notification(
+                            &request_id.1,
+                            &subscription_id,
+                            0,
+                            methods::ServerToClient::chainHead_unstable_bodyEvent {
+                                subscription: (&subscription_id).into(),
+                                result: methods::ChainHeadBodyEvent::Disjoint {},
+                            }
+                            .to_json_call_object_parameters(None),
+                        )
+                        .await;
+                }
             }
         });
     }
@@ -1408,7 +1433,7 @@ impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
                     )
                     .await;
 
-                let response = match block_scale_encoded_header
+                match block_scale_encoded_header
                     .as_ref()
                     .map(|h| header::decode(h, sync_service.block_number_bytes()))
                 {
@@ -1427,7 +1452,11 @@ impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
                         );
                         futures::pin_mut!(future);
 
-                        let requests_subscriptions = Arc::downgrade(&requests_subscriptions);
+                        let requests_subscriptions = {
+                            let weak = Arc::downgrade(&requests_subscriptions);
+                            drop(requests_subscriptions);
+                            weak
+                        };
 
                         loop {
                             let outcome = {
@@ -1452,25 +1481,34 @@ impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
                                     debug_assert_eq!(values.len(), 1);
                                     let value = values.into_iter().next().unwrap();
                                     let output = value.map(|v| methods::HexString(v).to_string());
-                                    break methods::ServerToClient::chainHead_unstable_storageEvent {
-                                        subscription: (&subscription_id).into(),
-                                        result: methods::ChainHeadStorageEvent::Done {
-                                            value: output,
-                                        },
-                                    }
-                                    .to_json_call_object_parameters(None)
+
+                                    requests_subscriptions.set_queued_notification(
+                                        &request_id.1,
+                                        &subscription_id,
+                                        0,
+                                        methods::ServerToClient::chainHead_unstable_storageEvent {
+                                            subscription: (&subscription_id).into(),
+                                            result: methods::ChainHeadStorageEvent::Done {
+                                                value: output,
+                                            },
+                                        }
+                                        .to_json_call_object_parameters(None)
+                                    ).await;
                                 }
                                 either::Left(Err(_)) => {
-                                    break methods::ServerToClient::chainHead_unstable_storageEvent {
-                                        subscription: (&subscription_id).into(),
-                                        result: methods::ChainHeadStorageEvent::Inaccessible {},
-                                    }
-                                    .to_json_call_object_parameters(None)
+                                    requests_subscriptions.set_queued_notification(
+                                        &request_id.1,
+                                        &subscription_id,
+                                        0,
+                                        methods::ServerToClient::chainHead_unstable_storageEvent {
+                                            subscription: (&subscription_id).into(),
+                                            result: methods::ChainHeadStorageEvent::Inaccessible {},
+                                        }
+                                        .to_json_call_object_parameters(None)
+                                    ).await;
                                 }
                                 either::Right((
-                                    SubscriptionMessage::StopIfChainHeadBody {
-                                        stop_request_id,
-                                    },
+                                    SubscriptionMessage::StopIfChainHeadBody { stop_request_id },
                                     confirmation_sender,
                                 )) => {
                                     requests_subscriptions
@@ -1491,23 +1529,37 @@ impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
                             }
                         }
                     }
-                    Some(Err(err)) => methods::ServerToClient::chainHead_unstable_storageEvent {
-                        subscription: (&subscription_id).into(),
-                        result: methods::ChainHeadStorageEvent::Error {
-                            error: err.to_string().into(),
-                        },
+                    Some(Err(err)) => {
+                        requests_subscriptions
+                            .set_queued_notification(
+                                &request_id.1,
+                                &subscription_id,
+                                0,
+                                methods::ServerToClient::chainHead_unstable_storageEvent {
+                                    subscription: (&subscription_id).into(),
+                                    result: methods::ChainHeadStorageEvent::Error {
+                                        error: err.to_string().into(),
+                                    },
+                                }
+                                .to_json_call_object_parameters(None),
+                            )
+                            .await;
                     }
-                    .to_json_call_object_parameters(None),
-                    None => methods::ServerToClient::chainHead_unstable_storageEvent {
-                        subscription: (&subscription_id).into(),
-                        result: methods::ChainHeadStorageEvent::Disjoint {},
+                    None => {
+                        requests_subscriptions
+                            .set_queued_notification(
+                                &request_id.1,
+                                &subscription_id,
+                                0,
+                                methods::ServerToClient::chainHead_unstable_storageEvent {
+                                    subscription: (&subscription_id).into(),
+                                    result: methods::ChainHeadStorageEvent::Disjoint {},
+                                }
+                                .to_json_call_object_parameters(None),
+                            )
+                            .await;
                     }
-                    .to_json_call_object_parameters(None),
                 };
-
-                requests_subscriptions
-                    .set_queued_notification(&request_id.1, &subscription_id, 0, response)
-                    .await;
             }
         });
     }
@@ -1560,7 +1612,7 @@ impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
                     )
                     .await;
 
-                let pre_runtime_call = if let Some(pre_runtime_call) = &pre_runtime_call {
+                let (pre_runtime_call, requests_subscriptions) = if let Some(pre_runtime_call) = &pre_runtime_call {
                     let call_future = pre_runtime_call.start(
                         &function_to_call,
                         iter::once(&call_parameters.0),
@@ -1573,7 +1625,11 @@ impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
                     );
                     futures::pin_mut!(call_future);
 
-                    let requests_subscriptions = Arc::downgrade(&requests_subscriptions);
+                    let requests_subscriptions = {
+                        let weak = Arc::downgrade(&requests_subscriptions);
+                        drop(requests_subscriptions);
+                        weak
+                    };
 
                     loop {
                         let outcome = {
@@ -1591,7 +1647,7 @@ impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
                         };
 
                         match outcome {
-                            either::Left(outcome) => break Some(outcome),
+                            either::Left(outcome) => break (Some(outcome), requests_subscriptions),
                             either::Right((
                                 SubscriptionMessage::StopIfChainHeadCall {
                                     stop_request_id,
@@ -1616,7 +1672,7 @@ impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
                         }
                     }
                 } else {
-                    None
+                    (None, requests_subscriptions)
                 };
 
                 let final_notif = match pre_runtime_call {
