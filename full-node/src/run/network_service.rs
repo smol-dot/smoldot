@@ -74,6 +74,9 @@ pub struct Config<'a> {
     /// List of block chains to be connected to.
     pub chains: Vec<ChainConfig>,
 
+    /// Value sent back for the agent version when receiving an identification request.
+    pub identify_agent_version: String,
+
     /// Key used for the encryption layer.
     /// This is a Noise static key, according to the Noise specification.
     /// Signed using the actual libp2p key.
@@ -143,6 +146,9 @@ pub struct NetworkService {
 struct Inner {
     /// Fields behind a mutex.
     guarded: Mutex<Guarded>,
+
+    /// Value provided through [`Config::identify_agent_version`].
+    identify_agent_version: String,
 
     /// Event to notify when the background task needs to be waken up.
     ///
@@ -274,6 +280,7 @@ impl NetworkService {
                     *network.noise_key().libp2p_public_ed25519_key(),
                 )
                 .into_peer_id(),
+                identify_agent_version: config.identify_agent_version,
                 wake_up_main_background_task: event_listener::Event::new(),
                 databases,
                 guarded: Mutex::new(Guarded {
@@ -896,7 +903,9 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                     request_id,
                 } => {
                     log::debug!("identify-request; peer_id={}", peer_id);
-                    guarded.network.respond_identify(request_id, "smoldot");
+                    guarded
+                        .network
+                        .respond_identify(request_id, &inner.identify_agent_version);
                 }
                 service::Event::BlocksRequestIn {
                     peer_id,
