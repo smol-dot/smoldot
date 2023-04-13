@@ -106,13 +106,13 @@ pub struct ClientConfig {
     /// The first parameter is the name of the task, which can be useful for debugging purposes.
     pub tasks_spawner: Box<dyn Fn(String, future::BoxFuture<'static, ()>) + Send + Sync>,
 
-    /// Value returned when a JSON-RPC client requests the name of the client. Reasonable value
-    /// is `env!("CARGO_PKG_NAME")`.
-    pub system_name: String,
+    /// Value returned when a JSON-RPC client requests the name of the client, or when a peer
+    /// performs an identification request. Reasonable value is `env!("CARGO_PKG_NAME")`.
+    pub client_name: String,
 
-    /// Value returned when a JSON-RPC client requests the version of the client. Reasonable value
-    /// is `env!("CARGO_PKG_VERSION")`.
-    pub system_version: String,
+    /// Value returned when a JSON-RPC client requests the version of the client, or when a peer
+    /// performs an identification request. Reasonable value is `env!("CARGO_PKG_VERSION")`.
+    pub client_version: String,
 }
 
 /// See [`Client::add_chain`].
@@ -178,13 +178,11 @@ pub struct Client<TPlat: platform::Platform, TChain = ()> {
     // TODO: use SipHasher
     chains_by_key: HashMap<ChainKey, RunningChain<TPlat>, fnv::FnvBuildHasher>,
 
-    /// Value to return when the `system_name` RPC is called. Should be set to the name of the
-    /// final executable.
-    system_name: String,
+    /// See [`ClientConfig::client_name`].
+    client_name: String,
 
-    /// Value to return when the `system_version` RPC is called. Should be set to the version of
-    /// the final executable.
-    system_version: String,
+    /// See [`ClientConfig::client_version`].
+    client_version: String,
 }
 
 struct PublicApiChain<TChain> {
@@ -322,8 +320,8 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
             spawn_new_task: config.tasks_spawner.into(),
             public_api_chains: slab::Slab::with_capacity(expected_chains),
             chains_by_key: HashMap::with_capacity_and_hasher(expected_chains, Default::default()),
-            system_name: config.system_name,
-            system_version: config.system_version,
+            client_name: config.client_name,
+            client_version: config.client_version,
         }
     }
 
@@ -825,8 +823,8 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
             });
 
             let spawn_new_task = self.spawn_new_task.clone();
-            let system_name = self.system_name.clone();
-            let system_version = self.system_version.clone();
+            let system_name = self.client_name.clone();
+            let system_version = self.client_version.clone();
 
             let init_future = async move {
                 // Wait for the chain to finish initializing before starting the JSON-RPC service.

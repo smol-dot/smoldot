@@ -36,8 +36,8 @@ fn main() {
         tasks_spawner: Box::new(move |_name, task| {
             async_std::task::spawn(task);
         }),
-        system_name: env!("CARGO_PKG_NAME").into(),
-        system_version: env!("CARGO_PKG_VERSION").into(),
+        client_name: env!("CARGO_PKG_NAME").into(),
+        client_version: env!("CARGO_PKG_VERSION").into(),
     });
 
     // Ask the client to connect to a chain.
