@@ -1084,7 +1084,65 @@ fn feature_disabled_tail_call() {
     }
 }
 
-// TODO: check that the SIMD feature is disabled: https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md
+#[test]
+fn feature_disabled_simd128() {
+    let module_bytes = wat::parse_str(
+        r#"(module
+            (type (;0;) (func (param i32) (result i64)))
+            (type (;1;) (func (param i32 i32 i32)))
+            (func (;0;) (type 0) (param i32) (result i64)
+              local.get 0
+              i64.load)
+            (func (;1;) (type 1) (param i32 i32 i32)
+              local.get 0
+              v128.const i32x4 0x00000000 0x00000000 0x00000000 0x00000000
+              local.get 1
+              i32x4.replace_lane 0
+              local.get 2
+              i32x4.replace_lane 2
+              v128.store)
+            (func (;2;) (type 0) (param i32) (result i64)
+              (local i32 i64)
+              global.get 0
+              i32.const 16
+              i32.sub
+              local.tee 1
+              global.set 0
+              local.get 1
+              local.get 0
+              local.get 0
+              call 1
+              local.get 1
+              call 0
+              local.set 2
+              local.get 1
+              i32.const 16
+              i32.add
+              global.set 0
+              local.get 2)
+            (table (;0;) 1 1 funcref)
+            (memory (;0;) 16)
+            (global (;0;) (mut i32) (i32.const 1048576))
+            (global (;1;) i32 (i32.const 1048576))
+            (global (;2;) i32 (i32.const 1048576))
+            (export "memory" (memory 0))
+            (export "test" (func 2))
+            (export "__data_end" (global 1))
+            (export "__heap_base" (global 2)))
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        assert!(super::VirtualMachinePrototype::new(super::Config {
+            module_bytes: &module_bytes,
+            exec_hint,
+            symbols: &mut |_, _, _| Ok(0),
+        })
+        .is_err());
+    }
+}
+
 // TODO: check that the extended-const feature is disabled: https://github.com/WebAssembly/extended-const/blob/master/proposals/extended-const/Overview.md
 
 // TODO: test for memory reads and writes, including within host functions

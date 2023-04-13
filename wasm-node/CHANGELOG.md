@@ -5,18 +5,24 @@
 ### Changed
 
 - As NodeJS v14 reaches its end of life on April 30th 2023, the minimum NodeJS version required to run smoldot is now v16. The smoldot Wasm binary now has SIMD enabled, meaning that the minimum Deno version required to run smoldot is now v1.9.
+- When receiving an identify request through the libp2p protocol, smoldot now sends back `smoldot-light-wasm vX.X.X` (with proper version numbers) as its agent name and version, instead of previously just `smoldot`. ([#417](https://github.com/smol-dot/smoldot/pull/417))
+
+## 1.0.2 - 2023-04-12
+
+### Changed
+
 - Removed support for the `ls` message in the multistream-select protocol, in accordance with the rest of the libp2p ecosystem. This message was in practice never used, and removing support for it simplifies the implementation. ([#379](https://github.com/smol-dot/smoldot/pull/379))
 - Yamux now considers answering pings in the wrong order as invalid. ([#383](https://github.com/smol-dot/smoldot/pull/383))
 
 ### Fixed
 
+- Fix the JSON-RPC service not being deallocated when a chain is removed with some subscriptions still active. ([#408](https://github.com/smol-dot/smoldot/pull/408), [#410](https://github.com/smol-dot/smoldot/pull/410), [#409](https://github.com/smol-dot/smoldot/pull/409))
+- Calling the `chainHead_unstable_call`, `chainHead_unstable_storage`, or `chainHead_unstable_body` JSON-RPC functions with the hash of an unpinned block no longer silently kills the `chainHead_follow` subscription. ([#409](https://github.com/smol-dot/smoldot/pull/409))
+- No longer generate a `chainHead_unstable_followEvent` notification with a `stop` event in response to a call to `chainHead_unstable_unfollow`. ([#409](https://github.com/smol-dot/smoldot/pull/409))
 - Fix a potential undefined behavior in the way the Rust and JavaScript communicate. ([#396](https://github.com/smol-dot/smoldot/pull/396))
 - Properly check whether Yamux substream IDs allocated by the remote are valid. ([#383](https://github.com/smol-dot/smoldot/pull/383))
 - Fix the size of the data of Yamux frames with the `SYN` flag not being verified against the allowed credits. ([#383](https://github.com/smol-dot/smoldot/pull/383))
 - Fix Yamux repeatedly sending empty data frames when the allowed window size is 0. ([#383](https://github.com/smol-dot/smoldot/pull/383))
-
-### Fixed
-
 - Post-MVP WebAssembly features are now properly disabled when compiling runtimes. This rejects runtimes that Substrate would consider as invalid as well. ([#386](https://github.com/smol-dot/smoldot/pull/386))
 
 ## 1.0.1 - 2023-03-29

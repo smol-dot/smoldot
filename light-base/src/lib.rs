@@ -106,13 +106,13 @@ pub struct ClientConfig {
     /// The first parameter is the name of the task, which can be useful for debugging purposes.
     pub tasks_spawner: Box<dyn Fn(String, future::BoxFuture<'static, ()>) + Send + Sync>,
 
-    /// Value returned when a JSON-RPC client requests the name of the client. Reasonable value
-    /// is `env!("CARGO_PKG_NAME")`.
-    pub system_name: String,
+    /// Value returned when a JSON-RPC client requests the name of the client, or when a peer
+    /// performs an identification request. Reasonable value is `env!("CARGO_PKG_NAME")`.
+    pub client_name: String,
 
-    /// Value returned when a JSON-RPC client requests the version of the client. Reasonable value
-    /// is `env!("CARGO_PKG_VERSION")`.
-    pub system_version: String,
+    /// Value returned when a JSON-RPC client requests the version of the client, or when a peer
+    /// performs an identification request. Reasonable value is `env!("CARGO_PKG_VERSION")`.
+    pub client_version: String,
 }
 
 /// See [`Client::add_chain`].
@@ -178,13 +178,11 @@ pub struct Client<TPlat: platform::Platform, TChain = ()> {
     // TODO: use SipHasher
     chains_by_key: HashMap<ChainKey, RunningChain<TPlat>, fnv::FnvBuildHasher>,
 
-    /// Value to return when the `system_name` RPC is called. Should be set to the name of the
-    /// final executable.
-    system_name: String,
+    /// See [`ClientConfig::client_name`].
+    client_name: String,
 
-    /// Value to return when the `system_version` RPC is called. Should be set to the version of
-    /// the final executable.
-    system_version: String,
+    /// See [`ClientConfig::client_version`].
+    client_version: String,
 }
 
 struct PublicApiChain<TChain> {
@@ -322,8 +320,8 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
             spawn_new_task: config.tasks_spawner.into(),
             public_api_chains: slab::Slab::with_capacity(expected_chains),
             chains_by_key: HashMap::with_capacity_and_hasher(expected_chains, Default::default()),
-            system_name: config.system_name,
-            system_version: config.system_version,
+            client_name: config.client_name,
+            client_version: config.client_version,
         }
     }
 
@@ -634,6 +632,10 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                 // peer-to-peer network.
                 let network_noise_key = connection::NoiseKey::new(&rand::random());
 
+                // Version of the client when requested through the networking.
+                let network_identify_agent_version =
+                    format!("{} {}", self.client_name, self.client_version);
+
                 // Spawn a background task that initializes the services of the new chain and
                 // yields a `ChainServices`.
                 let running_chain_init_future: future::RemoteHandle<ChainServices<TPlat>> = {
@@ -675,6 +677,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                                 .scale_encoding_vec(chain_spec.block_number_bytes().into()),
                             chain_spec,
                             relay_chain.as_ref().map(|(r, _)| r),
+                            network_identify_agent_version,
                             network_noise_key,
                         )
                         .await;
@@ -825,8 +828,8 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
             });
 
             let spawn_new_task = self.spawn_new_task.clone();
-            let system_name = self.system_name.clone();
-            let system_version = self.system_version.clone();
+            let system_name = self.client_name.clone();
+            let system_version = self.client_version.clone();
 
             let init_future = async move {
                 // Wait for the chain to finish initializing before starting the JSON-RPC service.
@@ -1001,6 +1004,7 @@ async fn start_services<TPlat: platform::Platform>(
     genesis_block_scale_encoded_header: Vec<u8>,
     chain_spec: chain_spec::ChainSpec,
     relay_chain: Option<&ChainServices<TPlat>>,
+    network_identify_agent_version: String,
     network_noise_key: connection::NoiseKey,
 ) -> ChainServices<TPlat> {
     // Since `network_noise_key` is moved out below, use it to build the network identity ahead
@@ -1016,6 +1020,7 @@ async fn start_services<TPlat: platform::Platform>(
                 move |name, fut| spawn_new_task(name, fut)
             }),
             num_events_receivers: 1, // Configures the length of `network_event_receivers`
+            identify_agent_version: network_identify_agent_version,
             noise_key: network_noise_key,
             chains: vec![network_service::ConfigChain {
                 log_name: log_name.clone(),

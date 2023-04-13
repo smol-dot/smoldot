@@ -958,6 +958,7 @@ impl<T> Yamux<T> {
                                 remote_write_closed: remote_write_closed @ false,
                                 local_write_close,
                                 write_queue,
+                                remote_window_pending_increase,
                                 ..
                             },
                         ..
@@ -968,6 +969,9 @@ impl<T> Yamux<T> {
                     if matches!(*local_write_close, SubstreamStateLocalWrite::FinQueued)
                         && write_queue.is_empty()
                     {
+                        let _was_in = self.inner.outgoing_req_substreams.remove(&substream_id.0);
+                        debug_assert_eq!(*remote_window_pending_increase != 0, _was_in);
+
                         let _was_inserted = self.inner.dead_substreams.insert(substream_id.0);
                         debug_assert!(_was_inserted);
                     }
@@ -1590,6 +1594,7 @@ impl<T> Yamux<T> {
                                 ..
                             } = self.inner.substreams.get(&id.0).unwrap().state
                             {
+                                debug_assert!(!self.inner.outgoing_req_substreams.contains(&id.0));
                                 let _was_inserted = self.inner.dead_substreams.insert(id.0);
                                 debug_assert!(_was_inserted);
                             }
@@ -1668,6 +1673,8 @@ impl<T> Yamux<T> {
                         .choose(&mut self.inner.randomness)
                         .cloned()
                     {
+                        debug_assert!(!self.inner.dead_substreams.contains(&substream_id));
+
                         let sub = self.inner.substreams.get_mut(&substream_id).unwrap();
 
                         let SubstreamState::Healthy {

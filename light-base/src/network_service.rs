@@ -69,6 +69,9 @@ pub struct Config {
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 
+    /// Value sent back for the agent version when receiving an identification request.
+    pub identify_agent_version: String,
+
     /// Key to use for the encryption layer of all the connections. Gives the node its identity.
     pub noise_key: connection::NoiseKey,
 
@@ -125,6 +128,9 @@ pub struct NetworkService<TPlat: Platform> {
 struct Shared<TPlat: Platform> {
     /// Fields protected by a mutex.
     guarded: Mutex<SharedGuarded<TPlat>>,
+
+    /// Value provided through [`Config::identify_agent_version`].
+    identify_agent_version: String,
 
     /// Names of the various chains the network service connects to. Used only for logging
     /// purposes.
@@ -272,6 +278,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                     Default::default(),
                 ),
             }),
+            identify_agent_version: config.identify_agent_version,
             log_chain_names,
             wake_up_main_background_task: event_listener::Event::new(),
         });
@@ -1222,7 +1229,9 @@ async fn update_round<TPlat: Platform>(
                         "Connection({}) => IdentifyRequest",
                         peer_id,
                     );
-                    guarded.network.respond_identify(request_id, "smoldot");
+                    guarded
+                        .network
+                        .respond_identify(request_id, &shared.identify_agent_version);
                 }
                 service::Event::BlocksRequestIn { .. } => unreachable!(),
                 service::Event::RequestInCancel { .. } => {
