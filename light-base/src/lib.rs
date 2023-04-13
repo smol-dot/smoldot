@@ -632,6 +632,10 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                 // peer-to-peer network.
                 let network_noise_key = connection::NoiseKey::new(&rand::random());
 
+                // Version of the client when requested through the networking.
+                let network_identify_agent_version =
+                    format!("{} {}", self.client_name, self.client_version);
+
                 // Spawn a background task that initializes the services of the new chain and
                 // yields a `ChainServices`.
                 let running_chain_init_future: future::RemoteHandle<ChainServices<TPlat>> = {
@@ -673,6 +677,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                                 .scale_encoding_vec(chain_spec.block_number_bytes().into()),
                             chain_spec,
                             relay_chain.as_ref().map(|(r, _)| r),
+                            network_identify_agent_version,
                             network_noise_key,
                         )
                         .await;
@@ -999,6 +1004,7 @@ async fn start_services<TPlat: platform::Platform>(
     genesis_block_scale_encoded_header: Vec<u8>,
     chain_spec: chain_spec::ChainSpec,
     relay_chain: Option<&ChainServices<TPlat>>,
+    network_identify_agent_version: String,
     network_noise_key: connection::NoiseKey,
 ) -> ChainServices<TPlat> {
     // Since `network_noise_key` is moved out below, use it to build the network identity ahead
@@ -1014,6 +1020,7 @@ async fn start_services<TPlat: platform::Platform>(
                 move |name, fut| spawn_new_task(name, fut)
             }),
             num_events_receivers: 1, // Configures the length of `network_event_receivers`
+            identify_agent_version: network_identify_agent_version,
             noise_key: network_noise_key,
             chains: vec![network_service::ConfigChain {
                 log_name: log_name.clone(),

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- When receiving an identify request through the libp2p protocol, smoldot now sends back `smoldot-light-wasm vX.X.X` (with proper version numbers) as its agent name and version, instead of previously just `smoldot`.
+
 ## 1.0.2 - 2023-04-12
 
 ### Changed
