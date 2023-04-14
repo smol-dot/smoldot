@@ -66,6 +66,20 @@ fn basic_seems_to_work() {
 }
 
 #[test]
+fn wat_not_accepted() {
+    for exec_hint in super::ExecHint::available_engines() {
+        assert!(matches!(
+            super::VirtualMachinePrototype::new(super::Config {
+                module_bytes: b"(module)",
+                exec_hint,
+                symbols: &mut |_, _, _| Ok(0)
+            }),
+            Err(super::NewErr::InvalidWasm(_))
+        ));
+    }
+}
+
+#[test]
 fn out_of_memory_access() {
     for exec_hint in super::ExecHint::available_engines() {
         let module_bytes = [
