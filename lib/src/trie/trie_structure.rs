@@ -23,7 +23,7 @@
 use super::nibble::Nibble;
 
 use alloc::{borrow::ToOwned as _, vec, vec::Vec};
-use core::{fmt, iter, mem};
+use core::{cmp, fmt, iter, mem, ops};
 use either::Either;
 use slab::Slab;
 
@@ -310,7 +310,7 @@ impl<TUd> TrieStructure<TUd> {
     /// Inner implementation of [`TrieStructure::existing_node`]. Traverses the tree, trying to
     /// find a node whose key is `key`.
     fn existing_node_inner<I: Iterator<Item = Nibble> + Clone>(
-        &mut self,
+        &self,
         mut key: I,
     ) -> ExistingNodeInnerResult<I> {
         let mut current_index = match self.root_index {
@@ -593,6 +593,176 @@ impl<TUd> TrieStructure<TUd> {
                 return false;
             }
         }
+    }
+
+    /// Returns all nodes whose full key is within the given range, in lexicographic order.
+    fn range_inner(
+        &self,
+        start_bound: ops::Bound<impl Iterator<Item = Nibble> + Clone>,
+        end_bound: ops::Bound<impl Iterator<Item = Nibble> + Clone>,
+    ) -> impl Iterator<Item = usize> + '_ {
+        // Start by processing the end bound to obtain an "end key".
+        // This end key is always assumed to be excluded. In other words, only keys strictly
+        // inferior to the end key are returned. If the user provides `Included`, we modify the key
+        // and append a dummy `0` nibble at the end of it. If the user provides `Unbounded`, we use
+        // an infinite-sized key so that every finite key is always inferior to it.
+        //
+        // The algorithm below will pop nibbles from the start of `end_key`.
+        // Because `end_key` is always excluded, this iterator must always contain at least one
+        // nibble, otherwise the iteration should have ended.
+        let mut end_key = match end_bound {
+            ops::Bound::Unbounded => either::Left(iter::repeat(Nibble::max())),
+            ops::Bound::Excluded(end_key) => either::Right(end_key.chain(None.into_iter())),
+            ops::Bound::Included(end_key) => {
+                either::Right(end_key.chain(Some(Nibble::zero()).into_iter()))
+            }
+        }
+        .peekable();
+
+        // The code below creates a variable named `iter`. This `iter` represents the cursor
+        // where the iterator is and the next node to return.
+        // If `iter` also contains an optional nibble. If this optional nibble is `None`, the
+        // iteration is with the node itself. If it is `Some`, the iteration isn't at the node but
+        // at its child (if any) of the given nibble.
+        let mut iter: (usize, Option<Nibble>) = match self.root_index {
+            Some(idx) => (idx, None),
+            None => {
+                // Trie is empty. Special case.
+                return either::Right(iter::empty());
+            }
+        };
+
+        // Equal to `len(iter) - len(iter ∩ end_key)`. In other words, the number of nibbles in
+        // iter's key (starting from the end) that do not match the end key. This also includes
+        // the optional nibble within `iter` (if any).
+        let mut iter_key_nibbles_extra: usize = 0;
+
+        // Iterate down the tree, updating the variables above, in order to find
+        // (using `start_bound`) the first node that the iterator must yield.
+        let (mut start_key, start_bound_is_included) = match start_bound {
+            ops::Bound::Unbounded => (either::Right(iter::empty()), true),
+            ops::Bound::Included(k) => (either::Left(k), true),
+            ops::Bound::Excluded(k) => (either::Left(k), false),
+            _ => unreachable!(),
+        };
+
+        'search: loop {
+            let node = self.nodes.get(iter.0).unwrap();
+
+            // First, we must remove `node`'s partial key from `key`, making sure that
+            // they match.
+            let mut pending_iter_key_nibbles_extra = 0;
+            for nibble in node.partial_key.iter().cloned() {
+                let start_key_next_nibble = start_key.next();
+
+                if start_key_next_nibble != Some(nibble) {
+                    // The partial key of `current` doesn't match `start_key`. Stop the
+                    // search entirely and rely on existing value of `iter`.
+                    break 'search;
+                }
+
+                if start_key_next_nibble == end_key.peek().copied() {}
+            }
+
+            if iter.1.is_none() {
+                // If `key.next()` is `Some`, put it in `iter.1`, otherwise return
+                // successfully.
+                match start_key.next() {
+                    Some(n) => iter.1 = Some(n),
+                    None => {
+                        // `iter` is an exact match with `start_key`. If the starting
+                        // bound is `Excluded`, we don't want to start iterating at `iter`
+                        // but at `next(iter)`, which we do by adding a zero nibble
+                        // afterwards.
+                        iter.1 = if start_bound_is_included {
+                            None
+                        } else {
+                            Some(Nibble::zero())
+                        };
+                        break 'search;
+                    }
+                };
+            }
+        }
+
+        either::Left(iter::from_fn(move || {
+            debug_assert!(end_key.peek().is_some());
+
+            let Some(mut iter_child_index) = iter.1 else {
+                // Can only happen at the first iteration.
+                iter.1 = Some(Nibble::zero());
+                iter_key_nibbles_extra += 1;
+                return Some(iter.0);
+            };
+
+            let mut go_to_parent = false;
+
+            loop {
+                let node = self.nodes.get(iter.0).unwrap();
+
+                if go_to_parent {
+                    // End the iterator if we were about to jump out of the end bound.
+                    if iter_key_nibbles_extra < 1 + node.partial_key.len() {
+                        return None;
+                    }
+
+                    let Some((parent_node_index, parent_nibble_direction)) = node.parent else { return None; };
+                    iter_key_nibbles_extra -= 1;
+                    iter_key_nibbles_extra -= node.partial_key.len();
+                    iter_node_index = parent_node_index;
+                    iter_child_index = match parent_nibble_direction.checked_add(1) {
+                        Some(idx) => idx,
+                        None => continue,
+                    };
+                }
+
+                // Note: there's no need to set `go_to_parent` to `false` because its value is
+                // never read again below.
+
+                loop {
+                    // If iter's key exactly matches the end bound, refuse to jump to the next
+                    // sibling.
+                    if iter_key_nibbles_extra == 0 && end_key.peek().is_none() {
+                        iter = None;
+                        return None;
+                    }
+
+                    if let Some(child) = node.children[usize::from(u8::from(iter_child_index))] {
+                        for nibble in self
+                            .nodes
+                            .get(child)
+                            .unwrap()
+                            .partial_key
+                            .iter()
+                            .copied()
+                            .chain(iter::once(Nibble::zero()))
+                        {
+                            debug_assert!(end_key.peek().is_some());
+                            if iter_key_nibbles_extra == 0
+                                && Some(nibble) == end_key.peek().copied()
+                            {
+                                let _ = end_key.next();
+                                if end_key.peek().is_none() {
+                                    iter = None;
+                                    return None;
+                                }
+                            } else {
+                                iter_key_nibbles_extra += 1;
+                            }
+                        }
+
+                        iter = Some((child, Some(Nibble::zero())));
+                        return Some(child);
+                    } else if let Some(next_attempt) = iter_child_index.checked_add(1) {
+                        iter_child_index = next_attempt;
+                    } else {
+                        // No more children. Jump back to parent and next sibling.
+                        go_to_parent = true;
+                        break;
+                    }
+                }
+            }
+        }))
     }
 
     /// Iterates over all nodes of the trie, in a specific but unspecified order.

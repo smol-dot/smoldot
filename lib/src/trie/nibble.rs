@@ -21,6 +21,25 @@ use core::fmt;
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Nibble(u8);
 
+impl Nibble {
+    /// Returns the equivalent of `Nibble::try_from(0).unwrap()`.
+    pub fn zero() -> Self {
+        Nibble(0)
+    }
+
+    pub fn max() -> Self {
+        Nibble(15)
+    }
+
+    pub fn checked_add(self, val: u8) -> Option<Self> {
+        let new_nibble = self.0.checked_add(val)?;
+        if new_nibble >= 16 {
+            return None;
+        }
+        Some(Nibble(new_nibble))
+    }
+}
+
 impl TryFrom<u8> for Nibble {
     type Error = NibbleFromU8Error;
 
