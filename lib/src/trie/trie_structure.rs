@@ -20,10 +20,12 @@
 //!
 //! See the [`TrieStructure`] struct.
 
-use super::nibble::Nibble;
+// TODO: the API of `TrieStructure` is rather wonky and could be simplified
+
+use super::{bytes_to_nibbles, nibble::Nibble};
 
 use alloc::{borrow::ToOwned as _, vec, vec::Vec};
-use core::{fmt, iter, mem};
+use core::{fmt, iter, mem, ops};
 use either::Either;
 use slab::Slab;
 
@@ -164,6 +166,11 @@ impl<TUd> TrieStructure<TUd> {
     /// Returns a list of all nodes in the structure, without any specific order.
     pub fn iter_unordered(&'_ self) -> impl Iterator<Item = NodeIndex> + '_ {
         self.nodes.iter().map(|(k, _)| NodeIndex(k))
+    }
+
+    /// Returns a list of all nodes in the structure in lexicographic order of keys.
+    pub fn iter_ordered(&'_ self) -> impl Iterator<Item = NodeIndex> + '_ {
+        self.all_node_lexicographic_ordered(None).map(NodeIndex)
     }
 
     /// Returns the root node of the trie, or `None` if the trie is empty.
@@ -310,7 +317,7 @@ impl<TUd> TrieStructure<TUd> {
     /// Inner implementation of [`TrieStructure::existing_node`]. Traverses the tree, trying to
     /// find a node whose key is `key`.
     fn existing_node_inner<I: Iterator<Item = Nibble> + Clone>(
-        &mut self,
+        &self,
         mut key: I,
     ) -> ExistingNodeInnerResult<I> {
         let mut current_index = match self.root_index {
@@ -566,8 +573,8 @@ impl<TUd> TrieStructure<TUd> {
             return false;
         }
 
-        let mut me_iter = self.all_nodes_ordered();
-        let mut other_iter = other.all_nodes_ordered();
+        let mut me_iter = self.all_node_lexicographic_ordered(None);
+        let mut other_iter = other.all_node_lexicographic_ordered(None);
 
         loop {
             let (me_node_idx, other_node_idx) = match (me_iter.next(), other_iter.next()) {
@@ -595,8 +602,14 @@ impl<TUd> TrieStructure<TUd> {
         }
     }
 
-    /// Iterates over all nodes of the trie, in a specific but unspecified order.
-    fn all_nodes_ordered(&'_ self) -> impl Iterator<Item = usize> + '_ {
+    /// Iterates over all nodes of the trie in a lexicographic order.
+    ///
+    /// If `start_node` is `Some`, the iteration always starts with the given node. If `None`, the
+    /// iteration always starts with the root node.
+    fn all_node_lexicographic_ordered(
+        &'_ self,
+        start_node: Option<usize>,
+    ) -> impl Iterator<Item = usize> + '_ {
         fn ancestry_order_next<TUd>(tree: &TrieStructure<TUd>, node_index: usize) -> Option<usize> {
             if let Some(first_child) = tree
                 .nodes
@@ -623,7 +636,9 @@ impl<TUd> TrieStructure<TUd> {
             return_value
         }
 
-        iter::successors(self.root_index, move |n| ancestry_order_next(self, *n))
+        iter::successors(start_node.or(self.root_index), move |n| {
+            ancestry_order_next(self, *n)
+        })
     }
 
     /// Returns the [`NodeAccess`] of the node at the given index, or `None` if no such node
@@ -695,6 +710,69 @@ impl<TUd> TrieStructure<TUd> {
         }
 
         Some(self.node_full_key(node_index.0))
+    }
+
+    /// Returns a list of all nodes in the structure in lexicographic order of keys.
+    #[inline] // Given that the bounds are often hard-coded, it seems better to inline this function.
+    pub fn range(
+        &'_ self,
+        range: impl ops::RangeBounds<[u8]>,
+    ) -> impl Iterator<Item = NodeIndex> + '_ {
+        let start_bound = range.start_bound();
+        let end_bound = range.end_bound();
+
+        let (start, skip_first) = match start_bound {
+            ops::Bound::Included(key) | ops::Bound::Excluded(key) => {
+                match self.existing_node_inner(bytes_to_nibbles(key.iter().copied())) {
+                    ExistingNodeInnerResult::Found { node_index, .. } => (
+                        Some(node_index),
+                        matches!(start_bound, ops::Bound::Excluded(_)),
+                    ),
+                    ExistingNodeInnerResult::NotFound {
+                        closest_ancestor: Some((node_index, _)),
+                    } => (Some(node_index), true),
+                    ExistingNodeInnerResult::NotFound {
+                        closest_ancestor: None,
+                    } => (None, false),
+                }
+            }
+            ops::Bound::Unbounded => (None, false),
+        };
+
+        let (end, include_end) = match end_bound {
+            ops::Bound::Included(key) | ops::Bound::Excluded(key) => {
+                match self.existing_node_inner(bytes_to_nibbles(key.iter().copied())) {
+                    ExistingNodeInnerResult::Found { node_index, .. } => (
+                        Some(node_index),
+                        matches!(start_bound, ops::Bound::Included(_)),
+                    ),
+                    ExistingNodeInnerResult::NotFound {
+                        closest_ancestor: Some((node_index, _)),
+                    } => (Some(node_index), true),
+                    ExistingNodeInnerResult::NotFound {
+                        closest_ancestor: None,
+                    } => (None, false),
+                }
+            }
+            ops::Bound::Unbounded => (None, false),
+        };
+
+        self.all_node_lexicographic_ordered(start)
+            .skip(if skip_first { 1 } else { 0 })
+            .take_while({
+                let mut previous_matched_end = false;
+                move |index| {
+                    if previous_matched_end {
+                        return false;
+                    }
+                    previous_matched_end = end.map_or(false, |end| *index == end);
+                    if previous_matched_end && !include_end {
+                        return false;
+                    }
+                    true
+                }
+            })
+            .map(NodeIndex)
     }
 
     /// Returns the full key of the node with the given index.
@@ -780,7 +858,7 @@ impl<TUd: fmt::Debug> fmt::Debug for TrieStructure<TUd> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_list()
             .entries(
-                self.all_nodes_ordered()
+                self.all_node_lexicographic_ordered(None)
                     .map(|idx| (idx, self.nodes.get(idx).unwrap())),
             )
             .finish()
@@ -1079,6 +1157,11 @@ impl<'a, TUd> StorageNodeAccess<'a, TUd> {
             .partial_key
             .iter()
             .cloned()
+    }
+
+    /// Returns the user data associated to this node.
+    pub fn into_user_data(self) -> &'a mut TUd {
+        &mut self.trie.nodes.get_mut(self.node_index).unwrap().user_data
     }
 
     /// Returns the user data associated to this node.
