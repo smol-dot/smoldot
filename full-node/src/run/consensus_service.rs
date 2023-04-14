@@ -1158,15 +1158,13 @@ impl SyncBackground {
                                 verify = req.inject_value(value);
                             }
                             all::BlockVerification::FinalizedStorageNextKey(req) => {
-                                // TODO: to_vec() :-/ range() immediately calculates the range of keys so there's no borrowing issue, but the take_while needs to keep req borrowed, which isn't possible
-                                let req_key = req.key().as_ref().to_vec();
                                 let next_key = self
                                     .finalized_block_storage
                                     .range::<[u8], _>((
-                                        ops::Bound::Included(req.key().as_ref()),
+                                        ops::Bound::Excluded(req.key().as_ref()),
                                         ops::Bound::Unbounded,
                                     ))
-                                    .find(move |(k, _)| k[..] > req_key[..])
+                                    .next()
                                     .map(|(k, _)| k);
                                 verify = req.inject_key(next_key);
                             }
