@@ -20,7 +20,7 @@
 //! # Usage
 //!
 //! Create a new JSON-RPC service by calling [`service`] then [`ServicePrototype::start`].
-//! Creating a JSON-RPC service spawns a background task (through [`StartConfig::tasks_executor`])
+//! Creating a JSON-RPC service spawns a background task (through [`PlatformRef::spawn_task`])
 //! dedicated to processing JSON-RPC requests.
 //!
 //! In order to process a JSON-RPC request, call [`Frontend::queue_rpc_request`]. Later, the
@@ -321,7 +321,7 @@ pub struct StartConfig<'a, TPlat: PlatformRef> {
 }
 
 impl ServicePrototype {
-    /// Consumes this prototype and starts the service through [`StartConfig::tasks_executor`].
+    /// Consumes this prototype and starts the service through [`PlatformRef::spawn_task`].
     pub fn start<TPlat: PlatformRef>(self, config: StartConfig<'_, TPlat>) {
         background::start(
             self.log_target.clone(),

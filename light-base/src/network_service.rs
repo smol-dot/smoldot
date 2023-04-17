@@ -20,7 +20,7 @@
 //! The [`NetworkService`] manages background tasks dedicated to connecting to other nodes.
 //! Importantly, its design is oriented towards the particular use case of the light client.
 //!
-//! The [`NetworkService`] spawns one background task (using the [`Config::tasks_executor`]) for
+//! The [`NetworkService`] spawns one background task (using [`PlatformRef::spawn_task`]) for
 //! each active connection.
 //!
 //! The objective of the [`NetworkService`] in general is to try stay connected as much as
