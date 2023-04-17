@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::ToBackground;
-use crate::{network_service, platform::Platform, runtime_service};
+use crate::{network_service, platform::PlatformRef, runtime_service};
 
 use alloc::{borrow::ToOwned as _, string::String, sync::Arc, vec::Vec};
 use core::{
@@ -38,8 +38,9 @@ use smoldot::{
 };
 
 /// Starts a sync service background task to synchronize a parachain.
-pub(super) async fn start_parachain<TPlat: Platform>(
+pub(super) async fn start_parachain<TPlat: PlatformRef>(
     log_target: String,
+    platform: TPlat,
     chain_information: chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
     relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
@@ -57,6 +58,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
 
         ParachainBackgroundTask {
             log_target,
+            platform,
             from_foreground,
             block_number_bytes,
             relay_chain_block_number_bytes,
@@ -96,9 +98,12 @@ pub(super) async fn start_parachain<TPlat: Platform>(
 }
 
 /// Task that is running in the background.
-struct ParachainBackgroundTask<TPlat: Platform> {
+struct ParachainBackgroundTask<TPlat: PlatformRef> {
     /// Target to use for all logs.
     log_target: String,
+
+    /// Access to the platform's capabilities.
+    platform: TPlat,
 
     /// Channel receiving message from the sync service frontend.
     from_foreground: mpsc::Receiver<ToBackground>,
@@ -141,7 +146,7 @@ struct ParachainBackgroundTask<TPlat: Platform> {
     subscription_state: ParachainBackgroundState<TPlat>,
 }
 
-enum ParachainBackgroundState<TPlat: Platform> {
+enum ParachainBackgroundState<TPlat: PlatformRef> {
     /// Currently subscribing to the relay chain runtime service.
     NotSubscribed {
         /// List of senders that will get notified when the tree of blocks is modified.
@@ -159,7 +164,7 @@ enum ParachainBackgroundState<TPlat: Platform> {
     Subscribed(ParachainBackgroundTaskAfterSubscription<TPlat>),
 }
 
-struct ParachainBackgroundTaskAfterSubscription<TPlat: Platform> {
+struct ParachainBackgroundTaskAfterSubscription<TPlat: PlatformRef> {
     /// List of senders that get notified when the tree of blocks is modified.
     all_subscriptions: Vec<mpsc::Sender<super::Notification>>,
 
@@ -209,7 +214,7 @@ struct ParachainBackgroundTaskAfterSubscription<TPlat: Platform> {
     next_start_parahead_fetch: future::Either<future::Fuse<TPlat::Delay>, future::Pending<()>>,
 }
 
-impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
+impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
     async fn run(mut self) {
         loop {
             // Start fetching paraheads of new blocks whose parahead needs to be fetched.
@@ -591,11 +596,11 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
         while runtime_subscription.in_progress_paraheads.len() < 4 {
             match runtime_subscription
                 .async_tree
-                .next_necessary_async_op(&TPlat::now())
+                .next_necessary_async_op(&self.platform.now())
             {
                 async_tree::NextNecessaryAsyncOp::NotReady { when: Some(when) } => {
                     runtime_subscription.next_start_parahead_fetch =
-                        future::Either::Left(TPlat::sleep_until(when).fuse());
+                        future::Either::Left(self.platform.sleep_until(when).fuse());
                     break;
                 }
                 async_tree::NextNecessaryAsyncOp::NotReady { when: None } => {
@@ -720,7 +725,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
 
                 runtime_subscription
                     .async_tree
-                    .async_op_failure(async_op_id, &TPlat::now());
+                    .async_op_failure(async_op_id, &self.platform.now());
             }
         }
     }
@@ -1085,7 +1090,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
     }
 }
 
-async fn parahead<TPlat: Platform>(
+async fn parahead<TPlat: PlatformRef>(
     relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
     relay_chain_block_number_bytes: usize,
     subscription_id: runtime_service::SubscriptionId,

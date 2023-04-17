@@ -22,7 +22,11 @@ use futures::prelude::*;
 pub mod async_std;
 
 /// Access to a platform's capabilities.
-pub trait Platform: Send + 'static {
+///
+/// Implementations of this trait are expected to be cheaply-clonable "handles". All clones of the
+/// same platform share the same objects. For instance, it is legal to create clone a platform,
+/// then create a connection on one clone, then access this connection on the other clone.
+pub trait PlatformRef: Clone + Send + Sync + 'static {
     type Delay: Future<Output = ()> + Unpin + Send + 'static;
     type Yield: Future<Output = ()> + Unpin + Send + 'static;
     type Instant: Clone
@@ -39,7 +43,7 @@ pub trait Platform: Send + 'static {
     /// A multi-stream connection.
     ///
     /// This object is merely a handle. The underlying connection should be dropped only after
-    /// the `Connection` and all its associated substream objects ([`Platform::Stream`]) have
+    /// the `Connection` and all its associated substream objects ([`PlatformRef::Stream`]) have
     /// been dropped.
     type Connection: Send + Sync + 'static;
     /// Opaque object representing either a single-stream connection or a substream in a
@@ -67,31 +71,31 @@ pub trait Platform: Send + 'static {
     /// Panics if the system time is configured to be below the UNIX epoch. This situation is a
     /// very very niche edge case that isn't worth handling.
     ///
-    fn now_from_unix_epoch() -> Duration;
+    fn now_from_unix_epoch(&self) -> Duration;
 
     /// Returns an object that represents "now".
-    fn now() -> Self::Instant;
+    fn now(&self) -> Self::Instant;
 
     /// Creates a future that becomes ready after at least the given duration has elapsed.
-    fn sleep(duration: Duration) -> Self::Delay;
+    fn sleep(&self, duration: Duration) -> Self::Delay;
 
     /// Creates a future that becomes ready after the given instant has been reached.
-    fn sleep_until(when: Self::Instant) -> Self::Delay;
+    fn sleep_until(&self, when: Self::Instant) -> Self::Delay;
 
     /// Should be called after a CPU-intensive operation in order to yield back control.
     ///
     /// This function can be implemented as no-op on platforms where this is irrelevant.
-    fn yield_after_cpu_intensive() -> Self::Yield;
+    fn yield_after_cpu_intensive(&self) -> Self::Yield;
 
     /// Starts a connection attempt to the given multiaddress.
     ///
     /// The multiaddress is passed as a string. If the string can't be parsed, an error should be
     /// returned where [`ConnectError::is_bad_addr`] is `true`.
-    fn connect(url: &str) -> Self::ConnectFuture;
+    fn connect(&self, url: &str) -> Self::ConnectFuture;
 
     /// Queues the opening of an additional outbound substream.
     ///
-    /// The substream, once opened, must be yielded by [`Platform::next_substream`].
+    /// The substream, once opened, must be yielded by [`PlatformRef::next_substream`].
     ///
     /// Calls to this function should be ignored if the connection has already been killed by the
     /// remote.
@@ -100,33 +104,36 @@ pub trait Platform: Send + 'static {
     /// >           to open, as this is not supposed to happen. If you need to handle such a
     /// >           situation, either try again opening a substream again or reset the entire
     /// >           connection.
-    fn open_out_substream(connection: &mut Self::Connection);
+    fn open_out_substream(&self, connection: &mut Self::Connection);
 
     /// Waits until a new incoming substream arrives on the connection.
     ///
     /// This returns both inbound and outbound substreams. Outbound substreams should only be
-    /// yielded once for every call to [`Platform::open_out_substream`].
+    /// yielded once for every call to [`PlatformRef::open_out_substream`].
     ///
     /// The future can also return `None` if the connection has been killed by the remote. If
-    /// the future returns `None`, the user of the `Platform` should drop the `Connection` and
+    /// the future returns `None`, the user of the `PlatformRef` should drop the `Connection` and
     /// all its associated `Stream`s as soon as possible.
-    fn next_substream(connection: &'_ mut Self::Connection) -> Self::NextSubstreamFuture<'_>;
+    fn next_substream<'a>(
+        &self,
+        connection: &'a mut Self::Connection,
+    ) -> Self::NextSubstreamFuture<'a>;
 
     /// Synchronizes the stream with the "actual" stream.
     ///
     /// Returns a future that becomes ready when "something" in the state has changed. In other
     /// words, when data has been added to the read buffer of the given stream , or the remote
     /// closes their sending side, or the number of writable bytes (see
-    /// [`Platform::writable_bytes`]) increases.
+    /// [`PlatformRef::writable_bytes`]) increases.
     ///
     /// This function might not add data to the read buffer nor process the remote closing its
     /// writing side, unless the read buffer has been emptied beforehand using
-    /// [`Platform::advance_read_cursor`].
+    /// [`PlatformRef::advance_read_cursor`].
     ///
     /// In the specific situation where the reading side is closed and the writing side has been
-    /// closed using [`Platform::close_send`], the API user must call this function before dropping
-    /// the `Stream` object. This makes it possible for the implementation to finish cleaning up
-    /// everything gracefully before the object is dropped.
+    /// closed using [`PlatformRef::close_send`], the API user must call this function before
+    /// dropping the `Stream` object. This makes it possible for the implementation to finish
+    /// cleaning up everything gracefully before the object is dropped.
     ///
     /// This function should also flush any outgoing data if necessary.
     ///
@@ -134,32 +141,32 @@ pub trait Platform: Send + 'static {
     /// shouldn't be updated unless this function is called.
     /// In other words, calling this function switches the stream from a state to another, and
     /// this state transition should only happen when this function is called and not otherwise.
-    fn update_stream(stream: &'_ mut Self::Stream) -> Self::StreamUpdateFuture<'_>;
+    fn update_stream<'a>(&self, stream: &'a mut Self::Stream) -> Self::StreamUpdateFuture<'a>;
 
     /// Gives access to the content of the read buffer of the given stream.
-    fn read_buffer(stream: &mut Self::Stream) -> ReadBuffer;
+    fn read_buffer<'a>(&self, stream: &'a mut Self::Stream) -> ReadBuffer<'a>;
 
     /// Discards the first `bytes` bytes of the read buffer of this stream.
     ///
-    /// This makes it possible for more data to be received when [`Platform::update_stream`] is
+    /// This makes it possible for more data to be received when [`PlatformRef::update_stream`] is
     /// called.
     ///
     /// # Panic
     ///
     /// Panics if there aren't enough bytes to discard in the buffer.
     ///
-    fn advance_read_cursor(stream: &mut Self::Stream, bytes: usize);
+    fn advance_read_cursor(&self, stream: &mut Self::Stream, bytes: usize);
 
-    /// Returns the maximum size of the buffer that can be passed to [`Platform::send`].
+    /// Returns the maximum size of the buffer that can be passed to [`PlatformRef::send`].
     ///
-    /// Must return 0 if [`Platform::close_send`] has previously been called, or if the stream
+    /// Must return 0 if [`PlatformRef::close_send`] has previously been called, or if the stream
     /// has been reset by the remote.
     ///
-    /// If [`Platform::send`] is called, the number of writable bytes must decrease by exactly
+    /// If [`PlatformRef::send`] is called, the number of writable bytes must decrease by exactly
     /// the size of the buffer that was provided.
-    /// The number of writable bytes should never change unless [`Platform::update_stream`] is
+    /// The number of writable bytes should never change unless [`PlatformRef::update_stream`] is
     /// called.
-    fn writable_bytes(stream: &mut Self::Stream) -> usize;
+    fn writable_bytes(&self, stream: &mut Self::Stream) -> usize;
 
     /// Queues the given bytes to be sent out on the given stream.
     ///
@@ -172,10 +179,10 @@ pub trait Platform: Send + 'static {
     /// # Panic
     ///
     /// Panics if `data.is_empty()`.
-    /// Panics if `data.len()` is superior to the value returned by [`Platform::writable_bytes`].
-    /// Panics if [`Platform::close_send`] has been called before on this stream.
+    /// Panics if `data.len()` is superior to the value returned by [`PlatformRef::writable_bytes`].
+    /// Panics if [`PlatformRef::close_send`] has been called before on this stream.
     ///
-    fn send(stream: &mut Self::Stream, data: &[u8]);
+    fn send(&self, stream: &mut Self::Stream, data: &[u8]);
 
     /// Closes the sending side of the given stream.
     ///
@@ -184,12 +191,12 @@ pub trait Platform: Send + 'static {
     ///
     /// # Panic
     ///
-    /// Panics if [`Platform::close_send`] has already been called on this stream.
+    /// Panics if [`PlatformRef::close_send`] has already been called on this stream.
     ///
-    fn close_send(stream: &mut Self::Stream);
+    fn close_send(&self, stream: &mut Self::Stream);
 }
 
-/// Type of opened connection. See [`Platform::connect`].
+/// Type of opened connection. See [`PlatformRef::connect`].
 #[derive(Debug)]
 pub enum PlatformConnection<TStream, TConnection> {
     /// The connection is a single stream on top of which Noise encryption and Yamux multiplexing
@@ -208,16 +215,16 @@ pub enum PlatformConnection<TStream, TConnection> {
     },
 }
 
-/// Direction in which a substream has been opened. See [`Platform::next_substream`].
+/// Direction in which a substream has been opened. See [`PlatformRef::next_substream`].
 #[derive(Debug)]
 pub enum PlatformSubstreamDirection {
     /// Substream has been opened by the remote.
     Inbound,
-    /// Substream has been opened locally in response to [`Platform::open_out_substream`].
+    /// Substream has been opened locally in response to [`PlatformRef::open_out_substream`].
     Outbound,
 }
 
-/// Error potentially returned by [`Platform::connect`].
+/// Error potentially returned by [`PlatformRef::connect`].
 pub struct ConnectError {
     /// Human-readable error message.
     pub message: String,
@@ -226,7 +233,7 @@ pub struct ConnectError {
     pub is_bad_addr: bool,
 }
 
-/// State of the read buffer, as returned by [`Platform::read_buffer`].
+/// State of the read buffer, as returned by [`PlatformRef::read_buffer`].
 #[derive(Debug)]
 pub enum ReadBuffer<'a> {
     /// Reading side of the stream is fully open. Contains the data waiting to be processed.

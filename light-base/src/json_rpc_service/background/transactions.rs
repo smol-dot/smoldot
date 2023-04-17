@@ -17,7 +17,7 @@
 
 //! All JSON-RPC method handlers that relate to transactions.
 
-use super::{Background, Platform, SubscriptionMessage};
+use super::{Background, PlatformRef, SubscriptionMessage};
 
 use crate::transactions_service;
 
@@ -25,7 +25,7 @@ use alloc::{borrow::ToOwned as _, str, string::ToString as _, sync::Arc, vec::Ve
 use futures::prelude::*;
 use smoldot::json_rpc::{self, methods, requests_subscriptions};
 
-impl<TPlat: Platform> Background<TPlat> {
+impl<TPlat: PlatformRef> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::author_pendingExtrinsics`].
     pub(super) async fn author_pending_extrinsics(
         self: &Arc<Self>,
