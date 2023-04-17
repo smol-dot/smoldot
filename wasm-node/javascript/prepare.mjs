@@ -138,7 +138,5 @@ try {
     );
 
 } finally {
-    // We use `rimraf` rather than `fs.rmSync` in order to maintain compatibility with older
-    // NodeJS versions.
-    rimraf.default.sync(tmpDir, { disableGlob: true });
+    fs.rmSync(tmpDir, { recursive: true, force: true });
 }
