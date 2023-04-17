@@ -18,7 +18,9 @@
 #![cfg(feature = "std")]
 #![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
-use super::{ConnectError, PlatformRef, PlatformConnection, PlatformSubstreamDirection, ReadBuffer};
+use super::{
+    ConnectError, PlatformConnection, PlatformRef, PlatformSubstreamDirection, ReadBuffer,
+};
 
 use alloc::collections::VecDeque;
 use core::{ops, pin::Pin, str, task::Poll, time::Duration};

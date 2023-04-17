@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::Shared;
-use crate::platform::{PlatformRef, PlatformConnection, PlatformSubstreamDirection, ReadBuffer};
+use crate::platform::{PlatformConnection, PlatformRef, PlatformSubstreamDirection, ReadBuffer};
 
 use alloc::{string::ToString as _, sync::Arc, vec, vec::Vec};
 use core::{cmp, iter, pin::Pin};
