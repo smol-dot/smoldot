@@ -20,7 +20,6 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as zlib from 'node:zlib';
-import * as rimraf from 'rimraf';
 
 // Which Cargo profile to use to compile the Rust. Should be either `debug` or `release`, based
 // on the CLI options passed by the user.
@@ -138,7 +137,5 @@ try {
     );
 
 } finally {
-    // We use `rimraf` rather than `fs.rmSync` in order to maintain compatibility with older
-    // NodeJS versions.
-    rimraf.default.sync(tmpDir, { disableGlob: true });
+    fs.rmSync(tmpDir, { recursive: true, force: true });
 }
