@@ -69,9 +69,6 @@ pub struct Config<TPlat> {
     /// Access to the platform's capabilities.
     pub platform: TPlat,
 
-    /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
-
     /// Value sent back for the agent version when receiving an identification request.
     pub identify_agent_version: String,
 
@@ -169,9 +166,6 @@ struct SharedGuarded<TPlat: PlatformRef> {
 
     messages_from_connections_rx:
         mpsc::Receiver<(service::ConnectionId, service::ConnectionToCoordinator)>,
-
-    /// Value received in [`Config::tasks_executor`].
-    tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 
     active_connections: HashMap<
         service::ConnectionId,
@@ -271,7 +265,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 active_connections: HashMap::with_capacity_and_hasher(32, Default::default()),
                 messages_from_connections_tx,
                 messages_from_connections_rx,
-                tasks_executor: config.tasks_executor,
                 blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
                 grandpa_warp_sync_requests: HashMap::with_capacity_and_hasher(
                     8,
@@ -291,7 +284,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         });
 
         // Spawn main task that processes the network service.
-        (shared.guarded.try_lock().unwrap().tasks_executor)(
+        shared.platform.spawn_task(
             "network-service".into(),
             Box::pin({
                 let shared = shared.clone();
@@ -305,7 +298,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 
         // Spawn task starts a discovery request at a periodic interval.
         // This is done through a separate task due to ease of implementation.
-        (shared.guarded.try_lock().unwrap().tasks_executor)(
+        shared.platform.spawn_task(
             "network-discovery".into(),
             Box::pin({
                 let shared = shared.clone();
@@ -1384,7 +1377,7 @@ async fn update_round<TPlat: PlatformRef>(
         // Sending the new task might fail in case a shutdown is happening, in which case
         // we don't really care about the state of anything anymore.
         // The sending here is normally very quick.
-        (guarded.tasks_executor)(task_name, Box::pin(task));
+        shared.platform.spawn_task(task_name.into(), Box::pin(task));
     }
 
     // Pull messages that the coordinator has generated in destination to the various

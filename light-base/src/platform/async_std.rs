@@ -22,7 +22,7 @@ use super::{
     ConnectError, PlatformConnection, PlatformRef, PlatformSubstreamDirection, ReadBuffer,
 };
 
-use alloc::collections::VecDeque;
+use alloc::{borrow::Cow, collections::VecDeque, sync::Arc};
 use core::{ops, pin::Pin, str, task::Poll, time::Duration};
 use futures::prelude::*;
 use smoldot::libp2p::{
@@ -37,7 +37,17 @@ use std::{
 /// Implementation of the [`PlatformRef`] trait that uses the `async-std` library and provides TCP
 /// and WebSocket connections.
 #[derive(Clone)]
-pub struct AsyncStdTcpWebSocket;
+pub struct AsyncStdTcpWebSocket {
+    client_name_version: Arc<(String, String)>,
+}
+
+impl AsyncStdTcpWebSocket {
+    pub fn new(client_name: String, client_version: String) -> Self {
+        AsyncStdTcpWebSocket {
+            client_name_version: Arc::new((client_name, client_version)),
+        }
+    }
+}
 
 impl PlatformRef for AsyncStdTcpWebSocket {
     type Delay = future::BoxFuture<'static, ()>;
@@ -69,6 +79,18 @@ impl PlatformRef for AsyncStdTcpWebSocket {
     fn sleep_until(&self, when: Self::Instant) -> Self::Delay {
         let duration = when.saturating_duration_since(std::time::Instant::now());
         self.sleep(duration)
+    }
+
+    fn spawn_task(&self, _task_name: Cow<str>, task: future::BoxFuture<'static, ()>) {
+        async_std::task::spawn(task);
+    }
+
+    fn client_name(&self) -> Cow<str> {
+        Cow::Borrowed(&self.client_name_version.0)
+    }
+
+    fn client_version(&self) -> Cow<str> {
+        Cow::Borrowed(&self.client_name_version.1)
     }
 
     fn yield_after_cpu_intensive(&self) -> Self::Yield {

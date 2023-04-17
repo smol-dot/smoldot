@@ -63,9 +63,6 @@ pub struct Config<TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
     pub platform: TPlat,
 
-    /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
-
     /// Access to the network, and index of the chain to sync from the point of view of the
     /// network service.
     pub network_service: (Arc<network_service::NetworkService<TPlat>>, usize),
@@ -120,11 +117,11 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         let log_target = format!("sync-service-{}", config.log_name);
 
         if let Some(config_parachain) = config.parachain {
-            (config.tasks_executor)(
-                log_target.clone(),
+            config.platform.spawn_task(
+                log_target.clone().into(),
                 Box::pin(parachain::start_parachain(
                     log_target,
-                    config.platform,
+                    config.platform.clone(),
                     config.chain_information,
                     config.block_number_bytes,
                     config_parachain.relay_chain_sync.clone(),
@@ -136,11 +133,11 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 )),
             );
         } else {
-            (config.tasks_executor)(
-                log_target.clone(),
+            config.platform.spawn_task(
+                log_target.clone().into(),
                 Box::pin(standalone::start_standalone_chain(
                     log_target,
-                    config.platform,
+                    config.platform.clone(),
                     config.chain_information,
                     config.block_number_bytes,
                     from_foreground,

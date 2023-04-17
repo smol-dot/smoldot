@@ -274,9 +274,6 @@ pub struct StartConfig<'a, TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
     pub platform: TPlat,
 
-    /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
-
     /// Access to the network, and index of the chain to sync from the point of view of the
     /// network service.
     pub network_service: (Arc<network_service::NetworkService<TPlat>>, usize),
