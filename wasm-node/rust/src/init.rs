@@ -199,19 +199,8 @@ pub(crate) fn init<TChain>(
         ))
         .unwrap();
 
-    let client = smoldot_light::Client::new(
-        platform::Platform,
-        smoldot_light::ClientConfig {
-            tasks_spawner: Box::new(move |name, task| {
-                new_task_tx.unbounded_send((name, task)).unwrap()
-            }),
-            client_name: env!("CARGO_PKG_NAME").into(),
-            client_version: env!("CARGO_PKG_VERSION").into(),
-        },
-    );
-
     Client {
-        smoldot: client,
+        smoldot: smoldot_light::Client::new(platform::Platform::new(new_task_tx)),
         chains: slab::Slab::with_capacity(8),
         periodically_yield,
         main_task,

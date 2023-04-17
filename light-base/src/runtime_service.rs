@@ -96,9 +96,6 @@ pub struct Config<TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
     pub platform: TPlat,
 
-    /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
-
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService<TPlat>>,
 
@@ -130,7 +127,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     ///
     /// The future returned by this function is expected to finish relatively quickly and is
     /// necessary only for locking purposes.
-    pub async fn new(mut config: Config<TPlat>) -> Self {
+    pub async fn new(config: Config<TPlat>) -> Self {
         // Target to use for all the logs of this service.
         let log_target = format!("runtime-{}", config.log_name);
 
@@ -170,7 +167,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
 
         // Spawns a task that runs in the background and updates the content of the mutex.
         let background_task_abort;
-        (config.tasks_executor)(log_target.clone(), {
+        config.platform.spawn_task(log_target.clone().into(), {
             let sync_service = config.sync_service.clone();
             let guarded = guarded.clone();
             let platform = config.platform.clone();
