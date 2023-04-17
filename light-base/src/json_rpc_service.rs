@@ -40,7 +40,7 @@
 mod background;
 
 use crate::{
-    network_service, platform::Platform, runtime_service, sync_service, transactions_service,
+    network_service, platform::PlatformRef, runtime_service, sync_service, transactions_service,
 };
 
 use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
@@ -270,7 +270,10 @@ pub struct ServicePrototype {
 }
 
 /// Configuration for a JSON-RPC service.
-pub struct StartConfig<'a, TPlat: Platform> {
+pub struct StartConfig<'a, TPlat: PlatformRef> {
+    /// Access to the platform's capabilities.
+    pub platform: TPlat,
+
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 
@@ -322,7 +325,7 @@ pub struct StartConfig<'a, TPlat: Platform> {
 
 impl ServicePrototype {
     /// Consumes this prototype and starts the service through [`StartConfig::tasks_executor`].
-    pub fn start<TPlat: Platform>(self, config: StartConfig<'_, TPlat>) {
+    pub fn start<TPlat: PlatformRef>(self, config: StartConfig<'_, TPlat>) {
         background::start(
             self.log_target.clone(),
             self.requests_subscriptions.clone(),

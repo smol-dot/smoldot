@@ -19,7 +19,7 @@
 
 use super::{Background, SubscriptionMessage};
 
-use crate::{platform::Platform, runtime_service, sync_service};
+use crate::{platform::PlatformRef, runtime_service, sync_service};
 
 use alloc::{
     borrow::ToOwned as _,
@@ -44,7 +44,7 @@ use smoldot::{
     network::protocol,
 };
 
-impl<TPlat: Platform> Background<TPlat> {
+impl<TPlat: PlatformRef> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_call`].
     pub(super) async fn chain_head_call(
         self: &Arc<Self>,
@@ -692,7 +692,7 @@ fn convert_runtime_spec(
     }
 }
 
-struct ChainHeadFollowTask<TPlat: Platform> {
+struct ChainHeadFollowTask<TPlat: PlatformRef> {
     /// Tree of hashes of all the current non-finalized blocks. This includes unpinned blocks.
     non_finalized_blocks: fork_tree::ForkTree<[u8; 32]>,
 
@@ -706,7 +706,7 @@ struct ChainHeadFollowTask<TPlat: Platform> {
     sync_service: Arc<sync_service::SyncService<TPlat>>,
 }
 
-enum Subscription<TPlat: Platform> {
+enum Subscription<TPlat: PlatformRef> {
     RuntimeUpdates {
         notifications: runtime_service::Subscription<TPlat>,
         subscription_id: runtime_service::SubscriptionId,
@@ -715,7 +715,7 @@ enum Subscription<TPlat: Platform> {
     NoRuntimeUpdates(mpsc::Receiver<sync_service::Notification>),
 }
 
-impl<TPlat: Platform> ChainHeadFollowTask<TPlat> {
+impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
     async fn run(
         mut self,
         requests_subscriptions: Arc<
