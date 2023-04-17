@@ -54,7 +54,7 @@
 //! large, the subscription is force-killed by the [`RuntimeService`].
 //!
 
-use crate::{platform::Platform, sync_service};
+use crate::{platform::PlatformRef, sync_service};
 
 use alloc::{
     borrow::ToOwned as _,
@@ -86,7 +86,7 @@ use smoldot::{
 };
 
 /// Configuration for a runtime service.
-pub struct Config<TPlat: Platform> {
+pub struct Config<TPlat: PlatformRef> {
     /// Name of the chain, for logging purposes.
     ///
     /// > **Note**: This name will be directly printed out. Any special character should already
@@ -111,7 +111,7 @@ pub struct Config<TPlat: Platform> {
 pub struct PinnedRuntimeId(Arc<Runtime>);
 
 /// See [the module-level documentation](..).
-pub struct RuntimeService<TPlat: Platform> {
+pub struct RuntimeService<TPlat: PlatformRef> {
     /// See [`Config::platform`].
     platform: TPlat,
 
@@ -125,7 +125,7 @@ pub struct RuntimeService<TPlat: Platform> {
     background_task_abort: future::AbortHandle,
 }
 
-impl<TPlat: Platform> RuntimeService<TPlat> {
+impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     /// Initializes a new runtime service.
     ///
     /// The future returned by this function is expected to finish relatively quickly and is
@@ -576,14 +576,14 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     }
 }
 
-impl<TPlat: Platform> Drop for RuntimeService<TPlat> {
+impl<TPlat: PlatformRef> Drop for RuntimeService<TPlat> {
     fn drop(&mut self) {
         self.background_task_abort.abort();
     }
 }
 
 /// Return value of [`RuntimeService::subscribe_all`].
-pub struct SubscribeAll<TPlat: Platform> {
+pub struct SubscribeAll<TPlat: PlatformRef> {
     /// SCALE-encoded header of the finalized block at the time of the subscription.
     pub finalized_block_scale_encoded_header: Vec<u8>,
 
@@ -606,13 +606,13 @@ pub struct SubscribeAll<TPlat: Platform> {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SubscriptionId(u64);
 
-pub struct Subscription<TPlat: Platform> {
+pub struct Subscription<TPlat: PlatformRef> {
     subscription_id: u64,
     channel: mpsc::Receiver<Notification>,
     guarded: Arc<Mutex<Guarded<TPlat>>>,
 }
 
-impl<TPlat: Platform> Subscription<TPlat> {
+impl<TPlat: PlatformRef> Subscription<TPlat> {
     pub async fn next(&mut self) -> Option<Notification> {
         self.channel.next().await
     }
@@ -725,7 +725,7 @@ pub struct BlockNotification {
     pub new_runtime: Option<Result<executor::CoreVersion, RuntimeError>>,
 }
 
-async fn is_near_head_of_chain_heuristic<TPlat: Platform>(
+async fn is_near_head_of_chain_heuristic<TPlat: PlatformRef>(
     sync_service: &sync_service::SyncService<TPlat>,
     guarded: &Mutex<Guarded<TPlat>>,
 ) -> bool {
@@ -757,7 +757,7 @@ pub enum PinnedBlockRuntimeLockError {
 /// See [`RuntimeService::pinned_block_runtime_lock`].
 // TODO: rename, as it doesn't lock anything anymore
 #[must_use]
-pub struct RuntimeLock<TPlat: Platform> {
+pub struct RuntimeLock<TPlat: PlatformRef> {
     sync_service: Arc<sync_service::SyncService<TPlat>>,
 
     block_number: u64,
@@ -766,7 +766,7 @@ pub struct RuntimeLock<TPlat: Platform> {
     runtime: Arc<Runtime>,
 }
 
-impl<TPlat: Platform> RuntimeLock<TPlat> {
+impl<TPlat: PlatformRef> RuntimeLock<TPlat> {
     /// Returns the hash of the block the call is being made against.
     pub fn block_hash(&self) -> &[u8; 32] {
         &self.hash
@@ -997,7 +997,7 @@ pub enum RuntimeError {
     Build(executor::host::NewErr),
 }
 
-struct Guarded<TPlat: Platform> {
+struct Guarded<TPlat: PlatformRef> {
     /// Identifier of the next subscription for
     /// [`GuardedInner::FinalizedBlockRuntimeKnown::all_blocks_subscriptions`].
     ///
@@ -1024,7 +1024,7 @@ struct Guarded<TPlat: Platform> {
     tree: GuardedInner<TPlat>,
 }
 
-enum GuardedInner<TPlat: Platform> {
+enum GuardedInner<TPlat: PlatformRef> {
     FinalizedBlockRuntimeKnown {
         /// Tree of blocks. Holds the state of the download of everything. Always `Some` when the
         /// `Mutex` is being locked. Temporarily switched to `None` during some operations.
@@ -1107,7 +1107,7 @@ struct Block {
     scale_encoded_header: Vec<u8>,
 }
 
-async fn run_background<TPlat: Platform>(
+async fn run_background<TPlat: PlatformRef>(
     log_target: String,
     platform: TPlat,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
@@ -1504,7 +1504,7 @@ impl RuntimeDownloadError {
     }
 }
 
-struct Background<TPlat: Platform> {
+struct Background<TPlat: PlatformRef> {
     log_target: String,
 
     /// See [`Config::platform`].
@@ -1534,7 +1534,7 @@ struct Background<TPlat: Platform> {
     wake_up_new_necessary_download: future::Fuse<future::BoxFuture<'static, ()>>,
 }
 
-impl<TPlat: Platform> Background<TPlat> {
+impl<TPlat: PlatformRef> Background<TPlat> {
     /// Injects into the state of `self` a completed runtime download.
     async fn runtime_download_finished(
         &mut self,
@@ -2032,7 +2032,7 @@ struct SuccessfulRuntime {
 }
 
 impl SuccessfulRuntime {
-    async fn from_storage<TPlat: Platform>(
+    async fn from_storage<TPlat: PlatformRef>(
         platform: &TPlat,
         code: &Option<Vec<u8>>,
         heap_pages: &Option<Vec<u8>>,

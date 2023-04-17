@@ -17,7 +17,7 @@
 
 //! All JSON-RPC method handlers that do nothing but return a value already found in the node.
 
-use super::{Background, Platform};
+use super::{Background, PlatformRef};
 
 use alloc::{borrow::Cow, format, string::ToString as _, sync::Arc, vec::Vec};
 use core::num::NonZeroUsize;
@@ -27,7 +27,7 @@ use smoldot::{
     network::protocol,
 };
 
-impl<TPlat: Platform> Background<TPlat> {
+impl<TPlat: PlatformRef> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::chain_getFinalizedHead`].
     pub(super) async fn chain_get_finalized_head(
         self: &Arc<Self>,

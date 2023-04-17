@@ -18,7 +18,7 @@
 #![cfg(feature = "std")]
 #![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
-use super::{ConnectError, Platform, PlatformConnection, PlatformSubstreamDirection, ReadBuffer};
+use super::{ConnectError, PlatformRef, PlatformConnection, PlatformSubstreamDirection, ReadBuffer};
 
 use alloc::collections::VecDeque;
 use core::{ops, pin::Pin, str, task::Poll, time::Duration};
@@ -32,12 +32,12 @@ use std::{
     net::{IpAddr, SocketAddr},
 };
 
-/// Implementation of the [`Platform`] trait that uses the `async-std` library and provides TCP
+/// Implementation of the [`PlatformRef`] trait that uses the `async-std` library and provides TCP
 /// and WebSocket connections.
 #[derive(Clone)]
 pub struct AsyncStdTcpWebSocket;
 
-impl Platform for AsyncStdTcpWebSocket {
+impl PlatformRef for AsyncStdTcpWebSocket {
     type Delay = future::BoxFuture<'static, ()>;
     type Yield = future::Ready<()>;
     type Instant = std::time::Instant;

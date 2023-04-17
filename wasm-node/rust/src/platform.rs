@@ -30,10 +30,10 @@ use std::{
     },
 };
 
-/// Total number of bytes that all the connections created through [`Platform`] combined have
+/// Total number of bytes that all the connections created through [`PlatformRef`] combined have
 /// received.
 pub static TOTAL_BYTES_RECEIVED: AtomicU64 = AtomicU64::new(0);
-/// Total number of bytes that all the connections created through [`Platform`] combined have
+/// Total number of bytes that all the connections created through [`PlatformRef`] combined have
 /// sent.
 pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
 
@@ -41,7 +41,7 @@ pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
 pub(crate) struct Platform;
 
 // TODO: this trait implementation was written before GATs were stable in Rust; now that the associated types have lifetimes, it should be possible to considerably simplify this code
-impl smoldot_light::platform::Platform for Platform {
+impl smoldot_light::platform::PlatformRef for Platform {
     type Delay = Delay;
     type Yield = Yield;
     type Instant = crate::Instant;
@@ -616,9 +616,9 @@ enum ConnectionInner {
     MultiStreamWebRtc {
         /// List of substreams that the host (i.e. JavaScript side) has reported have been opened,
         /// but that haven't been reported through
-        /// [`smoldot_light::platform::Platform::next_substream`] yet.
+        /// [`smoldot_light::platform::PlatformRef::next_substream`] yet.
         opened_substreams_to_pick_up: VecDeque<(u32, PlatformSubstreamDirection, u32)>,
-        /// Number of objects (connections and streams) in the [`Platform`] API that reference
+        /// Number of objects (connections and streams) in the [`PlatformRef`] API that reference
         /// this connection. If it switches from 1 to 0, the connection must be removed.
         connection_handles_alive: u32,
         /// Multihash encoding of the TLS certificate used by the local node at the DTLS layer.
@@ -630,7 +630,7 @@ enum ConnectionInner {
     Reset {
         /// Message given by the bindings to justify the closure.
         message: String,
-        /// Number of objects (connections and streams) in the [`Platform`] API that reference
+        /// Number of objects (connections and streams) in the [`PlatformRef`] API that reference
         /// this connection. If it switches from 1 to 0, the connection must be removed.
         connection_handles_alive: u32,
     },

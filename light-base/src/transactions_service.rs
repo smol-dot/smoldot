@@ -67,7 +67,7 @@
 //! transaction.
 //!
 
-use crate::{network_service, platform::Platform, runtime_service, sync_service};
+use crate::{network_service, platform::PlatformRef, runtime_service, sync_service};
 
 use alloc::{
     borrow::ToOwned as _,
@@ -94,7 +94,7 @@ use smoldot::{
 };
 
 /// Configuration for a [`TransactionsService`].
-pub struct Config<TPlat: Platform> {
+pub struct Config<TPlat: PlatformRef> {
     /// Name of the chain, for logging purposes.
     ///
     /// > **Note**: This name will be directly printed out. Any special character should already
@@ -140,7 +140,7 @@ pub struct TransactionsService<TPlat> {
     platform: PhantomData<fn() -> TPlat>,
 }
 
-impl<TPlat: Platform> TransactionsService<TPlat> {
+impl<TPlat: PlatformRef> TransactionsService<TPlat> {
     /// Builds a new service.
     pub async fn new(mut config: Config<TPlat>) -> Self {
         let log_target = format!("tx-service-{}", config.log_name);
@@ -304,7 +304,7 @@ enum ToBackground {
 }
 
 /// Background task running in parallel of the front service.
-async fn background_task<TPlat: Platform>(
+async fn background_task<TPlat: PlatformRef>(
     log_target: String,
     platform: TPlat,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
@@ -947,7 +947,7 @@ async fn background_task<TPlat: Platform>(
 }
 
 /// Background worker running in parallel of the front service.
-struct Worker<TPlat: Platform> {
+struct Worker<TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
     platform: TPlat,
 
@@ -1007,7 +1007,7 @@ struct Worker<TPlat: Platform> {
     max_concurrent_downloads: usize,
 }
 
-impl<TPlat: Platform> Worker<TPlat> {
+impl<TPlat: PlatformRef> Worker<TPlat> {
     /// Update the best block. Must have been previously inserted with
     /// [`light_pool::LightPool::add_block`].
     fn set_best_block(&mut self, log_target: &str, new_best_block_hash: &[u8; 32]) {
@@ -1066,7 +1066,7 @@ struct Block {
     downloading: bool,
 }
 
-struct PendingTransaction<TPlat: Platform> {
+struct PendingTransaction<TPlat: PlatformRef> {
     /// Earliest moment when to gossip the transaction on the network again.
     ///
     /// This should be interpreted as the moment before which to not reannounce, rather than the
@@ -1092,7 +1092,7 @@ struct PendingTransaction<TPlat: Platform> {
     >,
 }
 
-impl<TPlat: Platform> PendingTransaction<TPlat> {
+impl<TPlat: PlatformRef> PendingTransaction<TPlat> {
     fn add_status_update(&mut self, mut channel: mpsc::Sender<TransactionStatus>) {
         if let Some(latest_status) = &self.latest_status {
             if channel.try_send(latest_status.clone()).is_err() {
@@ -1119,7 +1119,7 @@ impl<TPlat: Platform> PendingTransaction<TPlat> {
 /// [`runtime_service::RuntimeService`].
 ///
 /// Returns the result of the validation, and the hash of the block it was validated against.
-async fn validate_transaction<TPlat: Platform>(
+async fn validate_transaction<TPlat: PlatformRef>(
     log_target: &str,
     relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
     relay_chain_sync_subscription_id: runtime_service::SubscriptionId,

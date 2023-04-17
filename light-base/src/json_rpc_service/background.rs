@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-    network_service, platform::Platform, runtime_service, sync_service, transactions_service,
+    network_service, platform::PlatformRef, runtime_service, sync_service, transactions_service,
 };
 
 use super::StartConfig;
@@ -50,7 +50,7 @@ mod state_chain;
 mod transactions;
 
 /// Fields used to process JSON-RPC requests in the background.
-struct Background<TPlat: Platform> {
+struct Background<TPlat: PlatformRef> {
     /// Target to use for all the logs.
     log_target: String,
 
@@ -215,7 +215,7 @@ struct Cache {
         lru::LruCache<([u8; 32], Option<methods::HexString>), Vec<Vec<u8>>, fnv::FnvBuildHasher>,
 }
 
-pub(super) fn start<TPlat: Platform>(
+pub(super) fn start<TPlat: PlatformRef>(
     log_target: String,
     requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>>,
     mut config: StartConfig<'_, TPlat>,
@@ -398,7 +398,7 @@ pub(super) fn start<TPlat: Platform>(
     debug_assert!(background_abort_registrations.next().is_none());
 }
 
-impl<TPlat: Platform> Background<TPlat> {
+impl<TPlat: PlatformRef> Background<TPlat> {
     /// Pulls one request from the inner state machine, and processes it.
     async fn handle_request(self: &Arc<Self>) {
         let (json_rpc_request, state_machine_request_id) =

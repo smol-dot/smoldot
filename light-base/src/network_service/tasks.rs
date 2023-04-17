@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::Shared;
-use crate::platform::{Platform, PlatformConnection, PlatformSubstreamDirection, ReadBuffer};
+use crate::platform::{PlatformRef, PlatformConnection, PlatformSubstreamDirection, ReadBuffer};
 
 use alloc::{string::ToString as _, sync::Arc, vec, vec::Vec};
 use core::{cmp, iter, pin::Pin};
@@ -28,7 +28,7 @@ use smoldot::{
 
 /// Asynchronous task managing a specific connection, including the connection process and the
 /// processing of the connection after it's been open.
-pub(super) async fn connection_task<TPlat: Platform>(
+pub(super) async fn connection_task<TPlat: PlatformRef>(
     start_connect: service::StartConnect<TPlat::Instant>,
     shared: Arc<Shared<TPlat>>,
     connection_to_coordinator_tx: mpsc::Sender<(
@@ -198,7 +198,7 @@ pub(super) async fn connection_task<TPlat: Platform>(
 
 /// Asynchronous task managing a specific single-stream connection after it's been open.
 // TODO: a lot of logging disappeared
-async fn single_stream_connection_task<TPlat: Platform>(
+async fn single_stream_connection_task<TPlat: PlatformRef>(
     mut connection: TPlat::Stream,
     shared: Arc<Shared<TPlat>>,
     connection_id: service::ConnectionId,
@@ -404,7 +404,7 @@ async fn single_stream_connection_task<TPlat: Platform>(
 /// >           buffer to not go over the frame size limit of WebRTC. It can easily be made more
 /// >           general-purpose.
 // TODO: a lot of logging disappeared
-async fn webrtc_multi_stream_connection_task<TPlat: Platform>(
+async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
     mut connection: TPlat::Connection,
     shared: Arc<Shared<TPlat>>,
     connection_id: service::ConnectionId,
@@ -418,7 +418,7 @@ async fn webrtc_multi_stream_connection_task<TPlat: Platform>(
     // We need to use `peek()` on this future later down this function.
     let mut coordinator_to_connection = coordinator_to_connection.peekable();
 
-    // Number of substreams that are currently being opened by the `Platform` implementation
+    // Number of substreams that are currently being opened by the `PlatformRef` implementation
     // and that the `connection_task` state machine isn't aware of yet.
     let mut pending_opening_out_substreams = 0;
     // Newly-open substream that has just been yielded by the connection.

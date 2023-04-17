@@ -22,7 +22,7 @@ use futures::{channel::mpsc, prelude::*};
 use smoldot::informant::BytesDisplay;
 use std::{panic, sync::atomic::Ordering, task};
 
-pub(crate) struct Client<TPlat: smoldot_light::platform::Platform, TChain> {
+pub(crate) struct Client<TPlat: smoldot_light::platform::PlatformRef, TChain> {
     pub(crate) smoldot: smoldot_light::Client<TPlat, TChain>,
 
     /// List of all chains that have been added by the user.

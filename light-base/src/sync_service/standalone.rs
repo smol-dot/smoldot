@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::{BlockNotification, FinalizedBlockRuntime, Notification, SubscribeAll, ToBackground};
-use crate::{network_service, platform::Platform};
+use crate::{network_service, platform::PlatformRef};
 
 use alloc::{borrow::ToOwned as _, string::String, sync::Arc, vec::Vec};
 use core::{
@@ -35,7 +35,7 @@ use smoldot::{
 };
 
 /// Starts a sync service background task to synchronize a standalone chain (relay chain or not).
-pub(super) async fn start_standalone_chain<TPlat: Platform>(
+pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
     log_target: String,
     platform: TPlat,
     chain_information: chain::chain_information::ValidChainInformation,
@@ -361,7 +361,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
     }
 }
 
-struct Task<TPlat: Platform> {
+struct Task<TPlat: PlatformRef> {
     /// Log target to use for all logs that are emitted.
     log_target: String,
 
@@ -452,7 +452,7 @@ struct Task<TPlat: Platform> {
     >,
 }
 
-impl<TPlat: Platform> Task<TPlat> {
+impl<TPlat: PlatformRef> Task<TPlat> {
     /// Starts one network request if any is necessary.
     ///
     /// Returns `true` if a request has been started.

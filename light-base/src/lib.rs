@@ -31,7 +31,7 @@
 //!
 //! The [`Client`] contains two generic parameters:
 //!
-//! - An implementation of the [`platform::Platform`] trait. This is how the client will
+//! - An implementation of the [`platform::PlatformRef`] trait. This is how the client will
 //! communicate with the outside, such as getting the current time.
 //! - An opaque user data. If you do not use this, you can simply use `()`.
 //!
@@ -158,7 +158,7 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
 pub struct ChainId(usize);
 
 /// Holds a list of chains, connections, and JSON-RPC services.
-pub struct Client<TPlat: platform::Platform, TChain = ()> {
+pub struct Client<TPlat: platform::PlatformRef, TChain = ()> {
     /// Access to the platform capabilities.
     platform: TPlat,
 
@@ -230,7 +230,7 @@ struct ChainKey {
     fork_id: Option<String>,
 }
 
-struct RunningChain<TPlat: platform::Platform> {
+struct RunningChain<TPlat: platform::PlatformRef> {
     /// Services that are dedicated to this chain. Wrapped within a `MaybeDone` because the
     /// initialization is performed asynchronously.
     services: future::MaybeDone<future::Shared<future::RemoteHandle<ChainServices<TPlat>>>>,
@@ -244,7 +244,7 @@ struct RunningChain<TPlat: platform::Platform> {
     num_references: NonZeroU32,
 }
 
-struct ChainServices<TPlat: platform::Platform> {
+struct ChainServices<TPlat: platform::PlatformRef> {
     network_service: Arc<network_service::NetworkService<TPlat>>,
     network_identity: peer_id::PeerId,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
@@ -254,7 +254,7 @@ struct ChainServices<TPlat: platform::Platform> {
     block_number_bytes: usize,
 }
 
-impl<TPlat: platform::Platform> Clone for ChainServices<TPlat> {
+impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
     fn clone(&self) -> Self {
         ChainServices {
             network_service: self.network_service.clone(),
@@ -315,7 +315,7 @@ impl JsonRpcResponses {
     }
 }
 
-impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
+impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
     /// Initializes the smoldot client.
     pub fn new(platform: TPlat, config: ClientConfig) -> Self {
         let expected_chains = 8;
@@ -1005,7 +1005,7 @@ pub enum AddChainError {
 ///
 /// Returns some of the services that have been started. If these service get shut down, all the
 /// other services will later shut down as well.
-async fn start_services<TPlat: platform::Platform>(
+async fn start_services<TPlat: platform::PlatformRef>(
     log_name: String,
     platform: &TPlat,
     spawn_new_task: Arc<

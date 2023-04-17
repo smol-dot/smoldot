@@ -26,7 +26,7 @@
 //!
 //! Use [`SyncService::subscribe_all`] to get notified about updates to the state of the chain.
 
-use crate::{network_service, platform::Platform, runtime_service};
+use crate::{network_service, platform::PlatformRef, runtime_service};
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use core::{fmt, num::NonZeroU32, time::Duration};
@@ -47,7 +47,7 @@ mod parachain;
 mod standalone;
 
 /// Configuration for a [`SyncService`].
-pub struct Config<TPlat: Platform> {
+pub struct Config<TPlat: PlatformRef> {
     /// Name of the chain, for logging purposes.
     ///
     /// > **Note**: This name will be directly printed out. Any special character should already
@@ -80,7 +80,7 @@ pub struct Config<TPlat: Platform> {
 }
 
 /// See [`Config::parachain`].
-pub struct ConfigParachain<TPlat: Platform> {
+pub struct ConfigParachain<TPlat: PlatformRef> {
     /// Runtime service that synchronizes the relay chain of this parachain.
     pub relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
 
@@ -101,7 +101,7 @@ pub struct ConfigParachain<TPlat: Platform> {
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct BlocksRequestId(usize);
 
-pub struct SyncService<TPlat: Platform> {
+pub struct SyncService<TPlat: PlatformRef> {
     /// Sender of messages towards the background task.
     to_background: Mutex<mpsc::Sender<ToBackground>>,
 
@@ -113,7 +113,7 @@ pub struct SyncService<TPlat: Platform> {
     block_number_bytes: usize,
 }
 
-impl<TPlat: Platform> SyncService<TPlat> {
+impl<TPlat: PlatformRef> SyncService<TPlat> {
     pub async fn new(mut config: Config<TPlat>) -> Self {
         let (to_background, from_foreground) = mpsc::channel(16);
 

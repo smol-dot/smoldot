@@ -36,7 +36,7 @@
 //! [`NetworkService::new`]. These channels inform the foreground about updates to the network
 //! connectivity.
 
-use crate::platform::Platform;
+use crate::platform::PlatformRef;
 
 use alloc::{
     boxed::Box,
@@ -119,7 +119,7 @@ pub struct ConfigChain {
     pub has_grandpa_protocol: bool,
 }
 
-pub struct NetworkService<TPlat: Platform> {
+pub struct NetworkService<TPlat: PlatformRef> {
     /// Struct shared between the foreground and background.
     shared: Arc<Shared<TPlat>>,
 
@@ -128,7 +128,7 @@ pub struct NetworkService<TPlat: Platform> {
 }
 
 /// Struct shared between the foreground and background.
-struct Shared<TPlat: Platform> {
+struct Shared<TPlat: PlatformRef> {
     /// Fields protected by a mutex.
     guarded: Mutex<SharedGuarded<TPlat>>,
 
@@ -150,7 +150,7 @@ struct Shared<TPlat: Platform> {
     wake_up_main_background_task: event_listener::Event,
 }
 
-struct SharedGuarded<TPlat: Platform> {
+struct SharedGuarded<TPlat: PlatformRef> {
     /// Data structure holding the entire state of the networking.
     network: service::ChainNetwork<TPlat::Instant>,
 
@@ -209,7 +209,7 @@ struct SharedGuarded<TPlat: Platform> {
         HashMap<service::KademliaOperationId, usize, fnv::FnvBuildHasher>,
 }
 
-impl<TPlat: Platform> NetworkService<TPlat> {
+impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// Initializes the network service with the given configuration.
     ///
     /// Returns the networking service, plus a list of receivers on which events are pushed.
@@ -851,7 +851,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
     }
 }
 
-impl<TPlat: Platform> Drop for NetworkService<TPlat> {
+impl<TPlat: PlatformRef> Drop for NetworkService<TPlat> {
     fn drop(&mut self) {
         for abort in &self.abort_handles {
             abort.abort();
@@ -952,7 +952,7 @@ pub enum QueueNotificationError {
     Queue(peers::QueueNotificationError),
 }
 
-async fn background_task<TPlat: Platform>(
+async fn background_task<TPlat: PlatformRef>(
     shared: Arc<Shared<TPlat>>,
     mut event_senders: Vec<mpsc::Sender<Event>>,
 ) {
@@ -967,7 +967,7 @@ async fn background_task<TPlat: Platform>(
     }
 }
 
-async fn update_round<TPlat: Platform>(
+async fn update_round<TPlat: PlatformRef>(
     shared: &Arc<Shared<TPlat>>,
     event_senders: &mut [mpsc::Sender<Event>],
 ) {
@@ -1411,7 +1411,7 @@ async fn update_round<TPlat: Platform>(
     }
 }
 
-impl<TPlat: Platform> SharedGuarded<TPlat> {
+impl<TPlat: PlatformRef> SharedGuarded<TPlat> {
     fn unassign_slot_and_ban(&mut self, platform: &TPlat, chain_index: usize, peer_id: PeerId) {
         self.network.unassign_slot(chain_index, &peer_id);
 
