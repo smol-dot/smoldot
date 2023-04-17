@@ -54,6 +54,9 @@ struct Background<TPlat: Platform> {
     /// Target to use for all the logs.
     log_target: String,
 
+    /// Access to the platform's capabilities.
+    platform: TPlat,
+
     /// State machine holding all the clients, requests, and subscriptions.
     ///
     /// Only requests that are valid JSON-RPC are insert into the state machine. However, requests
@@ -222,6 +225,7 @@ pub(super) fn start<TPlat: Platform>(
 ) {
     let me = Arc::new(Background {
         log_target,
+        platform: config.platform,
         requests_subscriptions,
         chain_name: config.chain_spec.name().to_owned(),
         chain_ty: config.chain_spec.chain_type().to_owned(),
@@ -270,7 +274,7 @@ pub(super) fn start<TPlat: Platform>(
 
                         // We yield once between each request in order to politely let other tasks
                         // do some work and not monopolize the CPU.
-                        TPlat::yield_after_cpu_intensive().await;
+                        me.platform.yield_after_cpu_intensive().await;
                     }
                 },
                 background_abort_registrations.next().unwrap(),
@@ -293,7 +297,7 @@ pub(super) fn start<TPlat: Platform>(
 
                         // We yield once between each request in order to politely let other tasks
                         // do some work and not monopolize the CPU.
-                        TPlat::yield_after_cpu_intensive().await;
+                        me.platform.yield_after_cpu_intensive().await;
                     }
                 },
                 background_abort_registrations.next().unwrap(),
@@ -949,7 +953,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         self.network_service
                             .0
                             .discover(
-                                &TPlat::now(),
+                                &self.platform.now(),
                                 self.network_service.1,
                                 iter::once((peer_id, iter::once(addr))),
                                 false,

@@ -65,7 +65,10 @@ pub use service::EncodedMerkleProof;
 mod tasks;
 
 /// Configuration for a [`NetworkService`].
-pub struct Config {
+pub struct Config<TPlat> {
+    /// Access to the platform's capabilities.
+    pub platform: TPlat,
+
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 
@@ -128,6 +131,9 @@ pub struct NetworkService<TPlat: Platform> {
 struct Shared<TPlat: Platform> {
     /// Fields protected by a mutex.
     guarded: Mutex<SharedGuarded<TPlat>>,
+
+    /// See [`Config::platform`].
+    platform: TPlat,
 
     /// Value provided through [`Config::identify_agent_version`].
     identify_agent_version: String,
@@ -209,7 +215,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
     /// Returns the networking service, plus a list of receivers on which events are pushed.
     /// All of these receivers must be polled regularly to prevent the networking service from
     /// slowing down.
-    pub async fn new(config: Config) -> (Arc<Self>, Vec<stream::BoxStream<'static, Event>>) {
+    pub async fn new(config: Config<TPlat>) -> (Arc<Self>, Vec<stream::BoxStream<'static, Event>>) {
         let (event_senders, event_receivers): (Vec<_>, Vec<_>) = (0..config.num_events_receivers)
             .map(|_| mpsc::channel(16))
             .unzip();
@@ -251,7 +257,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         let shared = Arc::new(Shared {
             guarded: Mutex::new(SharedGuarded {
                 network: service::ChainNetwork::new(service::Config {
-                    now: TPlat::now(),
+                    now: config.platform.now(),
                     chains,
                     connections_capacity: 32,
                     peers_capacity: 8,
@@ -278,6 +284,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                     Default::default(),
                 ),
             }),
+            platform: config.platform,
             identify_agent_version: config.identify_agent_version,
             log_chain_names,
             wake_up_main_background_task: event_listener::Event::new(),
@@ -306,14 +313,14 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                     let mut next_discovery = Duration::from_secs(5);
 
                     loop {
-                        TPlat::sleep(next_discovery).await;
+                        shared.platform.sleep(next_discovery).await;
                         next_discovery = cmp::min(next_discovery * 2, Duration::from_secs(120));
 
                         let mut guarded = shared.guarded.lock().await;
                         for chain_index in 0..shared.log_chain_names.len() {
                             let operation_id = guarded
                                 .network
-                                .start_kademlia_discovery_round(TPlat::now(), chain_index);
+                                .start_kademlia_discovery_round(shared.platform.now(), chain_index);
 
                             let _prev_value = guarded
                                 .kademlia_discovery_operations
@@ -396,7 +403,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             }
 
             let request_id = guarded.network.start_blocks_request(
-                TPlat::now(),
+                self.shared.platform.now(),
                 &target,
                 chain_index,
                 config,
@@ -483,7 +490,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             );
 
             let request_id = guarded.network.start_grandpa_warp_sync_request(
-                TPlat::now(),
+                self.shared.platform.now(),
                 &target,
                 chain_index,
                 begin_hash,
@@ -590,7 +597,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             );
 
             let request_id = match guarded.network.start_storage_proof_request(
-                TPlat::now(),
+                self.shared.platform.now(),
                 &target,
                 chain_index,
                 config,
@@ -666,7 +673,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             );
 
             let request_id = match guarded.network.start_call_proof_request(
-                TPlat::now(),
+                self.shared.platform.now(),
                 &target,
                 chain_index,
                 config,
@@ -982,7 +989,7 @@ async fn update_round<TPlat: Platform>(
     // Process the events that the coordinator has generated.
     'events_loop: loop {
         let event = loop {
-            let inner_event = match guarded.network.next_event(TPlat::now()) {
+            let inner_event = match guarded.network.next_event(shared.platform.now()) {
                 Some(ev) => ev,
                 None => break 'events_loop,
             };
@@ -1080,7 +1087,7 @@ async fn update_round<TPlat: Platform>(
                         &shared.log_chain_names[chain_index],
                         peer_id
                     );
-                    guarded.unassign_slot_and_ban(chain_index, peer_id);
+                    guarded.unassign_slot_and_ban(&shared.platform, chain_index, peer_id);
                     shared.wake_up_main_background_task.notify(1);
                 }
                 service::Event::ChainDisconnected {
@@ -1104,7 +1111,7 @@ async fn update_round<TPlat: Platform>(
                         &shared.log_chain_names[chain_index],
                         peer_id
                     );
-                    guarded.unassign_slot_and_ban(chain_index, peer_id.clone());
+                    guarded.unassign_slot_and_ban(&shared.platform, chain_index, peer_id.clone());
                     shared.wake_up_main_background_task.notify(1);
                     break Event::Disconnected {
                         peer_id,
@@ -1173,7 +1180,7 @@ async fn update_round<TPlat: Platform>(
 
                             for (peer_id, addrs) in nodes {
                                 guarded.network.discover(
-                                    &TPlat::now(),
+                                    &shared.platform.now(),
                                     chain_index,
                                     peer_id,
                                     addrs,
@@ -1281,7 +1288,11 @@ async fn update_round<TPlat: Platform>(
                     );
 
                     for chain_index in 0..guarded.network.num_chains() {
-                        guarded.unassign_slot_and_ban(chain_index, peer_id.clone());
+                        guarded.unassign_slot_and_ban(
+                            &shared.platform,
+                            chain_index,
+                            peer_id.clone(),
+                        );
                     }
                     shared.wake_up_main_background_task.notify(1);
                 }
@@ -1313,7 +1324,7 @@ async fn update_round<TPlat: Platform>(
 
     // TODO: doc
     for chain_index in 0..shared.log_chain_names.len() {
-        let now = TPlat::now();
+        let now = shared.platform.now();
 
         // Clean up the content of `slots_assign_backoff`.
         // TODO: the background task should be woken up when the ban expires
@@ -1348,7 +1359,7 @@ async fn update_round<TPlat: Platform>(
     // Grab this list and start opening a connection for each.
     // TODO: restore the rate limiting for connections openings
     loop {
-        let start_connect = match guarded.network.next_start_connect(|| TPlat::now()) {
+        let start_connect = match guarded.network.next_start_connect(|| shared.platform.now()) {
             Some(sc) => sc,
             None => break,
         };
@@ -1401,10 +1412,10 @@ async fn update_round<TPlat: Platform>(
 }
 
 impl<TPlat: Platform> SharedGuarded<TPlat> {
-    fn unassign_slot_and_ban(&mut self, chain_index: usize, peer_id: PeerId) {
+    fn unassign_slot_and_ban(&mut self, platform: &TPlat, chain_index: usize, peer_id: PeerId) {
         self.network.unassign_slot(chain_index, &peer_id);
 
-        let new_expiration = TPlat::now() + Duration::from_secs(20); // TODO: arbitrary constant
+        let new_expiration = platform.now() + Duration::from_secs(20); // TODO: arbitrary constant
         match self.slots_assign_backoff.entry((peer_id, chain_index)) {
             hash_map::Entry::Occupied(e) if *e.get() < new_expiration => {
                 *e.into_mut() = new_expiration;

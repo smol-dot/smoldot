@@ -271,6 +271,9 @@ pub struct ServicePrototype {
 
 /// Configuration for a JSON-RPC service.
 pub struct StartConfig<'a, TPlat: Platform> {
+    /// Access to the platform's capabilities.
+    pub platform: TPlat,
+
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 

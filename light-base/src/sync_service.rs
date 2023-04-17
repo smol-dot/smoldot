@@ -60,6 +60,9 @@ pub struct Config<TPlat: Platform> {
     /// Number of bytes of the block number in the networking protocol.
     pub block_number_bytes: usize,
 
+    /// Access to the platform's capabilities.
+    pub platform: TPlat,
+
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 
@@ -121,6 +124,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
                 log_target.clone(),
                 Box::pin(parachain::start_parachain(
                     log_target,
+                    config.platform,
                     config.chain_information,
                     config.block_number_bytes,
                     config_parachain.relay_chain_sync.clone(),
@@ -136,6 +140,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
                 log_target.clone(),
                 Box::pin(standalone::start_standalone_chain(
                     log_target,
+                    config.platform,
                     config.chain_information,
                     config.block_number_bytes,
                     from_foreground,

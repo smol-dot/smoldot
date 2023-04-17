@@ -58,12 +58,12 @@ pub(crate) enum Chain {
     },
 }
 
-pub(crate) fn init<TPlat: smoldot_light::platform::Platform, TChain>(
+pub(crate) fn init<TChain>(
     max_log_level: u32,
     enable_current_task: bool,
     cpu_rate_limit: u32,
     periodically_yield: bool,
-) -> Client<TPlat, TChain> {
+) -> Client<platform::Platform, TChain> {
     // Try initialize the logging and the panic hook.
     let _ = log::set_boxed_logger(Box::new(Logger)).map(|()| {
         log::set_max_level(match max_log_level {
@@ -199,13 +199,16 @@ pub(crate) fn init<TPlat: smoldot_light::platform::Platform, TChain>(
         ))
         .unwrap();
 
-    let client = smoldot_light::Client::new(smoldot_light::ClientConfig {
-        tasks_spawner: Box::new(move |name, task| {
-            new_task_tx.unbounded_send((name, task)).unwrap()
-        }),
-        client_name: env!("CARGO_PKG_NAME").into(),
-        client_version: env!("CARGO_PKG_VERSION").into(),
-    });
+    let client = smoldot_light::Client::new(
+        platform::Platform,
+        smoldot_light::ClientConfig {
+            tasks_spawner: Box::new(move |name, task| {
+                new_task_tx.unbounded_send((name, task)).unwrap()
+            }),
+            client_name: env!("CARGO_PKG_NAME").into(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
+        },
+    );
 
     Client {
         smoldot: client,

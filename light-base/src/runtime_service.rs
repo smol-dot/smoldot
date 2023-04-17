@@ -93,6 +93,9 @@ pub struct Config<TPlat: Platform> {
     /// >           have been filtered out from this name.
     pub log_name: String,
 
+    /// Access to the platform's capabilities.
+    pub platform: TPlat,
+
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 
@@ -109,6 +112,9 @@ pub struct PinnedRuntimeId(Arc<Runtime>);
 
 /// See [the module-level documentation](..).
 pub struct RuntimeService<TPlat: Platform> {
+    /// See [`Config::platform`].
+    platform: TPlat,
+
     /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService<TPlat>>,
 
@@ -167,14 +173,16 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         (config.tasks_executor)(log_target.clone(), {
             let sync_service = config.sync_service.clone();
             let guarded = guarded.clone();
+            let platform = config.platform.clone();
             let (abortable, abort) = future::abortable(async move {
-                run_background(log_target, sync_service, guarded).await;
+                run_background(log_target, platform, sync_service, guarded).await;
             });
             background_task_abort = abort;
             abortable.map(|_| ()).boxed()
         });
 
         RuntimeService {
+            platform: config.platform,
             sync_service: config.sync_service,
             guarded,
             background_task_abort,
@@ -529,8 +537,12 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             existing_runtime
         } else {
             // No identical runtime was found. Try compiling the new runtime.
-            let runtime =
-                SuccessfulRuntime::from_storage::<TPlat>(&storage_code, &storage_heap_pages).await;
+            let runtime = SuccessfulRuntime::from_storage::<TPlat>(
+                &self.platform,
+                &storage_code,
+                &storage_heap_pages,
+            )
+            .await;
             let runtime = Arc::new(Runtime {
                 heap_pages: storage_heap_pages,
                 runtime_code: storage_code,
@@ -1097,6 +1109,7 @@ struct Block {
 
 async fn run_background<TPlat: Platform>(
     log_target: String,
+    platform: TPlat,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     guarded: Arc<Mutex<Guarded<TPlat>>>,
 ) {
@@ -1301,6 +1314,7 @@ async fn run_background<TPlat: Platform>(
         // State machine containing all the state that will be manipulated below.
         let mut background = Background {
             log_target: log_target.clone(),
+            platform: platform.clone(),
             sync_service: sync_service.clone(),
             guarded: guarded.clone(),
             blocks_stream: subscription.new_blocks.boxed(),
@@ -1453,10 +1467,10 @@ async fn run_background<TPlat: Platform>(
                                 GuardedInner::FinalizedBlockRuntimeKnown {
                                     tree, ..
                                 } => {
-                                    tree.async_op_failure(async_op_id, &TPlat::now());
+                                    tree.async_op_failure(async_op_id, &background.platform.now());
                                 }
                                 GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                                    tree.async_op_failure(async_op_id, &TPlat::now());
+                                    tree.async_op_failure(async_op_id, &background.platform.now());
                                 }
                             }
 
@@ -1492,6 +1506,9 @@ impl RuntimeDownloadError {
 
 struct Background<TPlat: Platform> {
     log_target: String,
+
+    /// See [`Config::platform`].
+    platform: TPlat,
 
     sync_service: Arc<sync_service::SyncService<TPlat>>,
 
@@ -1540,8 +1557,12 @@ impl<TPlat: Platform> Background<TPlat> {
         let runtime = if let Some(existing_runtime) = existing_runtime {
             existing_runtime
         } else {
-            let runtime =
-                SuccessfulRuntime::from_storage::<TPlat>(&storage_code, &storage_heap_pages).await;
+            let runtime = SuccessfulRuntime::from_storage::<TPlat>(
+                &self.platform,
+                &storage_code,
+                &storage_heap_pages,
+            )
+            .await;
             match &runtime {
                 Ok(runtime) => {
                     log::info!(
@@ -1846,10 +1867,10 @@ impl<TPlat: Platform> Background<TPlat> {
             let download_params = {
                 let async_op = match &mut guarded.tree {
                     GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
-                        tree.next_necessary_async_op(&TPlat::now())
+                        tree.next_necessary_async_op(&self.platform.now())
                     }
                     GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                        tree.next_necessary_async_op(&TPlat::now())
+                        tree.next_necessary_async_op(&self.platform.now())
                     }
                 };
 
@@ -1857,7 +1878,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     async_tree::NextNecessaryAsyncOp::Ready(dl) => dl,
                     async_tree::NextNecessaryAsyncOp::NotReady { when } => {
                         self.wake_up_new_necessary_download = if let Some(when) = when {
-                            TPlat::sleep_until(when).boxed()
+                            self.platform.sleep_until(when).boxed()
                         } else {
                             future::pending().boxed()
                         }
@@ -2012,11 +2033,12 @@ struct SuccessfulRuntime {
 
 impl SuccessfulRuntime {
     async fn from_storage<TPlat: Platform>(
+        platform: &TPlat,
         code: &Option<Vec<u8>>,
         heap_pages: &Option<Vec<u8>>,
     ) -> Result<Self, RuntimeError> {
         // Since compiling the runtime is a CPU-intensive operation, we yield once before.
-        TPlat::yield_after_cpu_intensive().await;
+        platform.yield_after_cpu_intensive().await;
 
         // Parameters for `HostVmPrototype::new`.
         let module = code.as_ref().ok_or(RuntimeError::CodeNotFound)?;

@@ -37,6 +37,7 @@ pub static TOTAL_BYTES_RECEIVED: AtomicU64 = AtomicU64::new(0);
 /// sent.
 pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Clone)]
 pub(crate) struct Platform;
 
 // TODO: this trait implementation was written before GATs were stable in Rust; now that the associated types have lifetimes, it should be possible to considerably simplify this code
@@ -62,7 +63,7 @@ impl smoldot_light::platform::Platform for Platform {
         )>,
     >;
 
-    fn now_from_unix_epoch() -> Duration {
+    fn now_from_unix_epoch(&self) -> Duration {
         let value = unsafe { bindings::unix_time_ms() };
         debug_assert!(value.is_finite());
         // The documentation of `now_from_unix_epoch()` mentions that it's ok to panic if we're
@@ -74,19 +75,19 @@ impl smoldot_light::platform::Platform for Platform {
         Duration::from_secs_f64(value / 1000.0)
     }
 
-    fn now() -> Self::Instant {
+    fn now(&self) -> Self::Instant {
         crate::Instant::now()
     }
 
-    fn sleep(duration: Duration) -> Self::Delay {
+    fn sleep(&self, duration: Duration) -> Self::Delay {
         Delay::new(duration)
     }
 
-    fn sleep_until(when: Self::Instant) -> Self::Delay {
+    fn sleep_until(&self, when: Self::Instant) -> Self::Delay {
         Delay::new_at(when)
     }
 
-    fn yield_after_cpu_intensive() -> Self::Yield {
+    fn yield_after_cpu_intensive(&self) -> Self::Yield {
         // We do not yield once, but twice.
         // The reason is that, at the time of writing, `FuturesUnordered` yields to the outside
         // after one of its futures has yielded twice.
@@ -100,7 +101,7 @@ impl smoldot_light::platform::Platform for Platform {
         }
     }
 
-    fn connect(url: &str) -> Self::ConnectFuture {
+    fn connect(&self, url: &str) -> Self::ConnectFuture {
         let mut lock = STATE.try_lock().unwrap();
 
         let connection_id = lock.next_connection_id;
@@ -206,9 +207,10 @@ impl smoldot_light::platform::Platform for Platform {
         .boxed()
     }
 
-    fn next_substream(
-        ConnectionWrapper(connection_id): &'_ mut Self::Connection,
-    ) -> Self::NextSubstreamFuture<'_> {
+    fn next_substream<'a>(
+        &self,
+        ConnectionWrapper(connection_id): &'a mut Self::Connection,
+    ) -> Self::NextSubstreamFuture<'a> {
         let connection_id = *connection_id;
 
         async move {
@@ -262,7 +264,7 @@ impl smoldot_light::platform::Platform for Platform {
         .boxed()
     }
 
-    fn open_out_substream(ConnectionWrapper(connection_id): &mut Self::Connection) {
+    fn open_out_substream(&self, ConnectionWrapper(connection_id): &mut Self::Connection) {
         match STATE
             .try_lock()
             .unwrap()
@@ -281,7 +283,8 @@ impl smoldot_light::platform::Platform for Platform {
         }
     }
 
-    fn update_stream(
+    fn update_stream<'a>(
+        &self,
         StreamWrapper {
             connection_id,
             stream_id,
@@ -289,8 +292,8 @@ impl smoldot_light::platform::Platform for Platform {
             is_reset,
             writable_bytes,
             ..
-        }: &'_ mut Self::Stream,
-    ) -> Self::StreamUpdateFuture<'_> {
+        }: &'a mut Self::Stream,
+    ) -> Self::StreamUpdateFuture<'a> {
         Box::pin(async move {
             loop {
                 if *is_reset {
@@ -336,13 +339,14 @@ impl smoldot_light::platform::Platform for Platform {
         })
     }
 
-    fn read_buffer(
+    fn read_buffer<'a>(
+        &self,
         StreamWrapper {
             read_buffer,
             is_reset,
             ..
-        }: &mut Self::Stream,
-    ) -> smoldot_light::platform::ReadBuffer {
+        }: &'a mut Self::Stream,
+    ) -> smoldot_light::platform::ReadBuffer<'a> {
         if *is_reset {
             return smoldot_light::platform::ReadBuffer::Reset;
         }
@@ -355,6 +359,7 @@ impl smoldot_light::platform::Platform for Platform {
     }
 
     fn advance_read_cursor(
+        &self,
         StreamWrapper {
             read_buffer,
             is_reset,
@@ -369,6 +374,7 @@ impl smoldot_light::platform::Platform for Platform {
     }
 
     fn writable_bytes(
+        &self,
         StreamWrapper {
             is_reset,
             writable_bytes,
@@ -384,6 +390,7 @@ impl smoldot_light::platform::Platform for Platform {
     }
 
     fn send(
+        &self,
         StreamWrapper {
             connection_id,
             stream_id,
@@ -419,6 +426,7 @@ impl smoldot_light::platform::Platform for Platform {
     }
 
     fn close_send(
+        &self,
         StreamWrapper {
             connection_id,
             stream_id,

@@ -101,6 +101,9 @@ pub struct Config<TPlat: Platform> {
     /// >           have been filtered out from this name.
     pub log_name: String,
 
+    /// Access to the platform's capabilities.
+    pub platform: TPlat,
+
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 
@@ -147,6 +150,7 @@ impl<TPlat: Platform> TransactionsService<TPlat> {
             log_target.clone(),
             Box::pin(background_task::<TPlat>(
                 log_target,
+                config.platform,
                 config.sync_service,
                 config.runtime_service,
                 config.network_service.0,
@@ -302,6 +306,7 @@ enum ToBackground {
 /// Background task running in parallel of the front service.
 async fn background_task<TPlat: Platform>(
     log_target: String,
+    platform: TPlat,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     network_service: Arc<network_service::NetworkService<TPlat>>,
@@ -315,6 +320,7 @@ async fn background_task<TPlat: Platform>(
     let blocks_capacity = 32;
 
     let mut worker = Worker {
+        platform,
         sync_service,
         runtime_service,
         network_service,
@@ -730,7 +736,7 @@ async fn background_task<TPlat: Platform>(
                         continue;
                     }
 
-                    let now = TPlat::now();
+                    let now = worker.platform.now();
                     let tx = worker.pending_transactions.transaction_user_data_mut(maybe_reannounce_tx_id).unwrap();
                     if tx.when_reannounce > now {
                         continue;
@@ -740,10 +746,13 @@ async fn background_task<TPlat: Platform>(
 
                     // Update transaction state for the next re-announce.
                     tx.when_reannounce = now + Duration::from_secs(5);
-                    worker.next_reannounce.push(async move {
-                        TPlat::sleep(Duration::from_secs(5)).await;
-                        maybe_reannounce_tx_id
-                    }.boxed());
+                    worker.next_reannounce.push({
+                        let platform = worker.platform.clone();
+                        async move {
+                            platform.sleep(Duration::from_secs(5)).await;
+                            maybe_reannounce_tx_id
+                        }.boxed()
+                    });
 
                     // Perform the announce.
                     let peers_sent = worker.network_service
@@ -918,7 +927,7 @@ async fn background_task<TPlat: Platform>(
                             worker
                                 .pending_transactions
                                 .add_unvalidated(transaction_bytes, PendingTransaction {
-                                    when_reannounce: TPlat::now(),
+                                    when_reannounce: worker.platform.now(),
                                     status_update: {
                                         let mut vec = Vec::with_capacity(1);
                                         if let Some(updates_report) = updates_report {
@@ -939,6 +948,9 @@ async fn background_task<TPlat: Platform>(
 
 /// Background worker running in parallel of the front service.
 struct Worker<TPlat: Platform> {
+    /// Access to the platform's capabilities.
+    platform: TPlat,
+
     // How to download the bodies of blocks and synchronize the chain.
     sync_service: Arc<sync_service::SyncService<TPlat>>,
 

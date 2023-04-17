@@ -22,7 +22,7 @@ use futures::prelude::*;
 pub mod async_std;
 
 /// Access to a platform's capabilities.
-pub trait Platform: Send + 'static {
+pub trait Platform: Clone + Send + Sync + 'static {
     type Delay: Future<Output = ()> + Unpin + Send + 'static;
     type Yield: Future<Output = ()> + Unpin + Send + 'static;
     type Instant: Clone
@@ -67,27 +67,27 @@ pub trait Platform: Send + 'static {
     /// Panics if the system time is configured to be below the UNIX epoch. This situation is a
     /// very very niche edge case that isn't worth handling.
     ///
-    fn now_from_unix_epoch() -> Duration;
+    fn now_from_unix_epoch(&self) -> Duration;
 
     /// Returns an object that represents "now".
-    fn now() -> Self::Instant;
+    fn now(&self) -> Self::Instant;
 
     /// Creates a future that becomes ready after at least the given duration has elapsed.
-    fn sleep(duration: Duration) -> Self::Delay;
+    fn sleep(&self, duration: Duration) -> Self::Delay;
 
     /// Creates a future that becomes ready after the given instant has been reached.
-    fn sleep_until(when: Self::Instant) -> Self::Delay;
+    fn sleep_until(&self, when: Self::Instant) -> Self::Delay;
 
     /// Should be called after a CPU-intensive operation in order to yield back control.
     ///
     /// This function can be implemented as no-op on platforms where this is irrelevant.
-    fn yield_after_cpu_intensive() -> Self::Yield;
+    fn yield_after_cpu_intensive(&self) -> Self::Yield;
 
     /// Starts a connection attempt to the given multiaddress.
     ///
     /// The multiaddress is passed as a string. If the string can't be parsed, an error should be
     /// returned where [`ConnectError::is_bad_addr`] is `true`.
-    fn connect(url: &str) -> Self::ConnectFuture;
+    fn connect(&self, url: &str) -> Self::ConnectFuture;
 
     /// Queues the opening of an additional outbound substream.
     ///
@@ -100,7 +100,7 @@ pub trait Platform: Send + 'static {
     /// >           to open, as this is not supposed to happen. If you need to handle such a
     /// >           situation, either try again opening a substream again or reset the entire
     /// >           connection.
-    fn open_out_substream(connection: &mut Self::Connection);
+    fn open_out_substream(&self, connection: &mut Self::Connection);
 
     /// Waits until a new incoming substream arrives on the connection.
     ///
@@ -110,7 +110,10 @@ pub trait Platform: Send + 'static {
     /// The future can also return `None` if the connection has been killed by the remote. If
     /// the future returns `None`, the user of the `Platform` should drop the `Connection` and
     /// all its associated `Stream`s as soon as possible.
-    fn next_substream(connection: &'_ mut Self::Connection) -> Self::NextSubstreamFuture<'_>;
+    fn next_substream<'a>(
+        &self,
+        connection: &'a mut Self::Connection,
+    ) -> Self::NextSubstreamFuture<'a>;
 
     /// Synchronizes the stream with the "actual" stream.
     ///
@@ -134,10 +137,10 @@ pub trait Platform: Send + 'static {
     /// shouldn't be updated unless this function is called.
     /// In other words, calling this function switches the stream from a state to another, and
     /// this state transition should only happen when this function is called and not otherwise.
-    fn update_stream(stream: &'_ mut Self::Stream) -> Self::StreamUpdateFuture<'_>;
+    fn update_stream<'a>(&self, stream: &'a mut Self::Stream) -> Self::StreamUpdateFuture<'a>;
 
     /// Gives access to the content of the read buffer of the given stream.
-    fn read_buffer(stream: &mut Self::Stream) -> ReadBuffer;
+    fn read_buffer<'a>(&self, stream: &'a mut Self::Stream) -> ReadBuffer<'a>;
 
     /// Discards the first `bytes` bytes of the read buffer of this stream.
     ///
@@ -148,7 +151,7 @@ pub trait Platform: Send + 'static {
     ///
     /// Panics if there aren't enough bytes to discard in the buffer.
     ///
-    fn advance_read_cursor(stream: &mut Self::Stream, bytes: usize);
+    fn advance_read_cursor(&self, stream: &mut Self::Stream, bytes: usize);
 
     /// Returns the maximum size of the buffer that can be passed to [`Platform::send`].
     ///
@@ -159,7 +162,7 @@ pub trait Platform: Send + 'static {
     /// the size of the buffer that was provided.
     /// The number of writable bytes should never change unless [`Platform::update_stream`] is
     /// called.
-    fn writable_bytes(stream: &mut Self::Stream) -> usize;
+    fn writable_bytes(&self, stream: &mut Self::Stream) -> usize;
 
     /// Queues the given bytes to be sent out on the given stream.
     ///
@@ -175,7 +178,7 @@ pub trait Platform: Send + 'static {
     /// Panics if `data.len()` is superior to the value returned by [`Platform::writable_bytes`].
     /// Panics if [`Platform::close_send`] has been called before on this stream.
     ///
-    fn send(stream: &mut Self::Stream, data: &[u8]);
+    fn send(&self, stream: &mut Self::Stream, data: &[u8]);
 
     /// Closes the sending side of the given stream.
     ///
@@ -186,7 +189,7 @@ pub trait Platform: Send + 'static {
     ///
     /// Panics if [`Platform::close_send`] has already been called on this stream.
     ///
-    fn close_send(stream: &mut Self::Stream);
+    fn close_send(&self, stream: &mut Self::Stream);
 }
 
 /// Type of opened connection. See [`Platform::connect`].

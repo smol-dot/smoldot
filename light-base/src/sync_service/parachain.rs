@@ -40,6 +40,7 @@ use smoldot::{
 /// Starts a sync service background task to synchronize a parachain.
 pub(super) async fn start_parachain<TPlat: Platform>(
     log_target: String,
+    platform: TPlat,
     chain_information: chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
     relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
@@ -57,6 +58,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
 
         ParachainBackgroundTask {
             log_target,
+            platform,
             from_foreground,
             block_number_bytes,
             relay_chain_block_number_bytes,
@@ -99,6 +101,9 @@ pub(super) async fn start_parachain<TPlat: Platform>(
 struct ParachainBackgroundTask<TPlat: Platform> {
     /// Target to use for all logs.
     log_target: String,
+
+    /// Access to the platform's capabilities.
+    platform: TPlat,
 
     /// Channel receiving message from the sync service frontend.
     from_foreground: mpsc::Receiver<ToBackground>,
@@ -591,11 +596,11 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
         while runtime_subscription.in_progress_paraheads.len() < 4 {
             match runtime_subscription
                 .async_tree
-                .next_necessary_async_op(&TPlat::now())
+                .next_necessary_async_op(&self.platform.now())
             {
                 async_tree::NextNecessaryAsyncOp::NotReady { when: Some(when) } => {
                     runtime_subscription.next_start_parahead_fetch =
-                        future::Either::Left(TPlat::sleep_until(when).fuse());
+                        future::Either::Left(self.platform.sleep_until(when).fuse());
                     break;
                 }
                 async_tree::NextNecessaryAsyncOp::NotReady { when: None } => {
@@ -720,7 +725,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
 
                 runtime_subscription
                     .async_tree
-                    .async_op_failure(async_op_id, &TPlat::now());
+                    .async_op_failure(async_op_id, &self.platform.now());
             }
         }
     }
