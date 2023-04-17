@@ -139,7 +139,7 @@ pub struct TransactionsService<TPlat> {
 
 impl<TPlat: PlatformRef> TransactionsService<TPlat> {
     /// Builds a new service.
-    pub async fn new(mut config: Config<TPlat>) -> Self {
+    pub async fn new(config: Config<TPlat>) -> Self {
         let log_target = format!("tx-service-{}", config.log_name);
         let (to_background, from_foreground) = mpsc::channel(8);
 

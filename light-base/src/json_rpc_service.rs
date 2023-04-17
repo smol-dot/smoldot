@@ -43,7 +43,7 @@ use crate::{
     network_service, platform::PlatformRef, runtime_service, sync_service, transactions_service,
 };
 
-use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
+use alloc::{format, string::String, sync::Arc, vec::Vec};
 use core::num::NonZeroU32;
 use futures::prelude::*;
 use smoldot::{

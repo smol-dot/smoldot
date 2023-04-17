@@ -111,7 +111,7 @@ pub struct SyncService<TPlat: PlatformRef> {
 }
 
 impl<TPlat: PlatformRef> SyncService<TPlat> {
-    pub async fn new(mut config: Config<TPlat>) -> Self {
+    pub async fn new(config: Config<TPlat>) -> Self {
         let (to_background, from_foreground) = mpsc::channel(16);
 
         let log_target = format!("sync-service-{}", config.log_name);

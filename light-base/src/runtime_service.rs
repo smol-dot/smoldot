@@ -127,7 +127,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     ///
     /// The future returned by this function is expected to finish relatively quickly and is
     /// necessary only for locking purposes.
-    pub async fn new(mut config: Config<TPlat>) -> Self {
+    pub async fn new(config: Config<TPlat>) -> Self {
         // Target to use for all the logs of this service.
         let log_target = format!("runtime-{}", config.log_name);
 
