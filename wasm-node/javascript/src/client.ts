@@ -443,8 +443,8 @@ export function start(options: ClientOptions, platformBindings: PlatformBindings
       // Resolve the promise that `addChain` returned to the user.
       const newChain: Chain = {
         sendJsonRpc: (request) => {
-          if (alreadyDestroyedError)
-            throw alreadyDestroyedError;
+          if (alreadyDestroyedError.value)
+            throw alreadyDestroyedError.value;
           if (wasDestroyed.destroyed)
             throw new AlreadyDestroyedError();
           if (options.disableJsonRpc)
