@@ -134,10 +134,25 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
 }
 
 /// Chain registered in a [`Client`].
+///
+/// This type is a simple wrapper around a `usize`. Use the `From<usize> for ChainId` and
+/// `From<ChainId> for usize` trait implementations to convert back and forth if necessary.
 //
 // Implementation detail: corresponds to indices within [`Client::public_api_chains`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChainId(usize);
+
+impl From<usize> for ChainId {
+    fn from(id: usize) -> ChainId {
+        ChainId(id)
+    }
+}
+
+impl From<ChainId> for usize {
+    fn from(chain_id: ChainId) -> usize {
+        chain_id.0
+    }
+}
 
 /// Holds a list of chains, connections, and JSON-RPC services.
 pub struct Client<TPlat: platform::PlatformRef, TChain = ()> {
