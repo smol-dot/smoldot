@@ -65,8 +65,6 @@
 //! they are treated as unsigned integers by the JavaScript.
 //!
 
-use core::mem;
-
 #[link(wasm_import_module = "smoldot")]
 extern "C" {
     /// Must stop the execution immediately. The message is a UTF-8 string found in the memory of
@@ -695,14 +693,12 @@ pub(crate) fn get_buffer(buffer_index: u32) -> Vec<u8> {
     unsafe {
         let len = usize::try_from(buffer_size(buffer_index)).unwrap();
 
-        // TODO: consider rewriting this in a better way after all the currently unstable functions are stable: https://github.com/rust-lang/rust/issues/63291
-        let mut buffer = Vec::<mem::MaybeUninit<u8>>::with_capacity(len);
+        let mut buffer = Vec::<u8>::with_capacity(len);
         buffer_copy(
             buffer_index,
             buffer.spare_capacity_mut().as_mut_ptr() as usize as u32,
         );
         buffer.set_len(len);
-
-        mem::transmute::<Vec<mem::MaybeUninit<u8>>, Vec<u8>>(buffer)
+        buffer
     }
 }
