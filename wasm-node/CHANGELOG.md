@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- Fix `AlreadyDestroyedError` not being properly thrown if a function is called after `terminate()`.
+- Fix `AlreadyDestroyedError` not being properly thrown if a function is called after `terminate()`. ([#438](https://github.com/smol-dot/smoldot/pull/438))
 
 ## 1.0.2 - 2023-04-12
 
