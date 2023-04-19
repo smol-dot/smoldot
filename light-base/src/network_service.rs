@@ -871,6 +871,11 @@ pub enum Event {
         chain_index: usize,
         announce: service::EncodedBlockAnnounce,
     },
+    GrandpaNeighborPacket {
+        peer_id: PeerId,
+        chain_index: usize,
+        finalized_block_height: u64,
+    },
     /// Received a GrandPa commit message from the network.
     GrandpaCommitMessage {
         peer_id: PeerId,
@@ -1252,6 +1257,11 @@ async fn update_round<TPlat: PlatformRef>(
                         state.set_id,
                         state.commit_finalized_height,
                     );
+                    break Event::GrandpaNeighborPacket {
+                        chain_index,
+                        peer_id,
+                        finalized_block_height: state.commit_finalized_height,
+                    };
                 }
                 service::Event::GrandpaCommitMessage {
                     chain_index,

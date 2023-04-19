@@ -1173,6 +1173,16 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 }
             }
 
+            network_service::Event::GrandpaNeighborPacket {
+                peer_id,
+                chain_index,
+                finalized_block_height,
+            } if chain_index == self.network_chain_index => {
+                let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
+                self.sync
+                    .update_source_finality_state(sync_source_id, finalized_block_height);
+            }
+
             network_service::Event::GrandpaCommitMessage {
                 chain_index,
                 peer_id,
