@@ -226,9 +226,8 @@ impl SqliteFullDatabase {
             return Err(FinalizedAccessError::Obsolete);
         }
 
-        let finalized_block_header =
-            block_header(&connection, finalized_block_hash, self.block_number_bytes)?
-                .ok_or(AccessError::Corrupted(CorruptedError::MissingBlockHeader))?;
+        let finalized_block_header = block_header(&connection, finalized_block_hash)?
+            .ok_or(AccessError::Corrupted(CorruptedError::MissingBlockHeader))?;
 
         let finality = match (
             grandpa_authorities_set_id(&connection)?,
@@ -430,12 +429,8 @@ impl SqliteFullDatabase {
         let connection = self.database.lock();
 
         // Fetch the header of the block to finalize.
-        let new_finalized_header = block_header(
-            &connection,
-            new_finalized_block_hash,
-            self.block_number_bytes,
-        )?
-        .ok_or(SetFinalizedError::UnknownBlock)?;
+        let new_finalized_header = block_header(&connection, new_finalized_block_hash)?
+            .ok_or(SetFinalizedError::UnknownBlock)?;
         let new_finalized_header = header::decode(&new_finalized_header, self.block_number_bytes)
             .map_err(CorruptedError::BlockHeaderCorrupted)
             .map_err(AccessError::Corrupted)
@@ -496,12 +491,11 @@ impl SqliteFullDatabase {
                 // Update `expected_hash` to point to the parent of the current
                 // `expected_hash`.
                 expected_hash = {
-                    let header =
-                        block_header(&connection, &expected_hash, self.block_number_bytes)?.ok_or(
-                            SetFinalizedError::Access(AccessError::Corrupted(
-                                CorruptedError::BrokenChain,
-                            )),
-                        )?;
+                    let header = block_header(&connection, &expected_hash)?.ok_or(
+                        SetFinalizedError::Access(AccessError::Corrupted(
+                            CorruptedError::BrokenChain,
+                        )),
+                    )?;
                     let header = header::decode(&header, self.block_number_bytes)
                         .map_err(CorruptedError::BlockHeaderCorrupted)
                         .map_err(AccessError::Corrupted)
@@ -523,7 +517,7 @@ impl SqliteFullDatabase {
             }
 
             for block_hash in blocks_list {
-                let header = block_header(&connection, &block_hash, self.block_number_bytes)?
+                let header = block_header(&connection, &block_hash)?
                     .ok_or(AccessError::Corrupted(CorruptedError::MissingBlockHeader))?;
                 let header = header::decode(&header, self.block_number_bytes)
                     .map_err(CorruptedError::BlockHeaderCorrupted)
@@ -551,10 +545,10 @@ impl SqliteFullDatabase {
                     ))?
                 };
 
-            let block_header = block_header(&connection, &block_hash, self.block_number_bytes)?
-                .ok_or(SetFinalizedError::Access(AccessError::Corrupted(
-                    CorruptedError::MissingBlockHeader,
-                )))?;
+            let block_header =
+                block_header(&connection, &block_hash)?.ok_or(SetFinalizedError::Access(
+                    AccessError::Corrupted(CorruptedError::MissingBlockHeader),
+                ))?;
             let block_header = header::decode(&block_header, self.block_number_bytes)
                 .map_err(CorruptedError::BlockHeaderCorrupted)
                 .map_err(AccessError::Corrupted)
@@ -1144,7 +1138,6 @@ fn block_hashes_by_number(
 fn block_header(
     database: &sqlite::Connection,
     hash: &[u8; 32],
-    block_number_bytes: usize,
 ) -> Result<Option<Vec<u8>>, AccessError> {
     let mut statement = database
         .prepare(r#"SELECT header FROM blocks WHERE hash = ?"#)
