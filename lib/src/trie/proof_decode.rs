@@ -365,8 +365,8 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     ///
     /// This function is a convenient wrapper around [`DecodedTrieProof::iter_ordered`] that
     /// converts the keys into arrays of bytes. If a key can't be represented as an array of
-    /// bytes, then this function panics. Assuming that the trie has only ever been used in the
-    /// context of the runtime, then panics cannot happen. See the section below for an
+    /// bytes, then it is filtered out. Assuming that the trie has only ever been used in the
+    /// context of the runtime, then this cannot happen. See the section below for an
     /// explanation.
     ///
     /// The iterator might include branch nodes. It is not possible for this function to
@@ -404,14 +404,8 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// consists in an uneven number of nibbles.
     ///
     /// As a conclusion, if this proof is made against a trie that has only ever been used in the
-    /// context of a runtime, then this function cannot panic. Malicious proofs also cannot trigger
-    /// a panic.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the proof contains any storage value at a key with an uneven number of nibbles.
-    /// This cannot happen if the proof is a proof of a trie that has only ever been used in the
-    /// context of the runtime. See the section above for detailed explanations.
+    /// context of a runtime, then this function will work as intended and return the entire
+    /// content of the proof.
     ///
     pub fn iter_runtime_context_ordered(
         &'_ self,
@@ -420,7 +414,6 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
             let value = entry.trie_node_info.storage_value;
 
             if key.len() % 2 != 0 {
-                assert!(matches!(value, StorageValue::None));
                 return None;
             }
 
