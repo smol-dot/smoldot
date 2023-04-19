@@ -89,7 +89,7 @@ use crate::{
 };
 
 use alloc::{borrow::ToOwned as _, vec::Vec};
-use core::{mem, num::NonZeroU32, ops, time::Duration};
+use core::{cmp, mem, num::NonZeroU32, ops, time::Duration};
 
 mod disjoint;
 mod pending_blocks;
@@ -196,6 +196,9 @@ struct Source<TSrc> {
     /// keeping the finality proof with the lowest target block guarantees that, assuming the
     /// source isn't malicious, we will able to make *some* progress in the finality.
     unverified_finality_proofs: SourcePendingJustificationProofs,
+
+    /// Height of the highest finalized block according to that source. `None` if unknown.
+    finalized_block_number: Option<u64>,
 
     /// Similar to [`Source::unverified_finality_proofs`]. Contains proofs that have been checked
     /// and have been determined to not be verifiable right now.
@@ -702,9 +705,21 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     pub fn desired_requests(
         &'_ self,
     ) -> impl Iterator<Item = (SourceId, &'_ TSrc, RequestParams)> + '_ {
-        // TODO: need to periodically query for justifications of non-finalized blocks that change GrandPa authorities
+        let justification_requests =
+            self.chain
+                .finality_checkpoints()
+                .flat_map(|(block_height, _block_hash)| {
+                    self.inner.blocks.sources().filter(move |s| {
+                        // We assume that all sources have the same finalized blocks.
+                        self.inner.blocks[*s].unverified_finality_proofs.is_none()
+                            && self.inner.blocks[*s]
+                                .finalized_block_number
+                                .map_or(false, |n| n >= block_height)
+                    })
+                });
 
-        self.inner
+        let block_requests = self
+            .inner
             .blocks
             .desired_requests()
             .filter(move |rq| {
@@ -718,7 +733,9 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     &self.inner.blocks[rq.source_id].user_data,
                     rq.request_params,
                 )
-            })
+            });
+
+        block_requests
     }
 
     /// Inserts a new request in the data structure.
@@ -908,6 +925,27 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         }
     }
 
+    /// Update the finalized block height of the given source.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `source_id` is invalid.
+    ///
+    pub fn update_source_finality_state(
+        &mut self,
+        source_id: SourceId,
+        finalized_block_height: u64,
+    ) {
+        let source = &mut self.inner.blocks[source_id];
+        source.finalized_block_number = Some(
+            source
+                .finalized_block_number
+                .map_or(finalized_block_height, |b| {
+                    cmp::max(b, finalized_block_height)
+                }),
+        );
+    }
+
     /// Update the state machine with a Grandpa commit message received from the network.
     ///
     /// This function only inserts the commit message into the state machine, and does not
@@ -931,6 +969,14 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             Ok(msg) => msg.message.target_number,
             Err(_) => return GrandpaCommitMessageOutcome::ParseError,
         };
+
+        // The finalized block number of the source is increased even if the commit message
+        // isn't known to be valid yet.
+        source.finalized_block_number = Some(
+            source
+                .finalized_block_number
+                .map_or(block_number, |b| cmp::max(b, block_number)),
+        );
 
         source.unverified_finality_proofs.insert(
             block_number,
@@ -1732,6 +1778,7 @@ impl<'a, TBl, TRq, TSrc> AddSourceOldBlock<'a, TBl, TRq, TSrc> {
             Source {
                 user_data: source_user_data,
                 unverified_finality_proofs: SourcePendingJustificationProofs::None,
+                finalized_block_number: None,
                 pending_finality_proofs: SourcePendingJustificationProofs::None,
             },
             self.best_block_number,
@@ -1778,6 +1825,7 @@ impl<'a, TBl, TRq, TSrc> AddSourceKnown<'a, TBl, TRq, TSrc> {
             Source {
                 user_data: source_user_data,
                 unverified_finality_proofs: SourcePendingJustificationProofs::None,
+                finalized_block_number: None,
                 pending_finality_proofs: SourcePendingJustificationProofs::None,
             },
             self.best_block_number,
@@ -1813,6 +1861,7 @@ impl<'a, TBl, TRq, TSrc> AddSourceUnknown<'a, TBl, TRq, TSrc> {
             Source {
                 user_data: source_user_data,
                 unverified_finality_proofs: SourcePendingJustificationProofs::None,
+                finalized_block_number: None,
                 pending_finality_proofs: SourcePendingJustificationProofs::None,
             },
             self.best_block_number,

@@ -1340,6 +1340,32 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         }
     }
 
+    /// Update the finalized block height of the given source.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `source_id` is invalid.
+    ///
+    pub fn update_source_finality_state(
+        &mut self,
+        source_id: SourceId,
+        finalized_block_height: u64,
+    ) {
+        let source_id = self.shared.sources.get(source_id.0).unwrap();
+
+        match (&mut self.inner, source_id) {
+            (AllSyncInner::AllForks(sync), SourceMapping::AllForks(source_id)) => {
+                sync.update_source_finality_state(*source_id, finalized_block_height)
+            }
+            (AllSyncInner::Optimistic { .. }, _) => {} // TODO: store the value in the source user data and restore it on transition to AllForks
+            (AllSyncInner::GrandpaWarpSync { .. }, _) => {} // TODO: store the value in the source user data and restore it on transition to AllForks
+
+            // Invalid internal states.
+            (AllSyncInner::AllForks(_), _) => unreachable!(),
+            (AllSyncInner::Poisoned, _) => unreachable!(),
+        }
+    }
+
     /// Update the state machine with a Grandpa commit message received from the network.
     ///
     /// This function only inserts the commit message into the state machine, and does not

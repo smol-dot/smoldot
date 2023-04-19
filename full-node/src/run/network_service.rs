@@ -962,6 +962,7 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                         state.set_id,
                         state.commit_finalized_height,
                     );
+                    // TODO: report to the sync state machine
                 }
                 service::Event::GrandpaCommitMessage {
                     chain_index,
