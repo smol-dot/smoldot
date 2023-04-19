@@ -127,7 +127,9 @@ impl<T> NonFinalizedTree<T> {
 
         NonFinalizedTree {
             inner: Some(Box::new(NonFinalizedTreeInner {
-                finalized_block_header: chain_information.finalized_block_header,
+                finalized_block_header: chain_information
+                    .finalized_block_header
+                    .scale_encoding_vec(config.block_number_bytes),
                 finalized_block_hash,
                 finality: match chain_information.finality {
                     chain_information::ChainInformationFinality::Outsourced => Finality::Outsourced,
@@ -198,12 +200,11 @@ impl<T> NonFinalizedTree<T> {
     /// Returns the header of all known non-finalized blocks in the chain without any specific
     /// order.
     pub fn iter_unordered(&'_ self) -> impl Iterator<Item = header::HeaderRef<'_>> + '_ {
-        self.inner
-            .as_ref()
-            .unwrap()
+        let inner = self.inner.as_ref().unwrap();
+        inner
             .blocks
             .iter_unordered()
-            .map(|(_, b)| (&b.header).into())
+            .map(move |(_, b)| header::decode(&b.header, inner.block_number_bytes).unwrap())
     }
 
     /// Returns the header of all known non-finalized blocks in the chain.
@@ -211,12 +212,11 @@ impl<T> NonFinalizedTree<T> {
     /// The returned items are guaranteed to be in an order in which the parents are found before
     /// their children.
     pub fn iter_ancestry_order(&'_ self) -> impl Iterator<Item = header::HeaderRef<'_>> + '_ {
-        self.inner
-            .as_ref()
-            .unwrap()
+        let inner = self.inner.as_ref().unwrap();
+        inner
             .blocks
             .iter_ancestry_order()
-            .map(|(_, b)| (&b.header).into())
+            .map(move |(_, b)| header::decode(&b.header, inner.block_number_bytes).unwrap())
     }
 
     /// Reserves additional capacity for at least `additional` new blocks without allocating.
@@ -244,7 +244,11 @@ impl<T> NonFinalizedTree<T> {
     pub fn as_chain_information(&self) -> chain_information::ValidChainInformationRef {
         let inner = self.inner.as_ref().unwrap();
         let attempt = chain_information::ChainInformationRef {
-            finalized_block_header: (&inner.finalized_block_header).into(),
+            finalized_block_header: header::decode(
+                &inner.finalized_block_header,
+                inner.block_number_bytes,
+            )
+            .unwrap(),
             consensus: match &inner.finalized_consensus {
                 FinalizedConsensus::Unknown => {
                     chain_information::ChainInformationConsensusRef::Unknown
@@ -292,7 +296,8 @@ impl<T> NonFinalizedTree<T> {
 
     /// Returns the header of the latest finalized block.
     pub fn finalized_block_header(&self) -> header::HeaderRef {
-        (&self.inner.as_ref().unwrap().finalized_block_header).into()
+        let inner = self.inner.as_ref().unwrap();
+        header::decode(&inner.finalized_block_header, inner.block_number_bytes).unwrap()
     }
 
     /// Returns the hash of the latest finalized block.
@@ -304,9 +309,13 @@ impl<T> NonFinalizedTree<T> {
     pub fn best_block_header(&self) -> header::HeaderRef {
         let inner = self.inner.as_ref().unwrap();
         if let Some(index) = inner.current_best {
-            (&inner.blocks.get(index).unwrap().header).into()
+            header::decode(
+                &inner.blocks.get(index).unwrap().header,
+                inner.block_number_bytes,
+            )
+            .unwrap()
         } else {
-            (&inner.finalized_block_header).into()
+            header::decode(&inner.finalized_block_header, inner.block_number_bytes).unwrap()
         }
     }
 
@@ -442,7 +451,9 @@ where
                 "finalized_block_hash",
                 &format!(
                     "0x{}",
-                    hex::encode(inner.finalized_block_header.hash(inner.block_number_bytes))
+                    hex::encode(header::hash_from_scale_encoded_header(
+                        &inner.finalized_block_header
+                    ))
                 ),
             )
             .field("non_finalized_blocks", &Blocks(inner))
@@ -453,7 +464,9 @@ where
 /// See [`NonFinalizedTree::inner`].
 struct NonFinalizedTreeInner<T> {
     /// Header of the highest known finalized block.
-    finalized_block_header: header::Header,
+    ///
+    /// Guaranteed to be valid.
+    finalized_block_header: Vec<u8>,
     /// Hash of [`NonFinalizedTree::finalized_block_header`].
     finalized_block_hash: [u8; 32],
     /// State of the chain finality engine.
@@ -521,7 +534,9 @@ enum Finality {
 
 struct Block<T> {
     /// Header of the block.
-    header: header::Header,
+    ///
+    /// Guaranteed to be valid.
+    header: Vec<u8>,
     /// Cache of the hash of the block. Always equal to the hash of the header stored in this
     /// same struct.
     hash: [u8; 32],
