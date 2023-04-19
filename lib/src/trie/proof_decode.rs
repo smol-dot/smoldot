@@ -401,11 +401,13 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// trie root hash, we are also guaranteed that this proof reflects the actual trie. If the
     /// actual trie can't contain any storage value at a key that consists in an uneven number of
     /// nibbles, then the proof is also guaranteed to not contain any storage value at a key that
-    /// consists in an uneven number of nibbles.
+    /// consists in an uneven number of nibbles. Importantly, this is only true if we are sure that
+    /// the block is valid, in other words that it has indeed been created using a runtime. Blocks
+    /// that are invalid might have been created through a fake trie.
     ///
     /// As a conclusion, if this proof is made against a trie that has only ever been used in the
-    /// context of a runtime, then this function will work as intended and return the entire
-    /// content of the proof.
+    /// context of a runtime, and that the block using this trie is guaranteed to be valid, then
+    /// this function will work as intended and return the entire content of the proof.
     ///
     pub fn iter_runtime_context_ordered(
         &'_ self,
