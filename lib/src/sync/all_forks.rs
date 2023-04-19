@@ -89,7 +89,12 @@ use crate::{
 };
 
 use alloc::{borrow::ToOwned as _, vec::Vec};
-use core::{cmp, mem, num::NonZeroU32, ops, time::Duration};
+use core::{
+    cmp, mem,
+    num::{NonZeroU32, NonZeroU64},
+    ops,
+    time::Duration,
+};
 
 mod disjoint;
 mod pending_blocks;
@@ -705,17 +710,36 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     pub fn desired_requests(
         &'_ self,
     ) -> impl Iterator<Item = (SourceId, &'_ TSrc, RequestParams)> + '_ {
+        // Query justifications of blocks that are necessary in order for finality to progress
+        // against sources that have reported these blocks as finalized.
+        // TODO: make it clear in the API docs that justifications should be requested as part of a request
+        // TODO: this is O(n)
         let justification_requests =
             self.chain
                 .finality_checkpoints()
-                .flat_map(|(block_height, _block_hash)| {
-                    self.inner.blocks.sources().filter(move |s| {
-                        // We assume that all sources have the same finalized blocks.
-                        self.inner.blocks[*s].unverified_finality_proofs.is_none()
-                            && self.inner.blocks[*s]
-                                .finalized_block_number
-                                .map_or(false, |n| n >= block_height)
-                    })
+                .flat_map(move |(block_height, block_hash)| {
+                    self.inner
+                        .blocks
+                        .sources()
+                        .filter(move |s| {
+                            // We assume that all sources have the same finalized blocks and thus
+                            // don't check hashes.
+                            self.inner.blocks[*s].unverified_finality_proofs.is_none()
+                                && self.inner.blocks[*s]
+                                    .finalized_block_number
+                                    .map_or(false, |n| n >= block_height)
+                        })
+                        .map(move |source_id| {
+                            (
+                                source_id,
+                                &self.inner.blocks[source_id].user_data,
+                                RequestParams {
+                                    first_block_hash: *block_hash,
+                                    first_block_height: block_height,
+                                    num_blocks: NonZeroU64::new(1).unwrap(),
+                                },
+                            )
+                        })
                 });
 
         let block_requests = self
@@ -735,7 +759,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 )
             });
 
-        block_requests
+        justification_requests.chain(block_requests)
     }
 
     /// Inserts a new request in the data structure.
@@ -765,6 +789,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// > **Note**: It is in no way mandatory to actually call this function and cancel the
     /// >           requests that are returned.
     pub fn obsolete_requests(&'_ self) -> impl Iterator<Item = (RequestId, &'_ TRq)> + '_ {
+        // TODO: requests meant to query justifications only are considered obsolete by the underlying state machine, which right now is okay because the underlying state machine is pretty loose in its definition of obsolete
         self.inner.blocks.obsolete_requests()
     }
 
