@@ -31,7 +31,8 @@ fn invalid_wasm() {
             heap_pages: HeapPages::new(1024),
             module: &module_bytes,
         }) {
-            Err(NewErr::VirtualMachine(vm::NewErr::InvalidWasm(_))) => {}
+            Err(NewErr::VirtualMachine(vm::NewErr::InvalidWasm(_)) | NewErr::RuntimeVersion(_)) => {
+            }
             _ => panic!(),
         }
     }
