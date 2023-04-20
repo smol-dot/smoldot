@@ -102,7 +102,7 @@ export interface Config {
      *
      * The connection and stream must currently be in the `Open` state.
      *
-     * The number of bytes most never exceed the number of "writable bytes" of the stream.
+     * The number of bytes must never exceed the number of "writable bytes" of the stream.
      * `onWritableBytes` can be used in order to notify that more writable bytes are available.
      *
      * The `streamId` must be provided if and only if the connection is of type "multi-stream".
@@ -197,7 +197,8 @@ export interface ConnectionConfig {
     onStreamReset: (streamId: number) => void;
 
     /**
-     * Callback called when more data can be written on the stream.
+     * Callback called when some data sent using {@link Connection.send} has effectively been
+     * written on the stream, meaning that some buffer space is now free.
      *
      * Can only happen while the connection is in the `Open` state.
      *
@@ -205,6 +206,9 @@ export interface ConnectionConfig {
      *
      * The `streamId` parameter must be provided if and only if the connection is of type
      * "multi-stream".
+     *
+     * Only a number of bytes equal to the size of the data provided to {@link Connection.send}
+     * should be reported. In other words, the `initialWritableBytes` must never be exceeded.
      */
     onWritableBytes: (numExtra: number, streamId?: number) => void;
 
