@@ -17,7 +17,7 @@
 
 //! All legacy JSON-RPC method handlers that relate to the chain or the storage.
 
-use super::{Background, Platform, SubscriptionMessage};
+use super::{Background, PlatformRef, SubscriptionMessage};
 
 use crate::runtime_service;
 
@@ -44,7 +44,7 @@ use smoldot::{
 
 mod sub_utils;
 
-impl<TPlat: Platform> Background<TPlat> {
+impl<TPlat: PlatformRef> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::system_accountNextIndex`].
     pub(super) async fn account_next_index(
         self: &Arc<Self>,

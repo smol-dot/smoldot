@@ -192,35 +192,6 @@ pub fn calculate_merkle_value(
         Hasher(blake2_rfc::blake2b::Blake2b),
     }
 
-    impl HashOrInline {
-        /// Adds data to the node value. If this is a [`HashOrInline::Inline`] and the total size would
-        /// go above 32 bytes, then we switch to a hasher.
-        fn update(&mut self, data: &[u8]) {
-            match self {
-                HashOrInline::Inline(curr) => {
-                    if curr.try_extend_from_slice(data).is_err() {
-                        let mut hasher = blake2_rfc::blake2b::Blake2b::new(32);
-                        hasher.update(curr);
-                        hasher.update(data);
-                        *self = HashOrInline::Hasher(hasher);
-                    }
-                }
-                HashOrInline::Hasher(hasher) => {
-                    hasher.update(data);
-                }
-            }
-        }
-
-        fn finalize(self) -> MerkleValueOutput {
-            MerkleValueOutput {
-                inner: match self {
-                    HashOrInline::Inline(b) => MerkleValueOutputInner::Inline(b),
-                    HashOrInline::Hasher(h) => MerkleValueOutputInner::Hasher(h.finalize()),
-                },
-            }
-        }
-    }
-
     let mut merkle_value_sink = if is_root_node {
         HashOrInline::Hasher(blake2_rfc::blake2b::Blake2b::new(32))
     } else {
@@ -228,10 +199,30 @@ pub fn calculate_merkle_value(
     };
 
     for buffer in encode(decoded)? {
-        merkle_value_sink.update(buffer.as_ref());
+        let buffer = buffer.as_ref();
+        match &mut merkle_value_sink {
+            HashOrInline::Inline(curr) => {
+                if curr.try_extend_from_slice(buffer).is_ok() {
+                    continue;
+                }
+
+                let mut hasher = blake2_rfc::blake2b::Blake2b::new(32);
+                hasher.update(curr);
+                hasher.update(buffer);
+                merkle_value_sink = HashOrInline::Hasher(hasher);
+            }
+            HashOrInline::Hasher(hasher) => {
+                hasher.update(buffer);
+            }
+        }
     }
 
-    Ok(merkle_value_sink.finalize())
+    Ok(MerkleValueOutput {
+        inner: match merkle_value_sink {
+            HashOrInline::Inline(b) => MerkleValueOutputInner::Inline(b),
+            HashOrInline::Hasher(h) => MerkleValueOutputInner::Hasher(h.finalize()),
+        },
+    })
 }
 
 /// Output of the calculation.

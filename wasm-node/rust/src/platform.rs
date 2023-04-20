@@ -21,8 +21,9 @@ use smoldot::libp2p::multihash;
 use smoldot_light::platform::{ConnectError, PlatformSubstreamDirection};
 
 use core::{mem, pin, str, task, time::Duration};
-use futures::prelude::*;
+use futures::{channel::mpsc, prelude::*};
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, VecDeque},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -37,10 +38,22 @@ pub static TOTAL_BYTES_RECEIVED: AtomicU64 = AtomicU64::new(0);
 /// sent.
 pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) struct Platform;
+#[derive(Clone)]
+pub(crate) struct Platform {
+    new_task_tx: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
+}
+
+impl Platform {
+    // TODO: consider doing the spawning entirely here, instead of providing a channel
+    pub fn new(
+        new_task_tx: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
+    ) -> Self {
+        Self { new_task_tx }
+    }
+}
 
 // TODO: this trait implementation was written before GATs were stable in Rust; now that the associated types have lifetimes, it should be possible to considerably simplify this code
-impl smoldot_light::platform::Platform for Platform {
+impl smoldot_light::platform::PlatformRef for Platform {
     type Delay = Delay;
     type Yield = Yield;
     type Instant = crate::Instant;
@@ -62,7 +75,7 @@ impl smoldot_light::platform::Platform for Platform {
         )>,
     >;
 
-    fn now_from_unix_epoch() -> Duration {
+    fn now_from_unix_epoch(&self) -> Duration {
         let value = unsafe { bindings::unix_time_ms() };
         debug_assert!(value.is_finite());
         // The documentation of `now_from_unix_epoch()` mentions that it's ok to panic if we're
@@ -74,19 +87,33 @@ impl smoldot_light::platform::Platform for Platform {
         Duration::from_secs_f64(value / 1000.0)
     }
 
-    fn now() -> Self::Instant {
+    fn now(&self) -> Self::Instant {
         crate::Instant::now()
     }
 
-    fn sleep(duration: Duration) -> Self::Delay {
+    fn sleep(&self, duration: Duration) -> Self::Delay {
         Delay::new(duration)
     }
 
-    fn sleep_until(when: Self::Instant) -> Self::Delay {
+    fn sleep_until(&self, when: Self::Instant) -> Self::Delay {
         Delay::new_at(when)
     }
 
-    fn yield_after_cpu_intensive() -> Self::Yield {
+    fn spawn_task(&self, task_name: Cow<str>, task: future::BoxFuture<'static, ()>) {
+        self.new_task_tx
+            .unbounded_send((task_name.into_owned(), task))
+            .unwrap()
+    }
+
+    fn client_name(&self) -> Cow<str> {
+        env!("CARGO_PKG_NAME").into()
+    }
+
+    fn client_version(&self) -> Cow<str> {
+        env!("CARGO_PKG_VERSION").into()
+    }
+
+    fn yield_after_cpu_intensive(&self) -> Self::Yield {
         // We do not yield once, but twice.
         // The reason is that, at the time of writing, `FuturesUnordered` yields to the outside
         // after one of its futures has yielded twice.
@@ -100,7 +127,7 @@ impl smoldot_light::platform::Platform for Platform {
         }
     }
 
-    fn connect(url: &str) -> Self::ConnectFuture {
+    fn connect(&self, url: &str) -> Self::ConnectFuture {
         let mut lock = STATE.try_lock().unwrap();
 
         let connection_id = lock.next_connection_id;
@@ -206,9 +233,10 @@ impl smoldot_light::platform::Platform for Platform {
         .boxed()
     }
 
-    fn next_substream(
-        ConnectionWrapper(connection_id): &'_ mut Self::Connection,
-    ) -> Self::NextSubstreamFuture<'_> {
+    fn next_substream<'a>(
+        &self,
+        ConnectionWrapper(connection_id): &'a mut Self::Connection,
+    ) -> Self::NextSubstreamFuture<'a> {
         let connection_id = *connection_id;
 
         async move {
@@ -262,7 +290,7 @@ impl smoldot_light::platform::Platform for Platform {
         .boxed()
     }
 
-    fn open_out_substream(ConnectionWrapper(connection_id): &mut Self::Connection) {
+    fn open_out_substream(&self, ConnectionWrapper(connection_id): &mut Self::Connection) {
         match STATE
             .try_lock()
             .unwrap()
@@ -281,7 +309,8 @@ impl smoldot_light::platform::Platform for Platform {
         }
     }
 
-    fn update_stream(
+    fn update_stream<'a>(
+        &self,
         StreamWrapper {
             connection_id,
             stream_id,
@@ -289,8 +318,8 @@ impl smoldot_light::platform::Platform for Platform {
             is_reset,
             writable_bytes,
             ..
-        }: &'_ mut Self::Stream,
-    ) -> Self::StreamUpdateFuture<'_> {
+        }: &'a mut Self::Stream,
+    ) -> Self::StreamUpdateFuture<'a> {
         Box::pin(async move {
             loop {
                 if *is_reset {
@@ -319,6 +348,9 @@ impl smoldot_light::platform::Platform for Platform {
                     }
 
                     if stream.writable_bytes_extra != 0 {
+                        // As documented, the number of writable bytes must never exceed the
+                        // initial writable bytes value. As such, this can't overflow unless there
+                        // is a bug on the JavaScript side.
                         *writable_bytes += stream.writable_bytes_extra;
                         stream.writable_bytes_extra = 0;
                         shall_return = true;
@@ -336,13 +368,14 @@ impl smoldot_light::platform::Platform for Platform {
         })
     }
 
-    fn read_buffer(
+    fn read_buffer<'a>(
+        &self,
         StreamWrapper {
             read_buffer,
             is_reset,
             ..
-        }: &mut Self::Stream,
-    ) -> smoldot_light::platform::ReadBuffer {
+        }: &'a mut Self::Stream,
+    ) -> smoldot_light::platform::ReadBuffer<'a> {
         if *is_reset {
             return smoldot_light::platform::ReadBuffer::Reset;
         }
@@ -355,6 +388,7 @@ impl smoldot_light::platform::Platform for Platform {
     }
 
     fn advance_read_cursor(
+        &self,
         StreamWrapper {
             read_buffer,
             is_reset,
@@ -369,6 +403,7 @@ impl smoldot_light::platform::Platform for Platform {
     }
 
     fn writable_bytes(
+        &self,
         StreamWrapper {
             is_reset,
             writable_bytes,
@@ -384,6 +419,7 @@ impl smoldot_light::platform::Platform for Platform {
     }
 
     fn send(
+        &self,
         StreamWrapper {
             connection_id,
             stream_id,
@@ -419,6 +455,7 @@ impl smoldot_light::platform::Platform for Platform {
     }
 
     fn close_send(
+        &self,
         StreamWrapper {
             connection_id,
             stream_id,
@@ -608,7 +645,7 @@ enum ConnectionInner {
     MultiStreamWebRtc {
         /// List of substreams that the host (i.e. JavaScript side) has reported have been opened,
         /// but that haven't been reported through
-        /// [`smoldot_light::platform::Platform::next_substream`] yet.
+        /// [`smoldot_light::platform::PlatformRef::next_substream`] yet.
         opened_substreams_to_pick_up: VecDeque<(u32, PlatformSubstreamDirection, u32)>,
         /// Number of objects (connections and streams) in the [`Platform`] API that reference
         /// this connection. If it switches from 1 to 0, the connection must be removed.
@@ -749,10 +786,9 @@ pub(crate) fn stream_writable_bytes(connection_id: u32, stream_id: u32, bytes: u
         .unwrap();
     debug_assert!(!stream.reset);
 
-    stream.writable_bytes_extra = stream
-        .writable_bytes_extra
-        .checked_add(usize::try_from(bytes).unwrap())
-        .unwrap();
+    // As documented, the number of writable bytes must never exceed the initial writable bytes
+    // value. As such, this can't overflow unless there is a bug on the JavaScript side.
+    stream.writable_bytes_extra += usize::try_from(bytes).unwrap();
     stream.something_happened.notify(usize::max_value());
 }
 

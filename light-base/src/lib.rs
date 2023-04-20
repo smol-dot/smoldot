@@ -26,13 +26,13 @@
 //!
 //! ## Initialization
 //!
-//! In order to use the light client, call [`Client::new`], passing a [`ClientConfig`]. See the
-//! documentation of [`ClientConfig`] for information about what to provide.
+//! In order to use the light client, call [`Client::new`], passing an implementation of the
+//! [`platform::PlatformRef`] trait. See the documentation of the [`platform::PlatformRef`] trait
+//! for more information.
 //!
 //! The [`Client`] contains two generic parameters:
 //!
-//! - An implementation of the [`platform::Platform`] trait. This is how the client will
-//! communicate with the outside, such as getting the current time.
+//! - An implementation of the [`platform::PlatformRef`] trait.
 //! - An opaque user data. If you do not use this, you can simply use `()`.
 //!
 //! ## Adding a chain
@@ -97,24 +97,6 @@ pub mod platform;
 pub use json_rpc_service::HandleRpcError;
 pub use peer_id::PeerId;
 
-/// Configuration for a client.
-///
-/// See [`Client::new`].
-pub struct ClientConfig {
-    /// In order for the client to function, it needs to be able to spawn tasks in the background
-    /// that will run indefinitely. To do so, it will call this function with the task to spawn.
-    /// The first parameter is the name of the task, which can be useful for debugging purposes.
-    pub tasks_spawner: Box<dyn Fn(String, future::BoxFuture<'static, ()>) + Send + Sync>,
-
-    /// Value returned when a JSON-RPC client requests the name of the client, or when a peer
-    /// performs an identification request. Reasonable value is `env!("CARGO_PKG_NAME")`.
-    pub client_name: String,
-
-    /// Value returned when a JSON-RPC client requests the version of the client, or when a peer
-    /// performs an identification request. Reasonable value is `env!("CARGO_PKG_VERSION")`.
-    pub client_version: String,
-}
-
 /// See [`Client::add_chain`].
 #[derive(Debug, Clone)]
 pub struct AddChainConfig<'a, TChain, TRelays> {
@@ -152,16 +134,30 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
 }
 
 /// Chain registered in a [`Client`].
+///
+/// This type is a simple wrapper around a `usize`. Use the `From<usize> for ChainId` and
+/// `From<ChainId> for usize` trait implementations to convert back and forth if necessary.
 //
 // Implementation detail: corresponds to indices within [`Client::public_api_chains`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChainId(usize);
 
+impl From<usize> for ChainId {
+    fn from(id: usize) -> ChainId {
+        ChainId(id)
+    }
+}
+
+impl From<ChainId> for usize {
+    fn from(chain_id: ChainId) -> usize {
+        chain_id.0
+    }
+}
+
 /// Holds a list of chains, connections, and JSON-RPC services.
-pub struct Client<TPlat: platform::Platform, TChain = ()> {
-    /// Tasks can be spawned by calling this function. The first parameter is the name of the task
-    /// used for debugging purposes.
-    spawn_new_task: Arc<dyn Fn(String, future::BoxFuture<'static, ()>) + Send + Sync>,
+pub struct Client<TPlat: platform::PlatformRef, TChain = ()> {
+    /// Access to the platform capabilities.
+    platform: TPlat,
 
     /// List of chains currently running according to the public API. Indices in this container
     /// are reported through the public API. The values are either an error if the chain has failed
@@ -177,12 +173,6 @@ pub struct Client<TPlat: platform::Platform, TChain = ()> {
     /// initialization is still in progress.
     // TODO: use SipHasher
     chains_by_key: HashMap<ChainKey, RunningChain<TPlat>, fnv::FnvBuildHasher>,
-
-    /// See [`ClientConfig::client_name`].
-    client_name: String,
-
-    /// See [`ClientConfig::client_version`].
-    client_version: String,
 }
 
 struct PublicApiChain<TChain> {
@@ -227,7 +217,7 @@ struct ChainKey {
     fork_id: Option<String>,
 }
 
-struct RunningChain<TPlat: platform::Platform> {
+struct RunningChain<TPlat: platform::PlatformRef> {
     /// Services that are dedicated to this chain. Wrapped within a `MaybeDone` because the
     /// initialization is performed asynchronously.
     services: future::MaybeDone<future::Shared<future::RemoteHandle<ChainServices<TPlat>>>>,
@@ -241,7 +231,7 @@ struct RunningChain<TPlat: platform::Platform> {
     num_references: NonZeroU32,
 }
 
-struct ChainServices<TPlat: platform::Platform> {
+struct ChainServices<TPlat: platform::PlatformRef> {
     network_service: Arc<network_service::NetworkService<TPlat>>,
     network_identity: peer_id::PeerId,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
@@ -251,7 +241,7 @@ struct ChainServices<TPlat: platform::Platform> {
     block_number_bytes: usize,
 }
 
-impl<TPlat: platform::Platform> Clone for ChainServices<TPlat> {
+impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
     fn clone(&self) -> Self {
         ChainServices {
             network_service: self.network_service.clone(),
@@ -312,16 +302,14 @@ impl JsonRpcResponses {
     }
 }
 
-impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
+impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
     /// Initializes the smoldot client.
-    pub fn new(config: ClientConfig) -> Self {
+    pub fn new(platform: TPlat) -> Self {
         let expected_chains = 8;
         Client {
-            spawn_new_task: config.tasks_spawner.into(),
+            platform,
             public_api_chains: slab::Slab::with_capacity(expected_chains),
             chains_by_key: HashMap::with_capacity_and_hasher(expected_chains, Default::default()),
-            client_name: config.client_name,
-            client_version: config.client_version,
         }
     }
 
@@ -633,13 +621,16 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                 let network_noise_key = connection::NoiseKey::new(&rand::random());
 
                 // Version of the client when requested through the networking.
-                let network_identify_agent_version =
-                    format!("{} {}", self.client_name, self.client_version);
+                let network_identify_agent_version = format!(
+                    "{} {}",
+                    self.platform.client_name(),
+                    self.platform.client_version()
+                );
 
                 // Spawn a background task that initializes the services of the new chain and
                 // yields a `ChainServices`.
                 let running_chain_init_future: future::RemoteHandle<ChainServices<TPlat>> = {
-                    let spawn_new_task = self.spawn_new_task.clone();
+                    let platform = self.platform.clone();
                     let chain_spec = chain_spec.clone(); // TODO: quite expensive
                     let log_name = log_name.clone();
 
@@ -671,7 +662,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
 
                         let running_chain = start_services(
                             log_name.clone(),
-                            spawn_new_task,
+                            &platform,
                             chain_information,
                             genesis_block_header
                                 .scale_encoding_vec(chain_spec.block_number_bytes().into()),
@@ -737,10 +728,8 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                     };
 
                     let (background_future, output_future) = future.remote_handle();
-                    (self.spawn_new_task)(
-                        "services-initialization".to_owned(),
-                        background_future.boxed(),
-                    );
+                    self.platform
+                        .spawn_task("services-initialization".into(), background_future.boxed());
                     output_future
                 };
 
@@ -785,29 +774,32 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
         // bootnodes and database nodes to the network service after it has been initialized. This
         // is done by adding a short-lived task that waits for the chain initialization to finish
         // then adds the nodes.
-        (self.spawn_new_task)("network-service-add-initial-topology".to_owned(), {
-            // Clone `running_chain_init`.
-            let mut running_chain_init = match services_init {
-                future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
-                future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
-                future::MaybeDone::Gone => unreachable!(),
-            };
+        self.platform
+            .spawn_task("network-service-add-initial-topology".into(), {
+                // Clone `running_chain_init`.
+                let mut running_chain_init = match services_init {
+                    future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
+                    future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
+                    future::MaybeDone::Gone => unreachable!(),
+                };
 
-            async move {
-                // Wait for the chain to finish initializing to proceed.
-                (&mut running_chain_init).await;
-                let running_chain = Pin::new(&mut running_chain_init).take_output().unwrap();
-                running_chain
-                    .network_service
-                    .discover(&TPlat::now(), 0, checkpoint_nodes, false)
-                    .await;
-                running_chain
-                    .network_service
-                    .discover(&TPlat::now(), 0, bootstrap_nodes, true)
-                    .await;
-            }
-            .boxed()
-        });
+                let platform = self.platform.clone();
+
+                async move {
+                    // Wait for the chain to finish initializing to proceed.
+                    (&mut running_chain_init).await;
+                    let running_chain = Pin::new(&mut running_chain_init).take_output().unwrap();
+                    running_chain
+                        .network_service
+                        .discover(&platform.now(), 0, checkpoint_nodes, false)
+                        .await;
+                    running_chain
+                        .network_service
+                        .discover(&platform.now(), 0, bootstrap_nodes, true)
+                        .await;
+                }
+                .boxed()
+            });
 
         // JSON-RPC service initialization. This is done every time `add_chain` is called, even
         // if a similar chain already existed.
@@ -827,9 +819,9 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                 max_parallel_subscription_updates: NonZeroU32::new(8).unwrap(),
             });
 
-            let spawn_new_task = self.spawn_new_task.clone();
-            let system_name = self.client_name.clone();
-            let system_version = self.client_version.clone();
+            let system_name = self.platform.client_name().into_owned();
+            let system_version = self.platform.client_version().into_owned();
+            let platform = self.platform.clone();
 
             let init_future = async move {
                 // Wait for the chain to finish initializing before starting the JSON-RPC service.
@@ -837,7 +829,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                 let running_chain = Pin::new(&mut running_chain_init).take_output().unwrap();
 
                 service_starter.start(json_rpc_service::StartConfig {
-                    tasks_executor: Box::new(move |name, task| spawn_new_task(name, task)),
+                    platform,
                     sync_service: running_chain.sync_service,
                     network_service: (running_chain.network_service, 0), // TODO: 0?
                     transactions_service: running_chain.transactions_service,
@@ -851,7 +843,8 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                 })
             };
 
-            (self.spawn_new_task)("json-rpc-service-init".to_owned(), init_future.boxed());
+            self.platform
+                .spawn_task("json-rpc-service-init".into(), init_future.boxed());
 
             Some(frontend)
         } else {
@@ -995,11 +988,9 @@ pub enum AddChainError {
 ///
 /// Returns some of the services that have been started. If these service get shut down, all the
 /// other services will later shut down as well.
-async fn start_services<TPlat: platform::Platform>(
+async fn start_services<TPlat: platform::PlatformRef>(
     log_name: String,
-    spawn_new_task: Arc<
-        dyn Fn(String, Pin<Box<dyn Future<Output = ()> + Send + 'static>>) + Send + Sync,
-    >,
+    platform: &TPlat,
     chain_information: chain::chain_information::ValidChainInformation,
     genesis_block_scale_encoded_header: Vec<u8>,
     chain_spec: chain_spec::ChainSpec,
@@ -1015,10 +1006,7 @@ async fn start_services<TPlat: platform::Platform>(
     // The network service is responsible for connecting to the peer-to-peer network.
     let (network_service, mut network_event_receivers) =
         network_service::NetworkService::new(network_service::Config {
-            tasks_executor: Box::new({
-                let spawn_new_task = spawn_new_task.clone();
-                move |name, fut| spawn_new_task(name, fut)
-            }),
+            platform: platform.clone(),
             num_events_receivers: 1, // Configures the length of `network_event_receivers`
             identify_agent_version: network_identify_agent_version,
             noise_key: network_noise_key,
@@ -1053,13 +1041,10 @@ async fn start_services<TPlat: platform::Platform>(
         // chain.
         let sync_service = Arc::new(
             sync_service::SyncService::new(sync_service::Config {
+                platform: platform.clone(),
                 log_name: log_name.clone(),
                 chain_information: chain_information.clone(),
                 block_number_bytes: usize::from(chain_spec.block_number_bytes()),
-                tasks_executor: Box::new({
-                    let spawn_new_task = spawn_new_task.clone();
-                    move |name, fut| spawn_new_task(name, fut)
-                }),
                 network_service: (network_service.clone(), 0),
                 network_events_receiver: network_event_receivers.pop().unwrap(),
                 parachain: Some(sync_service::ConfigParachain {
@@ -1076,10 +1061,7 @@ async fn start_services<TPlat: platform::Platform>(
         let runtime_service = Arc::new(
             runtime_service::RuntimeService::new(runtime_service::Config {
                 log_name: log_name.clone(),
-                tasks_executor: Box::new({
-                    let spawn_new_task = spawn_new_task.clone();
-                    move |name, fut| spawn_new_task(name, fut)
-                }),
+                platform: platform.clone(),
                 sync_service: sync_service.clone(),
                 genesis_block_scale_encoded_header,
             })
@@ -1098,10 +1080,7 @@ async fn start_services<TPlat: platform::Platform>(
                 log_name: log_name.clone(),
                 chain_information: chain_information.clone(),
                 block_number_bytes: usize::from(chain_spec.block_number_bytes()),
-                tasks_executor: Box::new({
-                    let spawn_new_task = spawn_new_task.clone();
-                    move |name, fut| spawn_new_task(name, fut)
-                }),
+                platform: platform.clone(),
                 network_service: (network_service.clone(), 0),
                 network_events_receiver: network_event_receivers.pop().unwrap(),
                 parachain: None,
@@ -1114,10 +1093,7 @@ async fn start_services<TPlat: platform::Platform>(
         let runtime_service = Arc::new(
             runtime_service::RuntimeService::new(runtime_service::Config {
                 log_name: log_name.clone(),
-                tasks_executor: Box::new({
-                    let spawn_new_task = spawn_new_task.clone();
-                    move |name, fut| spawn_new_task(name, fut)
-                }),
+                platform: platform.clone(),
                 sync_service: sync_service.clone(),
                 genesis_block_scale_encoded_header,
             })
@@ -1134,7 +1110,7 @@ async fn start_services<TPlat: platform::Platform>(
     let transactions_service = Arc::new(
         transactions_service::TransactionsService::new(transactions_service::Config {
             log_name,
-            tasks_executor: Box::new(move |name, fut| spawn_new_task(name, fut)),
+            platform: platform.clone(),
             sync_service: sync_service.clone(),
             runtime_service: runtime_service.clone(),
             network_service: (network_service.clone(), 0),

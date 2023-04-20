@@ -20,7 +20,7 @@
 //! # Usage
 //!
 //! Create a new JSON-RPC service by calling [`service`] then [`ServicePrototype::start`].
-//! Creating a JSON-RPC service spawns a background task (through [`StartConfig::tasks_executor`])
+//! Creating a JSON-RPC service spawns a background task (through [`PlatformRef::spawn_task`])
 //! dedicated to processing JSON-RPC requests.
 //!
 //! In order to process a JSON-RPC request, call [`Frontend::queue_rpc_request`]. Later, the
@@ -40,10 +40,10 @@
 mod background;
 
 use crate::{
-    network_service, platform::Platform, runtime_service, sync_service, transactions_service,
+    network_service, platform::PlatformRef, runtime_service, sync_service, transactions_service,
 };
 
-use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
+use alloc::{format, string::String, sync::Arc, vec::Vec};
 use core::num::NonZeroU32;
 use futures::prelude::*;
 use smoldot::{
@@ -270,9 +270,9 @@ pub struct ServicePrototype {
 }
 
 /// Configuration for a JSON-RPC service.
-pub struct StartConfig<'a, TPlat: Platform> {
-    /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
+pub struct StartConfig<'a, TPlat: PlatformRef> {
+    /// Access to the platform's capabilities.
+    pub platform: TPlat,
 
     /// Access to the network, and index of the chain to sync from the point of view of the
     /// network service.
@@ -321,8 +321,8 @@ pub struct StartConfig<'a, TPlat: Platform> {
 }
 
 impl ServicePrototype {
-    /// Consumes this prototype and starts the service through [`StartConfig::tasks_executor`].
-    pub fn start<TPlat: Platform>(self, config: StartConfig<'_, TPlat>) {
+    /// Consumes this prototype and starts the service through [`PlatformRef::spawn_task`].
+    pub fn start<TPlat: PlatformRef>(self, config: StartConfig<'_, TPlat>) {
         background::start(
             self.log_target.clone(),
             self.requests_subscriptions.clone(),

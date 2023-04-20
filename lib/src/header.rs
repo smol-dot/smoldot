@@ -246,19 +246,39 @@ impl<'a> HeaderRef<'a> {
         &self,
         block_number_bytes: usize,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
-        iter::once(either::Left(either::Left(&self.parent_hash[..])))
-            .chain(iter::once(either::Left(either::Right(
-                util::encode_scale_compact_u64(self.number),
+        self.scale_encoding_before_digest().map(either::Left).chain(
+            self.digest
+                .scale_encoding(block_number_bytes)
+                .map(either::Right),
+        )
+    }
+
+    /// Same as [`HeaderRef::scale_encoding`], but with an extra digest item added to the end of
+    /// the list.
+    ///
+    /// > **Note**: Keep in mind that this can produce a potentially invalid header, for example
+    /// >           if the digest contains duplicate items that shouldn't be duplicate.
+    pub fn scale_encoding_with_extra_digest_item(
+        &self,
+        block_number_bytes: usize,
+        extra_item: DigestItemRef<'a>,
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+        self.scale_encoding_before_digest().map(either::Left).chain(
+            self.digest
+                .scale_encoding_with_extra_item(block_number_bytes, extra_item)
+                .map(either::Right),
+        )
+    }
+
+    fn scale_encoding_before_digest(
+        &self,
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+        iter::once(either::Left(&self.parent_hash[..]))
+            .chain(iter::once(either::Right(util::encode_scale_compact_u64(
+                self.number,
             ))))
-            .chain(iter::once(either::Left(either::Left(&self.state_root[..]))))
-            .chain(iter::once(either::Left(either::Left(
-                &self.extrinsics_root[..],
-            ))))
-            .chain(
-                self.digest
-                    .scale_encoding(block_number_bytes)
-                    .map(either::Right),
-            )
+            .chain(iter::once(either::Left(&self.state_root[..])))
+            .chain(iter::once(either::Left(&self.extrinsics_root[..])))
     }
 
     /// Equivalent to [`HeaderRef::scale_encoding`] but returns the data in a `Vec`.
@@ -607,6 +627,26 @@ impl<'a> DigestRef<'a> {
         )
     }
 
+    /// Same as [`DigestRef::scale_encoding`], but with an extra item added to the end of the list.
+    pub fn scale_encoding_with_extra_item(
+        &self,
+        block_number_bytes: usize,
+        extra_item: DigestItemRef<'a>,
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+        // Given that `self.logs().len()` counts a number of items present in memory, and that
+        // these items have a non-zero size, it is not possible for this value to be equal to
+        // `usize::max_value()`, as that would mean that the entire memory is completely full
+        // of digest log items. Therefore, doing `+ 1` is also guaranteed to never overflow.
+        let new_len = self.logs().len() + 1;
+
+        let encoded_len = util::encode_scale_compact_usize(new_len);
+        iter::once(either::Left(encoded_len)).chain(
+            self.logs()
+                .chain(iter::once(extra_item))
+                .flat_map(move |v| v.scale_encoding(block_number_bytes).map(either::Right)),
+        )
+    }
+
     /// Turns an already-decoded list of items into a [`DigestRef`].
     ///
     /// Error can happen if the list of items is invalid, for example if it contains a seal at the
@@ -863,33 +903,9 @@ impl Digest {
         DigestRef::from(self).aura_seal()
     }
 
-    /// Pushes an Aura seal at the end of the list. Returns an error if there is already an Aura
-    /// seal.
-    pub fn push_aura_seal(&mut self, seal: [u8; 64]) -> Result<(), PushSealError> {
-        if self.aura_seal_index.is_none() {
-            self.aura_seal_index = Some(self.list.len());
-            self.list.push(DigestItem::AuraSeal(seal));
-            Ok(())
-        } else {
-            Err(PushSealError())
-        }
-    }
-
     /// Returns the Babe seal digest item, if any.
     pub fn babe_seal(&self) -> Option<&[u8; 64]> {
         DigestRef::from(self).babe_seal()
-    }
-
-    /// Pushes a Babe seal at the end of the list. Returns an error if there is already a Babe
-    /// seal.
-    pub fn push_babe_seal(&mut self, seal: [u8; 64]) -> Result<(), PushSealError> {
-        if self.babe_seal_index.is_none() {
-            self.babe_seal_index = Some(self.list.len());
-            self.list.push(DigestItem::BabeSeal(seal));
-            Ok(())
-        } else {
-            Err(PushSealError())
-        }
     }
 
     /// Returns the Babe pre-runtime digest item, if any.
@@ -989,11 +1005,6 @@ impl<'a> Iterator for LogsIter<'a> {
 }
 
 impl<'a> ExactSizeIterator for LogsIter<'a> {}
-
-/// Error potentially returned when pushing a seal at the end of the digest log items.
-#[derive(Debug, Copy, Clone, derive_more::Display)]
-#[display(fmt = "Seal already exists")]
-pub struct PushSealError();
 
 // TODO: document
 #[derive(Debug, PartialEq, Eq, Clone)]

@@ -28,17 +28,12 @@ fn main() {
     // example, we provide `AsyncStdTcpWebSocket`, which are the "plug and play" default platform.
     // Any advance usage, such as embedding a client in WebAssembly, will likely require a custom
     // implementation of these bindings.
-    let mut client = smoldot_light::Client::<
-        smoldot_light::platform::async_std::AsyncStdTcpWebSocket,
-    >::new(smoldot_light::ClientConfig {
-        // The smoldot client will need to spawn tasks that run in the background. In order to do
-        // so, we need to provide a "tasks spawner".
-        tasks_spawner: Box::new(move |_name, task| {
-            async_std::task::spawn(task);
-        }),
-        client_name: env!("CARGO_PKG_NAME").into(),
-        client_version: env!("CARGO_PKG_VERSION").into(),
-    });
+    let mut client = smoldot_light::Client::new(
+        smoldot_light::platform::async_std::AsyncStdTcpWebSocket::new(
+            env!("CARGO_PKG_NAME").into(),
+            env!("CARGO_PKG_VERSION").into(),
+        ),
+    );
 
     // Ask the client to connect to a chain.
     let smoldot_light::AddChainSuccess {

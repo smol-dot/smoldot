@@ -57,7 +57,7 @@ pub struct DatabaseContent {
 ///
 /// The returned string is guaranteed to not exceed `max_size` bytes. A truncated or invalid
 /// database is intentionally returned if `max_size` is too low to fit all the information.
-pub async fn encode_database<TPlat: platform::Platform>(
+pub async fn encode_database<TPlat: platform::PlatformRef>(
     network_service: &network_service::NetworkService<TPlat>,
     sync_service: &sync_service::SyncService<TPlat>,
     genesis_block_hash: &[u8; 32],
