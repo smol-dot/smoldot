@@ -2478,6 +2478,16 @@ pub enum StorageKey<T> {
     ChildTrieDefault { child_trie: T, key: T },
 }
 
+impl<T> StorageKey<T> {
+    /// Returns the key alone.
+    pub fn into_key(self) -> T {
+        match self {
+            StorageKey::MainTrie { key } => key,
+            StorageKey::ChildTrieDefault { key, .. } => key,
+        }
+    }
+}
+
 impl<T> fmt::Debug for StorageKey<T>
 where
     T: AsRef<[u8]>,

@@ -1054,6 +1054,18 @@ impl<T> StorageNextKey<T> {
         self.inner.key()
     }
 
+    /// If `true`, then the provided value must the one superior or equal to the requested key.
+    /// If `false`, then the provided value must be strictly superior to the requested key.
+    pub fn or_equal(&self) -> bool {
+        self.inner.or_equal()
+    }
+
+    /// Returns the prefix the next key must start with. If the next key doesn't start with the
+    /// given prefix, then `None` should be provided.
+    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+        self.inner.prefix()
+    }
+
     /// Access to the Nth ancestor's information and hierarchy. Returns `None` if `n` is too
     /// large. A value of `0` for `n` corresponds to the parent block. A value of `1` corresponds
     /// to the parent's parent. And so on.
