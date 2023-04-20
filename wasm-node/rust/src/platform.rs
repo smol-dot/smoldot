@@ -348,6 +348,9 @@ impl smoldot_light::platform::PlatformRef for Platform {
                     }
 
                     if stream.writable_bytes_extra != 0 {
+                        // As documented, the number of writable bytes must never exceed the
+                        // initial writable bytes value. As such, this can't overflow unless there
+                        // is a bug on the JavaScript side.
                         *writable_bytes += stream.writable_bytes_extra;
                         stream.writable_bytes_extra = 0;
                         shall_return = true;
@@ -783,10 +786,9 @@ pub(crate) fn stream_writable_bytes(connection_id: u32, stream_id: u32, bytes: u
         .unwrap();
     debug_assert!(!stream.reset);
 
-    stream.writable_bytes_extra = stream
-        .writable_bytes_extra
-        .checked_add(usize::try_from(bytes).unwrap())
-        .unwrap();
+    // As documented, the number of writable bytes must never exceed the initial writable bytes
+    // value. As such, this can't overflow unless there is a bug on the JavaScript side.
+    stream.writable_bytes_extra += usize::try_from(bytes).unwrap();
     stream.something_happened.notify(usize::max_value());
 }
 

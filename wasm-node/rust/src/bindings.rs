@@ -619,6 +619,14 @@ pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, buffer_inde
 /// stream (and, in the case of a multi-stream connection, the stream itself) must be in the
 /// `Open` state.
 ///
+/// `total_sent - total_reported_writable_bytes` must always be `>= 0`, where `total_sent` is the
+/// total number of bytes sent on the stream using [`stream_send`] and
+/// `total_reported_writable_bytes` is the total number of bytes reported using
+/// [`stream_writable_bytes`].
+/// In other words, this function is meant to notify that data sent using [`stream_send`̀] has
+/// effectively been sent out. It is not possible to exceed the `initial_writable_bytes` provided
+/// when the stream was created.
+///
 /// If `connection_id` is a single-stream connection, then the value of `stream_id` is ignored.
 /// If `connection_id` is a multi-stream connection, then `stream_id` corresponds to the stream
 /// on which the data was received, as was provided to [`connection_stream_opened`].
