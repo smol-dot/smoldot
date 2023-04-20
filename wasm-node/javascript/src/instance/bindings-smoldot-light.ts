@@ -208,7 +208,7 @@ export interface ConnectionConfig {
      * "multi-stream".
      *
      * Only a number of bytes equal to the size of the data provided to {@link Connection.send}
-     * should be reported. In other words, the `initialWritableBytes` must never be exceeded.
+     * must be reported. In other words, the `initialWritableBytes` must never be exceeded.
      */
     onWritableBytes: (numExtra: number, streamId?: number) => void;
 
