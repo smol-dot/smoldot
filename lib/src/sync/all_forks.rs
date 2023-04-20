@@ -1212,11 +1212,19 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
             .chain
             .contains_non_finalized_block(&self.expected_next_hash)
         {
+            if !justifications.is_empty() {
+                self.inner.inner.blocks[self.source_id]
+                    .unverified_finality_proofs
+                    .insert(
+                        decoded_header.number,
+                        FinalityProofs::Justifications(justifications),
+                    );
+            }
+
             return Ok(AddBlock::AlreadyInChain(AddBlockOccupied {
                 inner: self,
                 decoded_header: decoded_header.into(),
                 is_verified: true,
-                justifications,
             }));
         }
 
@@ -1252,11 +1260,19 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
                 justifications,
             }))
         } else {
+            if !justifications.is_empty() {
+                self.inner.inner.blocks[self.source_id]
+                    .unverified_finality_proofs
+                    .insert(
+                        decoded_header.number,
+                        FinalityProofs::Justifications(justifications),
+                    );
+            }
+
             Ok(AddBlock::AlreadyPending(AddBlockOccupied {
                 inner: self,
                 decoded_header: decoded_header.into(),
                 is_verified: false,
-                justifications,
             }))
         }
     }
@@ -1308,7 +1324,6 @@ pub struct AddBlockOccupied<TBl, TRq, TSrc> {
     inner: FinishAncestrySearch<TBl, TRq, TSrc>,
     decoded_header: header::Header,
     is_verified: bool,
-    justifications: Vec<([u8; 4], Vec<u8>)>,
 }
 
 impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
@@ -1396,15 +1411,6 @@ impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
 
             mem::replace(&mut block_user_data.user_data, user_data)
         };
-
-        if !self.justifications.is_empty() {
-            self.inner.inner.inner.blocks[self.inner.source_id]
-                .unverified_finality_proofs
-                .insert(
-                    self.decoded_header.number,
-                    FinalityProofs::Justifications(self.justifications),
-                );
-        }
 
         // Update the state machine for the next iteration.
         // Note: this can't be reached if `expected_next_height` is 0, because that should have
