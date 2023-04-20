@@ -155,19 +155,16 @@ impl From<TrieEntryVersion> for u8 {
 
 /// Returns the Merkle value of the root of an empty trie.
 pub fn empty_trie_merkle_value() -> [u8; 32] {
-    let mut calculation = calculate_root::root_merkle_value(None);
-
-    loop {
-        match calculation {
-            calculate_root::RootMerkleValueCalculation::Finished { hash, .. } => break hash,
-            calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
-                calculation = keys.inject(iter::empty::<iter::Empty<u8>>());
-            }
-            calculate_root::RootMerkleValueCalculation::StorageValue(val) => {
-                calculation = val.inject(None::<(&[u8], _)>);
-            }
-        }
-    }
+    trie_node::calculate_merkle_value(
+        trie_node::Decoded {
+            children: [None::<&'static [u8]>; 16],
+            partial_key: iter::empty(),
+            storage_value: trie_node::StorageValue::None,
+        },
+        true,
+    )
+    .unwrap()
+    .into()
 }
 
 /// Returns the Merkle value of a trie containing the entries passed as parameter. The entries
