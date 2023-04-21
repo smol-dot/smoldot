@@ -17,14 +17,11 @@
 
 use super::{
     super::{
-        connection::{
-            established::{self, ConfigRequestResponse},
-            single_stream_handshake,
-        },
+        connection::{established, single_stream_handshake},
         read_write::ReadWrite,
     },
     ConnectionToCoordinator, ConnectionToCoordinatorInner, CoordinatorToConnection,
-    CoordinatorToConnectionInner, NotificationsOutErr, OverlayNetwork, ShutdownCause, SubstreamId,
+    CoordinatorToConnectionInner, NotificationsOutErr, ShutdownCause, SubstreamId,
 };
 
 use alloc::{collections::VecDeque, string::ToString as _, sync::Arc};
@@ -41,8 +38,6 @@ pub(super) struct Config<TNow> {
     pub(super) max_inbound_substreams: usize,
     pub(super) substreams_capacity: usize,
     pub(super) max_protocol_name_len: usize,
-    pub(super) notification_protocols: Arc<[OverlayNetwork]>,
-    pub(super) request_response_protocols: Arc<[ConfigRequestResponse]>,
     pub(super) ping_protocol: Arc<str>,
 }
 
@@ -80,12 +75,6 @@ enum SingleStreamConnectionTaskInner<TNow> {
         substreams_capacity: usize,
 
         max_protocol_name_len: usize,
-
-        /// See [`OverlayNetwork`].
-        notification_protocols: Arc<[OverlayNetwork]>,
-
-        /// See [`super::Config::request_response_protocols`].
-        request_response_protocols: Arc<[ConfigRequestResponse]>,
 
         /// See [`super::Config::ping_protocol`].
         ping_protocol: Arc<str>,
@@ -156,8 +145,6 @@ where
                 max_inbound_substreams: config.max_inbound_substreams,
                 substreams_capacity: config.substreams_capacity,
                 max_protocol_name_len: config.max_protocol_name_len,
-                notification_protocols: config.notification_protocols,
-                request_response_protocols: config.request_response_protocols,
                 ping_protocol: config.ping_protocol,
             },
             pending_messages: VecDeque::with_capacity({
@@ -720,8 +707,6 @@ where
                 max_inbound_substreams,
                 substreams_capacity,
                 max_protocol_name_len,
-                notification_protocols,
-                request_response_protocols,
                 ping_protocol,
             } => {
                 // Check that the handshake isn't taking too long.
@@ -785,8 +770,6 @@ where
                                 max_inbound_substreams,
                                 substreams_capacity,
                                 max_protocol_name_len,
-                                notification_protocols,
-                                request_response_protocols,
                                 ping_protocol,
                             };
                             break;

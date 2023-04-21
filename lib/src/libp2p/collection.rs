@@ -67,10 +67,7 @@ use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 
 pub use super::peer_id::PeerId;
 pub use super::read_write::ReadWrite;
-pub use established::{
-    ConfigNotifications, ConfigRequestResponse, ConfigRequestResponseIn, InboundError,
-    SubstreamFate,
-};
+pub use established::{InboundError, SubstreamFate};
 pub use single_stream_handshake::HandshakeError;
 
 pub use multi_stream::MultiStreamConnectionTask;
@@ -131,6 +128,36 @@ pub struct Config {
 
     /// Name of the ping protocol on the network.
     pub ping_protocol: String,
+}
+
+/// Configuration for a request-response protocol.
+#[derive(Debug, Clone)]
+pub struct ConfigRequestResponse {
+    /// Name of the protocol transferred on the wire.
+    pub name: String,
+
+    /// Configuration related to sending out requests through this protocol.
+    ///
+    /// > **Note**: This is used even if `inbound_allowed` is `false` when performing outgoing
+    /// >           requests.
+    pub inbound_config: ConfigRequestResponseIn,
+
+    pub max_response_size: usize,
+
+    /// If true, incoming substreams are allowed to negotiate this protocol.
+    pub inbound_allowed: bool,
+}
+
+/// See [`ConfigRequestResponse::inbound_config`].
+#[derive(Debug, Clone)]
+pub enum ConfigRequestResponseIn {
+    /// Request must be completely empty, not even a length prefix.
+    Empty,
+    /// Request must contain a length prefix plus a potentially empty payload.
+    Payload {
+        /// Maximum allowed size for the payload in bytes.
+        max_size: usize,
+    },
 }
 
 /// Configuration for a specific overlay network.
@@ -412,8 +439,6 @@ where
             max_inbound_substreams: self.max_inbound_substreams,
             substreams_capacity,
             max_protocol_name_len,
-            notification_protocols: self.notification_protocols.clone(),
-            request_response_protocols: self.request_response_protocols.clone(),
             ping_protocol: self.ping_protocol.clone(),
         });
 
