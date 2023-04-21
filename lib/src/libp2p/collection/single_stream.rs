@@ -39,6 +39,7 @@ pub(super) struct Config<TNow> {
     pub(super) handshake: single_stream_handshake::HealthyHandshake,
     pub(super) handshake_timeout: TNow,
     pub(super) max_inbound_substreams: usize,
+    pub(super) max_protocol_name_len: usize,
     pub(super) notification_protocols: Arc<[OverlayNetwork]>,
     pub(super) request_response_protocols: Arc<[ConfigRequestResponse]>,
     pub(super) ping_protocol: Arc<str>,
@@ -73,6 +74,8 @@ enum SingleStreamConnectionTaskInner<TNow> {
 
         /// See [`super::Config::max_inbound_substreams`].
         max_inbound_substreams: usize,
+
+        max_protocol_name_len: usize,
 
         /// See [`OverlayNetwork`].
         notification_protocols: Arc<[OverlayNetwork]>,
@@ -147,6 +150,7 @@ where
                 randomness_seed: config.randomness_seed,
                 timeout: config.handshake_timeout,
                 max_inbound_substreams: config.max_inbound_substreams,
+                max_protocol_name_len: config.max_protocol_name_len,
                 notification_protocols: config.notification_protocols,
                 request_response_protocols: config.request_response_protocols,
                 ping_protocol: config.ping_protocol,
@@ -683,6 +687,7 @@ where
                 randomness_seed,
                 timeout,
                 max_inbound_substreams,
+                max_protocol_name_len,
                 notification_protocols,
                 request_response_protocols,
                 ping_protocol,
@@ -746,6 +751,7 @@ where
                                 randomness_seed,
                                 timeout,
                                 max_inbound_substreams,
+                                max_protocol_name_len,
                                 notification_protocols,
                                 request_response_protocols,
                                 ping_protocol,
@@ -775,6 +781,7 @@ where
                                         .collect(),
                                     request_protocols: request_response_protocols.to_vec(), // TODO: overhead
                                     max_inbound_substreams,
+                                    max_protocol_name_len,
                                     randomness_seed,
                                     ping_protocol: ping_protocol.to_string(), // TODO: cloning :-/
                                     ping_interval: Duration::from_secs(20),   // TODO: hardcoded

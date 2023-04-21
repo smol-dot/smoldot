@@ -143,6 +143,7 @@ where
         now: TNow,
         handshake: noise::HandshakeInProgress,
         max_inbound_substreams: usize,
+        max_protocol_name_len: usize,
         notification_protocols: Arc<[OverlayNetwork]>,
         request_response_protocols: Arc<[ConfigRequestResponse]>,
         ping_protocol: Arc<str>,
@@ -168,6 +169,7 @@ where
                         .collect(),
                     request_protocols: request_response_protocols.to_vec(), // TODO: overhead
                     max_inbound_substreams,
+                    max_protocol_name_len,
                     randomness_seed,
                     ping_protocol: ping_protocol.to_string(), // TODO: cloning :-/
                     ping_interval: Duration::from_secs(20),   // TODO: hardcoded

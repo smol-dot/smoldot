@@ -58,6 +58,7 @@ use alloc::{
 };
 use core::{
     hash::Hash,
+    iter,
     ops::{self, Add, Sub},
     time::Duration,
 };
@@ -381,6 +382,19 @@ where
         // the value provided as parameter is indeed the one expected.
         let SingleStreamHandshakeKind::MultistreamSelectNoiseYamux { noise_key } = handshake_kind;
 
+        let max_protocol_name_len = self
+            .request_response_protocols
+            .iter()
+            .map(|r| r.name.len())
+            .chain(
+                self.notification_protocols
+                    .iter()
+                    .map(|n| n.config.protocol_name.len()),
+            )
+            .chain(iter::once(self.ping_protocol.len()))
+            .max()
+            .unwrap_or(0);
+
         let connection_task = SingleStreamConnectionTask::new(single_stream::Config {
             randomness_seed: self.randomness_seeds.gen(),
             handshake: single_stream_handshake::HealthyHandshake::noise_yamux(
@@ -389,6 +403,7 @@ where
             ),
             handshake_timeout: when_connected + self.handshake_timeout,
             max_inbound_substreams: self.max_inbound_substreams,
+            max_protocol_name_len,
             notification_protocols: self.notification_protocols.clone(),
             request_response_protocols: self.request_response_protocols.clone(),
             ping_protocol: self.ping_protocol.clone(),
@@ -450,6 +465,19 @@ where
             (noise_key, out)
         };
 
+        let max_protocol_name_len = self
+            .request_response_protocols
+            .iter()
+            .map(|r| r.name.len())
+            .chain(
+                self.notification_protocols
+                    .iter()
+                    .map(|n| n.config.protocol_name.len()),
+            )
+            .chain(iter::once(self.ping_protocol.len()))
+            .max()
+            .unwrap_or(0);
+
         let handshake = noise::HandshakeInProgress::new(noise::Config {
             key: &noise_key,
             // It's the "server" that initiates the Noise handshake.
@@ -462,6 +490,7 @@ where
             now,
             handshake,
             self.max_inbound_substreams,
+            max_protocol_name_len,
             self.notification_protocols.clone(),
             self.request_response_protocols.clone(),
             self.ping_protocol.clone(),
