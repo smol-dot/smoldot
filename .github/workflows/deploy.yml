@@ -58,7 +58,7 @@ jobs:
     permissions:
       contents: write   # Necessary to push on the `gh-pages` branch.
     container:
-      image: rust:1.67
+      image: rust:1.69
     steps:
       - uses: actions/checkout@v3
         with:
@@ -96,7 +96,7 @@ jobs:
   npm-publish:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.67
+      image: rust:1.69
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-node@v3.6.0

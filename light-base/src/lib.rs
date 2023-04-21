@@ -73,7 +73,7 @@
 extern crate alloc;
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
-use core::{num::NonZeroU32, pin::Pin};
+use core::{num::NonZeroU32, pin};
 use futures::{channel::oneshot, prelude::*};
 use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
@@ -287,8 +287,7 @@ impl JsonRpcResponses {
     /// Returns the next response or notification, or `None` if the chain has been removed.
     pub async fn next(&mut self) -> Option<String> {
         if let Some(frontend) = self.inner.as_mut() {
-            let response_fut = frontend.next_json_rpc_response();
-            futures::pin_mut!(response_fut);
+            let response_fut = pin::pin!(frontend.next_json_rpc_response());
             match future::select(response_fut, &mut self.public_api_chain_destroyed_rx).await {
                 future::Either::Left((response, _)) => return Some(response),
                 future::Either::Right((_result, _)) => {
@@ -641,7 +640,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                                 relay_chain_ready_future
                             {
                                 (&mut relay_chain_ready_future).await;
-                                let running_relay_chain = Pin::new(&mut relay_chain_ready_future)
+                                let running_relay_chain = pin::Pin::new(&mut relay_chain_ready_future)
                                     .take_output()
                                     .unwrap();
                                 Some((running_relay_chain, relay_chain_log_name))
@@ -788,7 +787,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 async move {
                     // Wait for the chain to finish initializing to proceed.
                     (&mut running_chain_init).await;
-                    let running_chain = Pin::new(&mut running_chain_init).take_output().unwrap();
+                    let running_chain = pin::Pin::new(&mut running_chain_init).take_output().unwrap();
                     running_chain
                         .network_service
                         .discover(&platform.now(), 0, checkpoint_nodes, false)
@@ -826,7 +825,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
             let init_future = async move {
                 // Wait for the chain to finish initializing before starting the JSON-RPC service.
                 (&mut running_chain_init).await;
-                let running_chain = Pin::new(&mut running_chain_init).take_output().unwrap();
+                let running_chain = pin::Pin::new(&mut running_chain_init).take_output().unwrap();
 
                 service_starter.start(json_rpc_service::StartConfig {
                     platform,

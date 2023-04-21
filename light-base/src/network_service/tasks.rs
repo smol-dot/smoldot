@@ -19,7 +19,7 @@ use super::Shared;
 use crate::platform::{PlatformConnection, PlatformRef, PlatformSubstreamDirection, ReadBuffer};
 
 use alloc::{string::ToString as _, sync::Arc, vec, vec::Vec};
-use core::{cmp, iter, pin::Pin};
+use core::{cmp, iter, pin};
 use futures::{channel::mpsc, prelude::*};
 use smoldot::{
     libp2p::{collection::SubstreamFate, read_write::ReadWrite},
@@ -52,8 +52,7 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
     };
 
     let socket = {
-        let socket = socket.fuse();
-        futures::pin_mut!(socket);
+        let mut socket = pin::pin!(socket.fuse());
         let mut timeout = shared.platform.sleep_until(start_connect.timeout).fuse();
 
         let result = futures::select! {
@@ -383,12 +382,11 @@ async fn single_stream_connection_task<TPlat: PlatformRef>(
         }
         .fuse();
         // Future that is woken up when new data is ready on the socket or more data is writable.
-        let stream_update = shared.platform.update_stream(&mut connection);
+        let stream_update = pin::pin!(shared.platform.update_stream(&mut connection));
         // Future that is woken up when a new message is coming from the coordinator.
-        let message_from_coordinator = Pin::new(&mut coordinator_to_connection).peek();
+        let message_from_coordinator = pin::Pin::new(&mut coordinator_to_connection).peek();
 
         // Combines the three futures above into one.
-        futures::pin_mut!(stream_update);
         future::select(
             future::select(stream_update, message_from_coordinator),
             poll_after,
@@ -639,7 +637,7 @@ async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
             .collect::<future::SelectAll<_>>();
 
         // Future that is woken up when a new message is coming from the coordinator.
-        let mut message_from_coordinator = Pin::new(&mut coordinator_to_connection).peek();
+        let mut message_from_coordinator = pin::Pin::new(&mut coordinator_to_connection).peek();
 
         // Do the actual waiting.
         debug_assert!(newly_open_substream.is_none());
