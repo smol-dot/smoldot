@@ -244,7 +244,9 @@ where
                     Some(established::Event::InboundError(err)) => {
                         Some(ConnectionToCoordinatorInner::InboundError(err))
                     }
-                    Some(established::Event::InboundNegotiated { id, protocol_name }) => todo!(),
+                    Some(established::Event::InboundNegotiated { id, protocol_name }) => {
+                        Some(ConnectionToCoordinatorInner::InboundNegotiated { id, protocol_name })
+                    }
                     Some(established::Event::RequestIn {
                         id,
                         protocol_index,
@@ -360,6 +362,23 @@ where
     /// [`MultiStreamConnectionTask::substream_read_write`] after this function has returned.
     pub fn inject_coordinator_message(&mut self, message: CoordinatorToConnection<TNow>) {
         match (message.inner, &mut self.connection) {
+            (
+                CoordinatorToConnectionInner::AcceptInbound {
+                    substream_id,
+                    inbound_ty,
+                },
+                MultiStreamConnectionTaskInner::Established { established, .. },
+            ) => {
+                // TODO: /!\ will panic if substream is obsolete, instead just ignore the response
+                established.accept_inbound(substream_id, inbound_ty);
+            }
+            (
+                CoordinatorToConnectionInner::RejectInbound { substream_id },
+                MultiStreamConnectionTaskInner::Established { established, .. },
+            ) => {
+                // TODO: /!\ will panic if substream is obsolete, instead just ignore the response
+                established.reject_inbound(substream_id);
+            }
             (
                 CoordinatorToConnectionInner::StartRequest {
                     protocol_name,
@@ -522,7 +541,9 @@ where
                 };
             }
             (
-                CoordinatorToConnectionInner::AcceptInNotifications { .. }
+                CoordinatorToConnectionInner::AcceptInbound { .. }
+                | CoordinatorToConnectionInner::RejectInbound { .. }
+                | CoordinatorToConnectionInner::AcceptInNotifications { .. }
                 | CoordinatorToConnectionInner::RejectInNotifications { .. }
                 | CoordinatorToConnectionInner::StartRequest { .. }
                 | CoordinatorToConnectionInner::AnswerRequest { .. }
@@ -533,7 +554,9 @@ where
                 | MultiStreamConnectionTaskInner::ShutdownAcked { .. },
             ) => unreachable!(),
             (
-                CoordinatorToConnectionInner::AcceptInNotifications { .. }
+                CoordinatorToConnectionInner::AcceptInbound { .. }
+                | CoordinatorToConnectionInner::RejectInbound { .. }
+                | CoordinatorToConnectionInner::AcceptInNotifications { .. }
                 | CoordinatorToConnectionInner::RejectInNotifications { .. }
                 | CoordinatorToConnectionInner::StartRequest { .. }
                 | CoordinatorToConnectionInner::AnswerRequest { .. }

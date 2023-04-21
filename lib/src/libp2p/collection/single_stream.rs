@@ -226,6 +226,23 @@ where
     pub fn inject_coordinator_message(&mut self, message: CoordinatorToConnection<TNow>) {
         match (message.inner, &mut self.connection) {
             (
+                CoordinatorToConnectionInner::AcceptInbound {
+                    substream_id,
+                    inbound_ty,
+                },
+                SingleStreamConnectionTaskInner::Established { established, .. },
+            ) => {
+                // TODO: /!\ will panic if substream is obsolete, instead just ignore the response
+                established.accept_inbound(substream_id, inbound_ty);
+            }
+            (
+                CoordinatorToConnectionInner::RejectInbound { substream_id },
+                SingleStreamConnectionTaskInner::Established { established, .. },
+            ) => {
+                // TODO: /!\ will panic if substream is obsolete, instead just ignore the response
+                established.reject_inbound(substream_id);
+            }
+            (
                 CoordinatorToConnectionInner::StartRequest {
                     protocol_name,
                     request_data,
@@ -387,7 +404,9 @@ where
                 };
             }
             (
-                CoordinatorToConnectionInner::AcceptInNotifications { .. }
+                CoordinatorToConnectionInner::AcceptInbound { .. }
+                | CoordinatorToConnectionInner::RejectInbound { .. }
+                | CoordinatorToConnectionInner::AcceptInNotifications { .. }
                 | CoordinatorToConnectionInner::RejectInNotifications { .. }
                 | CoordinatorToConnectionInner::StartRequest { .. }
                 | CoordinatorToConnectionInner::AnswerRequest { .. }
@@ -398,7 +417,9 @@ where
                 | SingleStreamConnectionTaskInner::ShutdownAcked { .. },
             ) => unreachable!(),
             (
-                CoordinatorToConnectionInner::AcceptInNotifications { .. }
+                CoordinatorToConnectionInner::AcceptInbound { .. }
+                | CoordinatorToConnectionInner::RejectInbound { .. }
+                | CoordinatorToConnectionInner::AcceptInNotifications { .. }
                 | CoordinatorToConnectionInner::RejectInNotifications { .. }
                 | CoordinatorToConnectionInner::StartRequest { .. }
                 | CoordinatorToConnectionInner::AnswerRequest { .. }
@@ -562,7 +583,12 @@ where
                                 .push_back(ConnectionToCoordinatorInner::InboundError(err));
                         }
                         Some(established::Event::InboundNegotiated { id, protocol_name }) => {
-                            todo!()
+                            self.pending_messages.push_back(
+                                ConnectionToCoordinatorInner::InboundNegotiated {
+                                    id,
+                                    protocol_name,
+                                },
+                            );
                         }
                         Some(established::Event::RequestIn {
                             id,

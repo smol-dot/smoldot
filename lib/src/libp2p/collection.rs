@@ -1273,6 +1273,74 @@ where
                         error,
                     }
                 }
+                ConnectionToCoordinatorInner::InboundNegotiated {
+                    id: connection_substream_id,
+                    protocol_name,
+                } => {
+                    // Ignore events if a shutdown has been initiated by the coordinator.
+                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
+                        connection.state
+                    {
+                        debug_assert!(api_initiated);
+                        continue;
+                    }
+
+                    if let Some((protocol_index, protocol)) = self
+                        .request_response_protocols
+                        .iter()
+                        .enumerate()
+                        .find(|(_, p)| p.name == protocol_name)
+                    {
+                        self.messages_to_connections.push_back((
+                            connection_id,
+                            CoordinatorToConnectionInner::AcceptInbound {
+                                substream_id: connection_substream_id,
+                                inbound_ty: established::InboundTy::Request {
+                                    protocol_index,
+                                    request_max_size: match protocol.inbound_config {
+                                        ConfigRequestResponseIn::Empty => None,
+                                        ConfigRequestResponseIn::Payload { max_size } => {
+                                            Some(max_size)
+                                        }
+                                    },
+                                },
+                            },
+                        ));
+                    } else if let Some((protocol_index, protocol)) = self
+                        .notification_protocols
+                        .iter()
+                        .enumerate()
+                        .find(|(_, p)| p.config.protocol_name == protocol_name)
+                    {
+                        self.messages_to_connections.push_back((
+                            connection_id,
+                            CoordinatorToConnectionInner::AcceptInbound {
+                                substream_id: connection_substream_id,
+                                inbound_ty: established::InboundTy::Notifications {
+                                    protocol_index,
+                                    max_handshake_size: protocol.config.max_handshake_size,
+                                },
+                            },
+                        ));
+                    } else if &*self.ping_protocol == &*protocol_name {
+                        self.messages_to_connections.push_back((
+                            connection_id,
+                            CoordinatorToConnectionInner::AcceptInbound {
+                                substream_id: connection_substream_id,
+                                inbound_ty: established::InboundTy::Ping,
+                            },
+                        ));
+                    } else {
+                        self.messages_to_connections.push_back((
+                            connection_id,
+                            CoordinatorToConnectionInner::RejectInbound {
+                                substream_id: connection_substream_id,
+                            },
+                        ));
+                    }
+
+                    continue;
+                }
                 ConnectionToCoordinatorInner::RequestIn {
                     id: connection_substream_id,
                     protocol_index,
@@ -1610,6 +1678,12 @@ enum ConnectionToCoordinatorInner {
     InboundError(established::InboundError),
 
     /// See the corresponding event in [`established::Event`].
+    InboundNegotiated {
+        id: established::SubstreamId,
+        protocol_name: String,
+    },
+
+    /// See the corresponding event in [`established::Event`].
     RequestIn {
         id: established::SubstreamId,
         protocol_index: usize,
@@ -1711,6 +1785,15 @@ enum CoordinatorToConnectionInner<TNow> {
     /// Before of concurrency, it is possible for this message to be sent/received *after* a
     /// [`ConnectionToCoordinatorInner::StartShutdown`] has been sent.
     StartShutdown,
+
+    AcceptInbound {
+        substream_id: established::SubstreamId,
+        /// Configuration of the protocol.
+        inbound_ty: established::InboundTy,
+    },
+    RejectInbound {
+        substream_id: established::SubstreamId,
+    },
 
     StartRequest {
         protocol_name: String,
