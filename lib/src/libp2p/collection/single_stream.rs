@@ -557,6 +557,9 @@ where
                             self.pending_messages
                                 .push_back(ConnectionToCoordinatorInner::InboundError(err));
                         }
+                        Some(established::Event::InboundNegotiated { id, protocol_name }) => {
+                            todo!()
+                        }
                         Some(established::Event::RequestIn {
                             id,
                             protocol_index,

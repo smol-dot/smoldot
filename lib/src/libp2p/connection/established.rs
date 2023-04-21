@@ -27,7 +27,7 @@ use core::time::Duration;
 pub use multi_stream::{MultiStream, SubstreamFate};
 pub use single_stream::{ConnectionPrototype, Error, SingleStream};
 pub use substream::{
-    InboundError, NotificationsInClosedErr, NotificationsOutErr, RequestError,
+    InboundError, InboundTy, NotificationsInClosedErr, NotificationsOutErr, RequestError,
     RespondInRequestError,
 };
 
@@ -80,6 +80,18 @@ pub enum Event<TRqUd, TNotifUd> {
     /// > **Note**: This event exists only for diagnostic purposes. No action is expected in
     /// >           return.
     InboundError(InboundError),
+
+    /// An inbound substream has requested to use a protocol. Call
+    /// [`SingleStream::accept_inbound`], [`SingleStream::reject_inbound`],
+    /// [`MultiStream::accept_inbound`], or [`MultiStream::reject_inbound`] in order to accept or
+    /// reject this substream.
+    InboundNegotiated {
+        /// Identifier of the request. Needs to be provided back when accepting or rejecting
+        /// the protocol.
+        id: SubstreamId,
+        /// Name of the protocol requested by the remote.
+        protocol_name: String,
+    },
 
     /// Received a request in the context of a request-response protocol.
     RequestIn {

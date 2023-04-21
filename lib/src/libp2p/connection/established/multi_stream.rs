@@ -32,6 +32,8 @@ use core::{
 };
 use rand::{Rng as _, SeedableRng as _};
 
+pub use substream::InboundTy;
+
 /// State machine of a fully-established connection where substreams are handled externally.
 pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
     /// Events that should be yielded from [`MultiStream::pull_event`].
@@ -536,52 +538,6 @@ where
 
             match event {
                 None => {}
-
-                Some(substream::Event::InboundNegotiated(protocol)) => {
-                    continue_looping = true;
-
-                    if protocol == self.ping_protocol {
-                        substream
-                            .inner
-                            .as_mut()
-                            .unwrap()
-                            .accept_inbound(substream::InboundTy::Ping);
-                    } else if let Some(protocol_index) = self
-                        .request_protocols
-                        .iter()
-                        .position(|p| p.name == protocol)
-                    {
-                        substream.inner.as_mut().unwrap().accept_inbound(
-                            substream::InboundTy::Request {
-                                protocol_index,
-                                request_max_size: if let ConfigRequestResponseIn::Payload {
-                                    max_size,
-                                } =
-                                    self.request_protocols[protocol_index].inbound_config
-                                {
-                                    Some(max_size)
-                                } else {
-                                    None
-                                },
-                            },
-                        );
-                    } else if let Some(protocol_index) = self
-                        .notifications_protocols
-                        .iter()
-                        .position(|p| p.name == protocol)
-                    {
-                        substream.inner.as_mut().unwrap().accept_inbound(
-                            substream::InboundTy::Notifications {
-                                protocol_index,
-                                max_handshake_size: self.notifications_protocols[protocol_index]
-                                    .max_handshake_size,
-                            },
-                        );
-                    } else {
-                        substream.inner.as_mut().unwrap().reject_inbound();
-                    }
-                }
-
                 Some(other) => {
                     continue_looping = true;
                     Self::on_substream_event(&mut self.pending_events, substream.id, other)
@@ -605,20 +561,17 @@ where
     }
 
     /// Turns an event from the [`substream`] module into an [`Event`] and adds it to the queue.
-    ///
-    /// # Panics
-    ///
-    /// Intentionally panics on [`substream::Event::InboundNegotiated`]. Please handle this
-    /// variant separately.
-    ///
     fn on_substream_event(
         pending_events: &mut VecDeque<Event<TRqUd, TNotifUd>>,
         substream_id: u32,
         event: substream::Event<TRqUd, TNotifUd>,
     ) {
         pending_events.push_back(match event {
-            substream::Event::InboundNegotiated(_) => panic!(),
             substream::Event::InboundError(error) => Event::InboundError(error),
+            substream::Event::InboundNegotiated(protocol_name) => Event::InboundNegotiated {
+                id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
+                protocol_name,
+            },
             substream::Event::RequestIn {
                 protocol_index,
                 request,
@@ -811,6 +764,54 @@ where
         });
 
         SubstreamId(SubstreamIdInner::MultiStream(substream_id))
+    }
+
+    /// Call after an [`Event::InboundNegotiated`] has been emitted in order to accept the protocol
+    /// name and indicate the type of the protocol.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the substream is not in the correct state.
+    ///
+    pub fn accept_inbound(&mut self, substream_id: SubstreamId, ty: InboundTy) {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::MultiStream(id) => id,
+            _ => panic!(),
+        };
+
+        let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+
+        self.in_substreams
+            .get_mut(inner_substream_id)
+            .unwrap()
+            .inner
+            .as_mut()
+            .unwrap()
+            .accept_inbound(ty);
+    }
+
+    /// Call after an [`Event::InboundNegotiated`] has been emitted in order to reject the
+    /// protocol name as not supported.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the substream is not in the correct state.
+    ///
+    pub fn reject_inbound(&mut self, substream_id: SubstreamId) {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::MultiStream(id) => id,
+            _ => panic!(),
+        };
+
+        let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+
+        self.in_substreams
+            .get_mut(inner_substream_id)
+            .unwrap()
+            .inner
+            .as_mut()
+            .unwrap()
+            .reject_inbound();
     }
 
     /// Accepts an inbound notifications protocol. Must be called in response to a

@@ -66,6 +66,8 @@ use core::{
 };
 use rand::{Rng as _, SeedableRng as _};
 
+pub use substream::InboundTy;
+
 /// State machine of a fully-established connection.
 pub struct SingleStream<TNow, TRqUd, TNotifUd> {
     /// Encryption layer applied directly on top of the incoming data and outgoing data.
@@ -630,42 +632,6 @@ where
 
             let event_to_yield = match event {
                 None => None,
-                Some(substream::Event::InboundNegotiated(protocol)) => {
-                    let substream = inner.yamux.user_data_mut(substream_id).as_mut().unwrap();
-
-                    if protocol == inner.ping_protocol {
-                        substream.accept_inbound(substream::InboundTy::Ping);
-                    } else if let Some(protocol_index) = inner
-                        .request_protocols
-                        .iter()
-                        .position(|p| p.name == protocol)
-                    {
-                        substream.accept_inbound(substream::InboundTy::Request {
-                            protocol_index,
-                            request_max_size: if let ConfigRequestResponseIn::Payload { max_size } =
-                                inner.request_protocols[protocol_index].inbound_config
-                            {
-                                Some(max_size)
-                            } else {
-                                None
-                            },
-                        });
-                    } else if let Some(protocol_index) = inner
-                        .notifications_protocols
-                        .iter()
-                        .position(|p| p.name == protocol)
-                    {
-                        substream.accept_inbound(substream::InboundTy::Notifications {
-                            protocol_index,
-                            max_handshake_size: inner.notifications_protocols[protocol_index]
-                                .max_handshake_size,
-                        });
-                    } else {
-                        substream.reject_inbound();
-                    }
-
-                    continue;
-                }
                 Some(other) => Some(Self::pass_through_substream_event(substream_id, other)),
             };
 
@@ -674,19 +640,16 @@ where
     }
 
     /// Turns an event from the [`substream`] module into an [`Event`].
-    ///
-    /// # Panics
-    ///
-    /// Intentionally panics on [`substream::Event::InboundNegotiated`]. Please handle this
-    /// variant separately.
-    ///
     fn pass_through_substream_event(
         substream_id: yamux::SubstreamId,
         event: substream::Event<TRqUd, TNotifUd>,
     ) -> Event<TRqUd, TNotifUd> {
         match event {
-            substream::Event::InboundNegotiated(_) => panic!(),
             substream::Event::InboundError(error) => Event::InboundError(error),
+            substream::Event::InboundNegotiated(protocol_name) => Event::InboundNegotiated {
+                id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
+                protocol_name,
+            },
             substream::Event::RequestIn {
                 protocol_index,
                 request,
@@ -905,6 +868,48 @@ where
             .unwrap(); // TODO: consider not panicking
 
         SubstreamId(SubstreamIdInner::SingleStream(substream))
+    }
+
+    /// Call after an [`Event::InboundNegotiated`] has been emitted in order to accept the protocol
+    /// name and indicate the type of the protocol.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the substream is not in the correct state.
+    ///
+    pub fn accept_inbound(&mut self, substream_id: SubstreamId, ty: InboundTy) {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::SingleStream(id) => id,
+            _ => panic!(),
+        };
+
+        self.inner
+            .yamux
+            .user_data_mut(substream_id)
+            .as_mut()
+            .unwrap()
+            .accept_inbound(ty);
+    }
+
+    /// Call after an [`Event::InboundNegotiated`] has been emitted in order to reject the
+    /// protocol name as not supported.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the substream is not in the correct state.
+    ///
+    pub fn reject_inbound(&mut self, substream_id: SubstreamId) {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::SingleStream(id) => id,
+            _ => panic!(),
+        };
+
+        self.inner
+            .yamux
+            .user_data_mut(substream_id)
+            .as_mut()
+            .unwrap()
+            .reject_inbound();
     }
 
     /// Accepts an inbound notifications protocol. Must be called in response to a
