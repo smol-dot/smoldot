@@ -53,8 +53,7 @@
 use super::{
     super::{super::read_write::ReadWrite, noise, yamux},
     substream::{self, RespondInRequestError},
-    Config, ConfigNotifications, ConfigRequestResponse, ConfigRequestResponseIn, Event,
-    SubstreamId, SubstreamIdInner,
+    Config, Event, SubstreamId, SubstreamIdInner,
 };
 
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
@@ -120,8 +119,6 @@ struct Inner<TNow, TRqUd, TNotifUd> {
     max_inbound_substreams: usize,
     /// See [`Config::max_protocol_name_len`].
     max_protocol_name_len: usize,
-    /// See [`Config::ping_protocol`].
-    ping_protocol: String,
     /// See [`Config::ping_interval`].
     ping_interval: Duration,
     /// See [`Config::ping_timeout`].
@@ -1122,7 +1119,6 @@ impl ConnectionPrototype {
                 ping_payload_randomness: randomness,
                 max_inbound_substreams: config.max_inbound_substreams,
                 max_protocol_name_len: config.max_protocol_name_len,
-                ping_protocol: config.ping_protocol,
                 ping_interval: config.ping_interval,
                 ping_timeout: config.ping_timeout,
                 intermediary_buffer: vec![0u8; 2048].into_boxed_slice(),

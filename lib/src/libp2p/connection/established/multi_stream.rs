@@ -18,8 +18,7 @@
 // TODO: needs docs
 
 use super::{
-    super::super::read_write::ReadWrite, substream, Config, ConfigNotifications,
-    ConfigRequestResponse, ConfigRequestResponseIn, Event, SubstreamId, SubstreamIdInner,
+    super::super::read_write::ReadWrite, substream, Config, Event, SubstreamId, SubstreamIdInner,
 };
 use crate::util::{self, protobuf};
 
@@ -697,7 +696,6 @@ where
     ///
     pub fn open_notifications_substream(
         &mut self,
-        now: TNow,
         protocol_name: String,
         max_handshake_size: usize,
         handshake: Vec<u8>,

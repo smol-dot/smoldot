@@ -22,9 +22,9 @@ use super::{
         connection::{established, noise},
         read_write::ReadWrite,
     },
-    ConfigRequestResponse, ConnectionToCoordinator, ConnectionToCoordinatorInner,
-    CoordinatorToConnection, CoordinatorToConnectionInner, NotificationsOutErr, OverlayNetwork,
-    PeerId, ShutdownCause, SubstreamFate, SubstreamId,
+    ConnectionToCoordinator, ConnectionToCoordinatorInner, CoordinatorToConnection,
+    CoordinatorToConnectionInner, NotificationsOutErr, PeerId, ShutdownCause, SubstreamFate,
+    SubstreamId,
 };
 
 use alloc::{collections::VecDeque, string::ToString as _, sync::Arc, vec, vec::Vec};
@@ -413,13 +413,11 @@ where
                     ..
                 },
             ) => {
-                let timeout = now.clone() + Duration::from_secs(20); // TODO: make configurable
                 let inner_substream_id = established.open_notifications_substream(
-                    now,
                     protocol_name,
                     max_handshake_size,
                     handshake,
-                    timeout,
+                    now + Duration::from_secs(20), // TODO: make configurable
                     (),
                 );
 

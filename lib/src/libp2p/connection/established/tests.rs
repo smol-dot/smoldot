@@ -17,10 +17,7 @@
 
 #![cfg(test)]
 
-use super::{
-    Config, ConfigNotifications, ConfigRequestResponse, ConfigRequestResponseIn, Event,
-    InboundError, NotificationsOutErr, RequestError, SingleStream,
-};
+use super::{Config, Event, InboundError, NotificationsOutErr, RequestError, SingleStream};
 use crate::libp2p::read_write::ReadWrite;
 use std::time::Duration;
 
