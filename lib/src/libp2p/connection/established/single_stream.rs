@@ -53,8 +53,8 @@
 use super::{
     super::{super::read_write::ReadWrite, noise, yamux},
     substream::{self, RespondInRequestError},
-    AddRequestError, Config, ConfigNotifications, ConfigRequestResponse, ConfigRequestResponseIn,
-    Event, SubstreamId, SubstreamIdInner,
+    Config, ConfigNotifications, ConfigRequestResponse, ConfigRequestResponseIn, Event,
+    SubstreamId, SubstreamIdInner,
 };
 
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
@@ -729,13 +729,15 @@ where
 
     /// Sends a request to the remote.
     ///
-    /// Must pass the index of the protocol within [`Config::request_protocols`].
-    ///
     /// This method only inserts the request into the connection object. Use
     /// [`SingleStream::read_write`] in order to actually send out the request.
     ///
     /// Assuming that the remote is using the same implementation, an [`Event::RequestIn`] will
     /// be generated on its side.
+    ///
+    /// If `request` is `None`, then no request is sent to the remote at all. If `request` is
+    /// `Some`, then a (potentially-empty) request is sent. If `Some(&[])` is provided, a
+    /// length-prefix containing a 0 is sent to the remote.
     ///
     /// After the remote has sent back a response, an [`Event::Response`] event will be generated
     /// locally. The `user_data` parameter will be passed back.
@@ -750,38 +752,20 @@ where
     ///
     pub fn add_request(
         &mut self,
-        protocol_index: usize,
-        request: Vec<u8>,
+        protocol_name: String,
+        request: Option<Vec<u8>>,
         timeout: TNow,
+        max_response_size: usize,
         user_data: TRqUd,
-    ) -> Result<SubstreamId, AddRequestError> {
-        let has_length_prefix = match self.inner.request_protocols[protocol_index].inbound_config {
-            ConfigRequestResponseIn::Payload { max_size } => {
-                if request.len() > max_size {
-                    return Err(AddRequestError::RequestTooLarge);
-                }
-                true
-            }
-            ConfigRequestResponseIn::Empty => {
-                if !request.is_empty() {
-                    return Err(AddRequestError::RequestTooLarge);
-                }
-                false
-            }
-        };
-
+    ) -> SubstreamId {
         let substream_id = self
             .inner
             .yamux
             .open_substream(Some(substream::Substream::request_out(
-                self.inner.request_protocols[protocol_index].name.clone(), // TODO: clone :-/
+                protocol_name,
                 timeout,
-                if has_length_prefix {
-                    Some(request)
-                } else {
-                    None
-                },
-                self.inner.request_protocols[protocol_index].max_response_size,
+                request,
+                max_response_size,
                 user_data,
             )))
             .unwrap(); // TODO: consider not panicking
@@ -789,13 +773,13 @@ where
         // TODO: we add some bytes due to the length prefix, this is a bit hacky as we should ask this information from the substream
         self.inner.yamux.add_remote_window_saturating(
             substream_id,
-            u64::try_from(self.inner.request_protocols[protocol_index].max_response_size)
+            u64::try_from(max_response_size)
                 .unwrap_or(u64::max_value())
                 .saturating_add(64)
                 .saturating_sub(yamux::NEW_SUBSTREAMS_FRAME_SIZE),
         );
 
-        Ok(SubstreamId(SubstreamIdInner::SingleStream(substream_id)))
+        SubstreamId(SubstreamIdInner::SingleStream(substream_id))
     }
 
     /// Returns the user data associated to a notifications substream.

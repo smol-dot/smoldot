@@ -18,7 +18,7 @@
 // TODO: needs docs
 
 use super::{
-    super::super::read_write::ReadWrite, substream, AddRequestError, Config, ConfigNotifications,
+    super::super::read_write::ReadWrite, substream, Config, ConfigNotifications,
     ConfigRequestResponse, ConfigRequestResponseIn, Event, SubstreamId, SubstreamIdInner,
 };
 use crate::util::{self, protobuf};
@@ -631,13 +631,15 @@ where
 
     /// Sends a request to the remote.
     ///
-    /// Must pass the index of the protocol within [`Config::request_protocols`].
-    ///
     /// This method only inserts the request into the connection object. The request will later
     /// be sent out through [`MultiStream::substream_read_write`].
     ///
     /// Assuming that the remote is using the same implementation, an [`Event::RequestIn`] will
     /// be generated on its side.
+    ///
+    /// If `request` is `None`, then no request is sent to the remote at all. If `request` is
+    /// `Some`, then a (potentially-empty) request is sent. If `Some(&[])` is provided, a
+    /// length-prefix containing a 0 is sent to the remote.
     ///
     /// After the remote has sent back a response, an [`Event::Response`] event will be generated
     /// locally. The `user_data` parameter will be passed back.
@@ -647,40 +649,22 @@ where
     /// answer during this time window, the request is considered failed.
     pub fn add_request(
         &mut self,
-        protocol_index: usize,
-        request: Vec<u8>,
+        protocol_name: String,
+        request: Option<Vec<u8>>,
         timeout: TNow,
+        max_response_size: usize,
         user_data: TRqUd,
-    ) -> Result<SubstreamId, AddRequestError> {
-        let has_length_prefix = match self.request_protocols[protocol_index].inbound_config {
-            ConfigRequestResponseIn::Payload { max_size } => {
-                if request.len() > max_size {
-                    return Err(AddRequestError::RequestTooLarge);
-                }
-                true
-            }
-            ConfigRequestResponseIn::Empty => {
-                if !request.is_empty() {
-                    return Err(AddRequestError::RequestTooLarge);
-                }
-                false
-            }
-        };
-
+    ) -> SubstreamId {
         let substream_id = self.next_out_substream_id;
         self.next_out_substream_id += 1;
 
         self.desired_out_substreams.push_back(Substream {
             id: substream_id,
             inner: Some(substream::Substream::request_out(
-                self.request_protocols[protocol_index].name.clone(), // TODO: clone :-/
+                protocol_name,
                 timeout,
-                if has_length_prefix {
-                    Some(request)
-                } else {
-                    None
-                },
-                self.request_protocols[protocol_index].max_response_size,
+                request,
+                max_response_size,
                 user_data,
             )),
             read_buffer: Vec::new(),
@@ -691,7 +675,7 @@ where
 
         // TODO: ? do this? substream.reserve_window(128 * 1024 * 1024 + 128); // TODO: proper max size
 
-        Ok(SubstreamId(SubstreamIdInner::MultiStream(substream_id)))
+        SubstreamId(SubstreamIdInner::MultiStream(substream_id))
     }
 
     /// Returns the user data associated to a notifications substream.

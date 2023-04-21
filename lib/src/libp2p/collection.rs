@@ -639,19 +639,25 @@ where
 
         let request_data = request_data.into();
 
-        // We check the size limit before sending the message. This size limit is the only reason
-        // why start a request can fail. By checking it here, we are guaranteed that the request
-        // start will succeed in the background.
-        if request_data.len()
-            > self
-                .request_response_protocols
-                .get(protocol_index)
-                .unwrap_or_else(|| panic!())
-                .inbound_config
-                .max_size()
-        {
-            return Err(StartRequestError::RequestTooLarge);
-        }
+        let protocol_info = self
+            .request_response_protocols
+            .get(protocol_index)
+            .unwrap_or_else(|| panic!());
+
+        let has_length_prefix = match protocol_info.inbound_config {
+            ConfigRequestResponseIn::Payload { max_size } => {
+                if request_data.len() > max_size {
+                    return Err(StartRequestError::RequestTooLarge);
+                }
+                true
+            }
+            ConfigRequestResponseIn::Empty => {
+                if !request_data.is_empty() {
+                    return Err(StartRequestError::RequestTooLarge);
+                }
+                false
+            }
+        };
 
         let substream_id = self.next_substream_id;
         self.next_substream_id.0 += 1;
@@ -662,9 +668,14 @@ where
         self.messages_to_connections.push_back((
             target,
             CoordinatorToConnectionInner::StartRequest {
-                protocol_index,
-                request_data,
+                protocol_name: protocol_info.name.clone(),
+                request_data: if has_length_prefix {
+                    Some(request_data)
+                } else {
+                    None
+                },
                 timeout,
+                max_response_size: protocol_info.max_response_size,
                 substream_id,
             },
         ));
@@ -1666,10 +1677,10 @@ enum CoordinatorToConnectionInner<TNow> {
     StartShutdown,
 
     StartRequest {
-        protocol_index: usize,
-        /// The size of the data is guaranteed to fit in the maximum allowed.
-        request_data: Vec<u8>,
+        protocol_name: String,
+        request_data: Option<Vec<u8>>,
         timeout: TNow,
+        max_response_size: usize,
         /// Id of the substream assigned by the coordinator.
         /// This is **not** the same as the actual substream used in the connection.
         substream_id: SubstreamId,

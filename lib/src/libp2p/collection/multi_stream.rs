@@ -242,10 +242,7 @@ where
                     Some(established::Event::InboundError(err)) => {
                         Some(ConnectionToCoordinatorInner::InboundError(err))
                     }
-                    Some(established::Event::InboundNegotiated {
-                        id,
-                        protocol_name,
-                    }) => todo!(),
+                    Some(established::Event::InboundNegotiated { id, protocol_name }) => todo!(),
                     Some(established::Event::RequestIn {
                         id,
                         protocol_index,
@@ -363,9 +360,10 @@ where
         match (message.inner, &mut self.connection) {
             (
                 CoordinatorToConnectionInner::StartRequest {
+                    protocol_name,
                     request_data,
                     timeout,
-                    protocol_index,
+                    max_response_size,
                     substream_id,
                 },
                 MultiStreamConnectionTaskInner::Established {
@@ -375,16 +373,13 @@ where
                     ..
                 },
             ) => {
-                let inner_substream_id = match established.add_request(
-                    protocol_index,
+                let inner_substream_id = established.add_request(
+                    protocol_name,
                     request_data,
                     timeout,
+                    max_response_size,
                     substream_id,
-                ) {
-                    Ok(s) => s,
-                    // The maximum request size is checked before sending the message.
-                    Err(established::AddRequestError::RequestTooLarge) => unreachable!(),
-                };
+                );
                 let _prev_value = outbound_substreams_map.insert(substream_id, inner_substream_id);
                 debug_assert!(_prev_value.is_none());
                 let _prev_value =

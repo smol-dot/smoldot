@@ -278,10 +278,3 @@ pub struct ConfigNotifications {
     /// Maximum size, in bytes, of a notification that can be received.
     pub max_notification_size: usize,
 }
-
-/// Error potentially returned when starting a request.
-#[derive(Debug, Clone, derive_more::Display)]
-pub enum AddRequestError {
-    /// Size of the request is over maximum allowed by the protocol.
-    RequestTooLarge,
-}

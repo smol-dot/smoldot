@@ -278,10 +278,13 @@ fn successful_request() {
 
     let mut connections = perform_handshake(256, 256, config.clone(), config);
 
-    let substream_id = connections
-        .alice
-        .add_request(0, b"request payload".to_vec(), Duration::from_secs(5), ())
-        .unwrap();
+    let substream_id = connections.alice.add_request(
+        "test-request-protocol".to_owned(),
+        Some(b"request payload".to_vec()),
+        Duration::from_secs(5),
+        1024,
+        (),
+    );
 
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
@@ -330,10 +333,13 @@ fn refused_request() {
 
     let mut connections = perform_handshake(256, 256, config.clone(), config);
 
-    let substream_id = connections
-        .alice
-        .add_request(0, b"request payload".to_vec(), Duration::from_secs(5), ())
-        .unwrap();
+    let substream_id = connections.alice.add_request(
+        "test-request-protocol".to_owned(),
+        Some(b"request payload".to_vec()),
+        Duration::from_secs(5),
+        1024,
+        (),
+    );
 
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
@@ -387,10 +393,13 @@ fn request_protocol_not_supported() {
 
     let mut connections = perform_handshake(256, 256, alice_config, bob_config);
 
-    let substream_id = connections
-        .alice
-        .add_request(0, b"request payload".to_vec(), Duration::from_secs(5), ())
-        .unwrap();
+    let substream_id = connections.alice.add_request(
+        "test-request-protocol".to_owned(),
+        Some(b"request payload".to_vec()),
+        Duration::from_secs(5),
+        1024,
+        (),
+    );
 
     let (_, event) = connections.run_until_event();
     match event {
@@ -423,10 +432,13 @@ fn request_timeout() {
 
     let mut connections = perform_handshake(256, 256, config.clone(), config);
 
-    let substream_id = connections
-        .alice
-        .add_request(0, b"request payload".to_vec(), Duration::from_secs(5), ())
-        .unwrap();
+    let substream_id = connections.alice.add_request(
+        "test-request-protocol".to_owned(),
+        Some(b"request payload".to_vec()),
+        Duration::from_secs(5),
+        1024,
+        (),
+    );
 
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
