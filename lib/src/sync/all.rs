@@ -139,7 +139,7 @@ pub enum Status<'a, TSrc> {
         /// [`AllSync::as_chain_information`], as this function first has to download extra
         /// information compared to just the finalized block.
         finalized_block_hash: [u8; 32],
-        /// Height of the block indicated by [`Status::ChainInformation::finalized_block_hash`].
+        /// Height of the block indicated by [`Status::WarpSyncFragments::finalized_block_hash`].
         finalized_block_number: u64,
     },
     /// Warp syncing algorithm has reached the head of the finalized chain and is downloading and
@@ -153,7 +153,8 @@ pub enum Status<'a, TSrc> {
         /// [`AllSync::as_chain_information`], as this function first has to download extra
         /// information compared to just the finalized block.
         finalized_block_hash: [u8; 32],
-        /// Height of the block indicated by [`Status::ChainInformation::finalized_block_hash`].
+        /// Height of the block indicated by
+        /// [`Status::WarpSyncChainInformation::finalized_block_hash`].
         finalized_block_number: u64,
     },
 }
