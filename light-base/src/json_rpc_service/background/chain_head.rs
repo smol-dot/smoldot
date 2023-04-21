@@ -31,7 +31,7 @@ use alloc::{
 use core::{
     cmp, iter,
     num::{NonZeroU32, NonZeroUsize},
-    ops,
+    ops, pin,
     time::Duration,
 };
 use futures::{channel::mpsc, prelude::*};
@@ -749,17 +749,15 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
 
         loop {
             let outcome = {
-                let next_block = match &mut self.subscription {
+                let next_block = pin::pin!(match &mut self.subscription {
                     Subscription::RuntimeUpdates { notifications, .. } => {
                         future::Either::Left(notifications.next().map(either::Left))
                     }
                     Subscription::NoRuntimeUpdates(notifications) => {
                         future::Either::Right(notifications.next().map(either::Right))
                     }
-                };
-                let next_message = messages_rx.next();
-                futures::pin_mut!(next_message);
-                futures::pin_mut!(next_block);
+                });
+                let next_message = pin::pin!(messages_rx.next());
 
                 match future::select(next_block, next_message).await {
                     future::Either::Left((v, _)) => either::Left(v),
@@ -1249,7 +1247,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
 
                 if let Some(block_number) = block_number {
                     // TODO: right now we query the header because the underlying function returns an error if we don't
-                    let future = sync_service.clone().block_query(
+                    let mut future = pin::pin!(sync_service.clone().block_query(
                         block_number,
                         hash.0,
                         protocol::BlocksRequestFields {
@@ -1263,8 +1261,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             network_config.timeout_ms,
                         ))),
                         NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
-                    );
-                    futures::pin_mut!(future);
+                    ));
 
                     let requests_subscriptions = {
                         let weak = Arc::downgrade(&requests_subscriptions);
@@ -1274,8 +1271,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
 
                     loop {
                         let outcome = {
-                            let next_message = messages_rx.next();
-                            futures::pin_mut!(next_message);
+                            let next_message = pin::pin!(messages_rx.next());
                             match future::select(&mut future, next_message).await {
                                 future::Either::Left((v, _)) => either::Left(v),
                                 future::Either::Right((v, _)) => either::Right(v),
@@ -1440,7 +1436,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     .map(|h| header::decode(h, sync_service.block_number_bytes()))
                 {
                     Some(Ok(decoded_header)) => {
-                        let future = sync_service.clone().storage_query(
+                        let mut future = pin::pin!(sync_service.clone().storage_query(
                             decoded_header.number,
                             &hash.0,
                             decoded_header.state_root,
@@ -1451,8 +1447,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                 network_config.timeout_ms,
                             ))),
                             NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
-                        );
-                        futures::pin_mut!(future);
+                        ));
 
                         let requests_subscriptions = {
                             let weak = Arc::downgrade(&requests_subscriptions);
@@ -1462,8 +1457,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
 
                         loop {
                             let outcome = {
-                                let next_message = messages_rx.next();
-                                futures::pin_mut!(next_message);
+                                let next_message = pin::pin!(messages_rx.next());
                                 match future::select(&mut future, next_message).await {
                                     future::Either::Left((v, _)) => either::Left(v),
                                     future::Either::Right((v, _)) => either::Right(v),
@@ -1617,7 +1611,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     .await;
 
                 let (pre_runtime_call, requests_subscriptions) = if let Some(pre_runtime_call) = &pre_runtime_call {
-                    let call_future = pre_runtime_call.start(
+                    let mut call_future = pin::pin!(pre_runtime_call.start(
                         &function_to_call,
                         iter::once(&call_parameters.0),
                         cmp::min(10, network_config.total_attempts),
@@ -1626,8 +1620,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             network_config.timeout_ms,
                         ))),
                         NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
-                    );
-                    futures::pin_mut!(call_future);
+                    ));
 
                     let requests_subscriptions = {
                         let weak = Arc::downgrade(&requests_subscriptions);
@@ -1637,8 +1630,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
 
                     loop {
                         let outcome = {
-                            let next_message = messages_rx.next();
-                            futures::pin_mut!(next_message);
+                            let next_message = pin::pin!(messages_rx.next());
                             match future::select(&mut call_future, next_message).await {
                                 future::Either::Left((v, _)) => either::Left(v),
                                 future::Either::Right((v, _)) => either::Right(v),

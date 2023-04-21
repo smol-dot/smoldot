@@ -17,7 +17,7 @@
 
 use super::Inner;
 
-use core::time::Duration;
+use core::{pin, time::Duration};
 use futures::{channel::mpsc, prelude::*};
 use futures_timer::Delay;
 use smoldot::{
@@ -73,8 +73,7 @@ pub(super) async fn opening_connection_task(
             Duration::new(0, 0)
         })
         .fuse();
-        let socket = socket.fuse();
-        futures::pin_mut!(socket);
+        let mut socket = pin::pin!(socket.fuse());
         futures::select! {
             _ = timeout => {
                 let mut guarded = inner.guarded.lock().await;
@@ -292,18 +291,17 @@ pub(super) async fn established_connection_task(
         .fuse();
 
         // Future that is woken up when new data is ready on the socket.
-        let connection_ready = if let Some(socket) = socket_container.as_mut() {
+        let connection_ready = pin::pin!(if let Some(socket) = socket_container.as_mut() {
             future::Either::Left(Pin::new(socket).process())
         } else {
             future::Either::Right(future::pending())
-        };
+        });
 
         // Future that is woken up when a new message is coming from the coordinator.
         let message_from_coordinator = Pin::new(&mut coordinator_to_connection).peek();
 
         // Wait until either some data is ready on the socket, or the connection state machine
         // has requested to be polled again, or a message is coming from the coordinator.
-        futures::pin_mut!(connection_ready);
         future::select(
             future::select(connection_ready, message_from_coordinator),
             poll_after,
