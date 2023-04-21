@@ -1088,13 +1088,11 @@ impl ConnectionPrototype {
     where
         TNow: Clone + Ord,
     {
-        // TODO: check conflicts between protocol names?
-
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
 
         let mut yamux = yamux::Yamux::new(yamux::Config {
             is_initiator: self.encryption.is_initiator(),
-            capacity: 64, // TODO: ?
+            capacity: config.substreams_capacity,
             randomness_seed: randomness.sample(rand::distributions::Standard),
             max_out_data_frame_size: NonZeroU32::new(8192).unwrap(), // TODO: make configurable?
             max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
