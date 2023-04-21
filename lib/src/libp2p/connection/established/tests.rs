@@ -486,8 +486,9 @@ fn outbound_substream_works() {
     let mut connections = perform_handshake(256, 256, config.clone(), config);
 
     let substream_id = connections.alice.open_notifications_substream(
-        0,
+        "test-notif-protocol".to_owned(),
         b"hello".to_vec(),
+        1024,
         connections.now + Duration::from_secs(5),
         (),
     );
@@ -567,8 +568,9 @@ fn outbound_substream_open_timeout() {
     let mut connections = perform_handshake(256, 256, config.clone(), config);
 
     let substream_id = connections.alice.open_notifications_substream(
-        0,
+        "test-notif-protocol".to_owned(),
         b"hello".to_vec(),
+        1024,
         connections.now + Duration::from_secs(5),
         (),
     );
@@ -619,8 +621,9 @@ fn outbound_substream_refuse() {
     let mut connections = perform_handshake(256, 256, config.clone(), config);
 
     let substream_id = connections.alice.open_notifications_substream(
-        0,
+        "test-notif-protocol".to_owned(),
         b"hello".to_vec(),
+        1024,
         connections.now + Duration::from_secs(5),
         (),
     );
@@ -672,8 +675,9 @@ fn outbound_substream_close_demanded() {
     let mut connections = perform_handshake(256, 256, config.clone(), config);
 
     let substream_id = connections.alice.open_notifications_substream(
-        0,
+        "test-notif-protocol".to_owned(),
         b"hello".to_vec(),
+        1024,
         connections.now + Duration::from_secs(5),
         (),
     );

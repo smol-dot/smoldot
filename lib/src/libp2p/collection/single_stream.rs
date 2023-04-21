@@ -251,9 +251,10 @@ where
             }
             (
                 CoordinatorToConnectionInner::OpenOutNotifications {
+                    protocol_name,
+                    max_handshake_size,
                     handshake,
                     now,
-                    overlay_network_index,
                     substream_id: outer_substream_id,
                 },
                 SingleStreamConnectionTaskInner::Established {
@@ -264,8 +265,9 @@ where
                 },
             ) => {
                 let inner_substream_id = established.open_notifications_substream(
-                    overlay_network_index,
+                    protocol_name,
                     handshake,
+                    max_handshake_size,
                     now + Duration::from_secs(20), // TODO: make configurable
                     (),
                 );

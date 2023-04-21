@@ -388,9 +388,10 @@ where
             }
             (
                 CoordinatorToConnectionInner::OpenOutNotifications {
+                    max_handshake_size,
+                    protocol_name,
                     handshake,
                     now,
-                    overlay_network_index,
                     substream_id: outer_substream_id,
                 },
                 MultiStreamConnectionTaskInner::Established {
@@ -400,10 +401,13 @@ where
                     ..
                 },
             ) => {
+                let timeout = now.clone() + Duration::from_secs(20); // TODO: make configurable
                 let inner_substream_id = established.open_notifications_substream(
                     now,
-                    overlay_network_index,
+                    protocol_name,
+                    max_handshake_size,
                     handshake,
+                    timeout,
                     (),
                 );
 

@@ -704,8 +704,6 @@ where
     /// Opens a outgoing substream with the given protocol, destined for a stream of
     /// notifications.
     ///
-    /// Must pass the index of the protocol within [`Config::notifications_protocols`].
-    ///
     /// The remote must first accept (or reject) the substream before notifications can be sent
     /// on it.
     ///
@@ -718,17 +716,12 @@ where
     pub fn open_notifications_substream(
         &mut self,
         now: TNow,
-        protocol_index: usize,
+        protocol_name: String,
+        max_handshake_size: usize,
         handshake: Vec<u8>,
+        timeout: TNow,
         user_data: TNotifUd,
     ) -> SubstreamId {
-        let max_handshake_size = self.notifications_protocols[protocol_index].max_handshake_size;
-
-        // TODO: turn this assert into something that can't panic?
-        assert!(handshake.len() <= max_handshake_size);
-
-        let timeout = now + Duration::from_secs(20); // TODO:
-
         let substream_id = self.next_out_substream_id;
         self.next_out_substream_id += 1;
 
@@ -736,7 +729,7 @@ where
             id: substream_id,
             inner: Some(substream::Substream::notifications_out(
                 timeout,
-                self.notifications_protocols[protocol_index].name.clone(), // TODO: clone :-/,
+                protocol_name,
                 handshake,
                 max_handshake_size,
                 user_data,

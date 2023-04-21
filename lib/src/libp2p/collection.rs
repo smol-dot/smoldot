@@ -717,10 +717,16 @@ where
             InnerConnectionState::Established
         ));
 
-        assert!(self
-            .notification_protocols
-            .get(overlay_network_index)
-            .is_some());
+        let (protocol_name, max_handshake_size) = {
+            let info = self
+                .notification_protocols
+                .get(overlay_network_index)
+                .unwrap_or_else(|| panic!());
+            (
+                info.config.protocol_name.clone(),
+                info.config.max_handshake_size,
+            )
+        };
 
         let substream_id = self.next_substream_id;
         self.next_substream_id.0 += 1;
@@ -737,9 +743,10 @@ where
         self.messages_to_connections.push_back((
             connection_id,
             CoordinatorToConnectionInner::OpenOutNotifications {
+                protocol_name,
                 handshake: handshake.into(),
                 now,
-                overlay_network_index,
+                max_handshake_size,
                 substream_id,
             },
         ));
@@ -1689,7 +1696,8 @@ enum CoordinatorToConnectionInner<TNow> {
         /// Id of the substream assigned by the coordinator.
         /// This is **not** the same as the actual substream used in the connection.
         substream_id: SubstreamId,
-        overlay_network_index: usize,
+        protocol_name: String,
+        max_handshake_size: usize,
         now: TNow,
         handshake: Vec<u8>,
     },
