@@ -58,7 +58,7 @@ jobs:
     permissions:
       contents: write   # Necessary to push on the `gh-pages` branch.
     container:
-      image: rust:1
+      image: rust:1.67
     steps:
       - uses: actions/checkout@v3
         with:
