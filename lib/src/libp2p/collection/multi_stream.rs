@@ -143,9 +143,8 @@ where
         now: TNow,
         handshake: noise::HandshakeInProgress,
         max_inbound_substreams: usize,
+        substreams_capacity: usize,
         max_protocol_name_len: usize,
-        notification_protocols: Arc<[OverlayNetwork]>,
-        request_response_protocols: Arc<[ConfigRequestResponse]>,
         ping_protocol: Arc<str>,
     ) -> Self {
         MultiStreamConnectionTask {
@@ -159,16 +158,8 @@ where
                     Default::default(),
                 ),
                 established: Some(established::MultiStream::webrtc(established::Config {
-                    notifications_protocols: notification_protocols
-                        .iter()
-                        .map(|net| established::ConfigNotifications {
-                            name: net.config.protocol_name.clone(), // TODO: clone :-/
-                            max_handshake_size: net.config.max_handshake_size,
-                            max_notification_size: net.config.max_notification_size,
-                        })
-                        .collect(),
-                    request_protocols: request_response_protocols.to_vec(), // TODO: overhead
                     max_inbound_substreams,
+                    substreams_capacity,
                     max_protocol_name_len,
                     randomness_seed,
                     ping_protocol: ping_protocol.to_string(), // TODO: cloning :-/

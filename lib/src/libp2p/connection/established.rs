@@ -208,15 +208,14 @@ pub enum Event<TRqUd, TNotifUd> {
 pub struct Config<TNow> {
     /// Maximum number of substreams that the remote can have simultaneously opened.
     pub max_inbound_substreams: usize,
+    /// Number of substreams that are expected to be opened simultaneously.
+    pub substreams_capacity: usize,
     /// Maximum size in bytes of the protocols supported by the local node. Any protocol larger
     /// than that requested by the remote is automatically refused. Necessary in order to avoid
     /// situations where the remote sends an infinitely-sized protocol name.
     pub max_protocol_name_len: usize,
-    /// List of request-response protocols supported for incoming substreams.
-    pub request_protocols: Vec<ConfigRequestResponse>,
-    /// List of notifications protocols supported for incoming substreams.
-    pub notifications_protocols: Vec<ConfigNotifications>,
     /// Name of the ping protocol on the network.
+    // TODO: remove from config?
     pub ping_protocol: String,
     /// When to start the first outgoing ping.
     pub first_out_ping: TNow,

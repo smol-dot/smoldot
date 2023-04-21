@@ -78,10 +78,8 @@ pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
     /// See [`Config::max_inbound_substreams`].
     // TODO: not enforced at the moment
     _max_inbound_substreams: usize,
-    /// See [`Config::request_protocols`].
-    request_protocols: Vec<ConfigRequestResponse>,
-    /// See [`Config::notifications_protocols`].
-    notifications_protocols: Vec<ConfigNotifications>,
+    /// See [`Config::max_protocol_name_len`].
+    max_protocol_name_len: usize,
     /// See [`Config::ping_protocol`].
     ping_protocol: String,
     /// See [`Config::ping_interval`].
@@ -116,13 +114,6 @@ where
 {
     /// Creates a new connection from the given configuration.
     pub fn webrtc(config: Config<TNow>) -> MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
-        // TODO: check conflicts between protocol names?
-
-        // We expect at maximum one parallel request per protocol, plus one substream per direction
-        // (in and out) per notification substream, plus one ping substream per direction.
-        let num_expected_substreams =
-            config.request_protocols.len() + config.notifications_protocols.len() * 2 + 2;
-
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
 
         MultiStream {
@@ -133,25 +124,24 @@ where
                 // complexity). For this reason, we reserve enough for the events that can happen
                 // by reading/writing substreams plus events that can happen by resetting
                 // substreams.
-                let cap = MAX_PENDING_EVENTS + num_expected_substreams;
+                let cap = MAX_PENDING_EVENTS + config.substreams_capacity;
                 VecDeque::with_capacity(cap)
             },
             in_substreams: hashbrown::HashMap::with_capacity_and_hasher(
-                num_expected_substreams,
+                config.substreams_capacity,
                 util::SipHasherBuild::new(randomness.sample(rand::distributions::Standard)),
             ),
             out_in_substreams_map: hashbrown::HashMap::with_capacity_and_hasher(
-                num_expected_substreams,
+                config.substreams_capacity,
                 Default::default(),
             ),
             next_out_substream_id: 0,
-            desired_out_substreams: VecDeque::with_capacity(num_expected_substreams),
+            desired_out_substreams: VecDeque::with_capacity(config.substreams_capacity),
             ping_substream: None,
             next_ping: config.first_out_ping,
             ping_payload_randomness: randomness,
             _max_inbound_substreams: config.max_inbound_substreams,
-            request_protocols: config.request_protocols,
-            notifications_protocols: config.notifications_protocols,
+            max_protocol_name_len: config.max_protocol_name_len,
             ping_protocol: config.ping_protocol,
             ping_interval: config.ping_interval,
             ping_timeout: config.ping_timeout,
@@ -200,17 +190,9 @@ where
             let out_substream_id = self.next_out_substream_id;
             self.next_out_substream_id += 1;
 
-            let max_protocol_name_len = self
-                .request_protocols
-                .iter()
-                .filter(|p| p.inbound_allowed)
-                .map(|p| p.name.len())
-                .max()
-                .unwrap_or(0);
-
             Substream {
                 id: out_substream_id,
-                inner: Some(substream::Substream::ingoing(max_protocol_name_len)),
+                inner: Some(substream::Substream::ingoing(self.max_protocol_name_len)),
                 read_buffer: Vec::new(),
                 read_buffer_partial_read: 0,
                 local_writing_side_closed: false,

@@ -118,10 +118,8 @@ struct Inner<TNow, TRqUd, TNotifUd> {
 
     /// See [`Config::max_inbound_substreams`].
     max_inbound_substreams: usize,
-    /// See [`Config::request_protocols`].
-    request_protocols: Vec<ConfigRequestResponse>,
-    /// See [`Config::notifications_protocols`].
-    notifications_protocols: Vec<ConfigNotifications>,
+    /// See [`Config::max_protocol_name_len`].
+    max_protocol_name_len: usize,
     /// See [`Config::ping_protocol`].
     ping_protocol: String,
     /// See [`Config::ping_interval`].
@@ -338,21 +336,12 @@ where
                         continue;
                     }
 
-                    let max_protocol_name_len = self
-                        .inner
-                        .request_protocols
-                        .iter()
-                        .filter(|p| p.inbound_allowed)
-                        .map(|p| p.name.len())
-                        .max()
-                        .unwrap_or(0);
-
                     // Can only panic if there's no incoming substream, which we know for sure
                     // is the case here.
                     self.inner
                         .yamux
                         .accept_pending_substream(Some(substream::Substream::ingoing(
-                            max_protocol_name_len,
+                            self.inner.max_protocol_name_len,
                         )))
                         .unwrap_or_else(|_| panic!());
                 }
@@ -1132,8 +1121,7 @@ impl ConnectionPrototype {
                 next_ping: config.first_out_ping,
                 ping_payload_randomness: randomness,
                 max_inbound_substreams: config.max_inbound_substreams,
-                request_protocols: config.request_protocols,
-                notifications_protocols: config.notifications_protocols,
+                max_protocol_name_len: config.max_protocol_name_len,
                 ping_protocol: config.ping_protocol,
                 ping_interval: config.ping_interval,
                 ping_timeout: config.ping_timeout,

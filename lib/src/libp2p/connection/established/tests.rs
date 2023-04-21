@@ -239,9 +239,8 @@ fn handshake_works() {
     fn test_with_buffer_sizes(size1: usize, size2: usize) {
         let config = Config {
             first_out_ping: Duration::new(0, 0),
-            notifications_protocols: Vec::new(),
-            request_protocols: Vec::new(),
             max_inbound_substreams: 64,
+            substreams_capacity: 16,
             max_protocol_name_len: 128,
             ping_interval: Duration::from_secs(20),
             ping_protocol: "ping".to_owned(),
@@ -263,14 +262,8 @@ fn handshake_works() {
 fn successful_request() {
     let config = Config {
         first_out_ping: Duration::new(60, 0),
-        notifications_protocols: Vec::new(),
-        request_protocols: vec![ConfigRequestResponse {
-            inbound_allowed: true,
-            inbound_config: ConfigRequestResponseIn::Payload { max_size: 128 },
-            max_response_size: 1024,
-            name: "test-request-protocol".to_owned(),
-        }],
         max_inbound_substreams: 64,
+        substreams_capacity: 16,
         max_protocol_name_len: 128,
         ping_interval: Duration::from_secs(20),
         ping_protocol: "ping".to_owned(),
@@ -319,14 +312,8 @@ fn successful_request() {
 fn refused_request() {
     let config = Config {
         first_out_ping: Duration::new(60, 0),
-        notifications_protocols: Vec::new(),
-        request_protocols: vec![ConfigRequestResponse {
-            inbound_allowed: true,
-            inbound_config: ConfigRequestResponseIn::Payload { max_size: 128 },
-            max_response_size: 1024,
-            name: "test-request-protocol".to_owned(),
-        }],
         max_inbound_substreams: 64,
+        substreams_capacity: 16,
         max_protocol_name_len: 128,
         ping_interval: Duration::from_secs(20),
         ping_protocol: "ping".to_owned(),
@@ -375,14 +362,8 @@ fn refused_request() {
 fn request_protocol_not_supported() {
     let alice_config = Config {
         first_out_ping: Duration::new(60, 0),
-        notifications_protocols: Vec::new(),
-        request_protocols: vec![ConfigRequestResponse {
-            inbound_allowed: true,
-            inbound_config: ConfigRequestResponseIn::Payload { max_size: 128 },
-            max_response_size: 1024,
-            name: "test-request-protocol".to_owned(),
-        }],
         max_inbound_substreams: 64,
+        substreams_capacity: 16,
         max_protocol_name_len: 128,
         ping_interval: Duration::from_secs(20),
         ping_protocol: "ping".to_owned(),
@@ -391,7 +372,6 @@ fn request_protocol_not_supported() {
     };
 
     let bob_config = Config {
-        request_protocols: Vec::new(),
         ..alice_config.clone()
     };
 
@@ -420,14 +400,8 @@ fn request_protocol_not_supported() {
 fn request_timeout() {
     let config = Config {
         first_out_ping: Duration::new(60, 0),
-        notifications_protocols: Vec::new(),
-        request_protocols: vec![ConfigRequestResponse {
-            inbound_allowed: true,
-            inbound_config: ConfigRequestResponseIn::Payload { max_size: 128 },
-            max_response_size: 1024,
-            name: "test-request-protocol".to_owned(),
-        }],
         max_inbound_substreams: 64,
+        substreams_capacity: 16,
         max_protocol_name_len: 128,
         ping_interval: Duration::from_secs(20),
         ping_protocol: "ping".to_owned(),
@@ -475,13 +449,8 @@ fn request_timeout() {
 fn outbound_substream_works() {
     let config = Config {
         first_out_ping: Duration::new(60, 0),
-        notifications_protocols: vec![ConfigNotifications {
-            name: "test-notif-protocol".to_owned(),
-            max_handshake_size: 1024,
-            max_notification_size: 1024,
-        }],
-        request_protocols: Vec::new(),
         max_inbound_substreams: 64,
+        substreams_capacity: 16,
         max_protocol_name_len: 128,
         ping_interval: Duration::from_secs(20),
         ping_protocol: "ping".to_owned(),
@@ -558,13 +527,8 @@ fn outbound_substream_works() {
 fn outbound_substream_open_timeout() {
     let config = Config {
         first_out_ping: Duration::new(60, 0),
-        notifications_protocols: vec![ConfigNotifications {
-            name: "test-notif-protocol".to_owned(),
-            max_handshake_size: 1024,
-            max_notification_size: 1024,
-        }],
-        request_protocols: Vec::new(),
         max_inbound_substreams: 64,
+        substreams_capacity: 16,
         max_protocol_name_len: 128,
         ping_interval: Duration::from_secs(20),
         ping_protocol: "ping".to_owned(),
@@ -612,13 +576,8 @@ fn outbound_substream_open_timeout() {
 fn outbound_substream_refuse() {
     let config = Config {
         first_out_ping: Duration::new(60, 0),
-        notifications_protocols: vec![ConfigNotifications {
-            name: "test-notif-protocol".to_owned(),
-            max_handshake_size: 1024,
-            max_notification_size: 1024,
-        }],
-        request_protocols: Vec::new(),
         max_inbound_substreams: 64,
+        substreams_capacity: 16,
         max_protocol_name_len: 128,
         ping_interval: Duration::from_secs(20),
         ping_protocol: "ping".to_owned(),
@@ -667,13 +626,8 @@ fn outbound_substream_refuse() {
 fn outbound_substream_close_demanded() {
     let config = Config {
         first_out_ping: Duration::new(60, 0),
-        notifications_protocols: vec![ConfigNotifications {
-            name: "test-notif-protocol".to_owned(),
-            max_handshake_size: 1024,
-            max_notification_size: 1024,
-        }],
-        request_protocols: Vec::new(),
         max_inbound_substreams: 64,
+        substreams_capacity: 16,
         max_protocol_name_len: 128,
         ping_interval: Duration::from_secs(20),
         ping_protocol: "ping".to_owned(),

@@ -382,6 +382,7 @@ where
         // the value provided as parameter is indeed the one expected.
         let SingleStreamHandshakeKind::MultistreamSelectNoiseYamux { noise_key } = handshake_kind;
 
+        // TODO: could be precalculated
         let max_protocol_name_len = self
             .request_response_protocols
             .iter()
@@ -395,6 +396,12 @@ where
             .max()
             .unwrap_or(0);
 
+        // We expect at maximum one parallel request per protocol, plus one substream per direction
+        // (in and out) per notification substream, plus one ping substream per direction.
+        // TODO: could be precalculated
+        let substreams_capacity =
+            self.request_response_protocols.len() + self.notification_protocols.len() * 2 + 2;
+
         let connection_task = SingleStreamConnectionTask::new(single_stream::Config {
             randomness_seed: self.randomness_seeds.gen(),
             handshake: single_stream_handshake::HealthyHandshake::noise_yamux(
@@ -403,6 +410,7 @@ where
             ),
             handshake_timeout: when_connected + self.handshake_timeout,
             max_inbound_substreams: self.max_inbound_substreams,
+            substreams_capacity,
             max_protocol_name_len,
             notification_protocols: self.notification_protocols.clone(),
             request_response_protocols: self.request_response_protocols.clone(),
@@ -465,6 +473,7 @@ where
             (noise_key, out)
         };
 
+        // TODO: could be precalculated
         let max_protocol_name_len = self
             .request_response_protocols
             .iter()
@@ -478,6 +487,12 @@ where
             .max()
             .unwrap_or(0);
 
+        // We expect at maximum one parallel request per protocol, plus one substream per direction
+        // (in and out) per notification substream, plus one ping substream per direction.
+        // TODO: could be precalculated
+        let substreams_capacity =
+            self.request_response_protocols.len() + self.notification_protocols.len() * 2 + 2;
+
         let handshake = noise::HandshakeInProgress::new(noise::Config {
             key: &noise_key,
             // It's the "server" that initiates the Noise handshake.
@@ -490,9 +505,8 @@ where
             now,
             handshake,
             self.max_inbound_substreams,
+            substreams_capacity,
             max_protocol_name_len,
-            self.notification_protocols.clone(),
-            self.request_response_protocols.clone(),
             self.ping_protocol.clone(),
         );
 

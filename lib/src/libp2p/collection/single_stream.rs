@@ -39,6 +39,7 @@ pub(super) struct Config<TNow> {
     pub(super) handshake: single_stream_handshake::HealthyHandshake,
     pub(super) handshake_timeout: TNow,
     pub(super) max_inbound_substreams: usize,
+    pub(super) substreams_capacity: usize,
     pub(super) max_protocol_name_len: usize,
     pub(super) notification_protocols: Arc<[OverlayNetwork]>,
     pub(super) request_response_protocols: Arc<[ConfigRequestResponse]>,
@@ -74,6 +75,9 @@ enum SingleStreamConnectionTaskInner<TNow> {
 
         /// See [`super::Config::max_inbound_substreams`].
         max_inbound_substreams: usize,
+
+        /// See [`super::Config::substreams_capacity`].
+        substreams_capacity: usize,
 
         max_protocol_name_len: usize,
 
@@ -150,6 +154,7 @@ where
                 randomness_seed: config.randomness_seed,
                 timeout: config.handshake_timeout,
                 max_inbound_substreams: config.max_inbound_substreams,
+                substreams_capacity: config.substreams_capacity,
                 max_protocol_name_len: config.max_protocol_name_len,
                 notification_protocols: config.notification_protocols,
                 request_response_protocols: config.request_response_protocols,
@@ -713,6 +718,7 @@ where
                 randomness_seed,
                 timeout,
                 max_inbound_substreams,
+                substreams_capacity,
                 max_protocol_name_len,
                 notification_protocols,
                 request_response_protocols,
@@ -777,6 +783,7 @@ where
                                 randomness_seed,
                                 timeout,
                                 max_inbound_substreams,
+                                substreams_capacity,
                                 max_protocol_name_len,
                                 notification_protocols,
                                 request_response_protocols,
@@ -797,16 +804,8 @@ where
 
                             self.connection = SingleStreamConnectionTaskInner::Established {
                                 established: connection.into_connection(established::Config {
-                                    notifications_protocols: notification_protocols
-                                        .iter()
-                                        .map(|net| established::ConfigNotifications {
-                                            name: net.config.protocol_name.clone(), // TODO: clone :-/
-                                            max_handshake_size: net.config.max_handshake_size,
-                                            max_notification_size: net.config.max_notification_size,
-                                        })
-                                        .collect(),
-                                    request_protocols: request_response_protocols.to_vec(), // TODO: overhead
                                     max_inbound_substreams,
+                                    substreams_capacity,
                                     max_protocol_name_len,
                                     randomness_seed,
                                     ping_protocol: ping_protocol.to_string(), // TODO: cloning :-/
