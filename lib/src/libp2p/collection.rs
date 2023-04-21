@@ -286,10 +286,10 @@ pub struct Network<TConn, TNow> {
     handshake_timeout: Duration,
 
     /// See [`OverlayNetwork`].
-    notification_protocols: Arc<[OverlayNetwork]>,
+    notification_protocols: Vec<NotificationProtocolConfig>,
 
     /// See [`Config::request_response_protocols`].
-    request_response_protocols: Arc<[ConfigRequestResponse]>,
+    request_response_protocols: Vec<ConfigRequestResponse>,
 
     /// See [`Config::ping_protocol`].
     ping_protocol: Arc<str>,
@@ -320,14 +320,6 @@ enum InnerConnectionState {
     },
 }
 
-/// State of a specific overlay network.
-///
-/// This struct is a slight variation to [`NotificationProtocolConfig`].
-struct OverlayNetwork {
-    /// See [`NotificationProtocolConfig`].
-    config: NotificationProtocolConfig,
-}
-
 /// See [`Network::outgoing_notification_substreams`] and
 /// [`Network::ingoing_notification_substreams`].
 ///
@@ -345,12 +337,6 @@ where
 {
     /// Initializes a new network data structure.
     pub fn new(config: Config) -> Self {
-        let notification_protocols = config
-            .notification_protocols
-            .into_iter()
-            .map(|config| OverlayNetwork { config })
-            .collect::<Arc<[_]>>();
-
         // The initial capacities given to the containers below are more or less arbitrary, the
         // objective being to avoid relocating the containers.
         Network {
@@ -371,18 +357,18 @@ where
             ),
             ingoing_requests_by_connection: BTreeSet::new(),
             outgoing_notification_substreams: hashbrown::HashMap::with_capacity_and_hasher(
-                notification_protocols.len() * config.capacity,
+                config.notification_protocols.len() * config.capacity,
                 Default::default(),
             ),
             outgoing_notification_substreams_by_connection: BTreeSet::new(),
             ingoing_notification_substreams: hashbrown::HashMap::with_capacity_and_hasher(
-                notification_protocols.len() * config.capacity,
+                config.notification_protocols.len() * config.capacity,
                 Default::default(),
             ),
             ingoing_notification_substreams_by_connection: BTreeMap::new(),
             randomness_seeds: ChaCha20Rng::from_seed(config.randomness_seed),
             max_inbound_substreams: config.max_inbound_substreams,
-            notification_protocols,
+            notification_protocols: config.notification_protocols,
             request_response_protocols: config.request_response_protocols.into_iter().collect(), // TODO: stupid overhead
             ping_protocol: config.ping_protocol.into(),
         }
@@ -417,7 +403,7 @@ where
             .chain(
                 self.notification_protocols
                     .iter()
-                    .map(|n| n.config.protocol_name.len()),
+                    .map(|n| n.protocol_name.len()),
             )
             .chain(iter::once(self.ping_protocol.len()))
             .max()
@@ -506,7 +492,7 @@ where
             .chain(
                 self.notification_protocols
                     .iter()
-                    .map(|n| n.config.protocol_name.len()),
+                    .map(|n| n.protocol_name.len()),
             )
             .chain(iter::once(self.ping_protocol.len()))
             .max()
@@ -639,7 +625,7 @@ where
     pub fn notification_protocols(
         &self,
     ) -> impl ExactSizeIterator<Item = &NotificationProtocolConfig> {
-        self.notification_protocols.iter().map(|v| &v.config)
+        self.notification_protocols.iter()
     }
 
     /// Returns the list the request-response protocols originally passed as
@@ -790,10 +776,7 @@ where
                 .notification_protocols
                 .get(overlay_network_index)
                 .unwrap_or_else(|| panic!());
-            (
-                info.config.protocol_name.clone(),
-                info.config.max_handshake_size,
-            )
+            (info.protocol_name.clone(), info.max_handshake_size)
         };
 
         let substream_id = self.next_substream_id;
@@ -1349,7 +1332,7 @@ where
                         .notification_protocols
                         .iter()
                         .enumerate()
-                        .find(|(_, p)| p.config.protocol_name == protocol_name)
+                        .find(|(_, p)| p.protocol_name == protocol_name)
                     {
                         self.messages_to_connections.push_back((
                             connection_id,
@@ -1357,7 +1340,7 @@ where
                                 substream_id: connection_substream_id,
                                 inbound_ty: established::InboundTy::Notifications {
                                     protocol_index,
-                                    max_handshake_size: protocol.config.max_handshake_size,
+                                    max_handshake_size: protocol.max_handshake_size,
                                 },
                             },
                         ));
