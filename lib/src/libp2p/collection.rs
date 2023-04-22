@@ -1317,7 +1317,7 @@ where
                             connection_id,
                             CoordinatorToConnectionInner::AcceptInbound {
                                 substream_id: connection_substream_id,
-                                inbound_ty: established::InboundTy::Request {
+                                inbound_ty: InboundTy::Request {
                                     protocol_index,
                                     request_max_size: match protocol.inbound_config {
                                         ConfigRequestResponseIn::Empty => None,
@@ -1338,7 +1338,7 @@ where
                             connection_id,
                             CoordinatorToConnectionInner::AcceptInbound {
                                 substream_id: connection_substream_id,
-                                inbound_ty: established::InboundTy::Notifications {
+                                inbound_ty: InboundTy::Notifications {
                                     protocol_index,
                                     max_handshake_size: protocol.max_handshake_size,
                                 },
@@ -1349,7 +1349,7 @@ where
                             connection_id,
                             CoordinatorToConnectionInner::AcceptInbound {
                                 substream_id: connection_substream_id,
-                                inbound_ty: established::InboundTy::Ping,
+                                inbound_ty: InboundTy::Ping,
                             },
                         ));
                     } else {
@@ -1811,7 +1811,7 @@ enum CoordinatorToConnectionInner<TNow> {
     AcceptInbound {
         substream_id: established::SubstreamId,
         /// Configuration of the protocol.
-        inbound_ty: established::InboundTy,
+        inbound_ty: InboundTy,
     },
     RejectInbound {
         substream_id: established::SubstreamId,
@@ -1864,6 +1864,23 @@ enum CoordinatorToConnectionInner<TNow> {
     AnswerRequest {
         substream_id: established::SubstreamId,
         response: Result<Vec<u8>, ()>,
+    },
+}
+
+/// Type of inbound protocol. Similar to [`established::InboundTy`], but contains the protocol
+/// index.
+enum InboundTy {
+    Ping,
+    Request {
+        protocol_index: usize,
+        /// Maximum allowed size of the request.
+        /// If `None`, then no data is expected on the substream, not even the length of the
+        /// request.
+        request_max_size: Option<usize>,
+    },
+    Notifications {
+        protocol_index: usize,
+        max_handshake_size: usize,
     },
 }
 

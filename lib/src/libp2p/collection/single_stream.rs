@@ -21,7 +21,7 @@ use super::{
         read_write::ReadWrite,
     },
     ConnectionToCoordinator, ConnectionToCoordinatorInner, CoordinatorToConnection,
-    CoordinatorToConnectionInner, NotificationsOutErr, ShutdownCause, SubstreamId,
+    CoordinatorToConnectionInner, InboundTy, NotificationsOutErr, ShutdownCause, SubstreamId,
 };
 
 use alloc::{collections::VecDeque, string::ToString as _, sync::Arc};
@@ -82,7 +82,7 @@ enum SingleStreamConnectionTaskInner<TNow> {
 
     /// Connection has been fully established.
     Established {
-        established: established::SingleStream<TNow, Option<SubstreamId>>,
+        established: established::SingleStream<TNow, either::Either<SubstreamId, usize>>,
 
         /// Because outgoing substream ids are assigned by the coordinator, we maintain a mapping
         /// of the "outer ids" to "inner ids".
@@ -218,8 +218,32 @@ where
                 },
                 SingleStreamConnectionTaskInner::Established { established, .. },
             ) => {
+                let (inbound_ty, protocol_index) = match inbound_ty {
+                    InboundTy::Notifications {
+                        protocol_index,
+                        max_handshake_size,
+                    } => (
+                        established::InboundTy::Notifications {
+                            protocol_index,
+                            max_handshake_size,
+                        },
+                        protocol_index,
+                    ),
+                    InboundTy::Request {
+                        protocol_index,
+                        request_max_size,
+                    } => (
+                        established::InboundTy::Request {
+                            protocol_index,
+                            request_max_size,
+                        },
+                        protocol_index,
+                    ),
+                    InboundTy::Ping => (established::InboundTy::Ping, 0),
+                };
+
                 // TODO: /!\ will panic if substream is obsolete, instead just ignore the response
-                established.accept_inbound(substream_id, inbound_ty, None);
+                established.accept_inbound(substream_id, inbound_ty, either::Right(protocol_index));
             }
             (
                 CoordinatorToConnectionInner::RejectInbound { substream_id },
@@ -247,7 +271,7 @@ where
                     request_data,
                     timeout,
                     max_response_size,
-                    Some(substream_id),
+                    either::Left(substream_id),
                 );
 
                 let _prev_value = outbound_substreams_map.insert(substream_id, inner_substream_id);
@@ -272,7 +296,7 @@ where
                     handshake,
                     max_handshake_size,
                     now + Duration::from_secs(20), // TODO: make configurable
-                    Some(outer_substream_id),
+                    either::Left(outer_substream_id),
                 );
 
                 let _prev_value =
@@ -566,11 +590,8 @@ where
                                 },
                             );
                         }
-                        Some(established::Event::RequestIn {
-                            id,
-                            protocol_index,
-                            request,
-                        }) => {
+                        Some(established::Event::RequestIn { id, request, .. }) => {
+                            let either::Right(protocol_index) = connection[id] else { panic!() };
                             self.pending_messages.push_back(
                                 ConnectionToCoordinatorInner::RequestIn {
                                     id,
@@ -584,7 +605,7 @@ where
                             user_data,
                             ..
                         }) => {
-                            let outer_substream_id = user_data.unwrap();
+                            let either::Left(outer_substream_id) = user_data else { panic!() };
                             outbound_substreams_map.remove(&outer_substream_id).unwrap();
                             self.pending_messages.push_back(
                                 ConnectionToCoordinatorInner::Response {
@@ -593,11 +614,8 @@ where
                                 },
                             );
                         }
-                        Some(established::Event::NotificationsInOpen {
-                            id,
-                            protocol_index,
-                            handshake,
-                        }) => {
+                        Some(established::Event::NotificationsInOpen { id, handshake, .. }) => {
+                            let either::Right(protocol_index) = connection[id] else { panic!() };
                             self.pending_messages.push_back(
                                 ConnectionToCoordinatorInner::NotificationsInOpen {
                                     id,
@@ -624,9 +642,12 @@ where
                         }
                         Some(established::Event::NotificationsOutResult { id, result }) => {
                             let (outer_substream_id, result) = match result {
-                                Ok(r) => (connection[id].unwrap(), Ok(r)),
+                                Ok(r) => {
+                                    let either::Left(outer_substream_id) = connection[id] else { panic!() };
+                                    (outer_substream_id, Ok(r))
+                                }
                                 Err((err, ud)) => {
-                                    let outer_substream_id = ud.unwrap();
+                                    let either::Left(outer_substream_id) = ud else { panic!() };
                                     outbound_substreams_map.remove(&outer_substream_id);
                                     (outer_substream_id, Err(NotificationsOutErr::Substream(err)))
                                 }
@@ -640,7 +661,7 @@ where
                             );
                         }
                         Some(established::Event::NotificationsOutCloseDemanded { id }) => {
-                            let outer_substream_id = connection[id].unwrap();
+                            let either::Left(outer_substream_id) = connection[id] else { panic!() };
                             self.pending_messages.push_back(
                                 ConnectionToCoordinatorInner::NotificationsOutCloseDemanded {
                                     id: outer_substream_id,
@@ -648,7 +669,7 @@ where
                             );
                         }
                         Some(established::Event::NotificationsOutReset { user_data, .. }) => {
-                            let outer_substream_id = user_data.unwrap();
+                            let either::Left(outer_substream_id) = user_data else { panic!() };
                             outbound_substreams_map.remove(&outer_substream_id);
                             self.pending_messages.push_back(
                                 ConnectionToCoordinatorInner::NotificationsOutReset {

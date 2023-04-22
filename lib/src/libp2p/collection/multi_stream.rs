@@ -23,8 +23,8 @@ use super::{
         read_write::ReadWrite,
     },
     ConnectionToCoordinator, ConnectionToCoordinatorInner, CoordinatorToConnection,
-    CoordinatorToConnectionInner, NotificationsOutErr, PeerId, ShutdownCause, SubstreamFate,
-    SubstreamId,
+    CoordinatorToConnectionInner, InboundTy, NotificationsOutErr, PeerId, ShutdownCause,
+    SubstreamFate, SubstreamId,
 };
 
 use alloc::{collections::VecDeque, string::ToString as _, sync::Arc, vec, vec::Vec};
@@ -69,13 +69,14 @@ enum MultiStreamConnectionTaskInner<TNow, TSubId> {
         /// State machine used once the connection has been established. Unused during the
         /// handshake, but created ahead of time. Always `Some`, except to be temporarily
         /// extracted.
-        established: Option<established::MultiStream<TNow, TSubId, SubstreamId>>,
+        established:
+            Option<established::MultiStream<TNow, TSubId, either::Either<SubstreamId, usize>>>,
     },
 
     /// Connection has been fully established.
     Established {
         // TODO: user data of request redundant with the substreams mapping below
-        established: established::MultiStream<TNow, TSubId, SubstreamId>,
+        established: established::MultiStream<TNow, TSubId, either::Either<SubstreamId, usize>>,
 
         /// If `Some`, contains the substream that was used for the handshake. This substream
         /// is meant to be closed as soon as possible.
@@ -238,15 +239,14 @@ where
                     Some(established::Event::InboundNegotiated { id, protocol_name }) => {
                         Some(ConnectionToCoordinatorInner::InboundNegotiated { id, protocol_name })
                     }
-                    Some(established::Event::RequestIn {
-                        id,
-                        protocol_index,
-                        request,
-                    }) => Some(ConnectionToCoordinatorInner::RequestIn {
-                        id,
-                        protocol_index,
-                        request,
-                    }),
+                    Some(established::Event::RequestIn { id, request, .. }) => {
+                        let either::Right(protocol_index) = established[id] else { panic!() };
+                        Some(ConnectionToCoordinatorInner::RequestIn {
+                            id,
+                            protocol_index,
+                            request,
+                        })
+                    }
                     Some(established::Event::Response { id, response, .. }) => {
                         let outer_substream_id = outbound_substreams_reverse.remove(&id).unwrap();
                         outbound_substreams_map.remove(&outer_substream_id).unwrap();
@@ -255,15 +255,14 @@ where
                             id: outer_substream_id,
                         })
                     }
-                    Some(established::Event::NotificationsInOpen {
-                        id,
-                        protocol_index,
-                        handshake,
-                    }) => Some(ConnectionToCoordinatorInner::NotificationsInOpen {
-                        id,
-                        protocol_index,
-                        handshake,
-                    }),
+                    Some(established::Event::NotificationsInOpen { id, handshake, .. }) => {
+                        let either::Right(protocol_index) = established[id] else { panic!() };
+                        Some(ConnectionToCoordinatorInner::NotificationsInOpen {
+                            id,
+                            protocol_index,
+                            handshake,
+                        })
+                    }
                     Some(established::Event::NotificationsInOpenCancel { id, .. }) => {
                         notifications_in_open_cancel_acknowledgments.push_back(id);
                         Some(ConnectionToCoordinatorInner::NotificationsInOpenCancel { id })
@@ -360,8 +359,32 @@ where
                 },
                 MultiStreamConnectionTaskInner::Established { established, .. },
             ) => {
+                let (inbound_ty, protocol_index) = match inbound_ty {
+                    InboundTy::Notifications {
+                        protocol_index,
+                        max_handshake_size,
+                    } => (
+                        established::InboundTy::Notifications {
+                            protocol_index,
+                            max_handshake_size,
+                        },
+                        protocol_index,
+                    ),
+                    InboundTy::Request {
+                        protocol_index,
+                        request_max_size,
+                    } => (
+                        established::InboundTy::Request {
+                            protocol_index,
+                            request_max_size,
+                        },
+                        protocol_index,
+                    ),
+                    InboundTy::Ping => (established::InboundTy::Ping, 0),
+                };
+
                 // TODO: /!\ will panic if substream is obsolete, instead just ignore the response
-                established.accept_inbound(substream_id, inbound_ty);
+                established.accept_inbound(substream_id, inbound_ty, either::Right(protocol_index));
             }
             (
                 CoordinatorToConnectionInner::RejectInbound { substream_id },
@@ -390,7 +413,7 @@ where
                     request_data,
                     timeout,
                     max_response_size,
-                    substream_id,
+                    either::Left(substream_id),
                 );
                 let _prev_value = outbound_substreams_map.insert(substream_id, inner_substream_id);
                 debug_assert!(_prev_value.is_none());
@@ -418,7 +441,7 @@ where
                     max_handshake_size,
                     handshake,
                     now + Duration::from_secs(20), // TODO: make configurable
-                    outer_substream_id,
+                    either::Left(outer_substream_id),
                 );
 
                 let _prev_value =

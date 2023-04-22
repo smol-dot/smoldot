@@ -26,7 +26,7 @@ use alloc::{collections::VecDeque, string::String, vec, vec::Vec};
 use core::{
     cmp, fmt,
     hash::Hash,
-    ops::{Add, Sub},
+    ops::{Add, Index, IndexMut, Sub},
     time::Duration,
 };
 use rand::{Rng as _, SeedableRng as _};
@@ -744,7 +744,7 @@ where
     ///
     /// Panics if the substream is not in the correct state.
     ///
-    pub fn accept_inbound(&mut self, substream_id: SubstreamId, ty: InboundTy) {
+    pub fn accept_inbound(&mut self, substream_id: SubstreamId, ty: InboundTy, user_data: TSubUd) {
         let substream_id = match substream_id.0 {
             SubstreamIdInner::MultiStream(id) => id,
             _ => panic!(),
@@ -752,13 +752,10 @@ where
 
         let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
 
-        self.in_substreams
-            .get_mut(inner_substream_id)
-            .unwrap()
-            .inner
-            .as_mut()
-            .unwrap()
-            .accept_inbound(ty);
+        let substream = self.in_substreams.get_mut(inner_substream_id).unwrap();
+        substream.inner.as_mut().unwrap().accept_inbound(ty);
+        debug_assert!(substream.user_data.is_none());
+        substream.user_data = Some(user_data);
     }
 
     /// Call after an [`Event::InboundNegotiated`] has been emitted in order to reject the
@@ -955,6 +952,50 @@ where
             .as_mut()
             .unwrap()
             .respond_in_request(response)
+    }
+}
+
+impl<TNow, TSubId, TSubUd> Index<SubstreamId> for MultiStream<TNow, TSubId, TSubUd>
+where
+    TSubId: Clone + PartialEq + Eq + Hash,
+{
+    type Output = TSubUd;
+
+    fn index(&self, substream_id: SubstreamId) -> &Self::Output {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::MultiStream(id) => id,
+            _ => panic!(),
+        };
+
+        let inner_sub_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+
+        self.in_substreams
+            .get(inner_sub_id)
+            .unwrap()
+            .user_data
+            .as_ref()
+            .unwrap()
+    }
+}
+
+impl<TNow, TSubId, TSubUd> IndexMut<SubstreamId> for MultiStream<TNow, TSubId, TSubUd>
+where
+    TSubId: Clone + PartialEq + Eq + Hash,
+{
+    fn index_mut(&mut self, substream_id: SubstreamId) -> &mut Self::Output {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::MultiStream(id) => id,
+            _ => panic!(),
+        };
+
+        let inner_sub_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+
+        self.in_substreams
+            .get_mut(inner_sub_id)
+            .unwrap()
+            .user_data
+            .as_mut()
+            .unwrap()
     }
 }
 
