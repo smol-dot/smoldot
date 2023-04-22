@@ -223,20 +223,14 @@ where
                         protocol_index,
                         max_handshake_size,
                     } => (
-                        established::InboundTy::Notifications {
-                            protocol_index,
-                            max_handshake_size,
-                        },
+                        established::InboundTy::Notifications { max_handshake_size },
                         protocol_index,
                     ),
                     InboundTy::Request {
                         protocol_index,
                         request_max_size,
                     } => (
-                        established::InboundTy::Request {
-                            protocol_index,
-                            request_max_size,
-                        },
+                        established::InboundTy::Request { request_max_size },
                         protocol_index,
                     ),
                     InboundTy::Ping => (established::InboundTy::Ping, 0),

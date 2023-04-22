@@ -281,11 +281,7 @@ fn successful_request() {
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
     match event {
-        either::Right(Event::RequestIn {
-            id,
-            protocol_index: 0,
-            request,
-        }) => {
+        either::Right(Event::RequestIn { id, request }) => {
             assert_eq!(request, b"request payload");
             connections
                 .bob
@@ -331,11 +327,7 @@ fn refused_request() {
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
     match event {
-        either::Right(Event::RequestIn {
-            id,
-            protocol_index: 0,
-            request,
-        }) => {
+        either::Right(Event::RequestIn { id, request }) => {
             assert_eq!(request, b"request payload");
             connections.bob.respond_in_request(id, Err(())).unwrap();
         }
@@ -419,11 +411,7 @@ fn request_timeout() {
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
     match event {
-        either::Right(Event::RequestIn {
-            protocol_index: 0,
-            request,
-            ..
-        }) => {
+        either::Right(Event::RequestIn { request, .. }) => {
             assert_eq!(request, b"request payload");
             // Don't answer.
         }
@@ -468,11 +456,7 @@ fn outbound_substream_works() {
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
     match event {
-        either::Right(Event::NotificationsInOpen {
-            id,
-            protocol_index: 0,
-            handshake,
-        }) => {
+        either::Right(Event::NotificationsInOpen { id, handshake }) => {
             assert_eq!(handshake, b"hello");
             connections
                 .bob
@@ -546,11 +530,7 @@ fn outbound_substream_open_timeout() {
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
     match event {
-        either::Right(Event::NotificationsInOpen {
-            protocol_index: 0,
-            handshake,
-            ..
-        }) => {
+        either::Right(Event::NotificationsInOpen { handshake, .. }) => {
             assert_eq!(handshake, b"hello");
             // Don't answer.
         }
@@ -595,11 +575,7 @@ fn outbound_substream_refuse() {
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
     match event {
-        either::Right(Event::NotificationsInOpen {
-            id,
-            protocol_index: 0,
-            handshake,
-        }) => {
+        either::Right(Event::NotificationsInOpen { id, handshake }) => {
             assert_eq!(handshake, b"hello");
             connections.bob.reject_in_notifications_substream(id);
         }
@@ -645,11 +621,7 @@ fn outbound_substream_close_demanded() {
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
     match event {
-        either::Right(Event::NotificationsInOpen {
-            id,
-            protocol_index: 0,
-            handshake,
-        }) => {
+        either::Right(Event::NotificationsInOpen { id, handshake }) => {
             assert_eq!(handshake, b"hello");
             connections
                 .bob

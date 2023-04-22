@@ -35,7 +35,6 @@ pub struct Substream<TNow> {
     inner: SubstreamInner<TNow>,
 }
 
-// TODO: remove `protocol_index` fields?
 enum SubstreamInner<TNow> {
     /// Protocol negotiation in progress in an incoming substream.
     InboundNegotiating(multistream_select::InProgress<String>, bool),
@@ -84,15 +83,10 @@ enum SubstreamInner<TNow> {
     NotificationsInHandshake {
         /// Buffer for the incoming handshake.
         handshake: leb128::FramedInProgress,
-        /// Protocol that was negotiated.
-        protocol_index: usize,
     },
     /// A handshake on a notifications protocol has been received. Now waiting for an action from
     /// the API user.
-    NotificationsInWait {
-        /// Protocol that was negotiated.
-        protocol_index: usize,
-    },
+    NotificationsInWait,
     /// API user has refused an incoming substream. Waiting for a close from the remote.
     /// In order to save a round-trip time, the remote might assume that the protocol negotiation
     /// has succeeded. As such, it might send additional data on this substream that should be
@@ -107,8 +101,6 @@ enum SubstreamInner<TNow> {
         next_notification: leb128::FramedInProgress,
         /// Handshake payload to write out.
         handshake: VecDeque<u8>,
-        /// Protocol that was negotiated.
-        protocol_index: usize,
         /// Maximum size, in bytes, allowed for each notification.
         max_notification_size: usize,
     },
@@ -132,15 +124,10 @@ enum SubstreamInner<TNow> {
     RequestInRecv {
         /// Buffer for the incoming request.
         request: leb128::FramedInProgress,
-        /// Protocol that was negotiated.
-        protocol_index: usize,
     },
     /// Similar to [`SubstreamInner::RequestInRecv`], but doesn't expect any request body.
     /// Immediately reports an event and switches to [`SubstreamInner::RequestInApiWait`].
-    RequestInRecvEmpty {
-        /// Protocol that was negotiated.
-        protocol_index: usize,
-    },
+    RequestInRecvEmpty,
     /// A request has been sent by the remote. API user must now send back the response.
     RequestInApiWait,
     /// A request has been sent by the remote. Sending back the response.
@@ -396,33 +383,22 @@ where
                             }),
                             None,
                         ),
-                        InboundTy::Notifications {
-                            protocol_index,
-                            max_handshake_size,
-                        } => (
+                        InboundTy::Notifications { max_handshake_size } => (
                             Some(SubstreamInner::NotificationsInHandshake {
-                                protocol_index,
                                 handshake: leb128::FramedInProgress::new(max_handshake_size),
                             }),
                             None,
                         ),
-                        InboundTy::Request {
-                            protocol_index,
-                            request_max_size,
-                        } => {
+                        InboundTy::Request { request_max_size } => {
                             if let Some(request_max_size) = request_max_size {
                                 (
                                     Some(SubstreamInner::RequestInRecv {
-                                        protocol_index,
                                         request: leb128::FramedInProgress::new(request_max_size),
                                     }),
                                     None,
                                 )
                             } else {
-                                (
-                                    Some(SubstreamInner::RequestInRecvEmpty { protocol_index }),
-                                    None,
-                                )
+                                (Some(SubstreamInner::RequestInRecvEmpty), None)
                             }
                         }
                     },
@@ -750,10 +726,7 @@ where
                 }
             }
 
-            SubstreamInner::RequestInRecv {
-                request,
-                protocol_index,
-            } => {
+            SubstreamInner::RequestInRecv { request } => {
                 let incoming_buffer = match read_write.incoming_buffer {
                     Some(buf) => buf,
                     None => {
@@ -769,21 +742,12 @@ where
                         read_write.advance_read(num_read);
                         (
                             Some(SubstreamInner::RequestInApiWait),
-                            Some(Event::RequestIn {
-                                protocol_index,
-                                request,
-                            }),
+                            Some(Event::RequestIn { request }),
                         )
                     }
                     Ok((num_read, leb128::Framed::InProgress(request))) => {
                         read_write.advance_read(num_read);
-                        (
-                            Some(SubstreamInner::RequestInRecv {
-                                request,
-                                protocol_index,
-                            }),
-                            None,
-                        )
+                        (Some(SubstreamInner::RequestInRecv { request }), None)
                     }
                     Err(err) => (
                         None,
@@ -791,10 +755,9 @@ where
                     ),
                 }
             }
-            SubstreamInner::RequestInRecvEmpty { protocol_index } => (
+            SubstreamInner::RequestInRecvEmpty => (
                 Some(SubstreamInner::RequestInApiWait),
                 Some(Event::RequestIn {
-                    protocol_index,
                     request: Vec::new(),
                 }),
             ),
@@ -809,10 +772,7 @@ where
                 }
             }
 
-            SubstreamInner::NotificationsInHandshake {
-                handshake,
-                protocol_index,
-            } => {
+            SubstreamInner::NotificationsInHandshake { handshake } => {
                 let incoming_buffer = match read_write.incoming_buffer {
                     Some(buf) => buf,
                     None => {
@@ -820,7 +780,7 @@ where
                         return (
                             None,
                             Some(Event::InboundError(
-                                InboundError::NotificationsInUnexpectedEof { protocol_index },
+                                InboundError::NotificationsInUnexpectedEof,
                             )),
                         );
                     }
@@ -830,20 +790,14 @@ where
                     Ok((num_read, leb128::Framed::Finished(handshake))) => {
                         read_write.advance_read(num_read);
                         (
-                            Some(SubstreamInner::NotificationsInWait { protocol_index }),
-                            Some(Event::NotificationsInOpen {
-                                protocol_index,
-                                handshake,
-                            }),
+                            Some(SubstreamInner::NotificationsInWait),
+                            Some(Event::NotificationsInOpen { handshake }),
                         )
                     }
                     Ok((num_read, leb128::Framed::InProgress(handshake))) => {
                         read_write.advance_read(num_read);
                         (
-                            Some(SubstreamInner::NotificationsInHandshake {
-                                handshake,
-                                protocol_index,
-                            }),
+                            Some(SubstreamInner::NotificationsInHandshake { handshake }),
                             None,
                         )
                     }
@@ -851,18 +805,14 @@ where
                         None,
                         Some(Event::InboundError(InboundError::NotificationsInError {
                             error,
-                            protocol_index,
                         })),
                     ),
                 }
             }
-            SubstreamInner::NotificationsInWait { protocol_index } => {
+            SubstreamInner::NotificationsInWait => {
                 // Incoming data isn't processed, potentially back-pressuring it.
                 if read_write.incoming_buffer.is_some() {
-                    (
-                        Some(SubstreamInner::NotificationsInWait { protocol_index }),
-                        None,
-                    )
+                    (Some(SubstreamInner::NotificationsInWait), None)
                 } else {
                     (
                         Some(SubstreamInner::NotificationsInRefused),
@@ -886,7 +836,6 @@ where
                 close_desired,
                 mut next_notification,
                 mut handshake,
-                protocol_index,
                 max_notification_size,
             } => {
                 read_write.write_from_vec_deque(&mut handshake);
@@ -917,7 +866,6 @@ where
                                     max_notification_size,
                                 ),
                                 handshake,
-                                protocol_index,
                                 max_notification_size,
                             }),
                             Some(Event::NotificationIn { notification }),
@@ -932,7 +880,6 @@ where
                                 close_desired,
                                 next_notification,
                                 handshake,
-                                protocol_index,
                                 max_notification_size,
                             }),
                             None,
@@ -1143,9 +1090,7 @@ where
         handshake: Vec<u8>,
         max_notification_size: usize,
     ) {
-        if let SubstreamInner::NotificationsInWait { protocol_index } = &mut self.inner {
-            let protocol_index = *protocol_index;
-
+        if let SubstreamInner::NotificationsInWait = &mut self.inner {
             self.inner = SubstreamInner::NotificationsIn {
                 close_desired: false,
                 next_notification: leb128::FramedInProgress::new(max_notification_size),
@@ -1155,7 +1100,6 @@ where
                         .chain(handshake.into_iter())
                         .collect::<VecDeque<_>>()
                 },
-                protocol_index,
                 max_notification_size,
             }
         }
@@ -1357,10 +1301,9 @@ impl<TNow> fmt::Debug for Substream<TNow> {
             SubstreamInner::NotificationsOutClosed { .. } => {
                 f.debug_tuple("notifications-out-closed").finish()
             }
-            SubstreamInner::NotificationsInHandshake { protocol_index, .. } => f
-                .debug_tuple("notifications-in-handshake")
-                .field(protocol_index)
-                .finish(),
+            SubstreamInner::NotificationsInHandshake { .. } => {
+                f.debug_tuple("notifications-in-handshake").finish()
+            }
             SubstreamInner::NotificationsInWait { .. } => {
                 f.debug_tuple("notifications-in-wait").finish()
             }
@@ -1372,9 +1315,8 @@ impl<TNow> fmt::Debug for Substream<TNow> {
                 f.debug_tuple("notifications-in-closed").finish()
             }
             SubstreamInner::RequestOut { .. } => f.debug_tuple("request-out").finish(),
-            SubstreamInner::RequestInRecv { protocol_index, .. }
-            | SubstreamInner::RequestInRecvEmpty { protocol_index, .. } => {
-                f.debug_tuple("request-in").field(protocol_index).finish()
+            SubstreamInner::RequestInRecv { .. } | SubstreamInner::RequestInRecvEmpty { .. } => {
+                f.debug_tuple("request-in").finish()
             }
             SubstreamInner::RequestInRespond { .. } => f.debug_tuple("request-in-respond").finish(),
             SubstreamInner::RequestInApiWait => f.debug_tuple("request-in").finish(),
@@ -1398,8 +1340,6 @@ pub enum Event {
 
     /// Received a request in the context of a request-response protocol.
     RequestIn {
-        /// Index of the request-response protocol the request was sent on.
-        protocol_index: usize,
         /// Bytes of the request. Its interpretation is out of scope of this module.
         request: Vec<u8>,
     },
@@ -1416,8 +1356,6 @@ pub enum Event {
     /// [`Substream::reject_in_notifications_substream`] must be called in the near future in
     /// order to accept or reject this substream.
     NotificationsInOpen {
-        /// Index of the notifications protocol concerned by the substream.
-        protocol_index: usize,
         /// Handshake sent by the remote. Its interpretation is out of scope of this module.
         handshake: Vec<u8>,
     },
@@ -1470,14 +1408,12 @@ pub enum Event {
 pub enum InboundTy {
     Ping,
     Request {
-        protocol_index: usize,
         /// Maximum allowed size of the request.
         /// If `None`, then no data is expected on the substream, not even the length of the
         /// request.
         request_max_size: Option<usize>,
     },
     Notifications {
-        protocol_index: usize,
         max_handshake_size: usize,
     },
 }
@@ -1498,17 +1434,12 @@ pub enum InboundError {
     NotificationsInError {
         /// Error that happened.
         error: leb128::FramedError,
-        /// Index of the protocol that was passed in the [`InboundTy::Notifications`].
-        protocol_index: usize,
     },
     /// Unexpected end of file while receiving an inbound notifications substream handshake.
     #[display(
         fmt = "Unexpected end of file while receiving an inbound notifications substream handshake"
     )]
-    NotificationsInUnexpectedEof {
-        /// Index of the protocol that was passed in the [`InboundTy::Notifications`].
-        protocol_index: usize,
-    },
+    NotificationsInUnexpectedEof,
 }
 
 /// Error that can happen during a request in a request-response scheme.

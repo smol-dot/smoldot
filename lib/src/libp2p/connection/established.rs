@@ -97,10 +97,6 @@ pub enum Event<TSubUd> {
     RequestIn {
         /// Identifier of the request. Needs to be provided back when answering the request.
         id: SubstreamId,
-        /// Index of the request-response protocol the request was sent on.
-        ///
-        /// The index refers to the position of the protocol in [`Config::request_protocols`].
-        protocol_index: usize,
         /// Bytes of the request. Its interpretation is out of scope of this module.
         request: Vec<u8>,
     },
@@ -127,11 +123,6 @@ pub enum Event<TSubUd> {
         /// Identifier of the substream. Needs to be provided back when accept or rejecting the
         /// substream.
         id: SubstreamId,
-        /// Index of the notifications protocol concerned by the substream.
-        ///
-        /// The index refers to the position of the protocol in
-        /// [`Config::notifications_protocols`].
-        protocol_index: usize,
         /// Handshake sent by the remote. Its interpretation is out of scope of this module.
         handshake: Vec<u8>,
     },

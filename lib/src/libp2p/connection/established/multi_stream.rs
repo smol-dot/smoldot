@@ -568,12 +568,8 @@ where
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
                 protocol_name,
             },
-            substream::Event::RequestIn {
-                protocol_index,
-                request,
-            } => Event::RequestIn {
+            substream::Event::RequestIn { request } => Event::RequestIn {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
-                protocol_index,
                 request,
             },
             substream::Event::Response { response } => Event::Response {
@@ -581,12 +577,8 @@ where
                 response,
                 user_data: substream_user_data.take().unwrap(),
             },
-            substream::Event::NotificationsInOpen {
-                protocol_index,
-                handshake,
-            } => Event::NotificationsInOpen {
+            substream::Event::NotificationsInOpen { handshake } => Event::NotificationsInOpen {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
-                protocol_index,
                 handshake,
             },
             substream::Event::NotificationsInOpenCancel => Event::NotificationsInOpenCancel {
