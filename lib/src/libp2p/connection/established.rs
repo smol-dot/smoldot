@@ -69,7 +69,7 @@ impl SubstreamId {
 /// [`MultiStream::pull_event`].
 #[must_use]
 #[derive(Debug)]
-pub enum Event<TRqUd, TNotifUd> {
+pub enum Event<TSubUd> {
     /// The connection is now in a mode where opening new substreams (i.e. starting requests
     /// and opening notifications substreams) is forbidden, but the remote is still able to open
     /// substreams and messages on existing substreams are still allowed to be sent and received.
@@ -113,7 +113,7 @@ pub enum Event<TRqUd, TNotifUd> {
         /// or [`MultiStream::add_request`].
         id: SubstreamId,
         /// Value that was passed to [`SingleStream::add_request`] or [`MultiStream::add_request`].
-        user_data: TRqUd,
+        user_data: TSubUd,
     },
 
     /// Remote has opened an inbound notifications substream.
@@ -162,6 +162,9 @@ pub enum Event<TRqUd, TNotifUd> {
         id: SubstreamId,
         /// If `Ok`, the substream has been closed gracefully. If `Err`, a problem happened.
         outcome: Result<(), NotificationsInClosedErr>,
+        /// Value that was passed to [`SingleStream::accept_inbound`] or
+        /// [`MultiStream::accept_inbound`].
+        user_data: TSubUd,
     },
 
     /// Outcome of trying to open a substream with [`SingleStream::open_notifications_substream`]
@@ -176,7 +179,7 @@ pub enum Event<TRqUd, TNotifUd> {
         id: SubstreamId,
         /// If `Ok`, contains the handshake sent back by the remote. Its interpretation is out of
         /// scope of this module.
-        result: Result<Vec<u8>, (NotificationsOutErr, TNotifUd)>,
+        result: Result<Vec<u8>, (NotificationsOutErr, TSubUd)>,
     },
     /// Remote has closed an outgoing notifications substream, meaning that it demands the closing
     /// of the substream.
@@ -193,7 +196,7 @@ pub enum Event<TRqUd, TNotifUd> {
         id: SubstreamId,
         /// Value that was passed to [`SingleStream::open_notifications_substream`] or
         /// [`MultiStream::open_notifications_substream`].
-        user_data: TNotifUd,
+        user_data: TSubUd,
     },
 
     /// An outgoing ping has succeeded. This event is generated automatically over time.

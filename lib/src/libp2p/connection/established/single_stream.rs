@@ -60,7 +60,7 @@ use alloc::{boxed::Box, string::String, vec, vec::Vec};
 use core::{
     fmt,
     num::{NonZeroU32, NonZeroUsize},
-    ops::{Add, Sub},
+    ops::{Add, Index, IndexMut, Sub},
     time::Duration,
 };
 use rand::{Rng as _, SeedableRng as _};
@@ -68,7 +68,7 @@ use rand::{Rng as _, SeedableRng as _};
 pub use substream::InboundTy;
 
 /// State machine of a fully-established connection.
-pub struct SingleStream<TNow, TRqUd, TNotifUd> {
+pub struct SingleStream<TNow, TSubUd> {
     /// Encryption layer applied directly on top of the incoming data and outgoing data.
     /// In addition to the cipher state, also contains a buffer of data received from the socket,
     /// decoded but yet to be parsed.
@@ -76,17 +76,17 @@ pub struct SingleStream<TNow, TRqUd, TNotifUd> {
     encryption: noise::Noise,
 
     /// Extra fields. Segregated in order to solve borrowing questions.
-    inner: Inner<TNow, TRqUd, TNotifUd>,
+    inner: Inner<TNow, TSubUd>,
 }
 
 /// Extra fields. Segregated in order to solve borrowing questions.
-struct Inner<TNow, TRqUd, TNotifUd> {
+struct Inner<TNow, TSubUd> {
     /// State of the various substreams of the connection.
     /// Consists in a collection of substreams, each of which holding a [`substream::Substream`]
     /// object, or `None` if the substream has been reset.
     /// Also includes, for each substream, a collection of buffers whose data is to be written
     /// out.
-    yamux: yamux::Yamux<Option<substream::Substream<TNow, TRqUd, TNotifUd>>>,
+    yamux: yamux::Yamux<Option<(substream::Substream<TNow>, Option<TSubUd>)>>,
 
     /// If `Some`, contains the substream and number of bytes that [`Inner::yamux`] has already
     /// processed but haven't been consumed from the buffer of decoded data in
@@ -135,7 +135,7 @@ struct Inner<TNow, TRqUd, TNotifUd> {
     intermediary_buffer: Box<[u8]>,
 }
 
-impl<TNow, TRqUd, TNotifUd> SingleStream<TNow, TRqUd, TNotifUd>
+impl<TNow, TSubUd> SingleStream<TNow, TSubUd>
 where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
@@ -152,13 +152,7 @@ where
     pub fn read_write(
         mut self,
         read_write: &'_ mut ReadWrite<'_, TNow>,
-    ) -> Result<
-        (
-            SingleStream<TNow, TRqUd, TNotifUd>,
-            Option<Event<TRqUd, TNotifUd>>,
-        ),
-        Error,
-    > {
+    ) -> Result<(SingleStream<TNow, TSubUd>, Option<Event<TSubUd>>), Error> {
         // First, update all the internal substreams.
         // This doesn't read data from `read_write`, but can potential write out data.
         for substream_id in self
@@ -192,6 +186,7 @@ where
                     .user_data_mut(self.inner.outgoing_pings)
                     .as_mut()
                     .unwrap()
+                    .0
                     .queue_ping(&payload, read_write.now.clone() + self.inner.ping_timeout);
             } else {
                 return Ok((self, Some(Event::PingOutFailed)));
@@ -337,8 +332,9 @@ where
                     // is the case here.
                     self.inner
                         .yamux
-                        .accept_pending_substream(Some(substream::Substream::ingoing(
-                            self.inner.max_protocol_name_len,
+                        .accept_pending_substream(Some((
+                            substream::Substream::ingoing(self.inner.max_protocol_name_len),
+                            None,
                         )))
                         .unwrap_or_else(|_| panic!());
                 }
@@ -396,7 +392,7 @@ where
 
                         // If the substream was reset by the remote, then the substream state
                         // machine will still be `Some`.
-                        if let Some(state_machine) =
+                        if let Some((state_machine, mut user_data)) =
                             self.inner.yamux.remove_dead_substream(dead_substream_id)
                         {
                             // TODO: consider changing this `state_machine.reset()` function to be a state transition of the substream state machine (that doesn't take ownership), to simplify the implementation of both the substream state machine and this code
@@ -405,6 +401,7 @@ where
                                     self,
                                     Some(Self::pass_through_substream_event(
                                         dead_substream_id,
+                                        &mut user_data,
                                         event,
                                     )),
                                 ));
@@ -427,20 +424,21 @@ where
                             self.inner.yamux.user_data_mut(dead_substream_id);
 
                         // Extract the substream state machine, maybe putting it back later.
-                        let state_machine_extracted = match state_machine_refmut.take() {
-                            Some(s) => s,
-                            None => {
-                                // Substream has already been removed from the Yamux state machine
-                                // previously. We know that it can't yield any more event.
-                                self.inner.yamux.remove_dead_substream(dead_substream_id);
+                        let (state_machine_extracted, mut substream_user_data) =
+                            match state_machine_refmut.take() {
+                                Some(s) => s,
+                                None => {
+                                    // Substream has already been removed from the Yamux state machine
+                                    // previously. We know that it can't yield any more event.
+                                    self.inner.yamux.remove_dead_substream(dead_substream_id);
 
-                                // Removing a dead substream might lead to Yamux being able to
-                                // process more incoming data. As such, we loop again.
-                                must_continue_looping = true;
+                                    // Removing a dead substream might lead to Yamux being able to
+                                    // process more incoming data. As such, we loop again.
+                                    must_continue_looping = true;
 
-                                continue;
-                            }
-                        };
+                                    continue;
+                                }
+                            };
 
                         // Now we run `state_machine_extracted.read_write`.
                         let mut substream_read_write = ReadWrite {
@@ -464,10 +462,20 @@ where
                             read_write.wake_up_after(&wake_up_after);
                         }
 
+                        let event_pass_through = if let Some(event) = event {
+                            Some(Self::pass_through_substream_event(
+                                dead_substream_id,
+                                &mut substream_user_data,
+                                event,
+                            ))
+                        } else {
+                            None
+                        };
+
                         if let Some(substream_update) = substream_update {
                             // Put back the substream state machine. It will be picked up again
                             // the next time `read_write` is called.
-                            *state_machine_refmut = Some(substream_update);
+                            *state_machine_refmut = Some((substream_update, substream_user_data));
                         } else {
                             // Substream has no more events to give us. Remove it from the Yamux
                             // state machine.
@@ -478,11 +486,8 @@ where
                             must_continue_looping = true;
                         }
 
-                        if let Some(event) = event {
-                            return Ok((
-                                self,
-                                Some(Self::pass_through_substream_event(dead_substream_id, event)),
-                            ));
+                        if let Some(event_pass_through) = event_pass_through {
+                            return Ok((self, Some(event_pass_through)));
                         }
                     }
                 }
@@ -548,18 +553,19 @@ where
     /// Panics if the substream has its read point closed and `in_data` isn't empty.
     ///
     fn process_substream(
-        inner: &mut Inner<TNow, TRqUd, TNotifUd>,
+        inner: &mut Inner<TNow, TSubUd>,
         substream_id: yamux::SubstreamId,
         outer_read_write: &mut ReadWrite<TNow>,
         in_data: &[u8],
-    ) -> (usize, Option<Event<TRqUd, TNotifUd>>) {
+    ) -> (usize, Option<Event<TSubUd>>) {
         let mut total_read = 0;
 
         loop {
-            let state_machine = match inner.yamux.user_data_mut(substream_id).take() {
-                Some(s) => s,
-                None => break (total_read, None),
-            };
+            let (state_machine, mut substream_user_data) =
+                match inner.yamux.user_data_mut(substream_id).take() {
+                    Some(s) => s,
+                    None => break (total_read, None),
+                };
 
             let read_is_closed = !inner.yamux.can_receive(substream_id);
             let write_is_closed = !inner.yamux.can_send(substream_id);
@@ -606,19 +612,25 @@ where
                 inner.yamux.close(substream_id).unwrap();
             }
 
+            let event_to_yield = match event {
+                None => None,
+                Some(other) => Some(Self::pass_through_substream_event(
+                    substream_id,
+                    &mut substream_user_data,
+                    other,
+                )),
+            };
+
             match substream_update {
-                Some(s) => *inner.yamux.user_data_mut(substream_id) = Some(s),
+                Some(s) => {
+                    *inner.yamux.user_data_mut(substream_id) = Some((s, substream_user_data))
+                }
                 None => {
                     if !closed_after || !read_is_closed {
                         // TODO: what we do here is definitely correct, but the docs of `reset()` seem sketchy, investigate
                         inner.yamux.reset(substream_id).unwrap();
                     }
                 }
-            };
-
-            let event_to_yield = match event {
-                None => None,
-                Some(other) => Some(Self::pass_through_substream_event(substream_id, other)),
             };
 
             break (total_read, event_to_yield);
@@ -628,8 +640,9 @@ where
     /// Turns an event from the [`substream`] module into an [`Event`].
     fn pass_through_substream_event(
         substream_id: yamux::SubstreamId,
-        event: substream::Event<TRqUd, TNotifUd>,
-    ) -> Event<TRqUd, TNotifUd> {
+        substream_user_data: &mut Option<TSubUd>,
+        event: substream::Event,
+    ) -> Event<TSubUd> {
         match event {
             substream::Event::InboundError(error) => Event::InboundError(error),
             substream::Event::InboundNegotiated(protocol_name) => Event::InboundNegotiated {
@@ -644,13 +657,10 @@ where
                 protocol_index,
                 request,
             },
-            substream::Event::Response {
-                response,
-                user_data,
-            } => Event::Response {
+            substream::Event::Response { response } => Event::Response {
                 id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
                 response,
-                user_data,
+                user_data: substream_user_data.take().unwrap(),
             },
             substream::Event::NotificationsInOpen {
                 protocol_index,
@@ -670,19 +680,23 @@ where
             substream::Event::NotificationsInClose { outcome } => Event::NotificationsInClose {
                 id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
                 outcome,
+                user_data: substream_user_data.take().unwrap(),
             },
             substream::Event::NotificationsOutResult { result } => Event::NotificationsOutResult {
                 id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
-                result,
+                result: match result {
+                    Ok(r) => Ok(r),
+                    Err(err) => Err((err, substream_user_data.take().unwrap())),
+                },
             },
             substream::Event::NotificationsOutCloseDemanded => {
                 Event::NotificationsOutCloseDemanded {
                     id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
                 }
             }
-            substream::Event::NotificationsOutReset { user_data } => Event::NotificationsOutReset {
+            substream::Event::NotificationsOutReset => Event::NotificationsOutReset {
                 id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
-                user_data,
+                user_data: substream_user_data.take().unwrap(),
             },
             substream::Event::PingOutSuccess => Event::PingOutSuccess,
             substream::Event::PingOutError { .. } => {
@@ -742,17 +756,19 @@ where
         request: Option<Vec<u8>>,
         timeout: TNow,
         max_response_size: usize,
-        user_data: TRqUd,
+        user_data: TSubUd,
     ) -> SubstreamId {
         let substream_id = self
             .inner
             .yamux
-            .open_substream(Some(substream::Substream::request_out(
-                protocol_name,
-                timeout,
-                request,
-                max_response_size,
-                user_data,
+            .open_substream(Some((
+                substream::Substream::request_out(
+                    protocol_name,
+                    timeout,
+                    request,
+                    max_response_size,
+                ),
+                Some(user_data),
             )))
             .unwrap(); // TODO: consider not panicking
 
@@ -766,30 +782,6 @@ where
         );
 
         SubstreamId(SubstreamIdInner::SingleStream(substream_id))
-    }
-
-    /// Returns the user data associated to a notifications substream.
-    ///
-    /// Returns `None` if the substream doesn't exist or isn't a notifications substream.
-    pub fn notifications_substream_user_data_mut(
-        &mut self,
-        id: SubstreamId,
-    ) -> Option<&mut TNotifUd> {
-        let id = match id.0 {
-            SubstreamIdInner::SingleStream(id) => id,
-            _ => return None,
-        };
-
-        if !self.inner.yamux.has_substream(id) {
-            return None;
-        }
-
-        self.inner
-            .yamux
-            .user_data_mut(id)
-            .as_mut()
-            .unwrap()
-            .notifications_substream_user_data_mut()
     }
 
     /// Opens a outgoing substream with the given protocol, destined for a stream of
@@ -814,17 +806,19 @@ where
         handshake: Vec<u8>,
         max_handshake_size: usize,
         timeout: TNow,
-        user_data: TNotifUd,
+        user_data: TSubUd,
     ) -> SubstreamId {
         let substream = self
             .inner
             .yamux
-            .open_substream(Some(substream::Substream::notifications_out(
-                timeout,
-                protocol_name,
-                handshake,
-                max_handshake_size,
-                user_data,
+            .open_substream(Some((
+                substream::Substream::notifications_out(
+                    timeout,
+                    protocol_name,
+                    handshake,
+                    max_handshake_size,
+                ),
+                Some(user_data),
             )))
             .unwrap(); // TODO: consider not panicking
 
@@ -838,18 +832,21 @@ where
     ///
     /// Panics if the substream is not in the correct state.
     ///
-    pub fn accept_inbound(&mut self, substream_id: SubstreamId, ty: InboundTy) {
+    pub fn accept_inbound(&mut self, substream_id: SubstreamId, ty: InboundTy, user_data: TSubUd) {
         let substream_id = match substream_id.0 {
             SubstreamIdInner::SingleStream(id) => id,
             _ => panic!(),
         };
 
-        self.inner
+        let (substream, ud) = self
+            .inner
             .yamux
             .user_data_mut(substream_id)
             .as_mut()
-            .unwrap()
-            .accept_inbound(ty);
+            .unwrap();
+        substream.accept_inbound(ty);
+        debug_assert!(ud.is_none());
+        *ud = Some(user_data);
     }
 
     /// Call after an [`Event::InboundNegotiated`] has been emitted in order to reject the
@@ -865,12 +862,14 @@ where
             _ => panic!(),
         };
 
-        self.inner
+        let (substream, ud) = self
+            .inner
             .yamux
             .user_data_mut(substream_id)
             .as_mut()
-            .unwrap()
-            .reject_inbound();
+            .unwrap();
+        substream.reject_inbound();
+        debug_assert!(ud.is_none());
     }
 
     /// Accepts an inbound notifications protocol. Must be called in response to a
@@ -884,7 +883,6 @@ where
         &mut self,
         substream_id: SubstreamId,
         handshake: Vec<u8>,
-        user_data: TNotifUd,
     ) {
         let substream_id = match substream_id.0 {
             SubstreamIdInner::SingleStream(id) => id,
@@ -898,7 +896,8 @@ where
             .user_data_mut(substream_id)
             .as_mut()
             .unwrap()
-            .accept_in_notifications_substream(handshake, max_notification_size, user_data);
+            .0
+            .accept_in_notifications_substream(handshake, max_notification_size);
     }
 
     /// Rejects an inbound notifications protocol. Must be called in response to a
@@ -919,6 +918,7 @@ where
             .user_data_mut(substream_id)
             .as_mut()
             .unwrap()
+            .0
             .reject_in_notifications_substream();
     }
 
@@ -954,6 +954,7 @@ where
             .user_data_mut(substream_id)
             .as_mut()
             .unwrap()
+            .0
             .write_notification_unbounded(notification);
     }
 
@@ -979,6 +980,7 @@ where
             .user_data(substream_id)
             .as_ref()
             .unwrap()
+            .0
             .notification_substream_queued_bytes();
         already_queued + from_substream
     }
@@ -1010,6 +1012,7 @@ where
             .user_data_mut(substream_id)
             .as_mut()
             .unwrap()
+            .0
             .close_notifications_substream();
     }
 
@@ -1038,13 +1041,52 @@ where
             .user_data_mut(substream_id)
             .as_mut()
             .unwrap()
+            .0
             .respond_in_request(response)
     }
 }
 
-impl<TNow, TRqUd, TNotifUd> fmt::Debug for SingleStream<TNow, TRqUd, TNotifUd>
+impl<TNow, TSubUd> Index<SubstreamId> for SingleStream<TNow, TSubUd> {
+    type Output = TSubUd;
+
+    fn index(&self, substream_id: SubstreamId) -> &Self::Output {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::SingleStream(id) => id,
+            _ => panic!(),
+        };
+
+        self.inner
+            .yamux
+            .user_data(substream_id)
+            .as_ref()
+            .unwrap()
+            .1
+            .as_ref()
+            .unwrap()
+    }
+}
+
+impl<TNow, TSubUd> IndexMut<SubstreamId> for SingleStream<TNow, TSubUd> {
+    fn index_mut(&mut self, substream_id: SubstreamId) -> &mut Self::Output {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::SingleStream(id) => id,
+            _ => panic!(),
+        };
+
+        self.inner
+            .yamux
+            .user_data_mut(substream_id)
+            .as_mut()
+            .unwrap()
+            .1
+            .as_mut()
+            .unwrap()
+    }
+}
+
+impl<TNow, TSubUd> fmt::Debug for SingleStream<TNow, TSubUd>
 where
-    TRqUd: fmt::Debug,
+    TSubUd: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_map()
@@ -1081,10 +1123,7 @@ impl ConnectionPrototype {
     }
 
     /// Turns this prototype into an actual connection.
-    pub fn into_connection<TNow, TRqUd, TNotifUd>(
-        self,
-        config: Config<TNow>,
-    ) -> SingleStream<TNow, TRqUd, TNotifUd>
+    pub fn into_connection<TNow, TSubUd>(self, config: Config<TNow>) -> SingleStream<TNow, TSubUd>
     where
         TNow: Clone + Ord,
     {
@@ -1100,8 +1139,9 @@ impl ConnectionPrototype {
         });
 
         let outgoing_pings = yamux
-            .open_substream(Some(substream::Substream::ping_out(
-                config.ping_protocol.clone(),
+            .open_substream(Some((
+                substream::Substream::ping_out(config.ping_protocol.clone()),
+                None,
             )))
             // Can only panic if a `GoAway` has been received, or if there are too many substreams
             // already open, which we know for sure can't happen here

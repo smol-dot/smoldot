@@ -69,13 +69,13 @@ enum MultiStreamConnectionTaskInner<TNow, TSubId> {
         /// State machine used once the connection has been established. Unused during the
         /// handshake, but created ahead of time. Always `Some`, except to be temporarily
         /// extracted.
-        established: Option<established::MultiStream<TNow, TSubId, SubstreamId, ()>>,
+        established: Option<established::MultiStream<TNow, TSubId, SubstreamId>>,
     },
 
     /// Connection has been fully established.
     Established {
         // TODO: user data of request redundant with the substreams mapping below
-        established: established::MultiStream<TNow, TSubId, SubstreamId, ()>,
+        established: established::MultiStream<TNow, TSubId, SubstreamId>,
 
         /// If `Some`, contains the substream that was used for the handshake. This substream
         /// is meant to be closed as soon as possible.
@@ -418,7 +418,7 @@ where
                     max_handshake_size,
                     handshake,
                     now + Duration::from_secs(20), // TODO: make configurable
-                    (),
+                    outer_substream_id,
                 );
 
                 let _prev_value =
@@ -497,7 +497,7 @@ where
                 {
                     notifications_in_open_cancel_acknowledgments.remove(idx);
                 } else {
-                    established.accept_in_notifications_substream(substream_id, handshake, ());
+                    established.accept_in_notifications_substream(substream_id, handshake);
                 }
             }
             (

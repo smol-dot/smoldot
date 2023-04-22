@@ -22,8 +22,8 @@ use crate::libp2p::read_write::ReadWrite;
 use std::time::Duration;
 
 struct TwoEstablished {
-    alice: SingleStream<Duration, (), ()>,
-    bob: SingleStream<Duration, (), ()>,
+    alice: SingleStream<Duration, ()>,
+    bob: SingleStream<Duration, ()>,
     alice_to_bob_buffer: Vec<u8>,
     bob_to_alice_buffer: Vec<u8>,
 
@@ -146,7 +146,7 @@ impl TwoEstablished {
         self.now += amount;
     }
 
-    fn run_until_event(mut self) -> (Self, either::Either<Event<(), ()>, Event<(), ()>>) {
+    fn run_until_event(mut self) -> (Self, either::Either<Event<()>, Event<()>>) {
         loop {
             let alice_to_bob_buffer_len = self.alice_to_bob_buffer.len();
             if alice_to_bob_buffer_len < self.alice_to_bob_buffer.capacity() {
@@ -476,7 +476,7 @@ fn outbound_substream_works() {
             assert_eq!(handshake, b"hello");
             connections
                 .bob
-                .accept_in_notifications_substream(id, b"hello back".to_vec(), ());
+                .accept_in_notifications_substream(id, b"hello back".to_vec());
         }
         _ev => unreachable!("{:?}", _ev),
     }
@@ -653,7 +653,7 @@ fn outbound_substream_close_demanded() {
             assert_eq!(handshake, b"hello");
             connections
                 .bob
-                .accept_in_notifications_substream(id, b"hello back".to_vec(), ());
+                .accept_in_notifications_substream(id, b"hello back".to_vec());
         }
         _ev => unreachable!("{:?}", _ev),
     }

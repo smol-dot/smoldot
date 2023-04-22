@@ -34,9 +34,9 @@ use rand::{Rng as _, SeedableRng as _};
 pub use substream::InboundTy;
 
 /// State machine of a fully-established connection where substreams are handled externally.
-pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
+pub struct MultiStream<TNow, TSubId, TSubUd> {
     /// Events that should be yielded from [`MultiStream::pull_event`].
-    pending_events: VecDeque<Event<TRqUd, TNotifUd>>,
+    pending_events: VecDeque<Event<TSubUd>>,
 
     /// List of all open substreams, both inbound and outbound.
     ///
@@ -44,8 +44,7 @@ pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
     /// to notifications and requests, and "in substreams", used for API purposes when it comes to
     /// raw data sent/received on a substream. When the user for example resets an "in substream",
     /// the "out substream" remains valid.
-    in_substreams:
-        hashbrown::HashMap<TSubId, Substream<TNow, TRqUd, TNotifUd>, util::SipHasherBuild>,
+    in_substreams: hashbrown::HashMap<TSubId, Substream<TNow, TSubUd>, util::SipHasherBuild>,
 
     out_in_substreams_map: hashbrown::HashMap<u32, TSubId, fnv::FnvBuildHasher>,
 
@@ -56,7 +55,7 @@ pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
     /// Every time an outgoing substream is opened, an item is pulled from this list.
     ///
     /// Does not include the ping substream.
-    desired_out_substreams: VecDeque<Substream<TNow, TRqUd, TNotifUd>>,
+    desired_out_substreams: VecDeque<Substream<TNow, TSubUd>>,
 
     /// Substream used for outgoing pings.
     ///
@@ -87,11 +86,14 @@ pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
     ping_timeout: Duration,
 }
 
-struct Substream<TNow, TRqUd, TNotifUd> {
+struct Substream<TNow, TSubUd> {
     id: u32,
+    /// Opaque data decided by the user. `None` if the substream doesn't exist on the API layer
+    /// yet.
+    user_data: Option<TSubUd>,
     /// Underlying state machine for the substream. Always `Some` while the substream is alive,
     /// and `None` if it has been reset.
-    inner: Option<substream::Substream<TNow, TRqUd, TNotifUd>>,
+    inner: Option<substream::Substream<TNow>>,
     /// All incoming data is first transferred to this buffer.
     // TODO: this is very suboptimal code, instead the parsing should be done in a streaming way
     read_buffer: Vec<u8>,
@@ -106,13 +108,13 @@ struct Substream<TNow, TRqUd, TNotifUd> {
 
 const MAX_PENDING_EVENTS: usize = 4;
 
-impl<TNow, TSubId, TRqUd, TNotifUd> MultiStream<TNow, TSubId, TRqUd, TNotifUd>
+impl<TNow, TSubId, TSubUd> MultiStream<TNow, TSubId, TSubUd>
 where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
     TSubId: Clone + PartialEq + Eq + Hash,
 {
     /// Creates a new connection from the given configuration.
-    pub fn webrtc(config: Config<TNow>) -> MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
+    pub fn webrtc(config: Config<TNow>) -> MultiStream<TNow, TSubId, TSubUd> {
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
 
         MultiStream {
@@ -151,7 +153,7 @@ where
     ///
     /// This method should be called after [`MultiStream::substream_read_write`] or
     /// [`MultiStream::reset_substream`] is called.
-    pub fn pull_event(&mut self) -> Option<Event<TRqUd, TNotifUd>> {
+    pub fn pull_event(&mut self) -> Option<Event<TSubUd>> {
         self.pending_events.pop_front()
     }
 
@@ -192,6 +194,7 @@ where
             Substream {
                 id: out_substream_id,
                 inner: Some(substream::Substream::ingoing(self.max_protocol_name_len)),
+                user_data: None,
                 read_buffer: Vec::new(),
                 read_buffer_partial_read: 0,
                 local_writing_side_closed: false,
@@ -206,6 +209,7 @@ where
             Substream {
                 id: out_substream_id,
                 inner: Some(substream::Substream::ping_out(self.ping_protocol.clone())),
+                user_data: None,
                 read_buffer: Vec::new(),
                 read_buffer_partial_read: 0,
                 local_writing_side_closed: false,
@@ -238,7 +242,7 @@ where
     /// Panics if there is no substream with that identifier.
     ///
     pub fn reset_substream(&mut self, substream_id: &TSubId) {
-        let substream = self.in_substreams.remove(substream_id).unwrap();
+        let mut substream = self.in_substreams.remove(substream_id).unwrap();
         let _was_in = self.out_in_substreams_map.remove(&substream.id);
         debug_assert!(_was_in.is_none());
 
@@ -248,7 +252,12 @@ where
 
         let maybe_event = substream.inner.unwrap().reset();
         if let Some(event) = maybe_event {
-            Self::on_substream_event(&mut self.pending_events, substream.id, event);
+            Self::on_substream_event(
+                &mut self.pending_events,
+                substream.id,
+                &mut substream.user_data,
+                event,
+            );
         }
     }
 
@@ -521,7 +530,12 @@ where
                 None => {}
                 Some(other) => {
                     continue_looping = true;
-                    Self::on_substream_event(&mut self.pending_events, substream.id, other)
+                    Self::on_substream_event(
+                        &mut self.pending_events,
+                        substream.id,
+                        &mut substream.user_data,
+                        other,
+                    )
                 }
             }
 
@@ -543,9 +557,10 @@ where
 
     /// Turns an event from the [`substream`] module into an [`Event`] and adds it to the queue.
     fn on_substream_event(
-        pending_events: &mut VecDeque<Event<TRqUd, TNotifUd>>,
+        pending_events: &mut VecDeque<Event<TSubUd>>,
         substream_id: u32,
-        event: substream::Event<TRqUd, TNotifUd>,
+        substream_user_data: &mut Option<TSubUd>,
+        event: substream::Event,
     ) {
         pending_events.push_back(match event {
             substream::Event::InboundError(error) => Event::InboundError(error),
@@ -561,13 +576,10 @@ where
                 protocol_index,
                 request,
             },
-            substream::Event::Response {
-                response,
-                user_data,
-            } => Event::Response {
+            substream::Event::Response { response } => Event::Response {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
                 response,
-                user_data,
+                user_data: substream_user_data.take().unwrap(),
             },
             substream::Event::NotificationsInOpen {
                 protocol_index,
@@ -587,19 +599,23 @@ where
             substream::Event::NotificationsInClose { outcome } => Event::NotificationsInClose {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
                 outcome,
+                user_data: substream_user_data.take().unwrap(),
             },
             substream::Event::NotificationsOutResult { result } => Event::NotificationsOutResult {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
-                result,
+                result: match result {
+                    Ok(r) => Ok(r),
+                    Err(err) => Err((err, substream_user_data.take().unwrap())),
+                },
             },
             substream::Event::NotificationsOutCloseDemanded => {
                 Event::NotificationsOutCloseDemanded {
                     id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
                 }
             }
-            substream::Event::NotificationsOutReset { user_data } => Event::NotificationsOutReset {
+            substream::Event::NotificationsOutReset => Event::NotificationsOutReset {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
-                user_data,
+                user_data: substream_user_data.take().unwrap(),
             },
             substream::Event::PingOutSuccess => Event::PingOutSuccess,
             substream::Event::PingOutError { .. } => {
@@ -634,7 +650,7 @@ where
         request: Option<Vec<u8>>,
         timeout: TNow,
         max_response_size: usize,
-        user_data: TRqUd,
+        user_data: TSubUd,
     ) -> SubstreamId {
         let substream_id = self.next_out_substream_id;
         self.next_out_substream_id += 1;
@@ -646,8 +662,8 @@ where
                 timeout,
                 request,
                 max_response_size,
-                user_data,
             )),
+            user_data: Some(user_data),
             read_buffer: Vec::new(),
             read_buffer_partial_read: 0,
             local_writing_side_closed: false,
@@ -665,7 +681,7 @@ where
     pub fn notifications_substream_user_data_mut(
         &mut self,
         id: SubstreamId,
-    ) -> Option<&mut TNotifUd> {
+    ) -> Option<&mut TSubUd> {
         let id = match id.0 {
             SubstreamIdInner::MultiStream(id) => id,
             _ => return None,
@@ -676,10 +692,8 @@ where
         self.in_substreams
             .get_mut(inner_substream_id)
             .unwrap()
-            .inner
+            .user_data
             .as_mut()
-            .unwrap()
-            .notifications_substream_user_data_mut()
     }
 
     /// Opens a outgoing substream with the given protocol, destined for a stream of
@@ -700,7 +714,7 @@ where
         max_handshake_size: usize,
         handshake: Vec<u8>,
         timeout: TNow,
-        user_data: TNotifUd,
+        user_data: TSubUd,
     ) -> SubstreamId {
         let substream_id = self.next_out_substream_id;
         self.next_out_substream_id += 1;
@@ -712,8 +726,8 @@ where
                 protocol_name,
                 handshake,
                 max_handshake_size,
-                user_data,
             )),
+            user_data: Some(user_data),
             read_buffer: Vec::new(),
             read_buffer_partial_read: 0,
             local_writing_side_closed: false,
@@ -782,7 +796,6 @@ where
         &mut self,
         substream_id: SubstreamId,
         handshake: Vec<u8>,
-        user_data: TNotifUd,
     ) {
         let substream_id = match substream_id.0 {
             SubstreamIdInner::MultiStream(id) => id,
@@ -799,7 +812,7 @@ where
             .inner
             .as_mut()
             .unwrap()
-            .accept_in_notifications_substream(handshake, max_notification_size, user_data);
+            .accept_in_notifications_substream(handshake, max_notification_size);
     }
 
     /// Rejects an inbound notifications protocol. Must be called in response to a
@@ -945,7 +958,7 @@ where
     }
 }
 
-impl<TNow, TSubId, TRqUd, TNotifUd> fmt::Debug for MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
+impl<TNow, TSubId, TSubUd> fmt::Debug for MultiStream<TNow, TSubId, TSubUd> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("Established").finish()
     }
