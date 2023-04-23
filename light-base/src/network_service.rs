@@ -47,10 +47,8 @@ use alloc::{
 };
 use async_lock::Mutex;
 use core::{cmp, num::NonZeroUsize, task::Poll, time::Duration};
-use futures::{
-    channel::{mpsc, oneshot},
-    prelude::*,
-};
+use futures::prelude::*;
+use futures_channel::{mpsc, oneshot};
 use hashbrown::{hash_map, HashMap, HashSet};
 use itertools::Itertools as _;
 use smoldot::{

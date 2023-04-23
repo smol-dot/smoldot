@@ -17,7 +17,8 @@
 
 use crate::cli;
 
-use futures::{channel::oneshot, prelude::*};
+use futures::prelude::*;
+use futures_channel::oneshot;
 use smoldot::{
     chain, chain_spec,
     database::full_sqlite,

@@ -230,7 +230,7 @@ mod tests {
             // `async_std::task::spawn`, as at the end of the test all executors but one will be
             // stuck sleeping, and we preferably don't want them to leak.
             let threads_pool = futures::executor::ThreadPool::new().unwrap();
-            let (finished_tx, mut finished_rx) = futures::channel::mpsc::channel::<()>(0);
+            let (finished_tx, mut finished_rx) = futures_channel::mpsc::channel::<()>(0);
             for _ in 0..4 {
                 let queue = queue.clone();
                 let counter = counter.clone();

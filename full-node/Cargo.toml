@@ -27,6 +27,7 @@ env_logger = { version = "0.10.0", default-features = false, features = ["auto-c
 event-listener = { version = "2.5.3" }
 fnv = { version = "1.0.7", default-features = false }
 futures = { version = "0.3.27", default-features = false, features = ["std", "thread-pool"] }
+futures-channel = "0.3.27"
 futures-timer = "3.0"
 hashbrown = { version = "0.13.2", default-features = false }
 hex = { version = "0.4.3", default-features = false }

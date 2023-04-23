@@ -20,7 +20,8 @@ use crate::platform::{PlatformConnection, PlatformRef, PlatformSubstreamDirectio
 
 use alloc::{string::ToString as _, sync::Arc, vec, vec::Vec};
 use core::{cmp, iter, pin};
-use futures::{channel::mpsc, prelude::*};
+use futures::prelude::*;
+use futures_channel::mpsc;
 use smoldot::{
     libp2p::{collection::SubstreamFate, read_write::ReadWrite},
     network::service,

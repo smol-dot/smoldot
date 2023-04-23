@@ -74,7 +74,8 @@ extern crate alloc;
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 use core::{num::NonZeroU32, pin};
-use futures::{channel::oneshot, prelude::*};
+use futures::prelude::*;
+use futures_channel::oneshot;
 use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
 use smoldot::{

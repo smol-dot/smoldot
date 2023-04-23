@@ -19,10 +19,8 @@
 //! For this reason, it is undesirable to access it from an asynchronous context.
 
 use async_lock::Mutex;
-use futures::{
-    channel::{mpsc, oneshot},
-    prelude::*,
-};
+use futures::prelude::*;
+use futures_channel::{mpsc, oneshot};
 use smoldot::database::full_sqlite::SqliteFullDatabase;
 use std::thread;
 

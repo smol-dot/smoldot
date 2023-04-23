@@ -18,7 +18,8 @@
 use crate::{alloc, bindings, cpu_rate_limiter, platform, timers::Delay};
 
 use core::{future::Future, pin::Pin, time::Duration};
-use futures::{channel::mpsc, prelude::*};
+use futures::prelude::*;
+use futures_channel::mpsc;
 use smoldot::informant::BytesDisplay;
 use std::{panic, sync::atomic::Ordering, task};
 

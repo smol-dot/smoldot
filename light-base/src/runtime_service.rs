@@ -72,10 +72,10 @@ use core::{
     time::Duration,
 };
 use futures::{
-    channel::mpsc,
     lock::{Mutex, MutexGuard},
     prelude::*,
 };
+use futures_channel::mpsc;
 use itertools::Itertools as _;
 use smoldot::{
     chain::async_tree,

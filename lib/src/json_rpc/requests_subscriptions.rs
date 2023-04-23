@@ -116,7 +116,7 @@ use core::{
     ops,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use futures::channel::{mpsc, oneshot};
+use futures_channel::{mpsc, oneshot};
 
 mod tests;
 

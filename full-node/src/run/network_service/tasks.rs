@@ -18,7 +18,8 @@
 use super::Inner;
 
 use core::{pin, time::Duration};
-use futures::{channel::mpsc, prelude::*};
+use futures::prelude::*;
+use futures_channel::mpsc;
 use futures_timer::Delay;
 use smoldot::{
     libp2p::{

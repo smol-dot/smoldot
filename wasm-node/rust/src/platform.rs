@@ -21,7 +21,8 @@ use smoldot::libp2p::multihash;
 use smoldot_light::platform::{ConnectError, PlatformSubstreamDirection};
 
 use core::{mem, pin, str, task, time::Duration};
-use futures::{channel::mpsc, prelude::*};
+use futures::prelude::*;
+use futures_channel::mpsc;
 use std::{
     borrow::Cow,
     collections::{BTreeMap, VecDeque},
