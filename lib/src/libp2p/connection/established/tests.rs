@@ -17,7 +17,9 @@
 
 #![cfg(test)]
 
-use super::{Config, Event, InboundError, NotificationsOutErr, RequestError, SingleStream};
+use super::{
+    Config, Event, InboundError, InboundTy, NotificationsOutErr, RequestError, SingleStream,
+};
 use crate::libp2p::read_write::ReadWrite;
 use std::time::Duration;
 
@@ -121,7 +123,7 @@ fn perform_handshake(
         }
     }
 
-    TwoEstablished {
+    let mut connections = TwoEstablished {
         alice: match alice {
             single_stream_handshake::Handshake::Success { connection, .. } => {
                 connection.into_connection(alice_config)
@@ -138,7 +140,23 @@ fn perform_handshake(
         bob_to_alice_buffer,
         now: Duration::new(0, 0),
         wake_up_after: None,
+    };
+
+    for _ in 0..2 {
+        let (connections_update, event) = connections.run_until_event();
+        connections = connections_update;
+        match event {
+            either::Left(Event::InboundNegotiated { id, .. }) => {
+                connections.alice.accept_inbound(id, InboundTy::Ping, ());
+            }
+            either::Right(Event::InboundNegotiated { id, .. }) => {
+                connections.bob.accept_inbound(id, InboundTy::Ping, ());
+            }
+            _ev => unreachable!("{:?}", _ev),
+        }
     }
+
+    connections
 }
 
 impl TwoEstablished {
@@ -281,6 +299,22 @@ fn successful_request() {
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
     match event {
+        either::Right(Event::InboundNegotiated { id, protocol_name }) => {
+            assert_eq!(protocol_name, "test-request-protocol");
+            connections.bob.accept_inbound(
+                id,
+                InboundTy::Request {
+                    request_max_size: Some(1024 * 1024),
+                },
+                (),
+            );
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
         either::Right(Event::RequestIn { id, request }) => {
             assert_eq!(request, b"request payload");
             connections
@@ -323,6 +357,22 @@ fn refused_request() {
         1024,
         (),
     );
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::InboundNegotiated { id, protocol_name }) => {
+            assert_eq!(protocol_name, "test-request-protocol");
+            connections.bob.accept_inbound(
+                id,
+                InboundTy::Request {
+                    request_max_size: Some(1024 * 1024),
+                },
+                (),
+            );
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
 
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
@@ -374,6 +424,16 @@ fn request_protocol_not_supported() {
         (),
     );
 
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::InboundNegotiated { id, protocol_name }) => {
+            assert_eq!(protocol_name, "test-request-protocol");
+            connections.bob.reject_inbound(id);
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+
     let (_, event) = connections.run_until_event();
     match event {
         either::Left(Event::Response { id, response, .. }) => {
@@ -407,6 +467,22 @@ fn request_timeout() {
         1024,
         (),
     );
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::InboundNegotiated { id, protocol_name }) => {
+            assert_eq!(protocol_name, "test-request-protocol");
+            connections.bob.accept_inbound(
+                id,
+                InboundTy::Request {
+                    request_max_size: Some(1024 * 1024),
+                },
+                (),
+            );
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
 
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
@@ -452,6 +528,22 @@ fn outbound_substream_works() {
         connections.now + Duration::from_secs(5),
         (),
     );
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::InboundNegotiated { id, protocol_name }) => {
+            assert_eq!(protocol_name, "test-notif-protocol");
+            connections.bob.accept_inbound(
+                id,
+                InboundTy::Notifications {
+                    max_handshake_size: 1024,
+                },
+                (),
+            );
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
 
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
@@ -530,6 +622,22 @@ fn outbound_substream_open_timeout() {
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
     match event {
+        either::Right(Event::InboundNegotiated { id, protocol_name }) => {
+            assert_eq!(protocol_name, "test-notif-protocol");
+            connections.bob.accept_inbound(
+                id,
+                InboundTy::Notifications {
+                    max_handshake_size: 1024,
+                },
+                (),
+            );
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
         either::Right(Event::NotificationsInOpen { handshake, .. }) => {
             assert_eq!(handshake, b"hello");
             // Don't answer.
@@ -571,6 +679,22 @@ fn outbound_substream_refuse() {
         connections.now + Duration::from_secs(5),
         (),
     );
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::InboundNegotiated { id, protocol_name }) => {
+            assert_eq!(protocol_name, "test-notif-protocol");
+            connections.bob.accept_inbound(
+                id,
+                InboundTy::Notifications {
+                    max_handshake_size: 1024,
+                },
+                (),
+            );
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
 
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
@@ -617,6 +741,22 @@ fn outbound_substream_close_demanded() {
         connections.now + Duration::from_secs(5),
         (),
     );
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::InboundNegotiated { id, protocol_name }) => {
+            assert_eq!(protocol_name, "test-notif-protocol");
+            connections.bob.accept_inbound(
+                id,
+                InboundTy::Notifications {
+                    max_handshake_size: 1024,
+                },
+                (),
+            );
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
 
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
