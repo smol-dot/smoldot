@@ -128,9 +128,40 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
     /// be wrong to connect to the "Kusama" created by user A.
     pub potential_relay_chains: TRelays,
 
-    /// If `true`, then no JSON-RPC service is started for this chain. This saves up a lot of
-    /// resources, but will cause all JSON-RPC requests targeting this chain to fail.
-    pub disable_json_rpc: bool,
+    /// Configuration for the JSON-RPC endpoint.
+    pub json_rpc: AddChainConfigJsonRpc,
+}
+
+/// See [`AddChainConfig::json_rpc`].
+#[derive(Debug, Clone)]
+pub enum AddChainConfigJsonRpc {
+    /// No JSON-RPC endpoint is available for this chain.  This saves up a lot of resources, but
+    /// will cause all JSON-RPC requests targeting this chain to fail.
+    Disabled,
+
+    /// The JSON-RPC endpoint is enabled. Normal operations.
+    Enabled {
+        /// Maximum number of JSON-RPC requests that can be added to a queue if it is not ready to
+        /// be processed immediately. Any additional request will be immediately rejected.
+        ///
+        /// This parameter is necessary in order to prevent JSON-RPC clients from using up too
+        /// much memory within the client.
+        ///
+        /// A typical value is 128.
+        max_pending_requests: NonZeroU32,
+
+        /// Maximum number of active subscriptions that can be started through JSON-RPC functions.
+        /// Any request that causes the JSON-RPC server to generate notifications counts as a
+        /// subscription.
+        /// Any additional subscription over this limit will be immediately rejected.
+        ///
+        /// This parameter is necessary in order to prevent JSON-RPC clients from using up too
+        /// much memory within the client.
+        ///
+        /// While a typical reasonable value would be for example 64, existing UIs tend to start
+        /// a lot of subscriptions, and a value such as 1024 is recommended.
+        max_subscriptions: u32,
+    },
 }
 
 /// Chain registered in a [`Client`].
@@ -188,7 +219,7 @@ struct PublicApiChain<TChain> {
 
     /// Handle that sends requests to the JSON-RPC service that runs in the background.
     /// Destroying this handle also shuts down the service. `None` iff
-    /// [`AddChainConfig::disable_json_rpc`] was `true` when adding the chain.
+    /// [`AddChainConfig::json_rpc`] was [`AddChainConfigJsonRpc::Disabled`] when adding the chain.
     json_rpc_frontend: Option<json_rpc_service::Frontend>,
 
     /// Dummy channel. Nothing is ever sent on it, but the receiving side is stored in the
@@ -258,8 +289,9 @@ pub struct AddChainSuccess {
 
     /// Stream of JSON-RPC responses or notifications.
     ///
-    /// Is always `Some` if [`AddChainConfig::disable_json_rpc`] was `false`, and `None` if it was
-    /// `true`. In other words, you can unwrap this `Option` if you passed `false`.
+    /// Is always `Some` if [`AddChainConfig::json_rpc`] was [`AddChainConfigJsonRpc::Disabled`],
+    /// and `None` if it was [`AddChainConfigJsonRpc::Enabled`]. In other words, you can unwrap
+    /// this `Option` if you passed `Enabled`.
     pub json_rpc_responses: Option<JsonRpcResponses>,
 }
 
@@ -802,7 +834,11 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
 
         // JSON-RPC service initialization. This is done every time `add_chain` is called, even
         // if a similar chain already existed.
-        let json_rpc_frontend = if !config.disable_json_rpc {
+        let json_rpc_frontend = if let AddChainConfigJsonRpc::Enabled {
+            max_pending_requests,
+            max_subscriptions,
+        } = config.json_rpc
+        {
             // Clone `running_chain_init`.
             let mut running_chain_init = match services_init {
                 future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
@@ -812,8 +848,14 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
 
             let (frontend, service_starter) = json_rpc_service::service(json_rpc_service::Config {
                 log_name: log_name.clone(), // TODO: add a way to differentiate multiple different json-rpc services under the same chain
-                max_pending_requests: NonZeroU32::new(128).unwrap(),
-                max_subscriptions: 1024, // Note: the PolkadotJS UI is very heavy in terms of subscriptions.
+                max_pending_requests,
+                max_subscriptions,
+                // Note that the settings below are intentionally not exposed in the publicly
+                // available configuration, as "good" values depend on the global number of tasks.
+                // In other words, these constants are relative to the number of other things that
+                // happen within the client rather than absolute values. Since the user isn't
+                // supposed to know what happens within the client, they can't rationally decide
+                // what value is appropriate.
                 max_parallel_requests: NonZeroU32::new(24).unwrap(),
                 max_parallel_subscription_updates: NonZeroU32::new(8).unwrap(),
             });
@@ -928,8 +970,8 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
     ///
     /// # Panic
     ///
-    /// Panics if the [`ChainId`] is invalid, or if [`AddChainConfig::disable_json_rpc`] was
-    /// `true` when adding the chain.
+    /// Panics if the [`ChainId`] is invalid, or if [`AddChainConfig::json_rpc`] was
+    /// [`AddChainConfigJsonRpc::Disabled`] when adding the chain.
     ///
     pub fn json_rpc_request(
         &mut self,
