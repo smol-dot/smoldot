@@ -237,8 +237,6 @@ struct ChainServices<TPlat: platform::PlatformRef> {
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
-    // TODO: can be grabbed from the sync service instead
-    block_number_bytes: usize,
 }
 
 impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
@@ -249,7 +247,6 @@ impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
             sync_service: self.sync_service.clone(),
             runtime_service: self.runtime_service.clone(),
             transactions_service: self.transactions_service.clone(),
-            block_number_bytes: self.block_number_bytes,
         }
     }
 }
@@ -1054,7 +1051,7 @@ async fn start_services<TPlat: platform::PlatformRef>(
                 parachain: Some(sync_service::ConfigParachain {
                     parachain_id: chain_spec.relay_chain().unwrap().1,
                     relay_chain_sync: relay_chain.runtime_service.clone(),
-                    relay_chain_block_number_bytes: relay_chain.block_number_bytes,
+                    relay_chain_block_number_bytes: relay_chain.sync_service.block_number_bytes(),
                 }),
             })
             .await,
@@ -1131,6 +1128,5 @@ async fn start_services<TPlat: platform::PlatformRef>(
         runtime_service,
         sync_service,
         transactions_service,
-        block_number_bytes: usize::from(chain_spec.block_number_bytes()),
     }
 }
