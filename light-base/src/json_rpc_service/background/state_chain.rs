@@ -36,7 +36,7 @@ use core::{
     pin,
     time::Duration,
 };
-use futures::prelude::*;
+use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use smoldot::{
     header,
     informant::HashDisplay,

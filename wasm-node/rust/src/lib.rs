@@ -28,7 +28,7 @@ use core::{
     sync::atomic,
     time::Duration,
 };
-use futures::prelude::*;
+use futures_util::{stream, FutureExt as _, Stream as _, StreamExt as _};
 use smoldot_light::HandleRpcError;
 use std::{
     sync::{Arc, Mutex},

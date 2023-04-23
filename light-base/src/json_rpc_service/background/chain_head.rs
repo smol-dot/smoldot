@@ -34,8 +34,8 @@ use core::{
     ops, pin,
     time::Duration,
 };
-use futures::prelude::*;
 use futures_channel::mpsc;
+use futures_util::{future, FutureExt as _, StreamExt as _};
 use hashbrown::HashMap;
 use smoldot::{
     chain::fork_tree,

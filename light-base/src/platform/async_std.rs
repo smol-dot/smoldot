@@ -24,7 +24,7 @@ use super::{
 
 use alloc::{borrow::Cow, collections::VecDeque, sync::Arc};
 use core::{ops, pin::Pin, str, task::Poll, time::Duration};
-use futures::prelude::*;
+use futures_util::{future, AsyncRead, AsyncWrite, FutureExt as _};
 use smoldot::libp2p::{
     multiaddr::{Multiaddr, ProtocolRef},
     websocket,

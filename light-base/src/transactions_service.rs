@@ -84,8 +84,9 @@ use core::{
     num::{NonZeroU32, NonZeroUsize},
     time::Duration,
 };
-use futures::{prelude::*, stream::FuturesUnordered};
+use futures::stream::FuturesUnordered;
 use futures_channel::mpsc;
+use futures_util::{future, FutureExt as _, SinkExt as _, StreamExt as _};
 use itertools::Itertools as _;
 use smoldot::{
     header,

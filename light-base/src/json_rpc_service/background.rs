@@ -36,7 +36,7 @@ use core::{
     sync::atomic,
     time::Duration,
 };
-use futures::prelude::*;
+use futures_util::{future, FutureExt as _};
 use smoldot::{
     executor::{host, runtime_host},
     header,

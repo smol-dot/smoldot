@@ -28,7 +28,7 @@ use crate::run::{database_thread, jaeger_service, network_service};
 
 use async_lock::Mutex;
 use core::{num::NonZeroU32, ops};
-use futures::prelude::*;
+use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use hashbrown::HashSet;
 use smoldot::{
     author,

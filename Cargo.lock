@@ -172,9 +172,9 @@ dependencies = [
 
 [[package]]
 name = "async-executor"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17adb73da160dfb475c183343c8cccd80721ea5a605d3eb57125f0a7b7a92d0b"
+checksum = "6fa3dc5f2a8564f07759c008b9109dc0d39de92a88d5588b8a5036d286383afb"
 dependencies = [
  "async-lock",
  "async-task",
@@ -2458,6 +2458,7 @@ dependencies = [
 name = "smoldot-light-wasm"
 version = "1.0.2"
 dependencies = [
+ "async-executor",
  "event-listener",
  "fnv",
  "futures",

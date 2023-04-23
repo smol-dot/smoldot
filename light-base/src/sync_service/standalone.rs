@@ -24,8 +24,8 @@ use core::{
     num::{NonZeroU32, NonZeroU64},
     time::Duration,
 };
-use futures::prelude::*;
 use futures_channel::mpsc;
+use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use hashbrown::{HashMap, HashSet};
 use smoldot::{
     chain, header,

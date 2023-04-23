@@ -31,8 +31,8 @@ use crate::{network_service, platform::PlatformRef, runtime_service};
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use async_lock::Mutex;
 use core::{fmt, num::NonZeroU32, time::Duration};
-use futures::prelude::*;
 use futures_channel::{mpsc, oneshot};
+use futures_util::{stream, SinkExt as _};
 use smoldot::{
     chain,
     executor::host,

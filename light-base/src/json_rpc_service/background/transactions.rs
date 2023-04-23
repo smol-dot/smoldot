@@ -23,7 +23,7 @@ use crate::transactions_service;
 
 use alloc::{borrow::ToOwned as _, str, string::ToString as _, sync::Arc, vec::Vec};
 use core::pin;
-use futures::prelude::*;
+use futures_util::{future, StreamExt as _};
 use smoldot::json_rpc::{self, methods, requests_subscriptions};
 
 impl<TPlat: PlatformRef> Background<TPlat> {

@@ -20,9 +20,9 @@ use crate::{bindings, timers::Delay};
 use smoldot::libp2p::multihash;
 use smoldot_light::platform::{ConnectError, PlatformSubstreamDirection};
 
-use core::{mem, pin, str, task, time::Duration};
-use futures::prelude::*;
+use core::{future::Future, mem, pin, str, task, time::Duration};
 use futures_channel::mpsc;
+use futures_util::{future, FutureExt as _};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, VecDeque},

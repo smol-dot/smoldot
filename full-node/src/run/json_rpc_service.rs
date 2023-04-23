@@ -15,8 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use futures::prelude::*;
 use futures_channel::oneshot;
+use futures_util::{future, FutureExt as _};
 use smoldot::json_rpc::{self, methods, websocket_server};
 use std::{io, net::SocketAddr};
 

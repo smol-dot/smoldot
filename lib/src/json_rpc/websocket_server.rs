@@ -118,8 +118,8 @@ mod tests;
 
 use async_std::net::{TcpListener, TcpStream};
 use core::{fmt, ops, str};
-use futures::{prelude::*};
 use futures_channel::mpsc;
+use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use soketto::handshake::{server::Response, Server};
 use std::{io, net::SocketAddr};
 

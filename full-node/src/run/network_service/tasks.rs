@@ -17,10 +17,10 @@
 
 use super::Inner;
 
-use core::{pin, time::Duration};
-use futures::prelude::*;
+use core::{future::Future, pin, time::Duration};
 use futures_channel::mpsc;
 use futures_timer::Delay;
+use futures_util::{future, AsyncRead, AsyncWrite, FutureExt as _, StreamExt as _};
 use smoldot::{
     libp2p::{
         async_std_connection::with_buffers,

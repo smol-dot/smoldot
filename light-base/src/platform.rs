@@ -16,8 +16,8 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use alloc::{borrow::Cow, string::String, vec::Vec};
-use core::{ops, str, time::Duration};
-use futures::prelude::*;
+use core::{future::Future, ops, str, time::Duration};
+use futures_util::future;
 
 pub mod async_std;
 

@@ -30,9 +30,9 @@
 use crate::run::{database_thread, jaeger_service};
 
 use async_lock::Mutex;
-use core::{cmp, mem, task::Poll, time::Duration};
-use futures::prelude::*;
+use core::{cmp, future::Future, mem, task::Poll, time::Duration};
 use futures_channel::{mpsc, oneshot};
+use futures_util::{future, stream, FutureExt as _, SinkExt as _, StreamExt as _};
 use hashbrown::HashMap;
 use smoldot::{
     database::full_sqlite,

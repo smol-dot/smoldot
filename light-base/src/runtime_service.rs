@@ -71,11 +71,9 @@ use core::{
     pin::Pin,
     time::Duration,
 };
-use futures::{
-    lock::{Mutex, MutexGuard},
-    prelude::*,
-};
+use futures::lock::{Mutex, MutexGuard};
 use futures_channel::mpsc;
+use futures_util::{future, stream, FutureExt as _, Stream, StreamExt as _};
 use itertools::Itertools as _;
 use smoldot::{
     chain::async_tree,
