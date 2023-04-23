@@ -15,8 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use core::iter;
-use std::num::NonZeroU32;
+use core::{iter, num::NonZeroU32};
 
 fn main() {
     // The `smoldot_light` library uses the `log` crate to emit logs.
