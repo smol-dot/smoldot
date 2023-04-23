@@ -93,6 +93,16 @@ pub enum Event<TSubUd> {
         protocol_name: String,
     },
 
+    /// An inbound substream that was previously accepted using [`SingleStream::accept_inbound`]
+    /// or [`MultiStream::accept_inbound`] was closed by the remote or has generated an error.
+    InboundAcceptedCancel {
+        /// Identifier of the substream.
+        id: SubstreamId,
+        /// Value that was passed to [`SingleStream::accept_inbound`] or
+        /// [`MultiStream::accept_inbound`].
+        user_data: TSubUd,
+    },
+
     /// Received a request in the context of a request-response protocol.
     RequestIn {
         /// Identifier of the request. Needs to be provided back when answering the request.

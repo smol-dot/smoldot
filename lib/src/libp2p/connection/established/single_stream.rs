@@ -644,7 +644,17 @@ where
         event: substream::Event,
     ) -> Event<TSubUd> {
         match event {
-            substream::Event::InboundError(error) => Event::InboundError(error),
+            substream::Event::InboundError {
+                error,
+                was_accepted: false,
+            } => Event::InboundError(error),
+            substream::Event::InboundError {
+                was_accepted: true, ..
+            } => Event::InboundAcceptedCancel {
+                id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
+                user_data: substream_user_data.take().unwrap(),
+                // TODO: notify of the error?
+            },
             substream::Event::InboundNegotiated(protocol_name) => Event::InboundNegotiated {
                 id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
                 protocol_name,

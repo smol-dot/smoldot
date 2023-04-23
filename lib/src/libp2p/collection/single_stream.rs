@@ -584,6 +584,11 @@ where
                                 },
                             );
                         }
+                        Some(established::Event::InboundAcceptedCancel { id, .. }) => {
+                            self.pending_messages.push_back(
+                                ConnectionToCoordinatorInner::InboundAcceptedCancel { id },
+                            );
+                        }
                         Some(established::Event::RequestIn { id, request, .. }) => {
                             let either::Right(protocol_index) = connection[id] else { panic!() };
                             self.pending_messages.push_back(

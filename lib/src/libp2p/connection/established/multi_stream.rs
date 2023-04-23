@@ -563,7 +563,16 @@ where
         event: substream::Event,
     ) {
         pending_events.push_back(match event {
-            substream::Event::InboundError(error) => Event::InboundError(error),
+            substream::Event::InboundError {
+                error,
+                was_accepted: false,
+            } => Event::InboundError(error),
+            substream::Event::InboundError {
+                was_accepted: true, ..
+            } => Event::InboundAcceptedCancel {
+                id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
+                user_data: substream_user_data.take().unwrap(),
+            },
             substream::Event::InboundNegotiated(protocol_name) => Event::InboundNegotiated {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
                 protocol_name,

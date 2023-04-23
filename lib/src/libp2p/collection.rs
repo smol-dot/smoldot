@@ -1363,6 +1363,10 @@ where
 
                     continue;
                 }
+                ConnectionToCoordinatorInner::InboundAcceptedCancel { .. } => {
+                    // Nothing to do, as we don't track inbound accepted substreams.
+                    continue;
+                }
                 ConnectionToCoordinatorInner::RequestIn {
                     id: connection_substream_id,
                     protocol_index,
@@ -1703,6 +1707,11 @@ enum ConnectionToCoordinatorInner {
     InboundNegotiated {
         id: established::SubstreamId,
         protocol_name: String,
+    },
+
+    /// See the corresponding event in [`established::Event`].
+    InboundAcceptedCancel {
+        id: established::SubstreamId,
     },
 
     /// See the corresponding event in [`established::Event`].

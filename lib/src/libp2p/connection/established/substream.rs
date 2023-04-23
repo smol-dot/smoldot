@@ -357,7 +357,10 @@ where
                     }
                     Err(err) => (
                         None,
-                        Some(Event::InboundError(InboundError::NegotiationError(err))),
+                        Some(Event::InboundError {
+                            error: InboundError::NegotiationError(err),
+                            was_accepted: false,
+                        }),
                     ),
                 }
             }
@@ -408,7 +411,10 @@ where
                     }
                     Err(err) => (
                         None,
-                        Some(Event::InboundError(InboundError::NegotiationError(err))),
+                        Some(Event::InboundError {
+                            error: InboundError::NegotiationError(err),
+                            was_accepted: true,
+                        }),
                     ),
                 }
             }
@@ -732,7 +738,10 @@ where
                     None => {
                         return (
                             None,
-                            Some(Event::InboundError(InboundError::RequestInExpectedEof)),
+                            Some(Event::InboundError {
+                                error: InboundError::RequestInExpectedEof,
+                                was_accepted: true,
+                            }),
                         );
                     }
                 };
@@ -751,7 +760,10 @@ where
                     }
                     Err(err) => (
                         None,
-                        Some(Event::InboundError(InboundError::RequestInLebError(err))),
+                        Some(Event::InboundError {
+                            error: InboundError::RequestInLebError(err),
+                            was_accepted: true,
+                        }),
                     ),
                 }
             }
@@ -779,9 +791,10 @@ where
                         read_write.close_write_if_empty();
                         return (
                             None,
-                            Some(Event::InboundError(
-                                InboundError::NotificationsInUnexpectedEof,
-                            )),
+                            Some(Event::InboundError {
+                                error: InboundError::NotificationsInUnexpectedEof,
+                                was_accepted: true,
+                            }),
                         );
                     }
                 };
@@ -803,9 +816,10 @@ where
                     }
                     Err(error) => (
                         None,
-                        Some(Event::InboundError(InboundError::NotificationsInError {
-                            error,
-                        })),
+                        Some(Event::InboundError {
+                            error: InboundError::NotificationsInError { error },
+                            was_accepted: true,
+                        }),
                     ),
                 }
             }
@@ -1332,7 +1346,10 @@ impl<TNow> fmt::Debug for Substream<TNow> {
 #[derive(Debug)]
 pub enum Event {
     /// Error while receiving an inbound substream.
-    InboundError(InboundError),
+    InboundError {
+        error: InboundError,
+        was_accepted: bool,
+    },
 
     /// An inbound substream has successfully negotiated a protocol. Call
     /// [`Substream::accept_inbound`] or [`Substream::reject_inbound`] in order to resume.
