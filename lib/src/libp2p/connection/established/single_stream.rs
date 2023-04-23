@@ -649,9 +649,7 @@ where
                 id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
                 protocol_name,
             },
-            substream::Event::RequestIn {
-                request,
-            } => Event::RequestIn {
+            substream::Event::RequestIn { request } => Event::RequestIn {
                 id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
                 request,
             },
@@ -660,9 +658,7 @@ where
                 response,
                 user_data: substream_user_data.take().unwrap(),
             },
-            substream::Event::NotificationsInOpen {
-                handshake,
-            } => Event::NotificationsInOpen {
+            substream::Event::NotificationsInOpen { handshake } => Event::NotificationsInOpen {
                 id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
                 handshake,
             },

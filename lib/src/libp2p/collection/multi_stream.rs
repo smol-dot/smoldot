@@ -75,7 +75,6 @@ enum MultiStreamConnectionTaskInner<TNow, TSubId> {
 
     /// Connection has been fully established.
     Established {
-        // TODO: user data of request redundant with the substreams mapping below
         established: established::MultiStream<TNow, TSubId, either::Either<SubstreamId, usize>>,
 
         /// If `Some`, contains the substream that was used for the handshake. This substream
@@ -89,11 +88,6 @@ enum MultiStreamConnectionTaskInner<TNow, TSubId> {
         /// of the "outer ids" to "inner ids".
         outbound_substreams_map:
             hashbrown::HashMap<SubstreamId, established::SubstreamId, fnv::FnvBuildHasher>,
-
-        /// Reverse mapping.
-        // TODO: could be user datas in established?
-        outbound_substreams_reverse:
-            hashbrown::HashMap<established::SubstreamId, SubstreamId, fnv::FnvBuildHasher>,
 
         /// After a [`ConnectionToCoordinatorInner::NotificationsInOpenCancel`] is emitted, an
         /// entry is added to this list. If the coordinator accepts or refuses a substream in this
@@ -209,7 +203,6 @@ where
             MultiStreamConnectionTaskInner::Established {
                 established,
                 outbound_substreams_map,
-                outbound_substreams_reverse,
                 handshake_finished_message_to_send,
                 notifications_in_open_cancel_acknowledgments,
                 ..
@@ -247,8 +240,12 @@ where
                             request,
                         })
                     }
-                    Some(established::Event::Response { id, response, .. }) => {
-                        let outer_substream_id = outbound_substreams_reverse.remove(&id).unwrap();
+                    Some(established::Event::Response {
+                        response,
+                        user_data,
+                        ..
+                    }) => {
+                        let either::Left(outer_substream_id) = user_data else { panic!() };
                         outbound_substreams_map.remove(&outer_substream_id).unwrap();
                         Some(ConnectionToCoordinatorInner::Response {
                             response,
@@ -274,28 +271,33 @@ where
                         Some(ConnectionToCoordinatorInner::NotificationsInClose { id, outcome })
                     }
                     Some(established::Event::NotificationsOutResult { id, result }) => {
-                        let outer_substream_id = *outbound_substreams_reverse.get(&id).unwrap();
-
-                        if result.is_err() {
-                            outbound_substreams_map.remove(&outer_substream_id);
-                            outbound_substreams_reverse.remove(&id);
-                        }
+                        let (outer_substream_id, result) = match result {
+                            Ok(r) => {
+                                let either::Left(outer_substream_id) = established[id] else { panic!() };
+                                (outer_substream_id, Ok(r))
+                            }
+                            Err((err, ud)) => {
+                                let either::Left(outer_substream_id) = ud else { panic!() };
+                                outbound_substreams_map.remove(&outer_substream_id);
+                                (outer_substream_id, Err(NotificationsOutErr::Substream(err)))
+                            }
+                        };
 
                         Some(ConnectionToCoordinatorInner::NotificationsOutResult {
                             id: outer_substream_id,
-                            result: result.map_err(|(err, _)| NotificationsOutErr::Substream(err)),
+                            result,
                         })
                     }
                     Some(established::Event::NotificationsOutCloseDemanded { id }) => {
-                        let outer_substream_id = *outbound_substreams_reverse.get(&id).unwrap();
+                        let either::Left(outer_substream_id) = established[id] else { panic!() };
                         Some(
                             ConnectionToCoordinatorInner::NotificationsOutCloseDemanded {
                                 id: outer_substream_id,
                             },
                         )
                     }
-                    Some(established::Event::NotificationsOutReset { id, .. }) => {
-                        let outer_substream_id = outbound_substreams_reverse.remove(&id).unwrap();
+                    Some(established::Event::NotificationsOutReset { user_data, .. }) => {
+                        let either::Left(outer_substream_id) = user_data else { panic!() };
                         outbound_substreams_map.remove(&outer_substream_id);
                         Some(ConnectionToCoordinatorInner::NotificationsOutReset {
                             id: outer_substream_id,
@@ -398,7 +400,6 @@ where
                 MultiStreamConnectionTaskInner::Established {
                     established,
                     outbound_substreams_map,
-                    outbound_substreams_reverse,
                     ..
                 },
             ) => {
@@ -410,9 +411,6 @@ where
                     either::Left(substream_id),
                 );
                 let _prev_value = outbound_substreams_map.insert(substream_id, inner_substream_id);
-                debug_assert!(_prev_value.is_none());
-                let _prev_value =
-                    outbound_substreams_reverse.insert(inner_substream_id, substream_id);
                 debug_assert!(_prev_value.is_none());
             }
             (
@@ -426,7 +424,6 @@ where
                 MultiStreamConnectionTaskInner::Established {
                     established,
                     outbound_substreams_map,
-                    outbound_substreams_reverse,
                     ..
                 },
             ) => {
@@ -441,16 +438,12 @@ where
                 let _prev_value =
                     outbound_substreams_map.insert(outer_substream_id, inner_substream_id);
                 debug_assert!(_prev_value.is_none());
-                let _prev_value =
-                    outbound_substreams_reverse.insert(inner_substream_id, outer_substream_id);
-                debug_assert!(_prev_value.is_none());
             }
             (
                 CoordinatorToConnectionInner::CloseOutNotifications { substream_id },
                 MultiStreamConnectionTaskInner::Established {
                     established,
                     outbound_substreams_map,
-                    outbound_substreams_reverse,
                     ..
                 },
             ) => {
@@ -459,7 +452,6 @@ where
                 // user close the substream before the message about the substream being closed
                 // was delivered to the coordinator.
                 if let Some(inner_substream_id) = outbound_substreams_map.remove(&substream_id) {
-                    outbound_substreams_reverse.remove(&inner_substream_id);
                     established.close_notifications_substream(inner_substream_id);
                 }
             }
@@ -982,8 +974,6 @@ where
                                 0,
                                 Default::default(),
                             ),
-                            outbound_substreams_reverse:
-                                hashbrown::HashMap::with_capacity_and_hasher(0, Default::default()),
                             notifications_in_open_cancel_acknowledgments: VecDeque::with_capacity(
                                 4,
                             ),
