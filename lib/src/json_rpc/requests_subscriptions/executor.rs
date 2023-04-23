@@ -32,9 +32,9 @@
 // Note: believe or not, but I couldn't find a library that does this in the Rust ecosystem.
 
 use alloc::sync::{Arc, Weak};
+use async_lock::Mutex;
 use core::{fmt, future::Future, pin::Pin, sync::atomic, task};
 use futures::future::BoxFuture;
-use futures::lock::Mutex;
 
 /// See [the module-level documentation](..).
 pub struct TasksQueue {

@@ -12,6 +12,7 @@ name = "basic"
 required-features = ["std"]
 
 [dependencies]
+async-lock = { version = "2.7.0", default-features = false }  # TODO: no-std-ize; this is has been done and is just waiting for a release: https://github.com/smol-rs/event-listener/pull/34
 blake2-rfc = { version = "0.2.18", default-features = false }
 derive_more = "0.99.17"
 either = { version = "1.8.1", default-features = false }

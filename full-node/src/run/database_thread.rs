@@ -18,9 +18,9 @@
 //! As explained in the documentation of smoldot, the database uses synchronous I/O operations.
 //! For this reason, it is undesirable to access it from an asynchronous context.
 
+use async_lock::Mutex;
 use futures::{
     channel::{mpsc, oneshot},
-    lock::Mutex,
     prelude::*,
 };
 use smoldot::database::full_sqlite::SqliteFullDatabase;

@@ -106,6 +106,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
+use async_lock::Mutex;
 use core::{
     any::Any,
     cmp, fmt,
@@ -115,10 +116,7 @@ use core::{
     ops,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use futures::{
-    channel::{mpsc, oneshot},
-    lock::Mutex,
-};
+use futures::channel::{mpsc, oneshot};
 
 mod tests;
 

@@ -77,13 +77,14 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use async_lock::Mutex;
 use core::{
     cmp, iter,
     marker::PhantomData,
     num::{NonZeroU32, NonZeroUsize},
     time::Duration,
 };
-use futures::{channel::mpsc, lock::Mutex, prelude::*, stream::FuturesUnordered};
+use futures::{channel::mpsc, prelude::*, stream::FuturesUnordered};
 use itertools::Itertools as _;
 use smoldot::{
     header,

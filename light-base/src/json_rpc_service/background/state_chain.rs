@@ -29,13 +29,14 @@ use alloc::{
     vec,
     vec::Vec,
 };
+use async_lock::MutexGuard;
 use core::{
     iter,
     num::{NonZeroU32, NonZeroUsize},
     pin,
     time::Duration,
 };
-use futures::{lock::MutexGuard, prelude::*};
+use futures::prelude::*;
 use smoldot::{
     header,
     informant::HashDisplay,

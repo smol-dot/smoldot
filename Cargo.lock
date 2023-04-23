@@ -2342,6 +2342,7 @@ name = "smoldot"
 version = "0.5.0"
 dependencies = [
  "arrayvec 0.7.2",
+ "async-lock",
  "async-std",
  "atomic",
  "base64 0.21.0",
@@ -2396,6 +2397,7 @@ dependencies = [
 name = "smoldot-full-node"
 version = "0.1.0"
 dependencies = [
+ "async-lock",
  "async-std",
  "atty",
  "blake2-rfc",
@@ -2424,6 +2426,7 @@ dependencies = [
 name = "smoldot-light"
 version = "0.3.0"
 dependencies = [
+ "async-lock",
  "async-std",
  "blake2-rfc",
  "derive_more",

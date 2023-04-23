@@ -29,10 +29,10 @@
 
 use crate::run::{database_thread, jaeger_service};
 
+use async_lock::Mutex;
 use core::{cmp, mem, task::Poll, time::Duration};
 use futures::{
     channel::{mpsc, oneshot},
-    lock::Mutex,
     prelude::*,
 };
 use hashbrown::HashMap;

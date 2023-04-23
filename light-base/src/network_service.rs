@@ -45,10 +45,10 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use async_lock::Mutex;
 use core::{cmp, num::NonZeroUsize, task::Poll, time::Duration};
 use futures::{
     channel::{mpsc, oneshot},
-    lock::Mutex,
     prelude::*,
 };
 use hashbrown::{hash_map, HashMap, HashSet};

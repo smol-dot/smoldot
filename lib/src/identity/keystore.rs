@@ -45,7 +45,7 @@
 
 use crate::{identity::seed_phrase, util::SipHasherBuild};
 
-use futures::lock::Mutex;
+use async_lock::Mutex;
 use rand::{Rng as _, SeedableRng as _};
 use std::{borrow::Cow, fs, io, path, str};
 
