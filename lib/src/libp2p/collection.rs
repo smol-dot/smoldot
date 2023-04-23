@@ -1711,7 +1711,8 @@ enum ConnectionToCoordinatorInner {
 
     /// See the corresponding event in [`established::Event`].
     InboundAcceptedCancel {
-        id: established::SubstreamId,
+        // TODO: this field is currently unused but is planned to be used in the future; if plans change then remove it
+        _id: established::SubstreamId,
     },
 
     /// See the corresponding event in [`established::Event`].

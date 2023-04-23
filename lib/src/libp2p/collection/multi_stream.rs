@@ -233,7 +233,7 @@ where
                         Some(ConnectionToCoordinatorInner::InboundNegotiated { id, protocol_name })
                     }
                     Some(established::Event::InboundAcceptedCancel { id, .. }) => {
-                        Some(ConnectionToCoordinatorInner::InboundAcceptedCancel { id })
+                        Some(ConnectionToCoordinatorInner::InboundAcceptedCancel { _id: id })
                     }
                     Some(established::Event::RequestIn { id, request, .. }) => {
                         let either::Right(protocol_index) = established[id] else { panic!() };

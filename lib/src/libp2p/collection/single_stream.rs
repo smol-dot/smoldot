@@ -586,7 +586,7 @@ where
                         }
                         Some(established::Event::InboundAcceptedCancel { id, .. }) => {
                             self.pending_messages.push_back(
-                                ConnectionToCoordinatorInner::InboundAcceptedCancel { id },
+                                ConnectionToCoordinatorInner::InboundAcceptedCancel { _id: id },
                             );
                         }
                         Some(established::Event::RequestIn { id, request, .. }) => {
