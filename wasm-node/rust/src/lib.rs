@@ -22,6 +22,7 @@
 
 use core::{
     cmp::Ordering,
+    num::NonZeroU32,
     ops::{Add, Sub},
     pin::Pin,
     str,
@@ -216,7 +217,15 @@ fn add_chain(
                 .unwrap_or_else(|_| panic!("non-utf8 chain spec")),
             database_content: str::from_utf8(&database_content)
                 .unwrap_or_else(|_| panic!("non-utf8 database content")),
-            disable_json_rpc: json_rpc_running == 0,
+            json_rpc: if json_rpc_running == 0 {
+                smoldot_light::AddChainConfigJsonRpc::Disabled
+            } else {
+                smoldot_light::AddChainConfigJsonRpc::Enabled {
+                    max_pending_requests: NonZeroU32::new(128).unwrap(),
+                    // Note: the PolkadotJS UI is very heavy in terms of subscriptions.
+                    max_subscriptions: 1024,
+                }
+            },
             potential_relay_chains: potential_relay_chains.into_iter(),
         }) {
         Ok(c) => c,

@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use core::iter;
+use core::{iter, num::NonZeroU32};
 
 fn main() {
     // The `smoldot_light` library uses the `log` crate to emit logs.
@@ -46,9 +46,23 @@ fn main() {
             // chain.
             specification: include_str!("../../demo-chain-specs/polkadot.json"),
 
-            // If `true`, the chain will not be able to handle JSON-RPC requests. This can be used
-            // to save up some resources.
-            disable_json_rpc: false,
+            // Configures some constants about the JSON-RPC endpoints.
+            // It is also possible to pass `Disabled`, in which case the chain will not be able to
+            // handle JSON-RPC requests. This can be used to save up some resources.
+            json_rpc: smoldot_light::AddChainConfigJsonRpc::Enabled {
+                // Maximum number of JSON-RPC in the queue of requests waiting to be processed.
+                // This parameter is necessary for situations where the JSON-RPC clients aren't
+                // trusted. If you control all the requests that are sent out and don't want them
+                // to fail, feel free to pass `u32::max_value()`.
+                max_pending_requests: NonZeroU32::new(128).unwrap(),
+                // Maximum number of active subscriptions before new ones are automatically
+                // rejected. Any JSON-RPC request that causes the server to generate notifications
+                // counts as a subscription.
+                // While a typical reasonable value would be for example 64, existing UIs tend to
+                // start a lot of subscriptions, and a value such as 1024 is recommended.
+                // Similarly, if you don't want any limit, feel free to pass `u32::max_value()`.
+                max_subscriptions: 1024,
+            },
 
             // This field is necessary only if adding a parachain.
             potential_relay_chains: iter::empty(),
@@ -71,7 +85,7 @@ fn main() {
 
     // The chain is now properly initialized.
 
-    // `json_rpc_responses` can only be `None` if we had passed `disable_json_rpc: true` in the
+    // `json_rpc_responses` can only be `None` if we had passed `json_rpc: Disabled` in the
     // configuration.
     let mut json_rpc_responses = json_rpc_responses.unwrap();
 
