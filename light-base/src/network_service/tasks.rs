@@ -56,7 +56,7 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
         let mut socket = pin::pin!(socket.fuse());
         let mut timeout = shared.platform.sleep_until(start_connect.timeout).fuse();
 
-        let result = futures::select! {
+        let result = futures_util::select! {
             _ = timeout => Err(None),
             result = socket => result.map_err(Some),
         };
@@ -331,7 +331,7 @@ async fn single_stream_connection_task<TPlat: PlatformRef>(
             // always remain ready until we push an element. While waiting, we process
             // incoming messages.
             loop {
-                futures::select! {
+                futures_util::select! {
                     _ = future::poll_fn(|cx| connection_to_coordinator.poll_ready(cx)).fuse() => break,
                     message = coordinator_to_connection.next() => {
                         if let Some(message) = message {
@@ -583,7 +583,7 @@ async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                 // always remain ready until we push an element. While waiting, we process
                 // incoming messages.
                 loop {
-                    futures::select! {
+                    futures_util::select! {
                         _ = future::poll_fn(|cx| connection_to_coordinator.poll_ready(cx)).fuse() => break,
                         message = coordinator_to_connection.next() => {
                             if let Some(message) = message {
@@ -642,7 +642,7 @@ async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
 
         // Do the actual waiting.
         debug_assert!(newly_open_substream.is_none());
-        futures::select! {
+        futures_util::select! {
             _ = message_from_coordinator => {}
             substream = if remote_has_reset { either::Right(future::pending()) } else { either::Left(shared.platform.next_substream(&mut connection)) }.fuse() => {
                 match substream {

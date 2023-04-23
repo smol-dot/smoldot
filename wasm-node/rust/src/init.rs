@@ -137,7 +137,7 @@ pub(crate) fn init<TChain>(
             }
 
             loop {
-                futures::select! {
+                futures_util::select! {
                     (new_task_name, new_task) = new_task_rx.select_next_some() => {
                         all_tasks.push(FutureAdapter {
                             name: new_task_name,

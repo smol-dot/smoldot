@@ -94,7 +94,7 @@ struct JsonRpcBackground {
 impl JsonRpcBackground {
     async fn run(mut self) {
         loop {
-            let event = futures::select! {
+            let event = futures_util::select! {
                 _ = &mut self.client_still_alive => return,
                 event = self.server.next_event().fuse() => event,
             };

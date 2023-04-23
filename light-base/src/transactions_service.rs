@@ -623,7 +623,7 @@ async fn background_task<TPlat: PlatformRef>(
                 }
             }
 
-            futures::select! {
+            futures_util::select! {
                 notification = subscribe_all.new_blocks.next().fuse() => {
                     match notification {
                         Some(runtime_service::Notification::Block(new_block)) => {

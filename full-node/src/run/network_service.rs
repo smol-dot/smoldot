@@ -460,7 +460,7 @@ impl NetworkService {
             let future = async move {
                 let mut connections = stream::FuturesUnordered::new();
                 loop {
-                    futures::select! {
+                    futures_util::select! {
                         new_connec = conn_tasks_rx.select_next_some() => {
                             connections.push(new_connec);
                         },

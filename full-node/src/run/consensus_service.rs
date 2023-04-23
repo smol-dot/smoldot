@@ -496,7 +496,7 @@ impl SyncBackground {
                 }
             };
 
-            futures::select! {
+            futures_util::select! {
                 () = authoring_ready_future => {
                     // Ready to author a block. Call `author_block()`.
                     // While a block is being authored, the whole syncing state machine is

@@ -1323,7 +1323,7 @@ async fn run_background<TPlat: PlatformRef>(
 
         // Inner loop. Process incoming events.
         loop {
-            futures::select! {
+            futures_util::select! {
                 _ = &mut background.wake_up_new_necessary_download => {
                     background.start_necessary_downloads().await;
                 },

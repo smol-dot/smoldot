@@ -192,7 +192,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
 
         // Now waiting for some event to happen: a network event, a request from the frontend
         // of the sync service, or a request being finished.
-        let response_outcome = futures::select! {
+        let response_outcome = futures_util::select! {
             network_event = from_network_service.next() => {
                 // Something happened on the network.
                 // We expect the networking channel to never close, so the event is unwrapped.

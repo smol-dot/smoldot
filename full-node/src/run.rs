@@ -593,7 +593,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     debug_assert!(network_events_receivers.next().is_none());
 
     loop {
-        futures::select! {
+        futures_util::select! {
             _ = informant_timer.next() => {
                 if matches!(cli_output, cli::Output::Informant) {
                     // We end the informant line with a `\r` so that it overwrites itself every time.
@@ -827,7 +827,7 @@ async fn background_open_database(
     let mut next_progress_icon = ['-', '\\', '|', '/'].iter().copied().cycle();
 
     loop {
-        futures::select! {
+        futures_util::select! {
             res = rx => return res.unwrap(),
             _ = progress_timer.next() => {
                 if show_progress {

@@ -376,7 +376,7 @@ impl<T> WsServer<T> {
     /// Returns the next event happening on the server.
     pub async fn next_event(&'_ mut self) -> Event<'_, T> {
         loop {
-            futures::select! {
+            futures_util::select! {
                 // Only try to fetch a new incoming connection if none is pending.
                 socket = {
                     let listener = &self.listener;
