@@ -650,7 +650,7 @@ mod tests {
 
     #[test]
     fn disk_storage_works_ed25519() {
-        futures::executor::block_on(async move {
+        futures_executor::block_on(async move {
             let path = tempfile::tempdir().unwrap();
 
             let keystore1 = Keystore::new(Some(path.path().to_owned()), rand::random())
@@ -684,7 +684,7 @@ mod tests {
 
     #[test]
     fn disk_storage_works_sr25519() {
-        futures::executor::block_on(async move {
+        futures_executor::block_on(async move {
             let path = tempfile::tempdir().unwrap();
 
             let keystore1 = Keystore::new(Some(path.path().to_owned()), rand::random())

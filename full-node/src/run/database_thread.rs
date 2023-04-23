@@ -80,7 +80,7 @@ impl From<SqliteFullDatabase> for DatabaseThread {
             .spawn(move || {
                 // When the `DatabaseThread` is dropped, the sender will close, `rx.next()`
                 // will return `None`, and the closure here will finish, ending the thread.
-                while let Some(closure) = futures::executor::block_on(rx.next()) {
+                while let Some(closure) = futures_executor::block_on(rx.next()) {
                     closure(&db)
                 }
             })

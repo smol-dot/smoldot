@@ -385,7 +385,7 @@ impl<T> WsServer<T> {
                         if !has_pending {
                             listener.accept().await
                         } else {
-                            loop { futures::pending!() }
+                            loop { futures_util::future::pending::<()>().await }
                         }
                     }
                 }.fuse() => {

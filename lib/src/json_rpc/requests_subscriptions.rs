@@ -117,6 +117,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use futures_channel::{mpsc, oneshot};
+use futures_util::future;
 
 mod tests;
 
@@ -389,7 +390,7 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
                 Some(c) => c,
                 None => {
                     // Freeze forever.
-                    futures::pending!();
+                    future::pending::<()>().await;
                     continue;
                 }
             };
@@ -829,9 +830,11 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
                 .ok_or(())?;
 
             // TODO: keeping the lock while sending the message doesn't seem great as it could potentially deadlock
-            let _ =
-                futures::SinkExt::send(&mut subscription.messages_tx, (message, confirmation_tx))
-                    .await;
+            let _ = futures_util::SinkExt::send(
+                &mut subscription.messages_tx,
+                (message, confirmation_tx),
+            )
+            .await;
 
             confirmation_rx
         };
@@ -1159,7 +1162,7 @@ impl<TSubMsg> MessagesReceiver<TSubMsg> {
     pub async fn next(&mut self) -> (TSubMsg, ConfirmationSend) {
         // The channel can never be closed in normal situations, as the sender is kept in the list
         // of subscriptions and this list of subscriptions is only cleaned up.
-        let (msg, tx) = futures::StreamExt::next(&mut self.rx).await.unwrap();
+        let (msg, tx) = futures_util::StreamExt::next(&mut self.rx).await.unwrap();
         (msg, ConfirmationSend { tx })
     }
 }

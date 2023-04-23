@@ -307,7 +307,7 @@ fn remove_chain(chain_id: u32) {
             // purpose of erasing the previously-registered waker.
             if let Some(mut json_rpc_responses_rx) = json_rpc_responses_rx {
                 let _ = Pin::new(&mut json_rpc_responses_rx).poll_next(
-                    &mut task::Context::from_waker(futures::task::noop_waker_ref()),
+                    &mut task::Context::from_waker(futures_util::task::noop_waker_ref()),
                 );
             }
 

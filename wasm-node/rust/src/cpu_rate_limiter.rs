@@ -69,7 +69,7 @@ impl<T: Future> Future for CpuRateLimiter<T> {
         // Note that `crate::timers::Delay` is a `FusedFuture`, making it ok to call `poll` even
         // if it is possible for the `Delay` to already be resolved.
         // We add a small zero-cost shim to ensure at compile time that this is indeed the case.
-        fn enforce_fused<T: futures::future::FusedFuture>(_: &T) {}
+        fn enforce_fused<T: futures_util::future::FusedFuture>(_: &T) {}
         enforce_fused(&this.prevent_poll_until);
         if Future::poll(this.prevent_poll_until.as_mut(), cx).is_pending() {
             return Poll::Pending;
@@ -106,7 +106,7 @@ impl<T: Future> Future for CpuRateLimiter<T> {
     }
 }
 
-impl<T: futures::future::FusedFuture> futures::future::FusedFuture for CpuRateLimiter<T> {
+impl<T: futures_util::future::FusedFuture> futures_util::future::FusedFuture for CpuRateLimiter<T> {
     fn is_terminated(&self) -> bool {
         self.inner.is_terminated()
     }

@@ -190,7 +190,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         .as_ref()
         .map(|relay_chain_spec| relay_chain_spec.as_chain_information().unwrap().0);
 
-    let threads_pool = futures::executor::ThreadPool::builder()
+    let threads_pool = futures_executor::ThreadPool::builder()
         .name_prefix("tasks-pool-")
         .create()
         .unwrap();

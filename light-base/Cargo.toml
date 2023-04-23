@@ -18,9 +18,8 @@ derive_more = "0.99.17"
 either = { version = "1.8.1", default-features = false }
 event-listener = { version = "2.5.3" }
 fnv = { version = "1.0.7", default-features = false }
-futures = "0.3.27" # TODO: no-stdize
-futures-channel = "0.3.27" # TODO: no-stdize
-futures-util = { version = "0.3.27", default-features = false }
+futures-channel = { version = "0.3.27", features = ["std", "sink"] }   # TODO: no-std-ize and remove "sink"
+futures-util = { version = "0.3.27", default-features = false, features = ["std", "async-await", "async-await-macro", "channel", "sink"] }  # TODO: slim down these features
 hashbrown = { version = "0.13.2", default-features = false }
 hex = { version = "0.4.3", default-features = false }
 itertools = "0.10.5"
