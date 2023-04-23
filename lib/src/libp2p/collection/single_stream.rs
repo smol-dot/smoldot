@@ -71,7 +71,7 @@ enum SingleStreamConnectionTaskInner<TNow> {
         /// See [`super::Config::max_inbound_substreams`].
         max_inbound_substreams: usize,
 
-        /// See [`super::Config::substreams_capacity`].
+        /// See [`Config::substreams_capacity`].
         substreams_capacity: usize,
 
         max_protocol_name_len: usize,

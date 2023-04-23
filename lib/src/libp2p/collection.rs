@@ -285,7 +285,7 @@ pub struct Network<TConn, TNow> {
     /// See [`Config::handshake_timeout`].
     handshake_timeout: Duration,
 
-    /// See [`OverlayNetwork`].
+    /// See [`Config::notification_protocols`].
     notification_protocols: Vec<NotificationProtocolConfig>,
 
     /// See [`Config::request_response_protocols`].
