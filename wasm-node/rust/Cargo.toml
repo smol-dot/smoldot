@@ -12,7 +12,6 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-async-executor = { version = "1.5.1" }
 event-listener = { version = "2.5.3" }
 fnv = { version = "1.0.7", default-features = false }
 futures = "0.3.27"

@@ -18,8 +18,7 @@
 use crate::{alloc, bindings, cpu_rate_limiter, platform, timers::Delay};
 
 use core::{future::Future, pin::Pin, time::Duration};
-use futures_channel::mpsc;
-use futures_util::{future, stream, FutureExt as _, StreamExt as _};
+use futures::{channel::mpsc, prelude::*};
 use smoldot::informant::BytesDisplay;
 use std::{panic, sync::atomic::Ordering, task};
 
@@ -94,7 +93,8 @@ pub(crate) fn init<TChain>(
 
     // A channel needs to be passed to the client in order for it to spawn background tasks.
     // Since "spawning a task" isn't really something that a browser or Node environment can do
-    // efficiently, we instead combine all the asynchronous tasks into one executor below.
+    // efficiently, we instead combine all the asynchronous tasks into one `FuturesUnordered`
+    // below.
     let (new_task_tx, mut new_task_rx) =
         mpsc::unbounded::<(String, future::BoxFuture<'static, ()>)>();
 
@@ -102,7 +102,7 @@ pub(crate) fn init<TChain>(
     // It receives new tasks from `new_task_rx` and runs them.
     let main_task = cpu_rate_limiter::CpuRateLimiter::new(
         async move {
-            let all_tasks = async_executor::Executor::new();
+            let mut all_tasks = stream::FuturesUnordered::new();
 
             // The code below processes tasks that have names.
             #[pin_project::pin_project]
@@ -136,15 +136,15 @@ pub(crate) fn init<TChain>(
             }
 
             loop {
-                futures_util::select! {
+                futures::select! {
                     (new_task_name, new_task) = new_task_rx.select_next_some() => {
-                        all_tasks.spawn(FutureAdapter {
+                        all_tasks.push(FutureAdapter {
                             name: new_task_name,
                             enable_current_task,
                             future: new_task,
-                        }).detach();
+                        });
                     },
-                    () = all_tasks.tick().fuse() => {},
+                    () = all_tasks.select_next_some() => {},
                 }
             }
         },
