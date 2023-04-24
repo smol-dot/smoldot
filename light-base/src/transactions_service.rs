@@ -77,13 +77,16 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use async_lock::Mutex;
 use core::{
     cmp, iter,
     marker::PhantomData,
     num::{NonZeroU32, NonZeroUsize},
     time::Duration,
 };
-use futures::{channel::mpsc, lock::Mutex, prelude::*, stream::FuturesUnordered};
+use futures_channel::mpsc;
+use futures_util::stream::FuturesUnordered;
+use futures_util::{future, FutureExt as _, SinkExt as _, StreamExt as _};
 use itertools::Itertools as _;
 use smoldot::{
     header,
@@ -103,9 +106,6 @@ pub struct Config<TPlat: PlatformRef> {
 
     /// Access to the platform's capabilities.
     pub platform: TPlat,
-
-    /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService<TPlat>>,
@@ -142,15 +142,15 @@ pub struct TransactionsService<TPlat> {
 
 impl<TPlat: PlatformRef> TransactionsService<TPlat> {
     /// Builds a new service.
-    pub async fn new(mut config: Config<TPlat>) -> Self {
+    pub async fn new(config: Config<TPlat>) -> Self {
         let log_target = format!("tx-service-{}", config.log_name);
         let (to_background, from_foreground) = mpsc::channel(8);
 
-        (config.tasks_executor)(
-            log_target.clone(),
+        config.platform.spawn_task(
+            log_target.clone().into(),
             Box::pin(background_task::<TPlat>(
                 log_target,
-                config.platform,
+                config.platform.clone(),
                 config.sync_service,
                 config.runtime_service,
                 config.network_service.0,
@@ -624,7 +624,7 @@ async fn background_task<TPlat: PlatformRef>(
                 }
             }
 
-            futures::select! {
+            futures_util::select! {
                 notification = subscribe_all.new_blocks.next().fuse() => {
                     match notification {
                         Some(runtime_service::Notification::Block(new_block)) => {

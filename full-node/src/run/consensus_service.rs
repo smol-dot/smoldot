@@ -26,8 +26,9 @@
 
 use crate::run::{database_thread, jaeger_service, network_service};
 
+use async_lock::Mutex;
 use core::{num::NonZeroU32, ops};
-use futures::{lock::Mutex, prelude::*};
+use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use hashbrown::HashSet;
 use smoldot::{
     author,
@@ -495,7 +496,7 @@ impl SyncBackground {
                 }
             };
 
-            futures::select! {
+            futures_util::select! {
                 () = authoring_ready_future => {
                     // Ready to author a block. Call `author_block()`.
                     // While a block is being authored, the whole syncing state machine is
@@ -1158,14 +1159,21 @@ impl SyncBackground {
                                 verify = req.inject_value(value);
                             }
                             all::BlockVerification::FinalizedStorageNextKey(req) => {
-                                let next_key = self
-                                    .finalized_block_storage
-                                    .range::<[u8], _>((
-                                        ops::Bound::Excluded(req.key().as_ref()),
-                                        ops::Bound::Unbounded,
-                                    ))
-                                    .next()
-                                    .map(|(k, _)| k);
+                                let next_key = {
+                                    let key = req.key();
+                                    self.finalized_block_storage
+                                        .range::<[u8], _>((
+                                            if req.or_equal() {
+                                                ops::Bound::Included(key.as_ref())
+                                            } else {
+                                                ops::Bound::Excluded(key.as_ref())
+                                            },
+                                            ops::Bound::Unbounded,
+                                        ))
+                                        .next()
+                                        .filter(|(k, _)| k.starts_with(req.prefix().as_ref()))
+                                        .map(|(k, _)| k)
+                                };
                                 verify = req.inject_key(next_key);
                             }
                             all::BlockVerification::FinalizedStoragePrefixKeys(req) => {

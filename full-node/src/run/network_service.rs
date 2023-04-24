@@ -29,12 +29,10 @@
 
 use crate::run::{database_thread, jaeger_service};
 
-use core::{cmp, mem, task::Poll, time::Duration};
-use futures::{
-    channel::{mpsc, oneshot},
-    lock::Mutex,
-    prelude::*,
-};
+use async_lock::Mutex;
+use core::{cmp, future::Future, mem, task::Poll, time::Duration};
+use futures_channel::{mpsc, oneshot};
+use futures_util::{future, stream, FutureExt as _, SinkExt as _, StreamExt as _};
 use hashbrown::HashMap;
 use smoldot::{
     database::full_sqlite,
@@ -462,7 +460,7 @@ impl NetworkService {
             let future = async move {
                 let mut connections = stream::FuturesUnordered::new();
                 loop {
-                    futures::select! {
+                    futures_util::select! {
                         new_connec = conn_tasks_rx.select_next_some() => {
                             connections.push(new_connec);
                         },
@@ -962,6 +960,7 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                         state.set_id,
                         state.commit_finalized_height,
                     );
+                    // TODO: report to the sync state machine
                 }
                 service::Event::GrandpaCommitMessage {
                     chain_index,

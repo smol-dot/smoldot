@@ -17,7 +17,7 @@
 
 use super::{Config, Event, WsServer};
 
-use futures::io::{BufReader, BufWriter};
+use futures_util::io::{BufReader, BufWriter};
 
 #[test]
 fn basic_works() {

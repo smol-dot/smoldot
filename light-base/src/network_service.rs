@@ -20,7 +20,7 @@
 //! The [`NetworkService`] manages background tasks dedicated to connecting to other nodes.
 //! Importantly, its design is oriented towards the particular use case of the light client.
 //!
-//! The [`NetworkService`] spawns one background task (using the [`Config::tasks_executor`]) for
+//! The [`NetworkService`] spawns one background task (using [`PlatformRef::spawn_task`]) for
 //! each active connection.
 //!
 //! The objective of the [`NetworkService`] in general is to try stay connected as much as
@@ -45,12 +45,10 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use async_lock::Mutex;
 use core::{cmp, num::NonZeroUsize, task::Poll, time::Duration};
-use futures::{
-    channel::{mpsc, oneshot},
-    lock::Mutex,
-    prelude::*,
-};
+use futures_channel::{mpsc, oneshot};
+use futures_util::{future, stream, FutureExt as _, SinkExt as _, StreamExt as _};
 use hashbrown::{hash_map, HashMap, HashSet};
 use itertools::Itertools as _;
 use smoldot::{
@@ -68,9 +66,6 @@ mod tasks;
 pub struct Config<TPlat> {
     /// Access to the platform's capabilities.
     pub platform: TPlat,
-
-    /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 
     /// Value sent back for the agent version when receiving an identification request.
     pub identify_agent_version: String,
@@ -170,9 +165,6 @@ struct SharedGuarded<TPlat: PlatformRef> {
     messages_from_connections_rx:
         mpsc::Receiver<(service::ConnectionId, service::ConnectionToCoordinator)>,
 
-    /// Value received in [`Config::tasks_executor`].
-    tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
-
     active_connections: HashMap<
         service::ConnectionId,
         mpsc::Sender<service::CoordinatorToConnection<TPlat::Instant>>,
@@ -271,7 +263,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 active_connections: HashMap::with_capacity_and_hasher(32, Default::default()),
                 messages_from_connections_tx,
                 messages_from_connections_rx,
-                tasks_executor: config.tasks_executor,
                 blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
                 grandpa_warp_sync_requests: HashMap::with_capacity_and_hasher(
                     8,
@@ -291,7 +282,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         });
 
         // Spawn main task that processes the network service.
-        (shared.guarded.try_lock().unwrap().tasks_executor)(
+        shared.platform.spawn_task(
             "network-service".into(),
             Box::pin({
                 let shared = shared.clone();
@@ -305,7 +296,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 
         // Spawn task starts a discovery request at a periodic interval.
         // This is done through a separate task due to ease of implementation.
-        (shared.guarded.try_lock().unwrap().tasks_executor)(
+        shared.platform.spawn_task(
             "network-discovery".into(),
             Box::pin({
                 let shared = shared.clone();
@@ -878,6 +869,11 @@ pub enum Event {
         chain_index: usize,
         announce: service::EncodedBlockAnnounce,
     },
+    GrandpaNeighborPacket {
+        peer_id: PeerId,
+        chain_index: usize,
+        finalized_block_height: u64,
+    },
     /// Received a GrandPa commit message from the network.
     GrandpaCommitMessage {
         peer_id: PeerId,
@@ -1259,6 +1255,11 @@ async fn update_round<TPlat: PlatformRef>(
                         state.set_id,
                         state.commit_finalized_height,
                     );
+                    break Event::GrandpaNeighborPacket {
+                        chain_index,
+                        peer_id,
+                        finalized_block_height: state.commit_finalized_height,
+                    };
                 }
                 service::Event::GrandpaCommitMessage {
                     chain_index,
@@ -1384,7 +1385,7 @@ async fn update_round<TPlat: PlatformRef>(
         // Sending the new task might fail in case a shutdown is happening, in which case
         // we don't really care about the state of anything anymore.
         // The sending here is normally very quick.
-        (guarded.tasks_executor)(task_name, Box::pin(task));
+        shared.platform.spawn_task(task_name.into(), Box::pin(task));
     }
 
     // Pull messages that the coordinator has generated in destination to the various

@@ -24,7 +24,8 @@ use core::{
     num::{NonZeroU32, NonZeroU64},
     time::Duration,
 };
-use futures::{channel::mpsc, prelude::*};
+use futures_channel::mpsc;
+use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use hashbrown::{HashMap, HashSet};
 use smoldot::{
     chain, header,
@@ -191,7 +192,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
 
         // Now waiting for some event to happen: a network event, a request from the frontend
         // of the sync service, or a request being finished.
-        let response_outcome = futures::select! {
+        let response_outcome = futures_util::select! {
             network_event = from_network_service.next() => {
                 // Something happened on the network.
                 // We expect the networking channel to never close, so the event is unwrapped.
@@ -1171,6 +1172,16 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         // Log messages are already printed above.
                     }
                 }
+            }
+
+            network_service::Event::GrandpaNeighborPacket {
+                peer_id,
+                chain_index,
+                finalized_block_height,
+            } if chain_index == self.network_chain_index => {
+                let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
+                self.sync
+                    .update_source_finality_state(sync_source_id, finalized_block_height);
             }
 
             network_service::Event::GrandpaCommitMessage {

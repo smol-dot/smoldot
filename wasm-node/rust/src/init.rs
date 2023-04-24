@@ -18,7 +18,8 @@
 use crate::{alloc, bindings, cpu_rate_limiter, platform, timers::Delay};
 
 use core::{future::Future, pin::Pin, time::Duration};
-use futures::{channel::mpsc, prelude::*};
+use futures_channel::mpsc;
+use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use smoldot::informant::BytesDisplay;
 use std::{panic, sync::atomic::Ordering, task};
 
@@ -49,8 +50,8 @@ pub(crate) enum Chain {
         /// Receiver for JSON-RPC responses sent by the client. `None` if JSON-RPC requests are
         /// disabled on this chain.
         /// While this could in principle be a [`smoldot_light::JsonRpcResponses`], we wrap it
-        /// within a [`futures::Stream`] in order to guarantee that the `waker` that we register
-        /// doesn't get cleaned up.
+        /// within a [`futures_util::Stream`] in order to guarantee that the `waker` that we
+        /// register doesn't get cleaned up.
         json_rpc_responses_rx: Option<stream::BoxStream<'static, String>>,
     },
     Erroneous {
@@ -136,7 +137,7 @@ pub(crate) fn init<TChain>(
             }
 
             loop {
-                futures::select! {
+                futures_util::select! {
                     (new_task_name, new_task) = new_task_rx.select_next_some() => {
                         all_tasks.push(FutureAdapter {
                             name: new_task_name,
@@ -199,19 +200,8 @@ pub(crate) fn init<TChain>(
         ))
         .unwrap();
 
-    let client = smoldot_light::Client::new(
-        platform::Platform,
-        smoldot_light::ClientConfig {
-            tasks_spawner: Box::new(move |name, task| {
-                new_task_tx.unbounded_send((name, task)).unwrap()
-            }),
-            client_name: env!("CARGO_PKG_NAME").into(),
-            client_version: env!("CARGO_PKG_VERSION").into(),
-        },
-    );
-
     Client {
-        smoldot: client,
+        smoldot: smoldot_light::Client::new(platform::Platform::new(new_task_tx)),
         chains: slab::Slab::with_capacity(8),
         periodically_yield,
         main_task,

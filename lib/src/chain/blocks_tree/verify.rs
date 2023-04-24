@@ -60,10 +60,9 @@ impl<T> NonFinalizedTree<T> {
                 self.inner = Some(self_inner);
                 Err(err)
             }
-            VerifyOut::HeaderOk(context, is_new_best, consensus, finality) => {
-                let hash = context.header.hash(context.chain.block_number_bytes);
+            VerifyOut::HeaderOk(context, is_new_best, consensus, finality, hash, block_height) => {
                 Ok(HeaderVerifySuccess::Insert {
-                    block_height: context.header.number,
+                    block_height,
                     is_new_best,
                     insert: HeaderInsert {
                         chain: self,
@@ -140,6 +139,7 @@ impl<T> NonFinalizedTreeInner<T> {
         };
 
         let hash = header::hash_from_scale_encoded_header(&scale_encoded_header);
+        let block_number = decoded_header.number;
 
         // Check for duplicates.
         if self.blocks_by_hash.contains_key(&hash) {
@@ -225,7 +225,7 @@ impl<T> NonFinalizedTreeInner<T> {
 
         let mut context = VerifyContext {
             chain: self,
-            header: Box::new(decoded_header.into()),
+            header: scale_encoded_header,
             parent_tree_index,
             consensus,
             finality,
@@ -289,16 +289,28 @@ impl<T> NonFinalizedTreeInner<T> {
                     BlockFinality::Grandpa { .. } => verify::header_only::ConfigFinality::Grandpa,
                 },
                 allow_unknown_consensus_engines: context.chain.allow_unknown_consensus_engines,
-                block_header: (&*context.header).into(), // TODO: inefficiency ; in case of header only verify we do an extra allocation to build the context above
+                block_header: header::decode(&context.header, context.chain.block_number_bytes)
+                    .unwrap(), // TODO: inefficiency ; in case of header only verify we do an extra allocation to build the context above
                 block_number_bytes: context.chain.block_number_bytes,
-                parent_block_header: parent_block_header.into(),
+                parent_block_header: header::decode(
+                    &parent_block_header,
+                    context.chain.block_number_bytes,
+                )
+                .unwrap(),
             })
             .map_err(HeaderVerifyError::VerificationFailed);
 
             match result {
                 Ok(success) => {
                     let (is_new_best, consensus, finality) = context.apply_success_header(success);
-                    VerifyOut::HeaderOk(context, is_new_best, consensus, finality)
+                    VerifyOut::HeaderOk(
+                        context,
+                        is_new_best,
+                        consensus,
+                        finality,
+                        hash,
+                        block_number,
+                    )
                 }
                 Err(err) => VerifyOut::HeaderErr(context.chain, err),
             }
@@ -307,7 +319,14 @@ impl<T> NonFinalizedTreeInner<T> {
 }
 
 enum VerifyOut<T> {
-    HeaderOk(VerifyContext<T>, bool, BlockConsensus, BlockFinality),
+    HeaderOk(
+        VerifyContext<T>,
+        bool,
+        BlockConsensus,
+        BlockFinality,
+        [u8; 32],
+        u64,
+    ),
     HeaderErr(Box<NonFinalizedTreeInner<T>>, HeaderVerifyError),
     HeaderDuplicate(Box<NonFinalizedTreeInner<T>>),
     Body(BodyVerifyStep1<T>),
@@ -316,7 +335,7 @@ enum VerifyOut<T> {
 struct VerifyContext<T> {
     chain: Box<NonFinalizedTreeInner<T>>,
     parent_tree_index: Option<fork_tree::NodeIndex>,
-    header: Box<header::Header>,
+    header: Vec<u8>,
     consensus: Option<BlockConsensus>,
     finality: BlockFinality,
 }
@@ -346,12 +365,15 @@ impl<T> VerifyContext<T> {
         &mut self,
         success_consensus: verify::header_body::SuccessConsensus,
     ) -> (bool, BlockConsensus, BlockFinality) {
+        let decoded_header = header::decode(&self.header, self.chain.block_number_bytes).unwrap();
+
         let is_new_best = if let Some(current_best) = self.chain.current_best {
             best_block::is_better_block(
                 &self.chain.blocks,
+                self.chain.block_number_bytes,
                 current_best,
                 self.parent_tree_index,
-                (&*self.header).into(),
+                decoded_header.clone(),
             ) == Ordering::Greater
         } else {
             true
@@ -511,14 +533,14 @@ impl<T> VerifyContext<T> {
                 let mut scheduled_change = parent_scheduled_change.clone();
 
                 // Check whether the verified block schedules a change of authorities.
-                for grandpa_digest_item in self.header.digest.logs().filter_map(|d| match d {
+                for grandpa_digest_item in decoded_header.digest.logs().filter_map(|d| match d {
                     header::DigestItemRef::GrandpaConsensus(gp) => Some(gp),
                     _ => None,
                 }) {
                     match grandpa_digest_item {
                         header::GrandpaConsensusLogRef::ScheduledChange(change) => {
                             let trigger_block_height =
-                                self.header.number.checked_add(change.delay).unwrap();
+                                decoded_header.number.checked_add(change.delay).unwrap();
 
                             // It is forbidden to schedule a change while a change is already
                             // scheduled, otherwise the block is invalid. This is verified during
@@ -548,7 +570,7 @@ impl<T> VerifyContext<T> {
                 // Note that this is checked after we have potentially fetched `scheduled_change`
                 // from the block.
                 if let Some((trigger_height, new_list)) = &scheduled_change {
-                    if *trigger_height == self.header.number {
+                    if *trigger_height == decoded_header.number {
                         triggers_change = true;
                         triggered_authorities = new_list.clone();
                         scheduled_change = None;
@@ -558,16 +580,16 @@ impl<T> VerifyContext<T> {
                 // Some sanity checks.
                 debug_assert!(scheduled_change
                     .as_ref()
-                    .map(|(n, _)| *n > self.header.number)
+                    .map(|(n, _)| *n > decoded_header.number)
                     .unwrap_or(true));
                 debug_assert!(parent_prev_auth_change_trigger_number
                     .as_ref()
-                    .map(|n| *n < self.header.number)
+                    .map(|n| *n < decoded_header.number)
                     .unwrap_or(true));
 
                 BlockFinality::Grandpa {
                     prev_auth_change_trigger_number: if *parent_triggers_change {
-                        Some(self.header.number - 1)
+                        Some(decoded_header.number - 1)
                     } else {
                         *parent_prev_auth_change_trigger_number
                     },
@@ -593,7 +615,7 @@ impl<T> VerifyContext<T> {
 
                 // Block verification is successful!
                 let (is_new_best, consensus, finality) = self.apply_success_body(success.consensus);
-                let hash = self.header.hash(self.chain.block_number_bytes);
+                let hash = header::hash_from_scale_encoded_header(&self.header);
 
                 BodyVerifyStep2::Finished {
                     parent_runtime: success.parent_runtime,
@@ -804,9 +826,17 @@ impl<T> BodyVerifyRuntimeRequired<T> {
             consensus: config_consensus,
             allow_unknown_consensus_engines: self.context.chain.allow_unknown_consensus_engines,
             now_from_unix_epoch: self.now_from_unix_epoch,
-            block_header: (&*self.context.header).into(),
+            block_header: header::decode(
+                &self.context.header,
+                self.context.chain.block_number_bytes,
+            )
+            .unwrap(),
             block_number_bytes: self.context.chain.block_number_bytes,
-            parent_block_header: parent_block_header.into(),
+            parent_block_header: header::decode(
+                &parent_block_header,
+                self.context.chain.block_number_bytes,
+            )
+            .unwrap(),
             block_body,
             main_trie_root_calculation_cache,
             max_log_level: 0,
@@ -1024,6 +1054,18 @@ impl<T> StorageNextKey<T> {
         self.inner.key()
     }
 
+    /// If `true`, then the provided value must the one superior or equal to the requested key.
+    /// If `false`, then the provided value must be strictly superior to the requested key.
+    pub fn or_equal(&self) -> bool {
+        self.inner.or_equal()
+    }
+
+    /// Returns the prefix the next key must start with. If the next key doesn't start with the
+    /// given prefix, then `None` should be provided.
+    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+        self.inner.prefix()
+    }
+
     /// Access to the Nth ancestor's information and hierarchy. Returns `None` if `n` is too
     /// large. A value of `0` for `n` corresponds to the parent block. A value of `1` corresponds
     /// to the parent's parent. And so on.
@@ -1131,7 +1173,7 @@ impl<'c, T> HeaderInsert<'c, T> {
         let new_node_index = context.chain.blocks.insert(
             context.parent_tree_index,
             Block {
-                header: *context.header,
+                header: context.header,
                 hash: self.hash,
                 consensus: self.consensus.take().unwrap(),
                 finality: self.finality.take().unwrap(),
@@ -1155,14 +1197,15 @@ impl<'c, T> HeaderInsert<'c, T> {
 
     /// Returns the block header about to be inserted.
     pub fn header(&self) -> header::HeaderRef {
-        From::from(&*self.context.as_ref().unwrap().header)
+        let context = self.context.as_ref().unwrap();
+        header::decode(&context.header, context.chain.block_number_bytes).unwrap()
     }
 
     /// Destroys the object without inserting the block in the chain. Returns the block header.
-    pub fn into_header(mut self) -> header::Header {
+    pub fn into_scale_encoded_header(mut self) -> Vec<u8> {
         let context = self.context.take().unwrap();
         self.chain.inner = Some(context.chain);
-        *context.header
+        context.header
     }
 }
 
@@ -1218,7 +1261,7 @@ pub struct BodyInsert<T> {
 impl<T> BodyInsert<T> {
     /// Returns the header of the block about to be inserted.
     pub fn header(&self) -> header::HeaderRef {
-        (&*self.context.header).into()
+        header::decode(&self.context.header, self.context.chain.block_number_bytes).unwrap()
     }
 
     /// Inserts the block with the given user data.
@@ -1231,7 +1274,7 @@ impl<T> BodyInsert<T> {
         let new_node_index = self.context.chain.blocks.insert(
             self.context.parent_tree_index,
             Block {
-                header: *self.context.header,
+                header: self.context.header,
                 hash: self.hash,
                 consensus: self.consensus,
                 finality: self.finality,

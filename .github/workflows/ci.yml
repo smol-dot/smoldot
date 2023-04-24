@@ -30,7 +30,7 @@ jobs:
   test-64bits:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.67
+      image: rust:1.69
     steps:
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v2
@@ -39,7 +39,7 @@ jobs:
   test-32bits:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.67
+      image: rust:1.69
     steps:
     - run: apt-get update && apt install -y libc6-dev-i386
     - uses: actions/checkout@v3
@@ -50,7 +50,7 @@ jobs:
   wasm-node-check:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.67
+      image: rust:1.69
     steps:
     - run: apt-get update && apt install -y binaryen # For `wasm-opt`
     - uses: actions/checkout@v3
@@ -66,7 +66,7 @@ jobs:
   check-features:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.67
+      image: rust:1.69
     steps:
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v2
@@ -107,7 +107,7 @@ jobs:
         # Since build artifacts are specific to a nightly version, we pin the specific nightly
         # version to use in order to not invalidate the build cache every day. The exact version
         # is completely arbitrary.
-        toolchain: nightly-2023-02-24
+        toolchain: nightly-2023-04-20
         override: true
     - uses: baptiste0928/cargo-install@v2  # This action ensures that the compilation is cached.
       with:
@@ -121,7 +121,7 @@ jobs:
   check-rustdoc-links:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.67
+      image: rust:1.69
     steps:
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v2

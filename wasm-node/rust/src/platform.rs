@@ -20,9 +20,11 @@ use crate::{bindings, timers::Delay};
 use smoldot::libp2p::multihash;
 use smoldot_light::platform::{ConnectError, PlatformSubstreamDirection};
 
-use core::{mem, pin, str, task, time::Duration};
-use futures::prelude::*;
+use core::{future::Future, mem, pin, str, task, time::Duration};
+use futures_channel::mpsc;
+use futures_util::{future, FutureExt as _};
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, VecDeque},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -38,7 +40,18 @@ pub static TOTAL_BYTES_RECEIVED: AtomicU64 = AtomicU64::new(0);
 pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
-pub(crate) struct Platform;
+pub(crate) struct Platform {
+    new_task_tx: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
+}
+
+impl Platform {
+    // TODO: consider doing the spawning entirely here, instead of providing a channel
+    pub fn new(
+        new_task_tx: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
+    ) -> Self {
+        Self { new_task_tx }
+    }
+}
 
 // TODO: this trait implementation was written before GATs were stable in Rust; now that the associated types have lifetimes, it should be possible to considerably simplify this code
 impl smoldot_light::platform::PlatformRef for Platform {
@@ -85,6 +98,20 @@ impl smoldot_light::platform::PlatformRef for Platform {
 
     fn sleep_until(&self, when: Self::Instant) -> Self::Delay {
         Delay::new_at(when)
+    }
+
+    fn spawn_task(&self, task_name: Cow<str>, task: future::BoxFuture<'static, ()>) {
+        self.new_task_tx
+            .unbounded_send((task_name.into_owned(), task))
+            .unwrap()
+    }
+
+    fn client_name(&self) -> Cow<str> {
+        env!("CARGO_PKG_NAME").into()
+    }
+
+    fn client_version(&self) -> Cow<str> {
+        env!("CARGO_PKG_VERSION").into()
     }
 
     fn yield_after_cpu_intensive(&self) -> Self::Yield {
@@ -322,6 +349,9 @@ impl smoldot_light::platform::PlatformRef for Platform {
                     }
 
                     if stream.writable_bytes_extra != 0 {
+                        // As documented, the number of writable bytes must never exceed the
+                        // initial writable bytes value. As such, this can't overflow unless there
+                        // is a bug on the JavaScript side.
                         *writable_bytes += stream.writable_bytes_extra;
                         stream.writable_bytes_extra = 0;
                         shall_return = true;
@@ -757,10 +787,9 @@ pub(crate) fn stream_writable_bytes(connection_id: u32, stream_id: u32, bytes: u
         .unwrap();
     debug_assert!(!stream.reset);
 
-    stream.writable_bytes_extra = stream
-        .writable_bytes_extra
-        .checked_add(usize::try_from(bytes).unwrap())
-        .unwrap();
+    // As documented, the number of writable bytes must never exceed the initial writable bytes
+    // value. As such, this can't overflow unless there is a bug on the JavaScript side.
+    stream.writable_bytes_extra += usize::try_from(bytes).unwrap();
     stream.something_happened.notify(usize::max_value());
 }
 

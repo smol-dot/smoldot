@@ -139,7 +139,7 @@ pub enum Status<'a, TSrc> {
         /// [`AllSync::as_chain_information`], as this function first has to download extra
         /// information compared to just the finalized block.
         finalized_block_hash: [u8; 32],
-        /// Height of the block indicated by [`Status::ChainInformation::finalized_block_hash`].
+        /// Height of the block indicated by [`Status::WarpSyncFragments::finalized_block_hash`].
         finalized_block_number: u64,
     },
     /// Warp syncing algorithm has reached the head of the finalized chain and is downloading and
@@ -153,7 +153,8 @@ pub enum Status<'a, TSrc> {
         /// [`AllSync::as_chain_information`], as this function first has to download extra
         /// information compared to just the finalized block.
         finalized_block_hash: [u8; 32],
-        /// Height of the block indicated by [`Status::ChainInformation::finalized_block_hash`].
+        /// Height of the block indicated by
+        /// [`Status::WarpSyncChainInformation::finalized_block_hash`].
         finalized_block_number: u64,
     },
 }
@@ -433,6 +434,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     user_data,
                     best_block_number,
                     best_block_hash,
+                    finalized_block_height: None,
                 };
 
                 let inner_source_id = sync.add_source(source_extra);
@@ -1337,6 +1339,42 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             (AllSyncInner::AllForks(_), SourceMapping::Optimistic(_)) => unreachable!(),
             (AllSyncInner::GrandpaWarpSync { .. }, SourceMapping::Optimistic(_)) => unreachable!(),
             (AllSyncInner::Optimistic { .. }, SourceMapping::GrandpaWarpSync(_)) => unreachable!(),
+        }
+    }
+
+    /// Update the finalized block height of the given source.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `source_id` is invalid.
+    ///
+    pub fn update_source_finality_state(
+        &mut self,
+        source_id: SourceId,
+        finalized_block_height: u64,
+    ) {
+        let source_id = self.shared.sources.get(source_id.0).unwrap();
+
+        match (&mut self.inner, source_id) {
+            (AllSyncInner::AllForks(sync), SourceMapping::AllForks(source_id)) => {
+                sync.update_source_finality_state(*source_id, finalized_block_height)
+            }
+            (AllSyncInner::Optimistic { .. }, _) => {} // TODO: the optimistic sync could get some help from the finalized block
+            (
+                AllSyncInner::GrandpaWarpSync { inner },
+                SourceMapping::GrandpaWarpSync(source_id),
+            ) => {
+                // TODO: the warp syncing algorithm could maybe be interested in the finalized block height
+                let n = &mut inner[*source_id].finalized_block_height;
+                *n = Some(n.map_or(finalized_block_height, |b| {
+                    cmp::max(b, finalized_block_height)
+                }));
+            }
+
+            // Invalid internal states.
+            (AllSyncInner::AllForks(_), _) => unreachable!(),
+            (AllSyncInner::GrandpaWarpSync { .. }, _) => unreachable!(),
+            (AllSyncInner::Poisoned, _) => unreachable!(),
         }
     }
 
@@ -2657,6 +2695,18 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
         self.inner.key()
     }
 
+    /// If `true`, then the provided value must the one superior or equal to the requested key.
+    /// If `false`, then the provided value must be strictly superior to the requested key.
+    pub fn or_equal(&self) -> bool {
+        self.inner.or_equal()
+    }
+
+    /// Returns the prefix the next key must start with. If the next key doesn't start with the
+    /// given prefix, then `None` should be provided.
+    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+        self.inner.prefix()
+    }
+
     /// Injects the key.
     ///
     /// # Panic
@@ -2734,6 +2784,7 @@ struct OptimisticRequestExtra<TRq> {
 struct GrandpaWarpSyncSourceExtra<TSrc> {
     outer_source_id: SourceId,
     user_data: TSrc,
+    finalized_block_height: Option<u64>,
     best_block_number: u64,
     best_block_hash: [u8; 32],
 }
@@ -2859,6 +2910,10 @@ impl<TRq> Shared<TRq> {
                     b.add_source_and_insert_block(source_user_data, None)
                 }
             };
+
+            if let Some(finalized_block_height) = source.finalized_block_height {
+                all_forks.update_source_finality_state(updated_source_id, finalized_block_height);
+            }
 
             self.sources[source.outer_source_id.0] = SourceMapping::AllForks(updated_source_id);
         }

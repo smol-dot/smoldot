@@ -24,7 +24,8 @@ use core::{
     num::{NonZeroU32, NonZeroUsize},
     time::Duration,
 };
-use futures::{channel::mpsc, prelude::*};
+use futures_channel::mpsc;
+use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use hashbrown::HashMap;
 use itertools::Itertools as _;
 use smoldot::{
@@ -230,7 +231,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 } => {
                     // While we wait for the `subscribe_future` future to be ready, we still need
                     // to process messages coming from the public API of the syncing service.
-                    futures::select! {
+                    futures_util::select! {
                         relay_chain_subscribe_all = &mut *subscribe_future => {
                             self.set_new_subscription(relay_chain_subscribe_all);
                         },
@@ -250,7 +251,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 }
 
                 ParachainBackgroundState::Subscribed(ref mut runtime_subscription) => {
-                    futures::select! {
+                    futures_util::select! {
                         () = &mut runtime_subscription.next_start_parahead_fetch => {
                             // Do nothing. This is simply to wake up and loop again.
                         },

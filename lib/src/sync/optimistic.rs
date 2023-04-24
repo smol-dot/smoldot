@@ -1503,6 +1503,18 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
         }
     }
 
+    /// If `true`, then the provided value must the one superior or equal to the requested key.
+    /// If `false`, then the provided value must be strictly superior to the requested key.
+    pub fn or_equal(&self) -> bool {
+        self.inner.or_equal()
+    }
+
+    /// Returns the prefix the next key must start with. If the next key doesn't start with the
+    /// given prefix, then `None` should be provided.
+    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+        self.inner.prefix()
+    }
+
     /// Injects the key.
     ///
     /// # Panic
@@ -1529,11 +1541,17 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
                         inner_key.as_ref()
                     },
                     key,
+                    self.inner.or_equal(),
                 )
         };
 
         match search {
-            storage_diff::StorageNextKey::Found(k) => {
+            storage_diff::StorageNextKey::Found(mut k) => {
+                // Because the storage diff doesn't check whether the next key conforms to the
+                // prefix, we have to do it here.
+                if k.map_or(false, |k| !k.starts_with(self.inner.prefix().as_ref())) {
+                    k = None;
+                }
                 let inner = self.inner.inject_key(k);
                 BlockVerification::from(Inner::Step2(inner), self.shared)
             }

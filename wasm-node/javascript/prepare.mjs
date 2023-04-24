@@ -20,7 +20,6 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as zlib from 'node:zlib';
-import * as rimraf from 'rimraf';
 
 // Which Cargo profile to use to compile the Rust. Should be either `debug` or `release`, based
 // on the CLI options passed by the user.
@@ -40,7 +39,7 @@ if (buildProfile != 'debug' && buildProfile != 'min-size-release')
 // The Rust version is pinned because the wasi target is still unstable. Without pinning, it is
 // possible for the wasm-js bindings to change between two Rust versions. Feel free to update
 // this version pin whenever you like, provided it continues to build.
-const rustVersion = '1.67.0';
+const rustVersion = '1.69.0';
 
 // Assume that the user has `rustup` installed and make sure that `rust_version` is available.
 // Because `rustup install` requires an Internet connection, check whether the toolchain is
@@ -77,7 +76,7 @@ child_process.execSync(
 child_process.execSync(
     "cargo +" + rustVersion + " build --package smoldot-light-wasm --target wasm32-wasi --no-default-features " +
     (buildProfile == 'debug' ? '' : ("--profile " + buildProfile)),
-    { 'stdio': 'inherit', 'env': { 'RUSTFLAGS': '-C target-feature=+bulk-memory,+sign-ext', ...process.env } }
+    { 'stdio': 'inherit', 'env': { 'RUSTFLAGS': '-C target-feature=+bulk-memory,+sign-ext,+simd128', ...process.env } }
 );
 
 // The code below will write a variable number of files to the `src/instance/autogen` directory.
@@ -138,7 +137,5 @@ try {
     );
 
 } finally {
-    // We use `rimraf` rather than `fs.rmSync` in order to maintain compatibility with older
-    // NodeJS versions.
-    rimraf.default.sync(tmpDir, { disableGlob: true });
+    fs.rmSync(tmpDir, { recursive: true, force: true });
 }

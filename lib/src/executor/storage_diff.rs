@@ -184,6 +184,7 @@ impl<T> TrieDiff<T> {
         &'a self,
         key: &'_ [u8],
         in_parent_next_key: Option<&'a [u8]>,
+        or_equal: bool,
     ) -> StorageNextKey<'a> {
         if let Some(in_parent_next_key) = in_parent_next_key {
             assert!(in_parent_next_key > key);
@@ -192,15 +193,22 @@ impl<T> TrieDiff<T> {
         // Find the diff entry that immediately follows `key`.
         let in_diff = self
             .btree
-            .range::<[u8], _>((ops::Bound::Excluded(key), ops::Bound::Unbounded))
+            .range::<[u8], _>((
+                if or_equal {
+                    ops::Bound::Included(key)
+                } else {
+                    ops::Bound::Excluded(key)
+                },
+                ops::Bound::Unbounded,
+            ))
             .next();
 
         match (in_parent_next_key, in_diff) {
             (Some(a), Some((b, true))) if a <= &b[..] => StorageNextKey::Found(Some(a)),
             (Some(a), Some((b, false))) if a < &b[..] => StorageNextKey::Found(Some(a)),
             (Some(a), Some((b, false))) => {
-                debug_assert!(a >= &b[..]);
-                debug_assert_ne!(&b[..], key);
+                debug_assert!(a >= &b[..]); // We actually expect `a == b` but let's be defensive.
+                debug_assert!(&b[..] > key || or_equal);
 
                 // The next key according to the parent storage has been erased in this diff. It
                 // is necessary to ask the user again, this time for the key after the one that
@@ -219,7 +227,7 @@ impl<T> TrieDiff<T> {
             (Some(a), None) => StorageNextKey::Found(Some(a)),
             (None, Some((b, true))) => StorageNextKey::Found(Some(&b[..])),
             (None, Some((b, false))) => {
-                debug_assert!(&b[..] > key);
+                debug_assert!(&b[..] > key || or_equal);
                 let found = self
                     .btree
                     .range::<[u8], _>((ops::Bound::Excluded(&b[..]), ops::Bound::Unbounded))

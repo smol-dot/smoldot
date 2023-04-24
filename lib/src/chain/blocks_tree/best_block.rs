@@ -32,6 +32,7 @@ use core::{cmp::Ordering, iter};
 /// output is guaranteed if this is not the case.
 pub(super) fn is_better_block<T>(
     blocks: &fork_tree::ForkTree<Block<T>>,
+    block_number_bytes: usize,
     old_best: fork_tree::NodeIndex,
     maybe_new_best_parent: Option<fork_tree::NodeIndex>,
     maybe_new_best: header::HeaderRef,
@@ -72,11 +73,15 @@ pub(super) fn is_better_block<T>(
     };
 
     let curr_best_chain_score: usize = ascend
-        .map(|i| block_score(&blocks.get(i).unwrap().header))
+        .map(|i| {
+            block_score(header::decode(&blocks.get(i).unwrap().header, block_number_bytes).unwrap())
+        })
         .sum();
     let candidate_score = block_score(maybe_new_best);
     let candidate_chain_score: usize = descend
-        .map(|i| block_score(&blocks.get(i).unwrap().header))
+        .map(|i| {
+            block_score(header::decode(&blocks.get(i).unwrap().header, block_number_bytes).unwrap())
+        })
         .sum();
     (candidate_chain_score + candidate_score).cmp(&curr_best_chain_score)
 }

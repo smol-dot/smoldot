@@ -15,9 +15,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use alloc::{string::String, vec::Vec};
-use core::{ops, str, time::Duration};
-use futures::prelude::*;
+use alloc::{borrow::Cow, string::String, vec::Vec};
+use core::{future::Future, ops, str, time::Duration};
+use futures_util::future;
 
 pub mod async_std;
 
@@ -81,6 +81,21 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
 
     /// Creates a future that becomes ready after the given instant has been reached.
     fn sleep_until(&self, when: Self::Instant) -> Self::Delay;
+
+    /// Spawns a task that runs indefinitely in the background.
+    ///
+    /// The first parameter is the name of the task, which can be useful for debugging purposes.
+    ///
+    /// The `Future` must be run until it yields a value.
+    fn spawn_task(&self, task_name: Cow<str>, task: future::BoxFuture<'static, ()>);
+
+    /// Value returned when a JSON-RPC client requests the name of the client, or when a peer
+    /// performs an identification request. Reasonable value is `env!("CARGO_PKG_NAME")`.
+    fn client_name(&self) -> Cow<str>;
+
+    /// Value returned when a JSON-RPC client requests the version of the client, or when a peer
+    /// performs an identification request. Reasonable value is `env!("CARGO_PKG_VERSION")`.
+    fn client_version(&self) -> Cow<str>;
 
     /// Should be called after a CPU-intensive operation in order to yield back control.
     ///
