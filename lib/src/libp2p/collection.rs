@@ -925,6 +925,7 @@ where
             CoordinatorToConnectionInner::AcceptInNotifications {
                 substream_id: *inner_substream_id,
                 handshake,
+                max_notification_size: 16 * 1024 * 1024, // TODO: obtain from protocol configuration
             },
         ));
 
@@ -1859,6 +1860,7 @@ enum CoordinatorToConnectionInner<TNow> {
     AcceptInNotifications {
         substream_id: established::SubstreamId,
         handshake: Vec<u8>,
+        max_notification_size: usize,
     },
     RejectInNotifications {
         substream_id: established::SubstreamId,

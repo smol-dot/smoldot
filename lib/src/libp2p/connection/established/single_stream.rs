@@ -885,14 +885,13 @@ where
         &mut self,
         substream_id: SubstreamId,
         handshake: Vec<u8>,
+        max_notification_size: usize,
     ) {
         let substream_id = match substream_id.0 {
             SubstreamIdInner::SingleStream(id) => id,
             _ => panic!(),
         };
 
-        let max_notification_size = 16 * 1024 * 1024; // TODO: hack
-                                                      // TODO: self.inner.notifications_protocols[protocol_index].max_notification_size;
         self.inner
             .yamux
             .user_data_mut(substream_id)

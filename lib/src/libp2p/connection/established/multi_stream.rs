@@ -794,6 +794,7 @@ where
         &mut self,
         substream_id: SubstreamId,
         handshake: Vec<u8>,
+        max_notification_size: usize,
     ) {
         let substream_id = match substream_id.0 {
             SubstreamIdInner::MultiStream(id) => id,
@@ -802,8 +803,6 @@ where
 
         let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
 
-        let max_notification_size = 16 * 1024 * 1024; // TODO: hack
-                                                      // TODO: self.notifications_protocols[protocol_index].max_notification_size;
         self.in_substreams
             .get_mut(inner_substream_id)
             .unwrap()

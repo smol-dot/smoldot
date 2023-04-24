@@ -230,7 +230,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
                 continue;
             }
             Some(Event::NotificationsInOpen { id, .. }) => {
-                local.accept_in_notifications_substream(id, b"dummy handshake".to_vec());
+                local.accept_in_notifications_substream(id, b"dummy handshake".to_vec(), 16);
                 continue;
             }
 
