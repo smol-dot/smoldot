@@ -8,7 +8,6 @@ documentation = "https://docs.rs/smoldot"
 license = "GPL-3.0-or-later WITH Classpath-exception-2.0"
 edition = "2021"
 keywords = ["blockchain", "peer-to-peer"]
-exclude = [".github", "bin"]  # TODO: we might need to reorganize the repo to avoid including unwanted files
 
 [features]
 default = ["database-sqlite", "std"]
