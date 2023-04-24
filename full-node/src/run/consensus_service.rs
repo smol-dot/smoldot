@@ -26,8 +26,9 @@
 
 use crate::run::{database_thread, jaeger_service, network_service};
 
+use async_lock::Mutex;
 use core::{num::NonZeroU32, ops};
-use futures::{lock::Mutex, prelude::*};
+use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use hashbrown::HashSet;
 use smoldot::{
     author,
@@ -495,7 +496,7 @@ impl SyncBackground {
                 }
             };
 
-            futures::select! {
+            futures_util::select! {
                 () = authoring_ready_future => {
                     // Ready to author a block. Call `author_block()`.
                     // While a block is being authored, the whole syncing state machine is

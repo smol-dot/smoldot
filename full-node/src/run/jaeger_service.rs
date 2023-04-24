@@ -35,7 +35,7 @@
 // TODO: more documentation
 
 use async_std::net::UdpSocket;
-use futures::prelude::*;
+use futures_util::future;
 use smoldot::libp2p::PeerId;
 use std::{convert::TryFrom as _, io, net::SocketAddr, num::NonZeroU128, sync::Arc};
 

@@ -12,12 +12,14 @@ name = "basic"
 required-features = ["std"]
 
 [dependencies]
+async-lock = { version = "2.7.0", default-features = false }  # TODO: no-std-ize; this is has been done and is just waiting for a release: https://github.com/smol-rs/event-listener/pull/34
 blake2-rfc = { version = "0.2.18", default-features = false }
 derive_more = "0.99.17"
 either = { version = "1.8.1", default-features = false }
 event-listener = { version = "2.5.3" }
 fnv = { version = "1.0.7", default-features = false }
-futures = "0.3.27"
+futures-channel = { version = "0.3.27", features = ["std", "sink"] }   # TODO: no-std-ize and remove "sink"
+futures-util = { version = "0.3.27", default-features = false, features = ["std", "async-await", "async-await-macro", "channel", "sink"] }  # TODO: slim down these features
 hashbrown = { version = "0.13.2", default-features = false }
 hex = { version = "0.4.3", default-features = false }
 itertools = "0.10.5"

@@ -17,9 +17,10 @@
 
 use super::Inner;
 
-use core::{pin, time::Duration};
-use futures::{channel::mpsc, prelude::*};
+use core::{future::Future, pin, time::Duration};
+use futures_channel::mpsc;
 use futures_timer::Delay;
+use futures_util::{future, AsyncRead, AsyncWrite, FutureExt as _, StreamExt as _};
 use smoldot::{
     libp2p::{
         async_std_connection::with_buffers,
@@ -74,7 +75,7 @@ pub(super) async fn opening_connection_task(
         })
         .fuse();
         let mut socket = pin::pin!(socket.fuse());
-        futures::select! {
+        futures_util::select! {
             _ = timeout => {
                 let mut guarded = inner.guarded.lock().await;
                 guarded.num_pending_out_attempts -= 1;
@@ -247,7 +248,7 @@ pub(super) async fn established_connection_task(
             // always remain ready until we push an element. While waiting, we process
             // incoming messages.
             loop {
-                futures::select! {
+                futures_util::select! {
                     _ = future::poll_fn(|cx| connection_to_coordinator.poll_ready(cx)).fuse() => break,
                     message = coordinator_to_connection.next() => {
                         if let Some(message) = message {

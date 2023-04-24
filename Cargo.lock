@@ -172,9 +172,9 @@ dependencies = [
 
 [[package]]
 name = "async-executor"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17adb73da160dfb475c183343c8cccd80721ea5a605d3eb57125f0a7b7a92d0b"
+checksum = "6fa3dc5f2a8564f07759c008b9109dc0d39de92a88d5588b8a5036d286383afb"
 dependencies = [
  "async-lock",
  "async-task",
@@ -2342,6 +2342,7 @@ name = "smoldot"
 version = "0.5.0"
 dependencies = [
  "arrayvec 0.7.2",
+ "async-lock",
  "async-std",
  "atomic",
  "base64 0.21.0",
@@ -2355,7 +2356,9 @@ dependencies = [
  "either",
  "event-listener",
  "fnv",
- "futures",
+ "futures-channel",
+ "futures-executor",
+ "futures-util",
  "hashbrown 0.13.2",
  "hex",
  "hmac 0.12.1",
@@ -2396,6 +2399,7 @@ dependencies = [
 name = "smoldot-full-node"
 version = "0.1.0"
 dependencies = [
+ "async-lock",
  "async-std",
  "atty",
  "blake2-rfc",
@@ -2407,8 +2411,10 @@ dependencies = [
  "env_logger",
  "event-listener",
  "fnv",
- "futures",
+ "futures-channel",
+ "futures-executor",
  "futures-timer",
+ "futures-util",
  "hashbrown 0.13.2",
  "hex",
  "log",
@@ -2424,6 +2430,7 @@ dependencies = [
 name = "smoldot-light"
 version = "0.3.0"
 dependencies = [
+ "async-lock",
  "async-std",
  "blake2-rfc",
  "derive_more",
@@ -2431,7 +2438,8 @@ dependencies = [
  "env_logger",
  "event-listener",
  "fnv",
- "futures",
+ "futures-channel",
+ "futures-util",
  "hashbrown 0.13.2",
  "hex",
  "itertools",
@@ -2451,7 +2459,8 @@ version = "1.0.2"
 dependencies = [
  "event-listener",
  "fnv",
- "futures",
+ "futures-channel",
+ "futures-util",
  "hashbrown 0.13.2",
  "lazy_static",
  "log",

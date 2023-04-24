@@ -28,6 +28,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use async_lock::Mutex;
 use core::{
     iter,
     num::{NonZeroU32, NonZeroUsize},
@@ -35,7 +36,7 @@ use core::{
     sync::atomic,
     time::Duration,
 };
-use futures::{lock::Mutex, prelude::*};
+use futures_util::{future, FutureExt as _};
 use smoldot::{
     executor::{host, runtime_host},
     header,
@@ -1138,7 +1139,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             lock
         } else {
             // Second situation: the block is not in the cache of recent blocks. This isn't great.
-            drop::<futures::lock::MutexGuard<_>>(cache_lock);
+            drop::<async_lock::MutexGuard<_>>(cache_lock);
 
             // The only solution is to download the runtime of the block in question from the network.
 

@@ -65,17 +65,15 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
+use async_lock::{Mutex, MutexGuard};
 use core::{
     iter, mem,
     num::{NonZeroU32, NonZeroUsize},
     pin::Pin,
     time::Duration,
 };
-use futures::{
-    channel::mpsc,
-    lock::{Mutex, MutexGuard},
-    prelude::*,
-};
+use futures_channel::mpsc;
+use futures_util::{future, stream, FutureExt as _, Stream, StreamExt as _};
 use itertools::Itertools as _;
 use smoldot::{
     chain::async_tree,
@@ -1323,7 +1321,7 @@ async fn run_background<TPlat: PlatformRef>(
 
         // Inner loop. Process incoming events.
         loop {
-            futures::select! {
+            futures_util::select! {
                 _ = &mut background.wake_up_new_necessary_download => {
                     background.start_necessary_downloads().await;
                 },

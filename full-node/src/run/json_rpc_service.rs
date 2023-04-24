@@ -15,7 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use futures::{channel::oneshot, prelude::*};
+use futures_channel::oneshot;
+use futures_util::{future, FutureExt as _};
 use smoldot::json_rpc::{self, methods, websocket_server};
 use std::{io, net::SocketAddr};
 
@@ -93,7 +94,7 @@ struct JsonRpcBackground {
 impl JsonRpcBackground {
     async fn run(mut self) {
         loop {
-            let event = futures::select! {
+            let event = futures_util::select! {
                 _ = &mut self.client_still_alive => return,
                 event = self.server.next_event().fuse() => event,
             };

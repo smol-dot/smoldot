@@ -29,8 +29,8 @@ use core::{
     task::{Context, Poll, Waker},
     time::Duration,
 };
-use futures::{lock::Mutex, prelude::*};
-use std::collections::BinaryHeap;
+use futures_util::future;
+use std::{collections::BinaryHeap, sync::Mutex};
 
 pub(crate) fn timer_finished(timer_id: u32) {
     let callback = {
