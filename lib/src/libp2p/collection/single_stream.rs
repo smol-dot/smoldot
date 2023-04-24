@@ -351,6 +351,7 @@ where
                 CoordinatorToConnectionInner::AcceptInNotifications {
                     substream_id,
                     handshake,
+                    max_notification_size,
                 },
                 SingleStreamConnectionTaskInner::Established {
                     established,
@@ -364,7 +365,7 @@ where
                 {
                     notifications_in_open_cancel_acknowledgments.remove(idx);
                 } else {
-                    established.accept_in_notifications_substream(substream_id, handshake);
+                    established.accept_in_notifications_substream(substream_id, handshake, max_notification_size);
                 }
             }
             (

@@ -552,7 +552,7 @@ fn outbound_substream_works() {
             assert_eq!(handshake, b"hello");
             connections
                 .bob
-                .accept_in_notifications_substream(id, b"hello back".to_vec());
+                .accept_in_notifications_substream(id, b"hello back".to_vec(), 4 * 1024);
         }
         _ev => unreachable!("{:?}", _ev),
     }
@@ -765,7 +765,7 @@ fn outbound_substream_close_demanded() {
             assert_eq!(handshake, b"hello");
             connections
                 .bob
-                .accept_in_notifications_substream(id, b"hello back".to_vec());
+                .accept_in_notifications_substream(id, b"hello back".to_vec(), 4 * 1024);
         }
         _ev => unreachable!("{:?}", _ev),
     }
