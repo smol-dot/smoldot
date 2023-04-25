@@ -187,8 +187,8 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
                 try {
                     socket.send(data);
                     if (bufferedAmountCheck.quenedUnreportedBytes == 0) {
-                      bufferedAmountCheck.nextTimeout = 10;
-                      setTimeout(checkBufferedAmount, 10);
+                        bufferedAmountCheck.nextTimeout = 10;
+                        setTimeout(checkBufferedAmount, 10);
                     }
                     bufferedAmountCheck.quenedUnreportedBytes += data.length;
                 } catch (_error) { }

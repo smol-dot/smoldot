@@ -45,14 +45,14 @@ export interface Config {
      * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
      */
     connect(config: ConnectionConfig): Connection;
-    
+
     /**
      * Closure to call when the Wasm instance calls `panic`.
      *
      * This callback will always be invoked from within a binding called the Wasm instance.
      */
     onPanic: (message: string) => never,
-    
+
     logCallback: (level: number, target: string, message: string) => void,
     jsonRpcResponsesNonEmptyCallback: (chainId: number) => void,
     currentTaskCallback?: (taskName: string | null) => void,
@@ -80,7 +80,7 @@ export interface Config {
  *
  * @see connect
  */
- export interface Connection {
+export interface Connection {
     /**
      * Transitions the connection or one of its substreams to the `Reset` state.
      *
@@ -164,10 +164,12 @@ export interface ConnectionConfig {
      * Must only be called once per connection.
      */
     onOpen: (info:
-        { type: 'single-stream', handshake: 'multistream-select-noise-yamux',
+        {
+            type: 'single-stream', handshake: 'multistream-select-noise-yamux',
             initialWritableBytes: number, writeClosable: boolean
         } |
-        { type: 'multi-stream', handshake: 'webrtc', 
+        {
+            type: 'multi-stream', handshake: 'webrtc',
             localTlsCertificateMultihash: Uint8Array,
             remoteTlsCertificateMultihash: Uint8Array,
         }
@@ -332,14 +334,14 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                     if (killedTracked.killed) return;
                     try {
                         instance.exports.timer_finished(id);
-                    } catch(_error) {}
+                    } catch (_error) { }
                 })
             } else {
                 setTimeout(() => {
                     if (killedTracked.killed) return;
                     try {
                         instance.exports.timer_finished(id);
-                    } catch(_error) {}
+                    } catch (_error) { }
                 }, ms)
             }
         },
@@ -384,7 +386,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                                     break
                                 }
                             }
-                        } catch(_error) {}
+                        } catch (_error) { }
                     },
                     onConnectionReset: (message: string) => {
                         if (killedTracked.killed) return;
@@ -392,7 +394,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                             config.bufferIndices[0] = new TextEncoder().encode(message);
                             instance.exports.connection_reset(connectionId, 0);
                             delete config.bufferIndices[0]
-                        } catch(_error) {}
+                        } catch (_error) { }
                     },
                     onWritableBytes: (numExtra, streamId) => {
                         if (killedTracked.killed) return;
@@ -402,7 +404,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                                 streamId || 0,
                                 numExtra,
                             );
-                        } catch(_error) {}
+                        } catch (_error) { }
                     },
                     onMessage: (message: Uint8Array, streamId?: number) => {
                         if (killedTracked.killed) return;
@@ -410,7 +412,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                             config.bufferIndices[0] = message;
                             instance.exports.stream_message(connectionId, streamId || 0, 0);
                             delete config.bufferIndices[0]
-                        } catch(_error) {}
+                        } catch (_error) { }
                     },
                     onStreamOpened: (streamId: number, direction: 'inbound' | 'outbound', initialWritableBytes) => {
                         if (killedTracked.killed) return;
@@ -421,15 +423,15 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                                 direction === 'outbound' ? 1 : 0,
                                 initialWritableBytes
                             );
-                        } catch(_error) {}
+                        } catch (_error) { }
                     },
                     onStreamReset: (streamId: number) => {
                         if (killedTracked.killed) return;
                         try {
                             instance.exports.stream_reset(connectionId, streamId);
-                        } catch(_error) {}
+                        } catch (_error) { }
                     }
-                
+
                 });
 
                 connections[connectionId] = connec;
@@ -474,7 +476,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
         // that this function is called only when the connection is in an open state.
         stream_send: (connectionId: number, streamId: number, ptr: number, len: number) => {
             if (killedTracked.killed) return;
-    
+
             const instance = config.instance!;
 
             ptr >>>= 0;
@@ -487,7 +489,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
 
         stream_send_close: (connectionId: number, streamId: number) => {
             if (killedTracked.killed) return;
-    
+
             const connection = connections[connectionId]!;
             connection.closeSend(streamId);  // TODO: docs says the streamId is provided only for multi-stream connections, but here it's always provided
         },
