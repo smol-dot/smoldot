@@ -35,6 +35,11 @@ export interface Config {
     getRandomValues: (buffer: Uint8Array) => void,
 
     /**
+     * Returns the number of milliseconds since an arbitrary epoch.
+     */
+    performanceNow: () => number,
+
+    /**
      * List of environment variables to feed to the Rust program. An array of strings.
      * Example: `["RUST_BACKTRACE=1", "RUST_LOG=foo"];`
      *
@@ -73,6 +78,41 @@ export default (config: Config): WebAssembly.ModuleImports => {
             }
 
             return 0;
+        },
+
+        clock_time_get: (clockId: number, _precision: bigint, outPtr: number): number => {
+            // See <https://github.com/rust-lang/rust/blob/master/library/std/src/sys/wasi/time.rs>
+            // and <docs.rs/wasi/> for help.
+
+            const instance = config.instance!;
+            const mem = new Uint8Array(instance.exports.memory.buffer);
+            outPtr >>>= 0;
+
+            // We ignore the precision, as it can't be implemented anyway.
+
+            switch (clockId) {
+                case 0: {
+                    // Realtime clock.
+                    const now = BigInt(Date.now()) * BigInt(1_000_000);
+                    buffer.writeUInt64LE(mem, outPtr, now)
+
+                    // Success.
+                    return 0;
+                }
+                case 1: {
+                    // Monotonic clock.
+                    const nowMs = config.performanceNow();
+                    const now = BigInt(Math.floor(nowMs)) * BigInt(1_000_000) +
+                        BigInt(Math.floor(((nowMs - Math.floor(nowMs)) * 1_000_000)));
+                    buffer.writeUInt64LE(mem, outPtr, now)
+
+                    // Success.
+                    return 0;
+                }
+                default:
+                    // Return an `EINVAL` error.
+                    return 28
+            }
         },
 
         // Writing to a file descriptor is used in order to write to stdout/stderr.

@@ -30,7 +30,7 @@ use core::{
     time::Duration,
 };
 use futures_util::future;
-use std::{collections::BinaryHeap, sync::Mutex};
+use std::{collections::BinaryHeap, sync::Mutex, time::Instant};
 
 pub(crate) fn timer_finished(timer_id: u32) {
     let callback = {
@@ -40,8 +40,6 @@ pub(crate) fn timer_finished(timer_id: u32) {
 
     callback();
 }
-
-use super::Instant;
 
 /// `Future` that automatically wakes up after a certain amount of time has elapsed.
 pub struct Delay {

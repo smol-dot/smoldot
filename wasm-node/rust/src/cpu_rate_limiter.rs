@@ -22,6 +22,8 @@ use core::{
     time::Duration,
 };
 
+use std::time::Instant;
+
 /// Wraps around a `Future` and enforces an upper bound to the CPU consumed by the polling of
 /// this `Future`.
 ///
@@ -75,12 +77,12 @@ impl<T: Future> Future for CpuRateLimiter<T> {
             return Poll::Pending;
         }
 
-        let before_polling = crate::Instant::now();
+        let before_polling = Instant::now();
 
         match this.inner.poll(cx) {
             Poll::Ready(value) => Poll::Ready(value),
             Poll::Pending => {
-                let after_polling = crate::Instant::now();
+                let after_polling = Instant::now();
 
                 // Time it took to execute `poll`.
                 let poll_duration = after_polling - before_polling;

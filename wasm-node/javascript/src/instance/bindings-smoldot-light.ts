@@ -34,11 +34,6 @@ export interface Config {
     bufferIndices: Array<Uint8Array>,
 
     /**
-     * Returns the number of milliseconds since an arbitrary epoch.
-     */
-    performanceNow: () => number,
-
-    /**
      * Tries to open a new connection using the given configuration.
      *
      * @see Connection
@@ -306,12 +301,6 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                 config.logCallback(level, target, message);
             }
         },
-
-        // Must return the UNIX time in milliseconds.
-        unix_time_ms: () => Date.now(),
-
-        // Must return the value of a monotonic clock in milliseconds.
-        monotonic_clock_ms: () => config.performanceNow(),
 
         // Must call `timer_finished` after the given number of milliseconds has elapsed.
         start_timer: (id: number, ms: number) => {

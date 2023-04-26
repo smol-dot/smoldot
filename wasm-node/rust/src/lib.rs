@@ -20,15 +20,7 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 
-use core::{
-    cmp::Ordering,
-    num::NonZeroU32,
-    ops::{Add, Sub},
-    pin::Pin,
-    str,
-    sync::atomic,
-    time::Duration,
-};
+use core::{num::NonZeroU32, pin::Pin, str, sync::atomic, time::Duration};
 use futures_util::{stream, FutureExt as _, Stream as _, StreamExt as _};
 use smoldot_light::HandleRpcError;
 use std::{
@@ -52,77 +44,6 @@ fn start_timer_wrap(duration: Duration, closure: impl FnOnce() + 'static) {
     // truncated, but the precision of an `f64` is so high and the precision of the operating
     // system generally so low that this is not worth dealing with.
     unsafe { bindings::start_timer(timer_id, duration.as_secs_f64() * 1000.0) }
-}
-
-#[derive(Debug, Copy, Clone)]
-pub struct Instant {
-    /// Milliseconds.
-    inner: f64,
-}
-
-impl PartialEq for Instant {
-    fn eq(&self, other: &Instant) -> bool {
-        debug_assert!(self.inner.is_finite());
-        self.inner == other.inner
-    }
-}
-
-// This trait is ok to implement because `self.inner` is always finite.
-impl Eq for Instant {}
-
-impl PartialOrd for Instant {
-    fn partial_cmp(&self, other: &Instant) -> Option<Ordering> {
-        self.inner.partial_cmp(&other.inner)
-    }
-}
-
-impl Ord for Instant {
-    fn cmp(&self, other: &Self) -> Ordering {
-        debug_assert!(self.inner.is_finite());
-        self.inner.partial_cmp(&other.inner).unwrap()
-    }
-}
-
-impl Instant {
-    pub fn now() -> Instant {
-        let value = unsafe { bindings::monotonic_clock_ms() };
-        debug_assert!(value.is_finite());
-        Instant { inner: value }
-    }
-}
-
-impl Add<Duration> for Instant {
-    type Output = Instant;
-
-    fn add(self, other: Duration) -> Instant {
-        let new_val = self.inner + other.as_millis() as f64;
-        // Just like the `Add` implementation of the actual `Instant`, we panic if the value can't
-        // be represented.
-        assert!(new_val.is_finite());
-        Instant { inner: new_val }
-    }
-}
-
-impl Sub<Duration> for Instant {
-    type Output = Instant;
-
-    fn sub(self, other: Duration) -> Instant {
-        let new_val = self.inner - other.as_millis() as f64;
-        // Just like the `Sub` implementation of the actual `Instant`, we panic if the value can't
-        // be represented.
-        assert!(new_val.is_finite());
-        Instant { inner: new_val }
-    }
-}
-
-impl Sub<Instant> for Instant {
-    type Output = Duration;
-
-    fn sub(self, other: Instant) -> Duration {
-        let ms = self.inner - other.inner;
-        assert!(ms >= 0.0);
-        Duration::from_millis(ms as u64)
-    }
 }
 
 static CLIENT: Mutex<Option<init::Client<platform::Platform, ()>>> = Mutex::new(None);

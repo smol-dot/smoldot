@@ -130,38 +130,6 @@ extern "C" {
     /// virtual machine at offset `ptr` and with length `len`.
     pub fn log(level: u32, target_ptr: u32, target_len: u32, message_ptr: u32, message_len: u32);
 
-    /// Must return the number of milliseconds that have passed since the UNIX epoch, ignoring
-    /// leap seconds.
-    ///
-    /// Must never return `NaN` or infinite.
-    ///
-    /// This is typically implemented by calling `Date.now()`.
-    ///
-    /// See <https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/now>
-    ///
-    /// > **Note**: Ideally this function isn't needed. The wasi target supports clocks through
-    /// >           the `clock_time_get` syscall. However, since `clock_time_get` uses `u64s`, and
-    /// >           browsers don't support `u64s`, using it causes an unbypassable exception. See
-    /// >           also <https://github.com/dcodeIO/webassembly/issues/26#issuecomment-410157370>.
-    pub fn unix_time_ms() -> f64;
-
-    /// Must return the number of milliseconds that have passed since an arbitrary point in time.
-    ///
-    /// Must never return `NaN` or infinite.
-    ///
-    /// Contrary to [`unix_time_ms`], the returned value must never be inferior to a value
-    /// previously returned. Consequently, this must not be implemented using `Date.now()`, whose
-    /// value can decrease if the user adjusts their machine's clock, but rather with
-    /// `Performance.now()` or similar.
-    ///
-    /// See <https://developer.mozilla.org/fr/docs/Web/API/Performance/now>
-    ///
-    /// > **Note**: Ideally this function isn't needed. The wasi target supports clocks through
-    /// >           the `clock_time_get` syscall. However, since `clock_time_get` uses `u64s`, and
-    /// >           browsers don't support `u64s`, using it causes an unbypassable exception. See
-    /// >           also <https://github.com/dcodeIO/webassembly/issues/26#issuecomment-410157370>.
-    pub fn monotonic_clock_ms() -> f64;
-
     /// After at least `milliseconds` milliseconds have passed, must call [`timer_finished`] with
     /// the `id` passed as parameter.
     ///
