@@ -93,7 +93,7 @@ export default (config: Config): WebAssembly.ModuleImports => {
             switch (clockId) {
                 case 0: {
                     // Realtime clock.
-                    const now = BigInt(Date.now()) * BigInt(1_000_000);
+                    const now = BigInt(Math.floor(Date.now())) * BigInt(1_000_000);
                     buffer.writeUInt64LE(mem, outPtr, now)
 
                     // Success.
