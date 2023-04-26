@@ -102,8 +102,9 @@ export default (config: Config): WebAssembly.ModuleImports => {
                 case 1: {
                     // Monotonic clock.
                     const nowMs = config.performanceNow();
-                    const now = BigInt(Math.floor(nowMs)) * BigInt(1_000_000) +
-                        BigInt(Math.floor(((nowMs - Math.floor(nowMs)) * 1_000_000)));
+                    const nowMsInt = Math.floor(nowMs);
+                    const now = BigInt(nowMsInt) * BigInt(1_000_000) +
+                        BigInt(Math.floor(((nowMs - nowMsInt) * 1_000_000)));
                     buffer.writeUInt64LE(mem, outPtr, now)
 
                     // Success.
