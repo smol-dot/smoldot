@@ -27,8 +27,7 @@ use crate::libp2p::{connection::multistream_select, read_write};
 use crate::util::leb128;
 
 use alloc::{borrow::ToOwned as _, collections::VecDeque, string::String, vec::Vec};
-use core::mem;
-use core::{fmt, num::NonZeroUsize};
+use core::{fmt, mem, num::NonZeroUsize};
 
 /// State machine containing the state of a single substream of an established connection.
 pub struct Substream<TNow> {
@@ -36,6 +35,12 @@ pub struct Substream<TNow> {
 }
 
 enum SubstreamInner<TNow> {
+    /// Substream has been reset by the remote.
+    ///
+    /// Contains an optional event to yield on the API level before completely dropping the
+    /// substream.
+    Reset(Option<Event>),
+
     /// Protocol negotiation in progress in an incoming substream.
     InboundNegotiating(multistream_select::InProgress<String>, bool),
     /// Protocol negotiation in an incoming substream is in progress, and an
@@ -304,6 +309,23 @@ where
         }
     }
 
+    /// Yields all the events remaining to be yielded until the substream is destroyed. Can only
+    /// be called if the substream has been reset with a call to [`Substream::reset`].
+    ///
+    /// This is equivalent to calling [`Substream::read_write`] a dummy [`read_write::ReadWrite`]
+    /// in a loop until `None` is yielded.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the substream hasn't been reset with [`Substream::reset`].
+    ///
+    pub fn yield_events_after_reset(self) -> impl Iterator<Item = Event> {
+        match self.inner {
+            SubstreamInner::Reset(event) => event.into_iter(),
+            _ => panic!(),
+        }
+    }
+
     /// Reads data coming from the socket, updates the internal state machine, and writes data
     /// destined to the socket through the [`read_write::ReadWrite`].
     ///
@@ -323,6 +345,7 @@ where
         read_write: &'_ mut read_write::ReadWrite<'_, TNow>,
     ) -> (Option<SubstreamInner<TNow>>, Option<Event>) {
         match self.inner {
+            SubstreamInner::Reset(event) => (None, event),
             SubstreamInner::InboundNegotiating(nego, was_rejected_already) => {
                 match nego.read_write(read_write) {
                     Ok(multistream_select::Negotiation::InProgress(nego)) => (
@@ -1055,8 +1078,9 @@ where
         }
     }
 
-    pub fn reset(self) -> Option<Event> {
-        match self.inner {
+    pub fn reset(&mut self) {
+        let event = match &self.inner {
+            SubstreamInner::Reset(_) => return, // TODO: return an error or something?
             SubstreamInner::InboundNegotiating(_, _) => None,
             SubstreamInner::InboundNegotiatingAccept(_, _) => None,
             SubstreamInner::InboundNegotiatingApiWait(_) => None,
@@ -1089,7 +1113,9 @@ where
                 NonZeroUsize::new(queued_pings.len())
                     .map(|num_pings| Event::PingOutError { num_pings })
             }
-        }
+        };
+
+        self.inner = SubstreamInner::Reset(event);
     }
 
     /// Accepts an inbound notifications protocol. Must be called in response to a
@@ -1295,6 +1321,7 @@ where
 impl<TNow> fmt::Debug for Substream<TNow> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self.inner {
+            SubstreamInner::Reset(_) => f.debug_tuple("reset").finish(),
             SubstreamInner::InboundFailed => f.debug_tuple("incoming-negotiation-failed").finish(),
             SubstreamInner::InboundNegotiating(_, _) => {
                 f.debug_tuple("incoming-negotiating").finish()

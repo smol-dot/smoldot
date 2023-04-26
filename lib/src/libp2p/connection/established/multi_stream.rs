@@ -91,8 +91,8 @@ struct Substream<TNow, TSubUd> {
     /// Opaque data decided by the user. `None` if the substream doesn't exist on the API layer
     /// yet.
     user_data: Option<TSubUd>,
-    /// Underlying state machine for the substream. Always `Some` while the substream is alive,
-    /// and `None` if it has been reset.
+    /// Underlying state machine for the substream. Always `Some`, except temporarily while the
+    /// substream is being processed.
     inner: Option<substream::Substream<TNow>>,
     /// All incoming data is first transferred to this buffer.
     // TODO: this is very suboptimal code, instead the parsing should be done in a streaming way
@@ -250,8 +250,11 @@ where
             self.ping_substream = None;
         }
 
-        let maybe_event = substream.inner.unwrap().reset();
-        if let Some(event) = maybe_event {
+        let mut substream_state_machine = substream.inner.unwrap();
+        substream_state_machine.reset();
+
+        // Process the events remaining from the substream.
+        for event in substream_state_machine.yield_events_after_reset() {
             Self::on_substream_event(
                 &mut self.pending_events,
                 substream.id,
@@ -408,10 +411,10 @@ where
 
                 // If the remote has sent a `RESET_STREAM` flag, also reset the substream.
                 if flags.map_or(false, |f| f == 2) {
-                    substream.inner.take().unwrap().reset()
-                } else {
-                    None
+                    substream.inner.as_mut().unwrap().reset()
                 }
+
+                None
             } else {
                 // We allocate a buffer where the substream state machine will temporarily write
                 // out its data. The size of the buffer is capped in order to prevent the substream

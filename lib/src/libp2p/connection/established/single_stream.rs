@@ -83,7 +83,7 @@ pub struct SingleStream<TNow, TSubUd> {
 struct Inner<TNow, TSubUd> {
     /// State of the various substreams of the connection.
     /// Consists in a collection of substreams, each of which holding a [`substream::Substream`]
-    /// object, or `None` if the substream has been reset.
+    /// object. Always `Some`, except temporarily while the substream is being processed.
     /// Also includes, for each substream, a collection of buffers whose data is to be written
     /// out.
     yamux: yamux::Yamux<Option<(substream::Substream<TNow>, Option<TSubUd>)>>,
@@ -153,23 +153,6 @@ where
         mut self,
         read_write: &'_ mut ReadWrite<'_, TNow>,
     ) -> Result<(SingleStream<TNow, TSubUd>, Option<Event<TSubUd>>), Error> {
-        // First, update all the internal substreams.
-        // This doesn't read data from `read_write`, but can potential write out data.
-        for substream_id in self
-            .inner
-            .yamux
-            .user_datas()
-            .map(|(id, _)| id)
-            .collect::<Vec<_>>()
-        {
-            let (_num_read, event) =
-                Self::process_substream(&mut self.inner, substream_id, read_write, &[]);
-            debug_assert_eq!(_num_read, 0);
-            if let Some(event) = event {
-                return Ok((self, Some(event)));
-            }
-        }
-
         // Start any outgoing ping if necessary.
         if read_write.now >= self.inner.next_ping {
             self.inner.next_ping = read_write.now.clone() + self.inner.ping_interval;
@@ -198,6 +181,24 @@ where
         // substreams, and processing incoming data might lead to more data to emit. The easiest
         // way to implement this is a single loop that does everything.
         loop {
+            // First, update all the internal substreams.
+            // This doesn't read data from `read_write`, but can potential write out data.
+            // TODO: O(n)
+            for substream_id in self
+                .inner
+                .yamux
+                .user_datas()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>()
+            {
+                let (_num_read, event) =
+                    Self::process_substream(&mut self.inner, substream_id, read_write, &[]);
+                debug_assert_eq!(_num_read, 0);
+                if let Some(event) = event {
+                    return Ok((self, Some(event)));
+                }
+            }
+
             // If we have both sent and received a GoAway frame, that means that no new substream
             // can be opened. If in addition to this there is no substream in the connection,
             // then we can safely close it as a normal termination.
@@ -339,12 +340,22 @@ where
                         .unwrap_or_else(|_| panic!());
                 }
 
-                Some(
-                    yamux::IncomingDataDetail::StreamReset { .. }
-                    | yamux::IncomingDataDetail::StreamClosed { .. },
-                ) => {
+                Some(yamux::IncomingDataDetail::StreamClosed { .. }) => {
                     self.encryption
                         .consume_inbound_data(yamux_decode.bytes_read);
+                }
+
+                Some(yamux::IncomingDataDetail::StreamReset { substream_id }) => {
+                    self.encryption
+                        .consume_inbound_data(yamux_decode.bytes_read);
+                    self.inner
+                        .yamux
+                        .user_data_mut(substream_id)
+                        .as_mut()
+                        .unwrap()
+                        .0
+                        .reset();
+                    must_continue_looping = true;
                 }
 
                 Some(yamux::IncomingDataDetail::DataFrame {
@@ -375,123 +386,6 @@ where
                     unreachable!()
                 }
             };
-
-            // Substreams that have been closed or reset aren't immediately removed the yamux state
-            // machine. They must be removed manually, which is what is done here.
-            let dead_substream_ids = self
-                .inner
-                .yamux
-                .dead_substreams()
-                .map(|(id, death_ty, _)| (id, death_ty))
-                .collect::<Vec<_>>();
-            for (dead_substream_id, death_ty) in dead_substream_ids {
-                match death_ty {
-                    yamux::DeadSubstreamTy::Reset => {
-                        // If the substream has been reset, we simply remove it from the Yamux
-                        // state machine.
-
-                        // If the substream was reset by the remote, then the substream state
-                        // machine will still be `Some`.
-                        if let Some((state_machine, mut user_data)) =
-                            self.inner.yamux.remove_dead_substream(dead_substream_id)
-                        {
-                            // TODO: consider changing this `state_machine.reset()` function to be a state transition of the substream state machine (that doesn't take ownership), to simplify the implementation of both the substream state machine and this code
-                            if let Some(event) = state_machine.reset() {
-                                return Ok((
-                                    self,
-                                    Some(Self::pass_through_substream_event(
-                                        dead_substream_id,
-                                        &mut user_data,
-                                        event,
-                                    )),
-                                ));
-                            }
-                        };
-
-                        // Removing a dead substream might lead to Yamux being able to process more
-                        // incoming data. As such, we loop again.
-                        must_continue_looping = true;
-                    }
-                    yamux::DeadSubstreamTy::ClosedGracefully => {
-                        // If the substream has been closed gracefully, we don't necessarily
-                        // remove it instantly. Instead, we continue processing the substream
-                        // state machine until it tells us that there are no more events to
-                        // return.
-
-                        // Mutable reference to the substream state machine within the yamux
-                        // state machine.
-                        let state_machine_refmut =
-                            self.inner.yamux.user_data_mut(dead_substream_id);
-
-                        // Extract the substream state machine, maybe putting it back later.
-                        let (state_machine_extracted, mut substream_user_data) =
-                            match state_machine_refmut.take() {
-                                Some(s) => s,
-                                None => {
-                                    // Substream has already been removed from the Yamux state machine
-                                    // previously. We know that it can't yield any more event.
-                                    self.inner.yamux.remove_dead_substream(dead_substream_id);
-
-                                    // Removing a dead substream might lead to Yamux being able to
-                                    // process more incoming data. As such, we loop again.
-                                    must_continue_looping = true;
-
-                                    continue;
-                                }
-                            };
-
-                        // Now we run `state_machine_extracted.read_write`.
-                        let mut substream_read_write = ReadWrite {
-                            now: read_write.now.clone(),
-                            incoming_buffer: None,
-                            outgoing_buffer: None,
-                            read_bytes: 0,
-                            written_bytes: 0,
-                            wake_up_after: None,
-                        };
-
-                        let (substream_update, event) =
-                            state_machine_extracted.read_write(&mut substream_read_write);
-
-                        debug_assert!(
-                            substream_read_write.read_bytes == 0
-                                && substream_read_write.written_bytes == 0
-                        );
-
-                        if let Some(wake_up_after) = substream_read_write.wake_up_after {
-                            read_write.wake_up_after(&wake_up_after);
-                        }
-
-                        let event_pass_through = if let Some(event) = event {
-                            Some(Self::pass_through_substream_event(
-                                dead_substream_id,
-                                &mut substream_user_data,
-                                event,
-                            ))
-                        } else {
-                            None
-                        };
-
-                        if let Some(substream_update) = substream_update {
-                            // Put back the substream state machine. It will be picked up again
-                            // the next time `read_write` is called.
-                            *state_machine_refmut = Some((substream_update, substream_user_data));
-                        } else {
-                            // Substream has no more events to give us. Remove it from the Yamux
-                            // state machine.
-                            self.inner.yamux.remove_dead_substream(dead_substream_id);
-
-                            // Removing a dead substream might lead to Yamux being able to process more
-                            // incoming data. As such, we loop again.
-                            must_continue_looping = true;
-                        }
-
-                        if let Some(event_pass_through) = event_pass_through {
-                            return Ok((self, Some(event_pass_through)));
-                        }
-                    }
-                }
-            }
 
             // The yamux state machine contains the data that needs to be written out.
             // Try to flush it.
