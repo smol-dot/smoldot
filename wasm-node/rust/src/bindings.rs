@@ -137,8 +137,8 @@ extern "C" {
     /// have passed, and this will likely cause smoldot to restart a new timer for the remainder
     /// of the duration.
     ///
-    /// When [`timer_finished`] is called, the value of [`monotonic_clock_ms`] must have increased
-    /// by at least the given number of `milliseconds`.
+    /// When [`timer_finished`] is called, the value of the monotonic clock (in the WASI bindings)
+    /// must have increased by at least the given number of `milliseconds`.
     ///
     /// If `milliseconds` is 0, [`timer_finished`] should be called as soon as possible.
     ///
