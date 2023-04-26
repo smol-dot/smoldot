@@ -91,7 +91,7 @@ let wsServer = new WebSocketServer({
 console.log('JSON-RPC server now listening on port 9944');
 console.log('Please visit one of:');
 for (const chainId in chainSpecsById) {
-    console.log('- ' + chainId + ': https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2F' + chainId);
+    console.log('- ' + chainId + ': https://cloudflare-ipfs.com/ipns/dotapps.io/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2F' + chainId);
 }
 console.log('');
 
