@@ -100,7 +100,7 @@ impl<T: Future> Future for CpuRateLimiter<T> {
                 debug_assert!(after_poll_sleep >= 0.0 && !after_poll_sleep.is_nan());
                 *this.sleep_deprevation_sec += after_poll_sleep;
 
-                if *this.sleep_deprevation_sec > 5.0 {
+                if *this.sleep_deprevation_sec > 0.005 {
                     this.prevent_poll_until.set(crate::timers::Delay::new_at(
                         after_polling
                             + Duration::try_from_secs_f64(*this.sleep_deprevation_sec)
