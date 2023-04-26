@@ -36,6 +36,10 @@ pub struct CpuRateLimiter<T> {
     inner: T,
     max_divided_by_rate_limit_minus_one: f64,
 
+    /// Instead of sleeping regularly for short amounts of time, we instead continue running only
+    /// until the time we have to sleep reaches a certain threshold.
+    sleep_deprevation_sec: f64,
+
     /// Prevent `self.inner.poll` from being called before this `Delay` is ready.
     #[pin]
     prevent_poll_until: crate::timers::Delay,
@@ -57,6 +61,7 @@ impl<T> CpuRateLimiter<T> {
         CpuRateLimiter {
             inner,
             max_divided_by_rate_limit_minus_one,
+            sleep_deprevation_sec: 0.0,
             prevent_poll_until: crate::timers::Delay::new(Duration::new(0, 0)),
         }
     }
@@ -93,11 +98,16 @@ impl<T: Future> Future for CpuRateLimiter<T> {
                 let after_poll_sleep =
                     poll_duration.as_secs_f64() * *this.max_divided_by_rate_limit_minus_one;
                 debug_assert!(after_poll_sleep >= 0.0 && !after_poll_sleep.is_nan());
+                *this.sleep_deprevation_sec += after_poll_sleep;
 
-                this.prevent_poll_until.set(crate::timers::Delay::new_at(
-                    after_polling
-                        + Duration::try_from_secs_f64(after_poll_sleep).unwrap_or(Duration::MAX),
-                ));
+                if *this.sleep_deprevation_sec > 5.0 {
+                    this.prevent_poll_until.set(crate::timers::Delay::new_at(
+                        after_polling
+                            + Duration::try_from_secs_f64(*this.sleep_deprevation_sec)
+                                .unwrap_or(Duration::MAX),
+                    ));
+                    *this.sleep_deprevation_sec = 0.0;
+                }
 
                 Poll::Pending
             }
