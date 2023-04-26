@@ -90,9 +90,6 @@ impl<T: Future> Future for CpuRateLimiter<T> {
                 // In order to enforce the rate limiting, we prevent `poll` from executing
                 // for a certain amount of time.
                 // The base equation here is: `(after_poll_sleep + poll_duration) * rate_limit == poll_duration * u32::max_value()`.
-                // Because `Duration::mul_f64` and `Duration::from_secs_f64` panic in case of
-                // overflow, we need to do the operation of multiplying and checking the bounds
-                // manually.
                 let after_poll_sleep =
                     poll_duration.as_secs_f64() * *this.max_divided_by_rate_limit_minus_one;
                 debug_assert!(after_poll_sleep >= 0.0 && !after_poll_sleep.is_nan());
