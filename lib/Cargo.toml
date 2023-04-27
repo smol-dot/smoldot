@@ -93,7 +93,7 @@ parity-scale-codec = { version = "3.4.0", features = ["derive"], default-feature
 # The arch and OS of a specific target can be found with the command `rustc +nightly -Z unstable-options --print target-spec-json --target ...`
 [target.'cfg(any(all(target_arch = "x86_64", any(target_os = "windows", target_os = "linux", target_os = "macos")), all(target_arch = "aarch64", target_os = "linux"), all(target_arch = "s390x", target_os = "linux")))'.dependencies]
 # `std` feature
-wasmtime = { version = "8.0.0", default-features = false, features = ["async", "cranelift"], optional = true }
+wasmtime = { version = "8.0.1", default-features = false, features = ["async", "cranelift"], optional = true }
 
 [dev-dependencies]
 async-std = "1.12.0"
