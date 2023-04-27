@@ -30,6 +30,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Mutex,
     },
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 /// Total number of bytes that all the connections created through [`Platform`] combined have
@@ -57,7 +58,7 @@ impl Platform {
 impl smoldot_light::platform::PlatformRef for Platform {
     type Delay = Delay;
     type Yield = Yield;
-    type Instant = crate::Instant;
+    type Instant = Instant;
     type Connection = ConnectionWrapper; // Entry in the ̀`CONNECTIONS` map.
     type Stream = StreamWrapper; // Entry in the ̀`STREAMS` map and a read buffer.
     type ConnectFuture = future::BoxFuture<
@@ -77,19 +78,15 @@ impl smoldot_light::platform::PlatformRef for Platform {
     >;
 
     fn now_from_unix_epoch(&self) -> Duration {
-        let value = unsafe { bindings::unix_time_ms() };
-        debug_assert!(value.is_finite());
         // The documentation of `now_from_unix_epoch()` mentions that it's ok to panic if we're
         // before the UNIX epoch.
-        assert!(
-            value >= 0.0,
-            "running before the UNIX epoch isn't supported"
-        );
-        Duration::from_secs_f64(value / 1000.0)
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|_| panic!())
     }
 
     fn now(&self) -> Self::Instant {
-        crate::Instant::now()
+        Instant::now()
     }
 
     fn sleep(&self, duration: Duration) -> Self::Delay {

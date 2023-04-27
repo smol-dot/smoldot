@@ -105,7 +105,6 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
     // Used to bind with the smoldot-light bindings. See the `bindings-smoldot-light.js` file.
     const smoldotJsConfig: SmoldotBindingsConfig = {
         bufferIndices,
-        performanceNow: platformBindings.performanceNow,
         connect: platformBindings.connect,
         onPanic: (message) => {
             killAll();
@@ -119,6 +118,7 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
     const wasiConfig: WasiConfig = {
         envVars: [],
         getRandomValues: platformBindings.getRandomValues,
+        performanceNow: platformBindings.performanceNow,
         onProcExit: (retCode) => {
             killAll();
             config.onWasmPanic(`proc_exit called: ${retCode}`)
