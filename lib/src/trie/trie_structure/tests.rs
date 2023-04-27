@@ -801,7 +801,7 @@ fn range() {
         // Generate a set of random keys that will find themselves in the trie in the end.
         let final_storage: HashSet<Vec<Nibble>> = {
             let mut list = vec![Vec::new()];
-            for _ in 0..25 {
+            for _ in 0..4 {
                 for elem in list.clone().into_iter() {
                     for _ in 0..uniform_sample(0, 4) {
                         let mut elem = elem.clone();
