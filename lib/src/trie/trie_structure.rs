@@ -865,10 +865,23 @@ impl<TUd> TrieStructure<TUd> {
                         .copied()
                         .find_map(|c| c)
                     {
-                        iter_key_nibbles_extra += self.nodes.get(child).unwrap().partial_key.len();
+                        let child_node = self.nodes.get(child).unwrap();
+                        if iter_key_nibbles_extra == 1 {
+                            debug_assert!(iter_1 < *end_key.peek().unwrap());
+                            match child_node.parent.unwrap().1.cmp(end_key.peek().unwrap()) {
+                                cmp::Ordering::Greater => return None,
+                                cmp::Ordering::Equal => {
+                                    iter_key_nibbles_extra -= 1;
+                                    let _ = end_key.next();
+                                    iter = (iter.0, Some(child_node.parent.unwrap().1));
+                                    continue;
+                                }
+                                cmp::Ordering::Less => {}
+                            }
+                        }
+                        iter_key_nibbles_extra += child_node.partial_key.len();
                         // Point `iter` to the child and loop again, which yields it.
                         iter = (child, None);
-                        continue;
                     } else {
                         // `iter` has no child. Go up the tree.
                         loop {
@@ -883,10 +896,18 @@ impl<TUd> TrieStructure<TUd> {
                             iter_key_nibbles_extra -= 1;
                             iter_key_nibbles_extra -= node.partial_key.len();
                             iter.0 = parent_node_index;
-                            iter.1 = match parent_nibble_direction.checked_add(1) {
-                                Some(idx) => Some(idx),
+                            let next_sibling_nibble = match parent_nibble_direction.checked_add(1) {
+                                Some(idx) => idx,
                                 None => continue,
                             };
+                            if iter_key_nibbles_extra == 0
+                                && *end_key.peek().unwrap() == next_sibling_nibble
+                            {
+                                let _ = end_key.next();
+                            } else {
+                                iter_key_nibbles_extra += 1;
+                            }
+                            iter.1 = Some(next_sibling_nibble);
                             break;
                         }
                     }
