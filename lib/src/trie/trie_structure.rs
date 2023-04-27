@@ -596,11 +596,11 @@ impl<TUd> TrieStructure<TUd> {
     }
 
     /// Returns all nodes whose full key is within the given range, in lexicographic order.
-    fn range_inner(
-        &self,
-        start_bound: ops::Bound<impl Iterator<Item = Nibble> + Clone>,
-        end_bound: ops::Bound<impl Iterator<Item = Nibble> + Clone>,
-    ) -> impl Iterator<Item = usize> + '_ {
+    fn range_inner<'a>(
+        &'a self,
+        start_bound: ops::Bound<impl Iterator<Item = Nibble> + 'a>,
+        end_bound: ops::Bound<impl Iterator<Item = Nibble> + 'a>,
+    ) -> impl Iterator<Item = usize> + 'a {
         // Start by processing the end bound to obtain an "end key".
         // This end key is always assumed to be excluded. In other words, only keys strictly
         // inferior to the end key are returned. If the user provides `Included`, we modify the key
@@ -642,7 +642,6 @@ impl<TUd> TrieStructure<TUd> {
             ops::Bound::Unbounded => (either::Right(iter::empty()), true),
             ops::Bound::Included(k) => (either::Left(k), true),
             ops::Bound::Excluded(k) => (either::Left(k), false),
-            _ => unreachable!(),
         };
 
         // Iterate down the tree, updating the variables above. At each iteration, one of the
@@ -658,6 +657,7 @@ impl<TUd> TrieStructure<TUd> {
         // that `iter` is at the correct position.
         // TODO: we don't update iter_key_nibbles_extra
         'start_search: loop {
+            debug_assert!(iter.1.is_none());
             let iter_node = self.nodes.get(iter.0).unwrap();
 
             // First, we must remove nibbles at the front of `start_key` and compare them with
@@ -677,7 +677,7 @@ impl<TUd> TrieStructure<TUd> {
             }
 
             // Then, remove the next nibble from `start_key` and update `iter` based on it.
-            if let Some(mut next_nibble) = start_key.next() {
+            if let Some(next_nibble) = start_key.next() {
                 let next_nibble = usize::from(u8::from(next_nibble));
                 if let Some(child) = iter_node.children[next_nibble] {
                     // Update `iter` and continue searching.
@@ -713,6 +713,7 @@ impl<TUd> TrieStructure<TUd> {
                     // Make `iter` point to a non-existing node in-between `iter` and `start_key`
                     // and stop searching.
                     debug_assert!(iter.1.is_none());
+                    iter_key_nibbles_extra += 1;
                     iter.1 = Some(Nibble::zero());
                     break 'start_search;
                 }
@@ -724,6 +725,7 @@ impl<TUd> TrieStructure<TUd> {
                 iter.1 = if start_key_is_inclusive {
                     None
                 } else {
+                    iter_key_nibbles_extra += 1;
                     Some(Nibble::zero())
                 };
                 break 'start_search;
@@ -734,79 +736,107 @@ impl<TUd> TrieStructure<TUd> {
         // the end. This is done in the iterator that is returned from the function.
 
         either::Left(iter::from_fn(move || {
-            debug_assert!(end_key.peek().is_some());
-
-            let Some(mut iter_child_index) = iter.1 else {
-                // Can only happen at the first iteration.
-                iter.1 = Some(Nibble::zero());
-                iter_key_nibbles_extra += 1;
-                return Some(iter.0);
-            };
-
-            let mut go_to_parent = false;
+            // `end_key` must not be empty at this point, as otherwise the iteration has ended.
+            // We return `None` instead of panicking, as it is legitimately possible to reach this
+            // situation through some code paths.
+            if end_key.peek().is_none() {
+                return None;
+            }
 
             loop {
+                // If `iter` points to an actual node, yield it and jump to the position right
+                // after.
+                let Some(iter_1) = iter.1 else {
+                    iter.1 = Some(Nibble::zero());
+                    if iter_key_nibbles_extra == 0 && *end_key.peek().unwrap() == Nibble::zero() {
+                        let _ = end_key.next();
+                    } else {
+                        iter_key_nibbles_extra += 1;
+                    }
+                    return Some(iter.0);
+                };
+
                 let node = self.nodes.get(iter.0).unwrap();
 
-                if go_to_parent {
-                    // End the iterator if we were about to jump out of the end bound.
-                    if iter_key_nibbles_extra < 1 + node.partial_key.len() {
+                // If `iter_key_nibbles_extra == 0`, that means the end key starts with `iter`'s
+                // key. In that situations, things can be a bit tricky as we need to make sure
+                // that we don't go after the end key.
+                if iter_key_nibbles_extra == 0 {
+                    // Since `end_key` is always excluded, if `end_key` is finished then going down
+                    // the tree would go out of `end_key`. In that case, stop the iteration.
+                    if end_key.peek().is_none() {
                         return None;
                     }
 
-                    let Some((parent_node_index, parent_nibble_direction)) = node.parent else { return None; };
-                    iter_key_nibbles_extra -= 1;
-                    iter_key_nibbles_extra -= node.partial_key.len();
-                    iter_node_index = parent_node_index;
-                    iter_child_index = match parent_nibble_direction.checked_add(1) {
-                        Some(idx) => idx,
-                        None => continue,
-                    };
-                }
-
-                // Note: there's no need to set `go_to_parent` to `false` because its value is
-                // never read again below.
-
-                loop {
-                    // If iter's key exactly matches the end bound, refuse to jump to the next
-                    // sibling.
-                    if iter_key_nibbles_extra == 0 && end_key.peek().is_none() {
-                        iter = None;
-                        return None;
-                    }
-
-                    if let Some(child) = node.children[usize::from(u8::from(iter_child_index))] {
-                        for nibble in self
-                            .nodes
-                            .get(child)
-                            .unwrap()
-                            .partial_key
-                            .iter()
-                            .copied()
-                            .chain(iter::once(Nibble::zero()))
+                    // Since `iter_key_nibbles_extra == 0`, we can only go down the tree through
+                    // `iter.1`.
+                    if let Some(child) = node.children[usize::from(u8::from(iter_1))] {
+                        // `child` might be after the end bound if its partial key is superior or
+                        // equal to the `end_key`.
+                        for child_pk_nibble in
+                            self.nodes.get(child).unwrap().partial_key.iter().copied()
                         {
-                            debug_assert!(end_key.peek().is_some());
-                            if iter_key_nibbles_extra == 0
-                                && Some(nibble) == end_key.peek().copied()
-                            {
-                                let _ = end_key.next();
-                                if end_key.peek().is_none() {
-                                    iter = None;
-                                    return None;
+                            match child_pk_nibble.cmp(end_key.peek().unwrap()) {
+                                cmp::Ordering::Greater => return None,
+                                cmp::Ordering::Less => {
+                                    iter_key_nibbles_extra += 1;
                                 }
-                            } else {
-                                iter_key_nibbles_extra += 1;
+                                cmp::Ordering::Equal if iter_key_nibbles_extra != 0 => {
+                                    iter_key_nibbles_extra += 1;
+                                }
+                                cmp::Ordering::Equal => {
+                                    debug_assert_eq!(iter_key_nibbles_extra, 0);
+                                    let _ = end_key.next();
+                                    // `child` is superior or equal to `end_key`. Iteration is
+                                    // over.
+                                    if end_key.peek().is_none() {
+                                        return None;
+                                    }
+                                }
                             }
                         }
 
-                        iter = Some((child, Some(Nibble::zero())));
-                        return Some(child);
-                    } else if let Some(next_attempt) = iter_child_index.checked_add(1) {
-                        iter_child_index = next_attempt;
+                        // Point `iter` to the child and loop again, which yields it.
+                        iter = (child, None);
+                        continue;
                     } else {
-                        // No more children. Jump back to parent and next sibling.
-                        go_to_parent = true;
-                        break;
+                        // No such child. The iteration is over.
+                        return None;
+                    }
+                } else {
+                    // The end key can't be reached without going up again in the tree. This
+                    // simplifies things a bit.
+                    // Find the next child, in other words the node superior or equal to
+                    // `iter`.
+                    if let Some(child) = node.children[usize::from(u8::from(iter_1))..]
+                        .iter()
+                        .copied()
+                        .find_map(|c| c)
+                    {
+                        iter_key_nibbles_extra += self.nodes.get(child).unwrap().partial_key.len();
+                        // Point `iter` to the child and loop again, which yields it.
+                        iter = (child, None);
+                        continue;
+                    } else {
+                        // `iter` has no child. Go up the tree.
+                        loop {
+                            let node = self.nodes.get(iter.0).unwrap();
+
+                            // End the iterator if we were about to jump out of the end bound.
+                            if iter_key_nibbles_extra < 1 + node.partial_key.len() {
+                                return None;
+                            }
+
+                            let Some((parent_node_index, parent_nibble_direction)) = node.parent else { return None; };
+                            iter_key_nibbles_extra -= 1;
+                            iter_key_nibbles_extra -= node.partial_key.len();
+                            iter.0 = parent_node_index;
+                            iter.1 = match parent_nibble_direction.checked_add(1) {
+                                Some(idx) => Some(idx),
+                                None => continue,
+                            };
+                            break;
+                        }
                     }
                 }
             }
