@@ -893,7 +893,7 @@ fn range() {
                         trie_result,
                         Vec::new(),
                         "{:?} {:?} {:?} {:?}",
-                        final_storage,
+                        btree_map,
                         trie_result,
                         start_range_btree,
                         end_range_btree
@@ -912,8 +912,8 @@ fn range() {
                 .collect::<Vec<_>>();
             assert_eq!(
                 btree_result, trie_result,
-                "all_keys: {:?}\nbtree: {:?}\nbtree_result: {:?}\ntrie_result: {:?}\nstart: {:?}\nend: {:?}",
-                final_storage, btree_map, btree_result, trie_result, start_range_btree, end_range_btree
+                "btree: {:?}\nbtree_result: {:?}\ntrie_result: {:?}\nstart: {:?}\nend: {:?}",
+                btree_map, btree_result, trie_result, start_range_btree, end_range_btree
             );
         }
     }
