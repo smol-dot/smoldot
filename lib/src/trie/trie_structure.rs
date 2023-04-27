@@ -598,7 +598,7 @@ impl<TUd> TrieStructure<TUd> {
     /// Returns all nodes whose full key is within the given range, in lexicographic order.
     fn range_inner<'a>(
         &'a self,
-        start_bound: ops::Bound<impl Iterator<Item = Nibble> + 'a>,
+        start_bound: ops::Bound<impl Iterator<Item = Nibble>>,
         end_bound: ops::Bound<impl Iterator<Item = Nibble> + 'a>,
     ) -> impl Iterator<Item = usize> + 'a {
         // Start by processing the end bound to obtain an "end key".
@@ -647,8 +647,10 @@ impl<TUd> TrieStructure<TUd> {
         // Iterate down the tree, updating the variables above. At each iteration, one of the
         // three following is true:
         //
-        // - `iter` is inferior or inferior or equal to `start_key`.
-        // - `iter` is the first node that is superior or strictly superior to `start_key`.
+        // - `iter` is inferior or inferior or equal (depending on `start_key_is_inclusive`) to
+        //   `start_key`.
+        // - `iter` is the first node that is superior or strictly superior (depending on
+        //   `start_key_is_inclusive`) to `start_key`.
         // - `iter` points to a non-existing node that is inferior/inferior-or-equal to
         //   `start_key`, but is right before the first node that is superior/strictly superior to
         //   `start_key`.
