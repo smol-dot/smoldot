@@ -19,6 +19,8 @@
 
 use super::{Nibble, TrieStructure};
 
+use alloc::collections::BTreeMap;
+use core::ops;
 use rand::{
     distributions::{Distribution as _, Uniform},
     seq::SliceRandom as _,
@@ -781,4 +783,116 @@ fn iter_properly_traverses() {
     }
 
     assert_eq!(trie.all_nodes_ordered().count(), trie.nodes.len());
+}
+
+#[test]
+fn range() {
+    // This test makes sure that the `range` function works as expected.
+    // It first builds a random tree structure, then puts all the nodes of the structure into
+    // a `BTreeMap` (from the standard library), then compares whether `TreeStructure::range`
+    // returns the same results as `BTreeMap::range`.
+
+    fn uniform_sample(min: u8, max: u8) -> u8 {
+        Uniform::new_inclusive(min, max).sample(&mut rand::thread_rng())
+    }
+
+    // We run the test multiple times because of randomness.
+    for _ in 0..256 {
+        // Generate a set of random keys that will find themselves in the trie in the end.
+        let final_storage: HashSet<Vec<Nibble>> = {
+            let mut list = vec![Vec::new()];
+            for _ in 0..25 {
+                for elem in list.clone().into_iter() {
+                    for _ in 0..uniform_sample(0, 4) {
+                        let mut elem = elem.clone();
+                        for _ in 0..uniform_sample(0, 3) {
+                            elem.push(Nibble::try_from(uniform_sample(0, 15)).unwrap());
+                        }
+                        list.push(elem);
+                    }
+                }
+            }
+            list.into_iter().skip(1).collect()
+        };
+
+        // Create a trie and puts `final_storage` in it.
+        let mut trie = TrieStructure::new();
+        for key in &final_storage {
+            match trie.node(key.iter().copied()) {
+                super::Entry::Vacant(e) => {
+                    e.insert_storage_value().insert((), ());
+                }
+                super::Entry::Occupied(super::NodeAccess::Branch(e)) => {
+                    e.insert_storage_value();
+                }
+                super::Entry::Occupied(super::NodeAccess::Storage(_)) => {
+                    unreachable!()
+                }
+            }
+        }
+
+        // Create a `BTreeMap` containins all the nodes of the trie.
+        let btree_map = trie
+            .iter_unordered()
+            .map(|node_index| {
+                let full_key = trie
+                    .node_full_key_by_index(node_index)
+                    .unwrap()
+                    .collect::<Vec<_>>();
+                (full_key, node_index)
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        // Randomly query ranges of the btree map and the trie.
+        for _ in 0..64 {
+            let mut start_key = Vec::new();
+            for _ in 0..uniform_sample(0, 5) {
+                start_key.push(Nibble::try_from(uniform_sample(0, 15)).unwrap());
+            }
+
+            let mut end_key = Vec::new();
+            for _ in 0..uniform_sample(0, 5) {
+                end_key.push(Nibble::try_from(uniform_sample(0, 15)).unwrap());
+            }
+
+            let (start_range_btree, start_range_trie) = match uniform_sample(0, 2) {
+                0 => (
+                    ops::Bound::Included(start_key.clone()),
+                    ops::Bound::Included(start_key.iter().copied()),
+                ),
+                1 => (
+                    ops::Bound::Excluded(start_key.clone()),
+                    ops::Bound::Excluded(start_key.iter().copied()),
+                ),
+                2 => (ops::Bound::Unbounded, ops::Bound::Unbounded),
+                _ => unreachable!(),
+            };
+
+            let (end_range_btree, end_range_trie) = match uniform_sample(0, 2) {
+                0 => (
+                    ops::Bound::Included(end_key.clone()),
+                    ops::Bound::Included(end_key.iter().copied()),
+                ),
+                1 => (
+                    ops::Bound::Excluded(end_key.clone()),
+                    ops::Bound::Excluded(end_key.iter().copied()),
+                ),
+                2 => (ops::Bound::Unbounded, ops::Bound::Unbounded),
+                _ => unreachable!(),
+            };
+
+            let btree_result = btree_map
+                .range((start_range_btree, end_range_btree))
+                .map(|(_, idx)| *idx)
+                .collect::<Vec<_>>();
+            let trie_result = trie
+                .range(start_range_trie, end_range_trie)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                btree_result, trie_result,
+                "all_keys: {:?}\nbtree_result: {:?}\ntrie_result: {:?}",
+                final_storage, btree_result, trie_result
+            );
+        }
+    }
 }

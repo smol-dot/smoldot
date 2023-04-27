@@ -596,6 +596,16 @@ impl<TUd> TrieStructure<TUd> {
     }
 
     /// Returns all nodes whose full key is within the given range, in lexicographic order.
+    // TODO: change API to accept the range trait
+    pub fn range<'a>(
+        &'a self,
+        start_bound: ops::Bound<impl Iterator<Item = Nibble>>,
+        end_bound: ops::Bound<impl Iterator<Item = Nibble> + 'a>,
+    ) -> impl Iterator<Item = NodeIndex> + 'a {
+        self.range_inner(start_bound, end_bound).map(NodeIndex)
+    }
+
+    /// Returns all nodes whose full key is within the given range, in lexicographic order.
     fn range_inner<'a>(
         &'a self,
         start_bound: ops::Bound<impl Iterator<Item = Nibble>>,
