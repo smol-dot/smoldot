@@ -29,12 +29,10 @@
 
 use crate::run::{database_thread, jaeger_service};
 
-use core::{cmp, mem, task::Poll, time::Duration};
-use futures::{
-    channel::{mpsc, oneshot},
-    lock::Mutex,
-    prelude::*,
-};
+use async_lock::Mutex;
+use core::{cmp, future::Future, mem, task::Poll, time::Duration};
+use futures_channel::{mpsc, oneshot};
+use futures_util::{future, stream, FutureExt as _, SinkExt as _, StreamExt as _};
 use hashbrown::HashMap;
 use smoldot::{
     database::full_sqlite,
@@ -73,6 +71,9 @@ pub struct Config<'a> {
 
     /// List of block chains to be connected to.
     pub chains: Vec<ChainConfig>,
+
+    /// Value sent back for the agent version when receiving an identification request.
+    pub identify_agent_version: String,
 
     /// Key used for the encryption layer.
     /// This is a Noise static key, according to the Noise specification.
@@ -143,6 +144,9 @@ pub struct NetworkService {
 struct Inner {
     /// Fields behind a mutex.
     guarded: Mutex<Guarded>,
+
+    /// Value provided through [`Config::identify_agent_version`].
+    identify_agent_version: String,
 
     /// Event to notify when the background task needs to be waken up.
     ///
@@ -274,6 +278,7 @@ impl NetworkService {
                     *network.noise_key().libp2p_public_ed25519_key(),
                 )
                 .into_peer_id(),
+                identify_agent_version: config.identify_agent_version,
                 wake_up_main_background_task: event_listener::Event::new(),
                 databases,
                 guarded: Mutex::new(Guarded {
@@ -455,7 +460,7 @@ impl NetworkService {
             let future = async move {
                 let mut connections = stream::FuturesUnordered::new();
                 loop {
-                    futures::select! {
+                    futures_util::select! {
                         new_connec = conn_tasks_rx.select_next_some() => {
                             connections.push(new_connec);
                         },
@@ -896,7 +901,9 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                     request_id,
                 } => {
                     log::debug!("identify-request; peer_id={}", peer_id);
-                    guarded.network.respond_identify(request_id, "smoldot");
+                    guarded
+                        .network
+                        .respond_identify(request_id, &inner.identify_agent_version);
                 }
                 service::Event::BlocksRequestIn {
                     peer_id,
@@ -953,6 +960,7 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                         state.set_id,
                         state.commit_finalized_height,
                     );
+                    // TODO: report to the sync state machine
                 }
                 service::Event::GrandpaCommitMessage {
                     chain_index,

@@ -22,7 +22,7 @@ mod cli;
 mod run;
 
 fn main() {
-    futures::executor::block_on(async_main())
+    futures_executor::block_on(async_main())
 }
 
 async fn async_main() {

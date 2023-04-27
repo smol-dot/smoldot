@@ -240,7 +240,6 @@ pub struct Config<TModule> {
 ///
 /// > **Note**: This struct implements `Clone`. Cloning a [`HostVmPrototype`] allocates memory
 /// >           necessary for the clone to run.
-// TODO: this behaviour ^ interacts with zero-ing memory when resetting from a vm to a prototype; figure out and clarify
 #[derive(Clone)]
 pub struct HostVmPrototype {
     /// Runtime version of this runtime.
@@ -273,12 +272,20 @@ pub struct HostVmPrototype {
 impl HostVmPrototype {
     /// Creates a new [`HostVmPrototype`]. Parses and potentially JITs the module.
     pub fn new(config: Config<impl AsRef<[u8]>>) -> Result<Self, NewErr> {
-        // TODO: configurable maximum allowed size? a uniform value is important for consensus
+        // The maximum allowed size for the decompressed Wasm code needs to be the same amongst
+        // all implementations.
+        // See <https://github.com/paritytech/substrate/blob/f9d10fabe04d598d68f8b097cc4905adbb1ad630/primitives/maybe-compressed-blob/src/lib.rs#L37>.
+        // Hopefully, this value doesn't get changed without the Substrate team informing everyone.
         let module_bytes = zstd::zstd_decode_if_necessary(config.module.as_ref(), 50 * 1024 * 1024)
             .map_err(NewErr::BadFormat)?;
+
+        // Try to find the runtime version as Wasm custom sections.
+        // An error is returned if the sections have a wrong format, in which case we fail the
+        // initialization. `Ok(None)` can also be returned, in which case the sections are
+        // missing, and we will instead try to retrieve the version through a runtime call later
+        // down this function.
         let runtime_version = runtime_version::find_embedded_runtime_version(&module_bytes)
-            .ok()
-            .flatten(); // TODO: return error instead of using `ok()`? unclear
+            .map_err(NewErr::RuntimeVersion)?;
 
         // Initialize the virtual machine.
         // Each symbol requested by the Wasm runtime will be put in `registered_functions`. Later,
@@ -2471,6 +2478,16 @@ pub enum StorageKey<T> {
     ChildTrieDefault { child_trie: T, key: T },
 }
 
+impl<T> StorageKey<T> {
+    /// Returns the key alone.
+    pub fn into_key(self) -> T {
+        match self {
+            StorageKey::MainTrie { key } => key,
+            StorageKey::ChildTrieDefault { key, .. } => key,
+        }
+    }
+}
+
 impl<T> fmt::Debug for StorageKey<T>
 where
     T: AsRef<[u8]>,
@@ -3640,6 +3657,9 @@ pub enum NewErr {
     /// Error while initializing the virtual machine.
     #[display(fmt = "{_0}")]
     VirtualMachine(vm::NewErr),
+    /// Error while finding the runtime-version-related sections in the Wasm blob.
+    #[display(fmt = "Error in runtime spec Wasm sections: {_0}")]
+    RuntimeVersion(runtime_version::FindEmbeddedRuntimeVersionError),
     /// Error while calling `Core_version` to determine the runtime version.
     #[display(fmt = "Error while calling Core_version: {_0}")]
     CoreVersion(CoreVersionError),

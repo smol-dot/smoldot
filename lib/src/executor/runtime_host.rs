@@ -339,65 +339,6 @@ impl PrefixKeys {
         keys: impl Iterator<Item = impl AsRef<[u8]>>,
     ) -> RuntimeHostVm {
         match self.inner.vm {
-            host::HostVm::ExternalStorageClearPrefix(req) => {
-                // TODO: use prefix_remove_update once optimized and fixed to account for removal count limit
-                //main_trie_root_calculation_cache.prefix_remove_update(storage_key);
-
-                // Grab the maximum number of keys to remove, and initialize a counter for the
-                // number of keys removed so far.
-                let max_keys_to_remove = req.max_keys_to_remove();
-                let mut keys_removed_so_far = 0u32;
-
-                let prefix = match req.prefix() {
-                    host::StorageKey::MainTrie { key } => key.as_ref().to_owned(),
-                    _ => unreachable!(),
-                };
-
-                let mut after_overlay = self
-                    .inner
-                    .main_trie_changes
-                    .storage_prefix_keys_ordered(&prefix, keys)
-                    .peekable();
-
-                let mut keys_to_remove = Vec::new(); // TODO: capacity?
-
-                let some_keys_remain = loop {
-                    // Enforce the maximum number of keys to remove.
-                    if max_keys_to_remove.map_or(false, |max| keys_removed_so_far >= max) {
-                        break after_overlay.peek().is_some();
-                    }
-
-                    match after_overlay.next() {
-                        Some(k) => {
-                            keys_to_remove.push(k.as_ref().to_owned());
-
-                            // `wrapping_add` is used because the only way `keys_removed_so_far` can be
-                            // equal to `u32::max_value()` at this point is when `max_keys_to_remove`
-                            // is `None`.
-                            keys_removed_so_far = keys_removed_so_far.wrapping_add(1);
-                        }
-                        None => {
-                            break false;
-                        }
-                    }
-                };
-
-                drop(after_overlay);
-
-                for key in keys_to_remove {
-                    self.inner
-                        .main_trie_root_calculation_cache
-                        .as_mut()
-                        .unwrap()
-                        .storage_value_update(&key, false);
-                    self.inner
-                        .main_trie_changes
-                        .diff_insert_erase(key.clone(), ());
-                }
-
-                self.inner.vm = req.resume(keys_removed_so_far, some_keys_remain);
-            }
-
             host::HostVm::ExternalStorageRoot { .. } => {
                 if let calculate_root::RootMerkleValueCalculation::AllKeys(all_keys) =
                     self.inner.root_calculation.take().unwrap()
@@ -440,9 +381,11 @@ impl PrefixKeys {
 pub struct NextKey {
     inner: Inner,
 
-    /// If `Some`, ask for the key inside of this field rather than the one of `inner`. Used in
-    /// corner-case situations where the key provided by the user has been erased from storage.
+    /// If `Some`, ask for the key inside of this field rather than the one of `inner`.
     key_overwrite: Option<Vec<u8>>,
+
+    /// Number of keys removed. Used only to implement clearing a prefix, otherwise stays at 0.
+    keys_removed_so_far: u32,
 }
 
 impl NextKey {
@@ -458,7 +401,26 @@ impl NextKey {
                 host::StorageKey::MainTrie { key } => key,
                 _ => unreachable!(),
             }),
+
+            // Note that in the case `ExternalStorageClearPrefix`, `key_overwrite` is
+            // always `Some`.
             _ => unreachable!(),
+        }
+    }
+
+    /// If `true`, then the provided value must the one superior or equal to the requested key.
+    /// If `false`, then the provided value must be strictly superior to the requested key.
+    pub fn or_equal(&self) -> bool {
+        matches!(self.inner.vm, host::HostVm::ExternalStorageClearPrefix(_))
+            && self.keys_removed_so_far == 0
+    }
+
+    /// Returns the prefix the next key must start with. If the next key doesn't start with the
+    /// given prefix, then `None` should be provided.
+    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+        match &self.inner.vm {
+            host::HostVm::ExternalStorageClearPrefix(req) => either::Left(req.prefix().into_key()),
+            _ => either::Right(&[][..]),
         }
     }
 
@@ -467,6 +429,7 @@ impl NextKey {
     /// # Panic
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
+    /// Panics if the key passed as parameter doesn't start with the requested prefix.
     ///
     pub fn inject_key(mut self, key: Option<impl AsRef<[u8]>>) -> RuntimeHostVm {
         let key = key.as_ref().map(|k| k.as_ref());
@@ -485,7 +448,7 @@ impl NextKey {
                     };
                     self.inner
                         .main_trie_changes
-                        .storage_next_key(requested_key, key)
+                        .storage_next_key(requested_key, key, false)
                 };
 
                 match search {
@@ -498,8 +461,42 @@ impl NextKey {
                         return RuntimeHostVm::NextKey(NextKey {
                             inner: self.inner,
                             key_overwrite,
+                            keys_removed_so_far: 0,
                         });
                     }
+                }
+            }
+
+            host::HostVm::ExternalStorageClearPrefix(req) => {
+                // TODO: there's some trickiness regarding the behavior w.r.t keys only in the overlay; figure out
+
+                if let Some(key) = key {
+                    assert!(key.starts_with(req.prefix().into_key().as_ref()));
+
+                    // TODO: /!\ must clear keys from overlay as well
+
+                    if req
+                        .max_keys_to_remove()
+                        .map_or(false, |max| self.keys_removed_so_far >= max)
+                    {
+                        self.inner.vm = req.resume(self.keys_removed_so_far, true);
+                    } else {
+                        self.inner
+                            .main_trie_root_calculation_cache
+                            .as_mut()
+                            .unwrap()
+                            .storage_value_update(&key, false);
+                        self.inner
+                            .main_trie_changes
+                            .diff_insert_erase(key.clone(), ());
+                        self.keys_removed_so_far += 1;
+                        self.key_overwrite = Some(key.to_owned()); // TODO: might be expensive if lots of keys
+                        self.inner.vm = req.into();
+
+                        return RuntimeHostVm::NextKey(self);
+                    }
+                } else {
+                    self.inner.vm = req.resume(self.keys_removed_so_far, false);
                 }
             }
 
@@ -742,10 +739,18 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageClearPrefix(req) => {
-                    let is_main_trie = matches!(req.prefix(), host::StorageKey::MainTrie { .. });
-                    if is_main_trie {
+                    let prefix = match req.prefix() {
+                        host::StorageKey::MainTrie { key } => Some(key.as_ref().to_owned()),
+                        _ => None,
+                    };
+
+                    if let Some(prefix) = prefix {
                         self.vm = req.into();
-                        return RuntimeHostVm::PrefixKeys(PrefixKeys { inner: self });
+                        return RuntimeHostVm::NextKey(NextKey {
+                            inner: self,
+                            key_overwrite: Some(prefix),
+                            keys_removed_so_far: 0,
+                        });
                     } else {
                         // TODO: this is a dummy implementation and child tries are not implemented properly
                         self.vm = req.resume(0, false);
@@ -809,6 +814,7 @@ impl Inner {
                         return RuntimeHostVm::NextKey(NextKey {
                             inner: self,
                             key_overwrite: None,
+                            keys_removed_so_far: 0,
                         });
                     } else {
                         // TODO: this is a dummy implementation and child tries are not implemented properly

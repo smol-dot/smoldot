@@ -32,9 +32,9 @@
 // Note: believe or not, but I couldn't find a library that does this in the Rust ecosystem.
 
 use alloc::sync::{Arc, Weak};
+use async_lock::Mutex;
 use core::{fmt, future::Future, pin::Pin, sync::atomic, task};
-use futures::future::BoxFuture;
-use futures::lock::Mutex;
+use futures_util::future::BoxFuture;
 
 /// See [the module-level documentation](..).
 pub struct TasksQueue {
@@ -211,7 +211,7 @@ impl alloc::task::Wake for Waker {
 mod tests {
     use alloc::sync::Arc;
     use core::sync::atomic;
-    use futures::{SinkExt as _, StreamExt as _};
+    use futures_util::{SinkExt as _, StreamExt as _};
 
     #[test]
     fn no_race_condition() {
@@ -229,8 +229,8 @@ mod tests {
             // Note that we use a `ThreadPool` rather that spawn futures with
             // `async_std::task::spawn`, as at the end of the test all executors but one will be
             // stuck sleeping, and we preferably don't want them to leak.
-            let threads_pool = futures::executor::ThreadPool::new().unwrap();
-            let (finished_tx, mut finished_rx) = futures::channel::mpsc::channel::<()>(0);
+            let threads_pool = futures_executor::ThreadPool::new().unwrap();
+            let (finished_tx, mut finished_rx) = futures_channel::mpsc::channel::<()>(0);
             for _ in 0..4 {
                 let queue = queue.clone();
                 let counter = counter.clone();

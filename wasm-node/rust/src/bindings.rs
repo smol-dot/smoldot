@@ -65,8 +65,6 @@
 //! they are treated as unsigned integers by the JavaScript.
 //!
 
-use core::mem;
-
 #[link(wasm_import_module = "smoldot")]
 extern "C" {
     /// Must stop the execution immediately. The message is a UTF-8 string found in the memory of
@@ -621,6 +619,14 @@ pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, buffer_inde
 /// stream (and, in the case of a multi-stream connection, the stream itself) must be in the
 /// `Open` state.
 ///
+/// `total_sent - total_reported_writable_bytes` must always be `>= 0`, where `total_sent` is the
+/// total number of bytes sent on the stream using [`stream_send`] and
+/// `total_reported_writable_bytes` is the total number of bytes reported using
+/// [`stream_writable_bytes`].
+/// In other words, this function is meant to notify that data sent using [`stream_send`̀] has
+/// effectively been sent out. It is not possible to exceed the `initial_writable_bytes` provided
+/// when the stream was created.
+///
 /// If `connection_id` is a single-stream connection, then the value of `stream_id` is ignored.
 /// If `connection_id` is a multi-stream connection, then `stream_id` corresponds to the stream
 /// on which the data was received, as was provided to [`connection_stream_opened`].
@@ -695,14 +701,12 @@ pub(crate) fn get_buffer(buffer_index: u32) -> Vec<u8> {
     unsafe {
         let len = usize::try_from(buffer_size(buffer_index)).unwrap();
 
-        // TODO: consider rewriting this in a better way after all the currently unstable functions are stable: https://github.com/rust-lang/rust/issues/63291
-        let mut buffer = Vec::<mem::MaybeUninit<u8>>::with_capacity(len);
+        let mut buffer = Vec::<u8>::with_capacity(len);
         buffer_copy(
             buffer_index,
             buffer.spare_capacity_mut().as_mut_ptr() as usize as u32,
         );
         buffer.set_len(len);
-
-        mem::transmute::<Vec<mem::MaybeUninit<u8>>, Vec<u8>>(buffer)
+        buffer
     }
 }

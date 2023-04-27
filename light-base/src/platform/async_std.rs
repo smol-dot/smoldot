@@ -18,11 +18,13 @@
 #![cfg(feature = "std")]
 #![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
-use super::{ConnectError, Platform, PlatformConnection, PlatformSubstreamDirection, ReadBuffer};
+use super::{
+    ConnectError, PlatformConnection, PlatformRef, PlatformSubstreamDirection, ReadBuffer,
+};
 
-use alloc::collections::VecDeque;
+use alloc::{borrow::Cow, collections::VecDeque, sync::Arc};
 use core::{ops, pin::Pin, str, task::Poll, time::Duration};
-use futures::prelude::*;
+use futures_util::{future, AsyncRead, AsyncWrite, FutureExt as _};
 use smoldot::libp2p::{
     multiaddr::{Multiaddr, ProtocolRef},
     websocket,
@@ -32,11 +34,22 @@ use std::{
     net::{IpAddr, SocketAddr},
 };
 
-/// Implementation of the [`Platform`] trait that uses the `async-std` library and provides TCP
+/// Implementation of the [`PlatformRef`] trait that uses the `async-std` library and provides TCP
 /// and WebSocket connections.
-pub struct AsyncStdTcpWebSocket;
+#[derive(Clone)]
+pub struct AsyncStdTcpWebSocket {
+    client_name_version: Arc<(String, String)>,
+}
 
-impl Platform for AsyncStdTcpWebSocket {
+impl AsyncStdTcpWebSocket {
+    pub fn new(client_name: String, client_version: String) -> Self {
+        AsyncStdTcpWebSocket {
+            client_name_version: Arc::new((client_name, client_version)),
+        }
+    }
+}
+
+impl PlatformRef for AsyncStdTcpWebSocket {
     type Delay = future::BoxFuture<'static, ()>;
     type Yield = future::Ready<()>;
     type Instant = std::time::Instant;
@@ -50,30 +63,42 @@ impl Platform for AsyncStdTcpWebSocket {
     type NextSubstreamFuture<'a> =
         future::Pending<Option<(Self::Stream, PlatformSubstreamDirection)>>;
 
-    fn now_from_unix_epoch() -> Duration {
+    fn now_from_unix_epoch(&self) -> Duration {
         // Intentionally panic if the time is configured earlier than the UNIX EPOCH.
         std::time::UNIX_EPOCH.elapsed().unwrap()
     }
 
-    fn now() -> Self::Instant {
+    fn now(&self) -> Self::Instant {
         std::time::Instant::now()
     }
 
-    fn sleep(duration: Duration) -> Self::Delay {
+    fn sleep(&self, duration: Duration) -> Self::Delay {
         async_std::task::sleep(duration).boxed()
     }
 
-    fn sleep_until(when: Self::Instant) -> Self::Delay {
+    fn sleep_until(&self, when: Self::Instant) -> Self::Delay {
         let duration = when.saturating_duration_since(std::time::Instant::now());
-        Self::sleep(duration)
+        self.sleep(duration)
     }
 
-    fn yield_after_cpu_intensive() -> Self::Yield {
+    fn spawn_task(&self, _task_name: Cow<str>, task: future::BoxFuture<'static, ()>) {
+        async_std::task::spawn(task);
+    }
+
+    fn client_name(&self) -> Cow<str> {
+        Cow::Borrowed(&self.client_name_version.0)
+    }
+
+    fn client_version(&self) -> Cow<str> {
+        Cow::Borrowed(&self.client_name_version.1)
+    }
+
+    fn yield_after_cpu_intensive(&self) -> Self::Yield {
         // No-op.
         future::ready(())
     }
 
-    fn connect(multiaddr: &str) -> Self::ConnectFuture {
+    fn connect(&self, multiaddr: &str) -> Self::ConnectFuture {
         // We simply copy the address to own it. We could be more zero-cost here, but doing so
         // would considerably complicate the implementation.
         let multiaddr = multiaddr.to_owned();
@@ -198,19 +223,19 @@ impl Platform for AsyncStdTcpWebSocket {
         })
     }
 
-    fn open_out_substream(c: &mut Self::Connection) {
+    fn open_out_substream(&self, c: &mut Self::Connection) {
         // This function can only be called with so-called "multi-stream" connections. We never
         // open such connection.
         match *c {}
     }
 
-    fn next_substream(c: &'_ mut Self::Connection) -> Self::NextSubstreamFuture<'_> {
+    fn next_substream(&self, c: &'_ mut Self::Connection) -> Self::NextSubstreamFuture<'_> {
         // This function can only be called with so-called "multi-stream" connections. We never
         // open such connection.
         match *c {}
     }
 
-    fn update_stream(stream: &'_ mut Self::Stream) -> Self::StreamUpdateFuture<'_> {
+    fn update_stream<'a>(&self, stream: &'a mut Self::Stream) -> Self::StreamUpdateFuture<'a> {
         Box::pin(future::poll_fn(|cx| {
             let Some((read_buffer, write_buffer)) = stream.buffers.as_mut() else { return Poll::Pending };
 
@@ -326,7 +351,7 @@ impl Platform for AsyncStdTcpWebSocket {
         }))
     }
 
-    fn read_buffer(stream: &mut Self::Stream) -> ReadBuffer {
+    fn read_buffer<'a>(&self, stream: &'a mut Self::Stream) -> ReadBuffer<'a> {
         match stream.buffers.as_ref().map(|(r, _)| r) {
             None => ReadBuffer::Reset,
             Some(StreamReadBuffer::Closed) => ReadBuffer::Closed,
@@ -336,7 +361,7 @@ impl Platform for AsyncStdTcpWebSocket {
         }
     }
 
-    fn advance_read_cursor(stream: &mut Self::Stream, extra_bytes: usize) {
+    fn advance_read_cursor(&self, stream: &mut Self::Stream, extra_bytes: usize) {
         let Some(StreamReadBuffer::Open { ref mut cursor, .. }) =
             stream.buffers.as_mut().map(|(r, _)| r)
         else {
@@ -348,13 +373,13 @@ impl Platform for AsyncStdTcpWebSocket {
         cursor.start += extra_bytes;
     }
 
-    fn writable_bytes(stream: &mut Self::Stream) -> usize {
+    fn writable_bytes(&self, stream: &mut Self::Stream) -> usize {
         let Some(StreamWriteBuffer::Open { ref mut buffer, must_close: false, ..}) =
             stream.buffers.as_mut().map(|(_, w)| w) else { return 0 };
         buffer.capacity() - buffer.len()
     }
 
-    fn send(stream: &mut Self::Stream, data: &[u8]) {
+    fn send(&self, stream: &mut Self::Stream, data: &[u8]) {
         debug_assert!(!data.is_empty());
 
         // Because `writable_bytes` returns 0 if the writing side is closed, and because `data`
@@ -366,7 +391,7 @@ impl Platform for AsyncStdTcpWebSocket {
         buffer.extend(data.iter().copied());
     }
 
-    fn close_send(stream: &mut Self::Stream) {
+    fn close_send(&self, stream: &mut Self::Stream) {
         // It is not illegal to call this on an already-reset stream.
         let Some((_, write_buffer)) = stream.buffers.as_mut() else { return };
 

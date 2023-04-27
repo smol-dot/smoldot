@@ -16,16 +16,16 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::{BlockNotification, FinalizedBlockRuntime, Notification, SubscribeAll, ToBackground};
-use crate::{network_service, platform::Platform};
+use crate::{network_service, platform::PlatformRef};
 
 use alloc::{borrow::ToOwned as _, string::String, sync::Arc, vec::Vec};
 use core::{
     iter,
-    marker::PhantomData,
     num::{NonZeroU32, NonZeroU64},
     time::Duration,
 };
-use futures::{channel::mpsc, prelude::*};
+use futures_channel::mpsc;
+use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use hashbrown::{HashMap, HashSet};
 use smoldot::{
     chain, header,
@@ -36,8 +36,9 @@ use smoldot::{
 };
 
 /// Starts a sync service background task to synchronize a standalone chain (relay chain or not).
-pub(super) async fn start_standalone_chain<TPlat: Platform>(
+pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
     log_target: String,
+    platform: TPlat,
     chain_information: chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
     mut from_foreground: mpsc::Receiver<ToBackground>,
@@ -82,16 +83,16 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
         pending_grandpa_requests: stream::FuturesUnordered::new(),
         pending_storage_requests: stream::FuturesUnordered::new(),
         pending_call_proof_requests: stream::FuturesUnordered::new(),
-        warp_sync_taking_long_time_warning: future::Either::Left(TPlat::sleep(
-            Duration::from_secs(10),
-        ))
+        warp_sync_taking_long_time_warning: future::Either::Left(
+            platform.sleep(Duration::from_secs(10)),
+        )
         .fuse(),
         all_notifications: Vec::<mpsc::Sender<Notification>>::new(),
         log_target,
         network_service,
         network_chain_index,
         peers_source_id_map: HashMap::with_capacity_and_hasher(0, Default::default()),
-        platform: PhantomData,
+        platform,
     };
 
     // Necessary for the `select!` loop below.
@@ -132,7 +133,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
 
                 // As explained in the documentation of `yield_after_cpu_intensive`, we should
                 // yield after a CPU-intensive operation. This helps provide a better granularity.
-                TPlat::yield_after_cpu_intensive().await;
+                task.platform.yield_after_cpu_intensive().await;
             }
 
             queue_empty
@@ -191,7 +192,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
 
         // Now waiting for some event to happen: a network event, a request from the frontend
         // of the sync service, or a request being finished.
-        let response_outcome = futures::select! {
+        let response_outcome = futures_util::select! {
             network_event = from_network_service.next() => {
                 // Something happened on the network.
                 // We expect the networking channel to never close, so the event is unwrapped.
@@ -332,7 +333,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                 };
 
                 task.warp_sync_taking_long_time_warning =
-                    future::Either::Left(TPlat::sleep(Duration::from_secs(10))).fuse();
+                    future::Either::Left(task.platform.sleep(Duration::from_secs(10))).fuse();
                 continue;
             },
 
@@ -361,9 +362,12 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
     }
 }
 
-struct Task<TPlat: Platform> {
+struct Task<TPlat: PlatformRef> {
     /// Log target to use for all logs that are emitted.
     log_target: String,
+
+    /// Access to the platform's capabilities.
+    platform: TPlat,
 
     /// Main syncing state machine. Contains a list of peers, requests, and blocks, and manages
     /// everything about the non-finalized chain.
@@ -447,11 +451,9 @@ struct Task<TPlat: Platform> {
             ),
         >,
     >,
-
-    platform: PhantomData<fn() -> TPlat>,
 }
 
-impl<TPlat: Platform> Task<TPlat> {
+impl<TPlat: PlatformRef> Task<TPlat> {
     /// Starts one network request if any is necessary.
     ///
     /// Returns `true` if a request has been started.
@@ -713,7 +715,7 @@ impl<TPlat: Platform> Task<TPlat> {
                 // Header to verify.
                 let verified_hash = verify.hash();
                 let verified_height = verify.height();
-                match verify.perform(TPlat::now_from_unix_epoch(), ()) {
+                match verify.perform(self.platform.now_from_unix_epoch(), ()) {
                     all::HeaderVerifyOutcome::Success {
                         sync, is_new_best, ..
                     } => {
@@ -1170,6 +1172,16 @@ impl<TPlat: Platform> Task<TPlat> {
                         // Log messages are already printed above.
                     }
                 }
+            }
+
+            network_service::Event::GrandpaNeighborPacket {
+                peer_id,
+                chain_index,
+                finalized_block_height,
+            } if chain_index == self.network_chain_index => {
+                let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
+                self.sync
+                    .update_source_finality_state(sync_source_id, finalized_block_height);
             }
 
             network_service::Event::GrandpaCommitMessage {

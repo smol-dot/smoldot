@@ -17,15 +17,16 @@
 
 //! All JSON-RPC method handlers that relate to transactions.
 
-use super::{Background, Platform, SubscriptionMessage};
+use super::{Background, PlatformRef, SubscriptionMessage};
 
 use crate::transactions_service;
 
 use alloc::{borrow::ToOwned as _, str, string::ToString as _, sync::Arc, vec::Vec};
-use futures::prelude::*;
+use core::pin;
+use futures_util::{future, StreamExt as _};
 use smoldot::json_rpc::{self, methods, requests_subscriptions};
 
-impl<TPlat: Platform> Background<TPlat> {
+impl<TPlat: PlatformRef> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::author_pendingExtrinsics`].
     pub(super) async fn author_pending_extrinsics(
         self: &Arc<Self>,
@@ -184,8 +185,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 loop {
                     let event = {
-                        let next_message = messages_rx.next();
-                        futures::pin_mut!(next_message);
+                        let next_message = pin::pin!(messages_rx.next());
                         match future::select(transaction_updates.next(), next_message).await {
                             future::Either::Left((v, _)) => either::Left(v),
                             future::Either::Right((v, _)) => either::Right(v),
@@ -211,8 +211,7 @@ impl<TPlat: Platform> Background<TPlat> {
                             // client understands that no new notification is expected and
                             // unsubscribes.
                             break loop {
-                                let next_message = messages_rx.next();
-                                futures::pin_mut!(next_message);
+                                let next_message = pin::pin!(messages_rx.next());
                                 if let (
                                     SubscriptionMessage::StopIfTransactionLegacy {
                                         stop_request_id,

@@ -29,10 +29,9 @@ use core::{
     slice,
     task::{Context, Poll, Waker},
 };
+use futures_util::{task, FutureExt as _};
 // TODO: we use std::sync::Mutex rather than parking_lot::Mutex due to issues with Cargo features, see <https://github.com/paritytech/smoldot/issues/2732>
 use std::sync::Mutex;
-
-use futures::{task, FutureExt as _};
 
 /// See [`super::VirtualMachinePrototype`].
 pub struct JitPrototype {

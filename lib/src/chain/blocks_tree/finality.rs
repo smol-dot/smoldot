@@ -55,7 +55,14 @@ impl<T> NonFinalizedTree<T> {
                             unreachable!()
                         }
                     })
-                    .map(|(_, block)| (block.header.number, &block.hash));
+                    .map(|(_, block)| {
+                        (
+                            header::decode(&block.header, inner.block_number_bytes)
+                                .unwrap()
+                                .number,
+                            &block.hash,
+                        )
+                    });
 
                 either::Right(iter)
             }
@@ -171,7 +178,12 @@ impl<T> NonFinalizedTreeInner<T> {
                 finalized_scheduled_change,
                 finalized_triggered_authorities,
             } => {
-                match target_number.cmp(&self.finalized_block_header.number) {
+                let finalized_block_number =
+                    header::decode(&self.finalized_block_header, self.block_number_bytes)
+                        .unwrap()
+                        .number;
+
+                match target_number.cmp(&finalized_block_number) {
                     cmp::Ordering::Equal if *target_hash == self.finalized_block_hash => {
                         return Err(FinalityVerifyError::EqualToFinalized)
                     }
@@ -202,7 +214,7 @@ impl<T> NonFinalizedTreeInner<T> {
                 } = self.blocks.get(block_index).unwrap().finality
                 {
                     if let Some(prev_auth_change_trigger_number) = prev_auth_change_trigger_number {
-                        if *prev_auth_change_trigger_number > self.finalized_block_header.number {
+                        if *prev_auth_change_trigger_number > finalized_block_number {
                             return Err(FinalityVerifyError::TooFarAhead {
                                 justification_block_number: target_number,
                                 justification_block_hash: *target_hash,
@@ -379,7 +391,10 @@ impl<T> NonFinalizedTreeInner<T> {
                 );
                 debug_assert!(scheduled_change
                     .as_ref()
-                    .map(|(n, _)| *n > new_finalized_block.header.number)
+                    .map(|(n, _)| *n
+                        > header::decode(&new_finalized_block.header, self.block_number_bytes)
+                            .unwrap()
+                            .number)
                     .unwrap_or(true));
 
                 *after_finalized_block_authorities_set_id = *after_block_authorities_set_id;
@@ -426,9 +441,10 @@ impl<T> NonFinalizedTreeInner<T> {
                 let replace = if let Some(new_best_block) = new_best_block {
                     best_block::is_better_block(
                         &self.blocks,
+                        self.block_number_bytes,
                         new_best_block,
                         self.blocks.parent(idx),
-                        From::from(&block.header),
+                        header::decode(&block.header, self.block_number_bytes).unwrap(),
                     ) == Ordering::Greater
                 } else {
                     true
@@ -487,7 +503,8 @@ impl<T> NonFinalizedTreeInner<T> {
             &mut self.finalized_block_header,
             &mut new_finalized_block.header,
         );
-        self.finalized_block_hash = self.finalized_block_header.hash(self.block_number_bytes);
+        self.finalized_block_hash =
+            header::hash_from_scale_encoded_header(&self.finalized_block_header);
 
         debug_assert_eq!(self.blocks.len(), self.blocks_by_hash.len());
         SetFinalizedBlockIter {

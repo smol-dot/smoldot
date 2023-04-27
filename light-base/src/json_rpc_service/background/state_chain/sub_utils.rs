@@ -19,13 +19,13 @@
 //! by the JSON-RPC service.
 
 use crate::{
-    platform::Platform,
+    platform::PlatformRef,
     runtime_service::{Notification, RuntimeError, RuntimeService},
 };
 
 use alloc::{sync::Arc, vec::Vec};
 use core::num::NonZeroUsize;
-use futures::prelude::*;
+use futures_util::{future, stream, StreamExt as _};
 use smoldot::{executor, header};
 
 /// Returns the current runtime version, plus an unlimited stream that produces one item every
@@ -37,7 +37,7 @@ use smoldot::{executor, header};
 /// The stream can generate an `Err` if the runtime in the best block is invalid.
 ///
 /// The stream is infinite. In other words it is guaranteed to never return `None`.
-pub async fn subscribe_runtime_version<TPlat: Platform>(
+pub async fn subscribe_runtime_version<TPlat: PlatformRef>(
     runtime_service: &Arc<RuntimeService<TPlat>>,
 ) -> (
     Result<executor::CoreVersion, RuntimeError>,
@@ -223,7 +223,7 @@ pub async fn subscribe_runtime_version<TPlat: Platform>(
 ///
 /// This function only returns once the runtime of the current finalized block is known. This
 /// might take a long time.
-pub async fn subscribe_finalized<TPlat: Platform>(
+pub async fn subscribe_finalized<TPlat: PlatformRef>(
     runtime_service: &Arc<RuntimeService<TPlat>>,
 ) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
     let mut master_stream = stream::unfold(runtime_service.clone(), |runtime_service| async move {
@@ -306,7 +306,7 @@ pub async fn subscribe_finalized<TPlat: Platform>(
 ///
 /// This function only returns once the runtime of the current best block is known. This might
 /// take a long time.
-pub async fn subscribe_best<TPlat: Platform>(
+pub async fn subscribe_best<TPlat: PlatformRef>(
     runtime_service: &Arc<RuntimeService<TPlat>>,
 ) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
     let mut master_stream = stream::unfold(runtime_service.clone(), |runtime_service| async move {

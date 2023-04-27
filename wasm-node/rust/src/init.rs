@@ -18,11 +18,12 @@
 use crate::{alloc, bindings, cpu_rate_limiter, platform, timers::Delay};
 
 use core::{future::Future, pin::Pin, time::Duration};
-use futures::{channel::mpsc, prelude::*};
+use futures_channel::mpsc;
+use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use smoldot::informant::BytesDisplay;
 use std::{panic, sync::atomic::Ordering, task};
 
-pub(crate) struct Client<TPlat: smoldot_light::platform::Platform, TChain> {
+pub(crate) struct Client<TPlat: smoldot_light::platform::PlatformRef, TChain> {
     pub(crate) smoldot: smoldot_light::Client<TPlat, TChain>,
 
     /// List of all chains that have been added by the user.
@@ -49,8 +50,8 @@ pub(crate) enum Chain {
         /// Receiver for JSON-RPC responses sent by the client. `None` if JSON-RPC requests are
         /// disabled on this chain.
         /// While this could in principle be a [`smoldot_light::JsonRpcResponses`], we wrap it
-        /// within a [`futures::Stream`] in order to guarantee that the `waker` that we register
-        /// doesn't get cleaned up.
+        /// within a [`futures_util::Stream`] in order to guarantee that the `waker` that we
+        /// register doesn't get cleaned up.
         json_rpc_responses_rx: Option<stream::BoxStream<'static, String>>,
     },
     Erroneous {
@@ -58,12 +59,12 @@ pub(crate) enum Chain {
     },
 }
 
-pub(crate) fn init<TPlat: smoldot_light::platform::Platform, TChain>(
+pub(crate) fn init<TChain>(
     max_log_level: u32,
     enable_current_task: bool,
     cpu_rate_limit: u32,
     periodically_yield: bool,
-) -> Client<TPlat, TChain> {
+) -> Client<platform::Platform, TChain> {
     // Try initialize the logging and the panic hook.
     let _ = log::set_boxed_logger(Box::new(Logger)).map(|()| {
         log::set_max_level(match max_log_level {
@@ -136,7 +137,7 @@ pub(crate) fn init<TPlat: smoldot_light::platform::Platform, TChain>(
             }
 
             loop {
-                futures::select! {
+                futures_util::select! {
                     (new_task_name, new_task) = new_task_rx.select_next_some() => {
                         all_tasks.push(FutureAdapter {
                             name: new_task_name,
@@ -199,16 +200,8 @@ pub(crate) fn init<TPlat: smoldot_light::platform::Platform, TChain>(
         ))
         .unwrap();
 
-    let client = smoldot_light::Client::new(smoldot_light::ClientConfig {
-        tasks_spawner: Box::new(move |name, task| {
-            new_task_tx.unbounded_send((name, task)).unwrap()
-        }),
-        system_name: env!("CARGO_PKG_NAME").into(),
-        system_version: env!("CARGO_PKG_VERSION").into(),
-    });
-
     Client {
-        smoldot: client,
+        smoldot: smoldot_light::Client::new(platform::Platform::new(new_task_tx)),
         chains: slab::Slab::with_capacity(8),
         periodically_yield,
         main_task,

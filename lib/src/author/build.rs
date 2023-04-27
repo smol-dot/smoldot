@@ -358,6 +358,18 @@ impl NextKey {
         self.0.key()
     }
 
+    /// If `true`, then the provided value must the one superior or equal to the requested key.
+    /// If `false`, then the provided value must be strictly superior to the requested key.
+    pub fn or_equal(&self) -> bool {
+        self.0.or_equal()
+    }
+
+    /// Returns the prefix the next key must start with. If the next key doesn't start with the
+    /// given prefix, then `None` should be provided.
+    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+        self.0.prefix()
+    }
+
     /// Injects the key.
     ///
     /// # Panic
@@ -402,21 +414,18 @@ impl Seal {
     ///
     /// The method then returns the finished block.
     pub fn inject_sr25519_signature(mut self, signature: [u8; 64]) -> runtime::Success {
-        // TODO: optimize?
-        let mut header: header::Header = header::decode(
+        let header = header::decode(
             &self.block.scale_encoded_header,
             self.shared.block_number_bytes,
         )
-        .unwrap()
-        .into();
-
-        // `push_aura_seal` error if there is already an Aura seal, indicating that the runtime
-        // code is misbehaving. This condition is already verified when the `Seal` is created.
-        header.digest.push_aura_seal(signature).unwrap();
+        .unwrap();
 
         self.block.scale_encoded_header = header
-            .scale_encoding(self.shared.block_number_bytes)
-            .fold(Vec::new(), |mut a, b| {
+            .scale_encoding_with_extra_digest_item(
+                self.shared.block_number_bytes,
+                header::DigestItemRef::AuraSeal(&signature),
+            )
+            .fold(Vec::with_capacity(8192), |mut a, b| {
                 a.extend_from_slice(b.as_ref());
                 a
             });

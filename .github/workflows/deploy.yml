@@ -58,7 +58,7 @@ jobs:
     permissions:
       contents: write   # Necessary to push on the `gh-pages` branch.
     container:
-      image: rust:1
+      image: rust:1.69
     steps:
       - uses: actions/checkout@v3
         with:
@@ -96,12 +96,13 @@ jobs:
   npm-publish:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.67
+      image: rust:1.69
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-node@v3.6.0
         with:
-          node-version: 14   # An old version is intentionally used in order to check compatibility
+          # Set the oldest version still maintained, in order to ensure compatibility. See <https://nodejs.dev/en/about/releases/>
+          node-version: 16
       - run: apt-get update && apt install -y binaryen # For `wasm-opt`
       - uses: actions-rs/toolchain@v1
         with:
@@ -113,7 +114,7 @@ jobs:
         working-directory: ./wasm-node/javascript
       - run: npm publish --unsafe-perm --dry-run
         working-directory: ./wasm-node/javascript
-      - uses: JS-DevTools/npm-publish@v1
+      - uses: JS-DevTools/npm-publish@v2
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         # Warning: this GitHub action doesn't seem to run prepublish scripts, hence
         # the `npm publish --dry-run` done right above is important to ensure this.
@@ -134,7 +135,7 @@ jobs:
           fetch-depth: 0   # Necessary below for checking if the tag exists.
       - uses: actions/setup-node@v3.6.0
         with:
-          node-version: 14
+          node-version: 16
       - uses: denoland/setup-deno@v1
         with:
           deno-version: v1.x

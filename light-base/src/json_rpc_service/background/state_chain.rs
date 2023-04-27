@@ -17,7 +17,7 @@
 
 //! All legacy JSON-RPC method handlers that relate to the chain or the storage.
 
-use super::{Background, Platform, SubscriptionMessage};
+use super::{Background, PlatformRef, SubscriptionMessage};
 
 use crate::runtime_service;
 
@@ -29,12 +29,14 @@ use alloc::{
     vec,
     vec::Vec,
 };
+use async_lock::MutexGuard;
 use core::{
     iter,
     num::{NonZeroU32, NonZeroUsize},
+    pin,
     time::Duration,
 };
-use futures::{lock::MutexGuard, prelude::*};
+use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use smoldot::{
     header,
     informant::HashDisplay,
@@ -44,7 +46,7 @@ use smoldot::{
 
 mod sub_utils;
 
-impl<TPlat: Platform> Background<TPlat> {
+impl<TPlat: PlatformRef> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::system_accountNextIndex`].
     pub(super) async fn account_next_index(
         self: &Arc<Self>,
@@ -443,9 +445,8 @@ impl<TPlat: Platform> Background<TPlat> {
 
                     loop {
                         let message = {
-                            let next_new_block = new_blocks.next();
-                            let next_message = messages_rx.next();
-                            futures::pin_mut!(next_message, next_new_block);
+                            let next_new_block = pin::pin!(new_blocks.next());
+                            let next_message = pin::pin!(messages_rx.next());
                             match future::select(next_new_block, next_message).await {
                                 future::Either::Left((v, _)) => either::Left(v),
                                 future::Either::Right((v, _)) => either::Right(v),
@@ -595,8 +596,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 loop {
                     let event = {
-                        let next_message = messages_rx.next();
-                        futures::pin_mut!(next_message);
+                        let next_message = pin::pin!(messages_rx.next());
                         match future::select(blocks_list.next(), next_message).await {
                             future::Either::Left((ev, _)) => either::Left(ev),
                             future::Either::Right((ev, _)) => either::Right(ev),
@@ -729,8 +729,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 loop {
                     let event = {
-                        let next_message = messages_rx.next();
-                        futures::pin_mut!(next_message);
+                        let next_message = pin::pin!(messages_rx.next());
                         match future::select(blocks_list.next(), next_message).await {
                             future::Either::Left((ev, _)) => either::Left(ev),
                             future::Either::Right((ev, _)) => either::Right(ev),
@@ -1437,8 +1436,8 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 let (current_spec, spec_changes) =
                     sub_utils::subscribe_runtime_version(&runtime_service).await;
-                let spec_changes = stream::iter(iter::once(current_spec)).chain(spec_changes);
-                futures::pin_mut!(spec_changes);
+                let mut spec_changes =
+                    pin::pin!(stream::iter(iter::once(current_spec)).chain(spec_changes));
 
                 let requests_subscriptions = {
                     let weak = Arc::downgrade(&requests_subscriptions);
@@ -1448,8 +1447,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 loop {
                     let event = {
-                        let next_message = messages_rx.next();
-                        futures::pin_mut!(next_message);
+                        let next_message = pin::pin!(messages_rx.next());
                         match future::select(spec_changes.next(), next_message).await {
                             future::Either::Left((ev, _)) => either::Left(ev),
                             future::Either::Right((ev, _)) => either::Right(ev),
@@ -1701,7 +1699,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     )
                     .await;
 
-                futures::pin_mut!(storage_updates);
+                let mut storage_updates = pin::pin!(storage_updates);
 
                 let requests_subscriptions = {
                     let weak = Arc::downgrade(&requests_subscriptions);
@@ -1711,8 +1709,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 loop {
                     let event = {
-                        let next_message = messages_rx.next();
-                        futures::pin_mut!(next_message);
+                        let next_message = pin::pin!(messages_rx.next());
                         match future::select(storage_updates.next(), next_message).await {
                             future::Either::Left((ev, _)) => either::Left(ev),
                             future::Either::Right((ev, _)) => either::Right(ev),
