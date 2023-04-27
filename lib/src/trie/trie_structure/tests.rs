@@ -881,6 +881,28 @@ fn range() {
                 _ => unreachable!(),
             };
 
+            match (&start_range_btree, &end_range_btree) {
+                (
+                    ops::Bound::Included(start) | ops::Bound::Excluded(start),
+                    ops::Bound::Included(end) | ops::Bound::Excluded(end),
+                ) if start > end => {
+                    let trie_result = trie
+                        .range(start_range_trie, end_range_trie)
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        trie_result,
+                        Vec::new(),
+                        "{:?} {:?} {:?} {:?}",
+                        final_storage,
+                        trie_result,
+                        start_range_btree,
+                        end_range_btree
+                    );
+                    continue;
+                }
+                _ => {}
+            }
+
             let btree_result = btree_map
                 .range((start_range_btree, end_range_btree))
                 .map(|(_, idx)| *idx)
