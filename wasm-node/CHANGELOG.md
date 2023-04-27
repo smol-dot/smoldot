@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.3 - 2023-04-27
+
 ### Changed
 
 - As NodeJS v14 reaches its end of life on April 30th 2023, the minimum NodeJS version required to run smoldot is now v16. The smoldot Wasm binary now has SIMD enabled, meaning that the minimum Deno version required to run smoldot is now v1.9.
