@@ -27,10 +27,13 @@ impl Nibble {
         Nibble(0)
     }
 
+    /// Returns the equivalent of `Nibble::try_from(15).unwrap()`. It is the maximum possible value
+    /// for a nibble.
     pub fn max() -> Self {
         Nibble(15)
     }
 
+    /// Add the given number to the nibble. Returns `None` on overflow.
     pub fn checked_add(self, val: u8) -> Option<Self> {
         let new_nibble = self.0.checked_add(val)?;
         if new_nibble >= 16 {
