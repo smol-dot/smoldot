@@ -19,7 +19,7 @@
 
 use super::{Nibble, TrieStructure};
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use core::ops;
 use rand::{
     distributions::{Distribution as _, Uniform},
@@ -799,7 +799,7 @@ fn range() {
     // We run the test multiple times because of randomness.
     for _ in 0..256 {
         // Generate a set of random keys that will find themselves in the trie in the end.
-        let final_storage: HashSet<Vec<Nibble>> = {
+        let final_storage: BTreeSet<Vec<Nibble>> = {
             let mut list = vec![Vec::new()];
             for _ in 0..4 {
                 for elem in list.clone().into_iter() {
