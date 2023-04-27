@@ -904,7 +904,7 @@ fn range() {
             }
 
             let btree_result = btree_map
-                .range((start_range_btree, end_range_btree))
+                .range((start_range_btree.clone(), end_range_btree.clone()))
                 .map(|(_, idx)| *idx)
                 .collect::<Vec<_>>();
             let trie_result = trie
@@ -912,8 +912,8 @@ fn range() {
                 .collect::<Vec<_>>();
             assert_eq!(
                 btree_result, trie_result,
-                "all_keys: {:?}\nbtree_result: {:?}\ntrie_result: {:?}",
-                final_storage, btree_result, trie_result
+                "all_keys: {:?}\nbtree_result: {:?}\ntrie_result: {:?}\nstart: {:?}\nend: {:?}",
+                final_storage, btree_result, trie_result, start_range_btree, end_range_btree
             );
         }
     }
