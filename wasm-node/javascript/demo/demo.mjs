@@ -27,7 +27,8 @@ import * as fs from 'node:fs';
 const chainSpecsFiles = [
     //'../../demo-chain-specs/westend.json',
     //'../../demo-chain-specs/westend-westmint.json',
-    //'../../demo-chain-specs/polkadot.json',
+    '../../demo-chain-specs/polkadot.json',
+    '../../demo-chain-specs/astar.json',
     //'../../demo-chain-specs/polkadot-acala.json',
     //'../../demo-chain-specs/kusama.json',
     //'../../demo-chain-specs/kusama-statemine.json',
