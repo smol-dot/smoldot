@@ -899,6 +899,23 @@ fn range() {
                     );
                     continue;
                 }
+                (
+                    ops::Bound::Excluded(start),
+                    ops::Bound::Excluded(end),
+                ) if start == end => {
+                    let trie_result = trie
+                        .range(start_range_trie, end_range_trie)
+                        .collect::<Vec<_>>();
+                    assert!(
+                        trie_result.is_empty(),
+                        "{:?} {:?} {:?} {:?}",
+                        btree_map,
+                        trie_result,
+                        start_range_btree,
+                        end_range_btree
+                    );
+                    continue;
+                }
                 _ => {}
             }
 
