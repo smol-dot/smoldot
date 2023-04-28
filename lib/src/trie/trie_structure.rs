@@ -824,14 +824,14 @@ impl<TUd> TrieStructure<TUd> {
                         let node = self.nodes.get(iter.0).unwrap();
 
                         // End the iterator if we were about to jump out of the end bound.
-                        if iter_key_nibbles_extra < 1 + node.partial_key.len() {
+                        if iter_key_nibbles_extra < 2 + node.partial_key.len() {
                             return None;
                         }
 
                         let Some((parent_node_index, parent_nibble_direction)) = node.parent else { return None; };
-                        iter_key_nibbles_extra -= 1;
+                        iter_key_nibbles_extra -= 2;
                         iter_key_nibbles_extra -= node.partial_key.len();
-                        iter.0 = parent_node_index;
+                        iter = (parent_node_index, None);
                         let next_sibling_nibble = match parent_nibble_direction.checked_add(1) {
                             Some(idx) => idx,
                             None => continue,
