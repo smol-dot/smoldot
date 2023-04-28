@@ -40,7 +40,7 @@ use smoldot::{
     libp2p,
     network::{self, protocol::BlockData},
     sync::all::{self, TrieEntryVersion},
-    trie::{bytes_to_nibbles, trie_structure},
+    trie::{bytes_to_nibbles, nibbles_to_bytes_suffix_extend, trie_structure},
 };
 use std::{
     iter,
@@ -127,7 +127,7 @@ impl ConsensusService {
             finalized_block_number,
             best_block_hash,
             best_block_number,
-            finalized_block_storage,
+            mut finalized_block_storage,
             finalized_chain_information,
         ) = config
             .database
@@ -243,7 +243,7 @@ impl ConsensusService {
                             finalized_block_storage
                                 .node(bytes_to_nibbles(b":heappages".iter().copied()))
                                 .into_occupied()
-                                .and_then(|node| node.user_data().as_ref())
+                                .and_then(|node| node.into_user_data().as_ref())
                                 .map(|(hp, _)| &hp[..]),
                         )
                         .unwrap();
@@ -251,7 +251,8 @@ impl ConsensusService {
                             .node(bytes_to_nibbles(b":code".iter().copied()))
                             .into_occupied()
                             .unwrap()
-                            .user_data()
+                            .into_user_data()
+                            .as_ref()
                             .unwrap();
                         executor::host::HostVmPrototype::new(executor::host::Config {
                             module,
@@ -770,21 +771,29 @@ impl SyncBackground {
                     }
 
                     // Access to the best block storage.
-                    author::build::BuilderAuthoring::StorageGet(get) => {
+                    author::build::BuilderAuthoring::StorageGet(req) => {
                         // Access the storage of the best block. Can return `̀None` if not syncing
                         // in full mode, in which case we shouldn't have reached this code.
                         let best_block_storage_access = self.sync.best_block_storage().unwrap();
 
-                        let value = {
-                            let key = get.key();
-                            best_block_storage_access.get(key.as_ref(), || {
-                                self.finalized_block_storage
-                                    .get(key.as_ref())
-                                    .map(|(val, vers)| (&val[..], *vers))
-                            })
+                        let value = match self
+                            .finalized_block_storage
+                            .node(bytes_to_nibbles(req.key().as_ref().iter().copied()))
+                        {
+                            trie_structure::Entry::Occupied(
+                                trie_structure::NodeAccess::Storage(node),
+                            ) => {
+                                let (val, vers) = node.into_user_data().as_ref().unwrap();
+                                Some((&val[..], *vers))
+                            }
+                            trie_structure::Entry::Occupied(
+                                trie_structure::NodeAccess::Branch(_),
+                            )
+                            | trie_structure::Entry::Vacant(_) => None,
                         };
+
                         block_authoring =
-                            get.inject_value(value.map(|(val, vers)| (iter::once(val), vers)));
+                            req.inject_value(value.map(|(val, vers)| (iter::once(val), vers)));
                         continue;
                     }
                     author::build::BuilderAuthoring::NextKey(_) => {
@@ -795,23 +804,25 @@ impl SyncBackground {
                         // in full mode, in which case we shouldn't have reached this code.
                         let best_block_storage_access = self.sync.best_block_storage().unwrap();
 
-                        let keys = best_block_storage_access
-                            .prefix_keys_ordered(
-                                prefix_key.prefix().as_ref(),
-                                self.finalized_block_storage
-                                    .range::<[u8], _>((
-                                        ops::Bound::Included(prefix_key.prefix().as_ref()),
-                                        ops::Bound::Unbounded,
-                                    ))
-                                    .take_while(|(k, _)| {
-                                        k.starts_with(prefix_key.prefix().as_ref())
-                                    })
-                                    .map(|(k, _)| &k[..]),
-                            )
-                            .map(|k| k.as_ref().to_vec()) // TODO: overhead
-                            .collect::<Vec<_>>();
+                        // TODO: to_vec() :-/ range() immediately calculates the range of keys so there's no borrowing issue, but the take_while needs to keep req borrowed, which isn't possible
+                        let prefix = prefix_key.prefix().as_ref().to_vec();
+                        let keys = self
+                            .finalized_block_storage
+                            .range(ops::Bound::Included(&prefix), ops::Bound::Unbounded)
+                            .filter(|node_index| {
+                                self.finalized_block_storage.is_storage(*node_index)
+                            })
+                            .map(|node_index| {
+                                nibbles_to_bytes_suffix_extend(
+                                    self.finalized_block_storage
+                                        .node_full_key_by_index(node_index)
+                                        .unwrap(),
+                                )
+                                .collect::<Vec<_>>()
+                            })
+                            .take_while(|k| k.starts_with(&prefix));
 
-                        block_authoring = prefix_key.inject_keys_ordered(keys.into_iter());
+                        block_authoring = prefix_key.inject_keys_ordered(keys);
                         continue;
                     }
                 }
@@ -1182,19 +1193,22 @@ impl SyncBackground {
                             all::BlockVerification::FinalizedStorageNextKey(req) => {
                                 let next_key = self
                                     .finalized_block_storage
-                                    .range((
+                                    .range(
                                         ops::Bound::Excluded(req.key().as_ref()),
                                         ops::Bound::Unbounded,
-                                    ))
+                                    )
                                     .filter(|node_index| {
-                                        todo!("check that node is storage node and not branch")
+                                        self.finalized_block_storage.is_storage(*node_index)
                                     })
                                     .next()
                                     .map(|node_index| {
-                                        self.finalized_block_storage
-                                            .node_full_key_by_index(node_index)
-                                            .unwrap()
-                                            .collect::<Vec<_>>()
+                                        // TODO: consider detecting if nibbles are uneven instead of ignoring the problem
+                                        nibbles_to_bytes_suffix_extend(
+                                            self.finalized_block_storage
+                                                .node_full_key_by_index(node_index)
+                                                .unwrap(),
+                                        )
+                                        .collect::<Vec<_>>()
                                     });
                                 verify = req.inject_key(next_key);
                             }
@@ -1203,20 +1217,19 @@ impl SyncBackground {
                                 let prefix = req.prefix().as_ref().to_vec();
                                 let keys = self
                                     .finalized_block_storage
-                                    .range((
-                                        ops::Bound::Included(req.prefix().as_ref()),
-                                        ops::Bound::Unbounded,
-                                    ))
+                                    .range(ops::Bound::Included(&prefix), ops::Bound::Unbounded)
                                     .filter(|node_index| {
-                                        todo!("check that node is storage node and not branch")
+                                        self.finalized_block_storage.is_storage(*node_index)
                                     })
                                     .map(|node_index| {
-                                        self.finalized_block_storage
-                                            .node_full_key_by_index(node_index)
-                                            .unwrap()
-                                            .collect::<Vec<_>>()
+                                        nibbles_to_bytes_suffix_extend(
+                                            self.finalized_block_storage
+                                                .node_full_key_by_index(node_index)
+                                                .unwrap(),
+                                        )
+                                        .collect::<Vec<_>>()
                                     })
-                                    .take_while(|(k, _)| k.starts_with(&prefix));
+                                    .take_while(|k| k.starts_with(&prefix));
                                 verify = req.inject_keys_ordered(keys);
                             }
                             all::BlockVerification::RuntimeCompilation(rt) => {
@@ -1277,7 +1290,7 @@ impl SyncBackground {
                                             .finalized_block_storage
                                             .node(bytes_to_nibbles(key.iter().copied()))
                                         {
-                                            trie_structure::Entry::Occupied(node) => {
+                                            trie_structure::Entry::Occupied(mut node) => {
                                                 *node.user_data() = Some((
                                                     value.to_owned(),
                                                     block.full.as_ref().unwrap().state_trie_version,
@@ -1312,7 +1325,7 @@ impl SyncBackground {
                                             .node(bytes_to_nibbles(key.iter().copied()))
                                         {
                                             if let trie_structure::Remove::StorageToBranch(
-                                                new_node,
+                                                mut new_node,
                                             ) = node.remove()
                                             {
                                                 *new_node.user_data() = None;

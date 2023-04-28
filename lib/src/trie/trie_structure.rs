@@ -22,7 +22,7 @@
 
 // TODO: the API of `TrieStructure` is rather wonky and could be simplified
 
-use super::nibble::Nibble;
+use super::nibble::{bytes_to_nibbles, Nibble};
 
 use alloc::{borrow::ToOwned as _, vec, vec::Vec};
 use core::{cmp, fmt, iter, mem, ops};
@@ -283,6 +283,17 @@ impl<TUd> TrieStructure<TUd> {
                 closest_ancestor: closest_ancestor.map(|(i, _)| i),
             }),
         }
+    }
+
+    /// Returns `true` if the node with the given index is a storage node. Returns `false` if it
+    /// is a branch node.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`NodeIndex`] is invalid.
+    ///
+    pub fn is_storage(&self, node: NodeIndex) -> bool {
+        self.nodes[node.0].has_storage_value
     }
 
     /// Returns the node with the given key, or `None` if no such node exists.
@@ -603,8 +614,38 @@ impl<TUd> TrieStructure<TUd> {
     }
 
     /// Returns all nodes whose full key is within the given range, in lexicographic order.
-    // TODO: change API to accept the range trait
+    // TODO: change API to accept the range trait?
+    #[inline]
     pub fn range<'a>(
+        &'a self,
+        start_bound: ops::Bound<&'a [u8]>, // TODO: why does this require a `'a` lifetime? I don't get it
+        end_bound: ops::Bound<&'a [u8]>,
+    ) -> impl Iterator<Item = NodeIndex> + 'a {
+        let start_bound = match start_bound {
+            ops::Bound::Included(key) => {
+                ops::Bound::Included(bytes_to_nibbles(key.iter().copied()))
+            }
+            ops::Bound::Excluded(key) => {
+                ops::Bound::Excluded(bytes_to_nibbles(key.iter().copied()))
+            }
+            ops::Bound::Unbounded => ops::Bound::Unbounded,
+        };
+
+        let end_bound = match end_bound {
+            ops::Bound::Included(key) => {
+                ops::Bound::Included(bytes_to_nibbles(key.iter().copied()))
+            }
+            ops::Bound::Excluded(key) => {
+                ops::Bound::Excluded(bytes_to_nibbles(key.iter().copied()))
+            }
+            ops::Bound::Unbounded => ops::Bound::Unbounded,
+        };
+
+        self.range_inner(start_bound, end_bound).map(NodeIndex)
+    }
+
+    /// Returns all nodes whose full key is within the given range, in lexicographic order.
+    pub fn range_iter<'a>(
         &'a self,
         start_bound: ops::Bound<impl Iterator<Item = Nibble>>,
         end_bound: ops::Bound<impl Iterator<Item = Nibble> + 'a>,
@@ -1283,6 +1324,14 @@ impl<'a, TUd> NodeAccess<'a, TUd> {
         }
     }
 
+    /// Returns the user data stored in the node.
+    pub fn into_user_data(self) -> &'a mut TUd {
+        match self {
+            NodeAccess::Storage(n) => n.into_user_data(),
+            NodeAccess::Branch(n) => n.into_user_data(),
+        }
+    }
+
     /// Returns true if the node has a storage value associated to it.
     pub fn has_storage_value(&self) -> bool {
         match self {
@@ -1793,6 +1842,11 @@ impl<'a, TUd> BranchNodeAccess<'a, TUd> {
             trie: self.trie,
             node_index: self.node_index,
         }
+    }
+
+    /// Returns the user data associated to this node.
+    pub fn into_user_data(self) -> &'a mut TUd {
+        &mut self.trie.nodes.get_mut(self.node_index).unwrap().user_data
     }
 
     /// Returns the user data associated to this node.
