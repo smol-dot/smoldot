@@ -40,9 +40,9 @@ use smoldot::{
     libp2p,
     network::{self, protocol::BlockData},
     sync::all::{self, TrieEntryVersion},
+    trie::{bytes_to_nibbles, nibbles_to_bytes_suffix_extend, trie_structure},
 };
 use std::{
-    collections::BTreeMap,
     iter,
     num::NonZeroU64,
     sync::Arc,
@@ -127,15 +127,8 @@ impl ConsensusService {
             finalized_block_number,
             best_block_hash,
             best_block_number,
-            finalized_block_storage,
+            mut finalized_block_storage,
             finalized_chain_information,
-        ): (
-            _,
-            _,
-            _,
-            _,
-            BTreeMap<Vec<u8>, (Vec<u8>, TrieEntryVersion)>,
-            _,
         ) = config
             .database
             .with_database({
@@ -161,17 +154,24 @@ impl ConsensusService {
                     )
                     .unwrap()
                     .number;
-                    let finalized_block_storage: Vec<(Vec<u8>, Vec<u8>, u8)> = database
+                    // TODO: we copy all entries; it could be more optimal to have a custom implementation of FromIterator that directly does the conversion?
+                    let finalized_block_storage_raw: Vec<(Vec<u8>, Vec<u8>, u8)> = database
                         .finalized_block_storage_main_trie(&finalized_block_hash)
                         .unwrap();
-                    // TODO: we copy all entries; it could be more optimal to have a custom implementation of FromIterator that directly does the conversion?
-                    let finalized_block_storage = finalized_block_storage
-                        .into_iter()
-                        .map(|(k, val, vers)| {
-                            let vers = TrieEntryVersion::try_from(vers).unwrap(); // TODO: don't unwrap
-                            (k, (val, vers))
-                        })
-                        .collect();
+                    let mut finalized_block_storage = trie_structure::TrieStructure::with_capacity(
+                        finalized_block_storage_raw.len(),
+                    );
+                    for (key, value, version) in finalized_block_storage_raw {
+                        finalized_block_storage
+                            .node(bytes_to_nibbles(key.into_iter()))
+                            .into_vacant()
+                            .unwrap()
+                            .insert_storage_value()
+                            .insert(
+                                Some((value, TrieEntryVersion::try_from(version).unwrap())), // TODO: don't unwrap
+                                None,
+                            );
+                    }
                     let finalized_chain_information = database
                         .to_chain_information(&finalized_block_hash)
                         .unwrap();
@@ -237,15 +237,23 @@ impl ConsensusService {
                 full: Some(all::ConfigFull {
                     finalized_runtime: {
                         // Builds the runtime of the finalized block.
-                        // Assumed to always be valid, otherwise the block wouldn't have been saved in the
-                        // database, hence the large number of unwraps here.
-                        let (module, _) = finalized_block_storage.get(&b":code"[..]).unwrap();
+                        // Assumed to always be valid, otherwise the block wouldn't have been
+                        // saved in the database, hence the large number of unwraps here.
                         let heap_pages = executor::storage_heap_pages_to_value(
                             finalized_block_storage
-                                .get(&b":heappages"[..])
-                                .map(|(v, _)| &v[..]),
+                                .node(bytes_to_nibbles(b":heappages".iter().copied()))
+                                .into_occupied()
+                                .and_then(|node| node.into_user_data().as_ref())
+                                .map(|(hp, _)| &hp[..]),
                         )
                         .unwrap();
+                        let (module, _) = finalized_block_storage
+                            .node(bytes_to_nibbles(b":code".iter().copied()))
+                            .into_occupied()
+                            .unwrap()
+                            .into_user_data()
+                            .as_ref()
+                            .unwrap();
                         executor::host::HostVmPrototype::new(executor::host::Config {
                             module,
                             heap_pages,
@@ -340,12 +348,14 @@ struct SyncBackground {
     keystore: Arc<keystore::Keystore>,
 
     /// Holds, in parallel of the database, the storage of the latest finalized block.
-    /// At the time of writing, this state is stable around `~3MiB` for Polkadot, meaning that it is
-    /// completely acceptable to hold it entirely in memory.
-    // While reading the storage from the database is an option, doing so considerably slows down
+    /// At the time of writing, this state is stable around `~3MiB` for Polkadot, meaning that it
+    /// is completely acceptable to hold it entirely in memory.
+    /// For each trie entry, contains `Some` if a value is present, and `None` if this is only
+    /// a branch node.
+    /// While reading the storage from the database is an option, doing so considerably slows down
     /// the verification, and also makes it impossible to insert blocks in the database in
     /// parallel of this verification.
-    finalized_block_storage: BTreeMap<Vec<u8>, (Vec<u8>, TrieEntryVersion)>,
+    finalized_block_storage: trie_structure::TrieStructure<Option<(Vec<u8>, TrieEntryVersion)>>,
 
     sync_state: Arc<Mutex<SyncState>>,
 
@@ -761,21 +771,32 @@ impl SyncBackground {
                     }
 
                     // Access to the best block storage.
-                    author::build::BuilderAuthoring::StorageGet(get) => {
+                    author::build::BuilderAuthoring::StorageGet(req) => {
                         // Access the storage of the best block. Can return `̀None` if not syncing
                         // in full mode, in which case we shouldn't have reached this code.
                         let best_block_storage_access = self.sync.best_block_storage().unwrap();
 
-                        let value = {
-                            let key = get.key();
-                            best_block_storage_access.get(key.as_ref(), || {
-                                self.finalized_block_storage
-                                    .get(key.as_ref())
-                                    .map(|(val, vers)| (&val[..], *vers))
-                            })
-                        };
+                        let value =
+                            best_block_storage_access.get(req.key().as_ref(), || {
+                                match self
+                                    .finalized_block_storage
+                                    .node(bytes_to_nibbles(req.key().as_ref().iter().copied()))
+                                {
+                                    trie_structure::Entry::Occupied(
+                                        trie_structure::NodeAccess::Storage(node),
+                                    ) => {
+                                        let (val, vers) = node.into_user_data().as_ref().unwrap();
+                                        Some((&val[..], *vers))
+                                    }
+                                    trie_structure::Entry::Occupied(
+                                        trie_structure::NodeAccess::Branch(_),
+                                    )
+                                    | trie_structure::Entry::Vacant(_) => None,
+                                }
+                            });
+
                         block_authoring =
-                            get.inject_value(value.map(|(val, vers)| (iter::once(val), vers)));
+                            req.inject_value(value.map(|(val, vers)| (iter::once(val), vers)));
                         continue;
                     }
                     author::build::BuilderAuthoring::NextKey(_) => {
@@ -786,19 +807,27 @@ impl SyncBackground {
                         // in full mode, in which case we shouldn't have reached this code.
                         let best_block_storage_access = self.sync.best_block_storage().unwrap();
 
+                        // TODO: to_vec() :-/ range() immediately calculates the range of keys so there's no borrowing issue, but the take_while needs to keep req borrowed, which isn't possible
+                        let prefix = prefix_key.prefix().as_ref().to_vec();
+                        let finalized_keys = self
+                            .finalized_block_storage
+                            .range(ops::Bound::Included(&prefix), ops::Bound::Unbounded)
+                            .filter(|node_index| {
+                                self.finalized_block_storage.is_storage(*node_index)
+                            })
+                            .map(|node_index| {
+                                // TODO: consider detecting if nibbles are uneven instead of ignoring the problem
+                                nibbles_to_bytes_suffix_extend(
+                                    self.finalized_block_storage
+                                        .node_full_key_by_index(node_index)
+                                        .unwrap(),
+                                )
+                                .collect::<Vec<_>>()
+                            })
+                            .take_while(|k| k.starts_with(&prefix));
+
                         let keys = best_block_storage_access
-                            .prefix_keys_ordered(
-                                prefix_key.prefix().as_ref(),
-                                self.finalized_block_storage
-                                    .range::<[u8], _>((
-                                        ops::Bound::Included(prefix_key.prefix().as_ref()),
-                                        ops::Bound::Unbounded,
-                                    ))
-                                    .take_while(|(k, _)| {
-                                        k.starts_with(prefix_key.prefix().as_ref())
-                                    })
-                                    .map(|(k, _)| &k[..]),
-                            )
+                            .prefix_keys_ordered(prefix_key.prefix().as_ref(), finalized_keys)
                             .map(|k| k.as_ref().to_vec()) // TODO: overhead
                             .collect::<Vec<_>>();
 
@@ -1152,28 +1181,57 @@ impl SyncBackground {
                             }
 
                             all::BlockVerification::FinalizedStorageGet(req) => {
-                                let value = self
+                                let value = match self
                                     .finalized_block_storage
-                                    .get(req.key().as_ref())
-                                    .map(|(val, vers)| (&val[..], *vers));
+                                    .node(bytes_to_nibbles(req.key().as_ref().iter().copied()))
+                                {
+                                    trie_structure::Entry::Occupied(
+                                        trie_structure::NodeAccess::Storage(node),
+                                    ) => {
+                                        let (val, vers) = node.into_user_data().as_ref().unwrap();
+                                        Some((&val[..], *vers))
+                                    }
+                                    trie_structure::Entry::Occupied(
+                                        trie_structure::NodeAccess::Branch(_),
+                                    )
+                                    | trie_structure::Entry::Vacant(_) => None,
+                                };
+
                                 verify = req.inject_value(value);
                             }
                             all::BlockVerification::FinalizedStorageNextKey(req) => {
                                 let next_key = {
-                                    let key = req.key();
-                                    self.finalized_block_storage
-                                        .range::<[u8], _>((
+                                    let req_key = req.key();
+                                    let out = self
+                                        .finalized_block_storage
+                                        .range(
                                             if req.or_equal() {
-                                                ops::Bound::Included(key.as_ref())
+                                                ops::Bound::Included(req_key.as_ref())
                                             } else {
-                                                ops::Bound::Excluded(key.as_ref())
+                                                ops::Bound::Excluded(req_key.as_ref())
                                             },
                                             ops::Bound::Unbounded,
-                                        ))
+                                        )
+                                        .filter(|node_index| {
+                                            self.finalized_block_storage.is_storage(*node_index)
+                                        })
                                         .next()
-                                        .filter(|(k, _)| k.starts_with(req.prefix().as_ref()))
-                                        .map(|(k, _)| k)
+                                        .map(|node_index| {
+                                            // TODO: consider detecting if nibbles are uneven instead of ignoring the problem
+                                            nibbles_to_bytes_suffix_extend(
+                                                self.finalized_block_storage
+                                                    .node_full_key_by_index(node_index)
+                                                    .unwrap(),
+                                            )
+                                            .collect::<Vec<_>>()
+                                        })
+                                        .filter(|k| k.starts_with(req.prefix().as_ref()));
+                                    out
                                 };
+
+                                debug_assert!(next_key
+                                    .as_ref()
+                                    .map_or(true, |k| &**k > req.key().as_ref()));
                                 verify = req.inject_key(next_key);
                             }
                             all::BlockVerification::FinalizedStoragePrefixKeys(req) => {
@@ -1181,12 +1239,20 @@ impl SyncBackground {
                                 let prefix = req.prefix().as_ref().to_vec();
                                 let keys = self
                                     .finalized_block_storage
-                                    .range::<[u8], _>((
-                                        ops::Bound::Included(req.prefix().as_ref()),
-                                        ops::Bound::Unbounded,
-                                    ))
-                                    .take_while(|(k, _)| k.starts_with(&prefix))
-                                    .map(|(k, _)| k);
+                                    .range(ops::Bound::Included(&prefix), ops::Bound::Unbounded)
+                                    .filter(|node_index| {
+                                        self.finalized_block_storage.is_storage(*node_index)
+                                    })
+                                    .map(|node_index| {
+                                        // TODO: consider detecting if nibbles are uneven instead of ignoring the problem
+                                        nibbles_to_bytes_suffix_extend(
+                                            self.finalized_block_storage
+                                                .node_full_key_by_index(node_index)
+                                                .unwrap(),
+                                        )
+                                        .collect::<Vec<_>>()
+                                    })
+                                    .take_while(|k| k.starts_with(&prefix));
                                 verify = req.inject_keys_ordered(keys);
                             }
                             all::BlockVerification::RuntimeCompilation(rt) => {
@@ -1243,17 +1309,51 @@ impl SyncBackground {
                                     .diff_iter_unordered()
                                 {
                                     if let Some(value) = value {
-                                        self.finalized_block_storage.insert(
-                                            key.to_owned(),
-                                            (
-                                                value.to_owned(),
-                                                block.full.as_ref().unwrap().state_trie_version,
-                                            ),
-                                        );
+                                        match self
+                                            .finalized_block_storage
+                                            .node(bytes_to_nibbles(key.iter().copied()))
+                                        {
+                                            trie_structure::Entry::Occupied(mut node) => {
+                                                *node.user_data() = Some((
+                                                    value.to_owned(),
+                                                    block.full.as_ref().unwrap().state_trie_version,
+                                                ));
+
+                                                if let trie_structure::NodeAccess::Branch(node) =
+                                                    node
+                                                {
+                                                    node.insert_storage_value();
+                                                }
+                                            }
+                                            trie_structure::Entry::Vacant(node) => {
+                                                node.insert_storage_value().insert(
+                                                    Some((
+                                                        value.to_owned(),
+                                                        block
+                                                            .full
+                                                            .as_ref()
+                                                            .unwrap()
+                                                            .state_trie_version,
+                                                    )),
+                                                    None,
+                                                );
+                                            }
+                                        }
                                     } else {
-                                        let _was_there = self.finalized_block_storage.remove(key);
-                                        // TODO: if a block inserts a new value, then removes it in the next block, the key will remain in `finalized_block_storage`; either solve this or document this
-                                        // assert!(_was_there.is_some());
+                                        // TODO: if a block inserts a new value then removes it, the key will remain in the diff anyway; either solve this or document this
+                                        if let trie_structure::Entry::Occupied(
+                                            trie_structure::NodeAccess::Storage(node),
+                                        ) = self
+                                            .finalized_block_storage
+                                            .node(bytes_to_nibbles(key.iter().copied()))
+                                        {
+                                            if let trie_structure::Remove::StorageToBranch(
+                                                mut new_node,
+                                            ) = node.remove()
+                                            {
+                                                *new_node.user_data() = None;
+                                            }
+                                        }
                                     }
                                 }
                             }

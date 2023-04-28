@@ -782,7 +782,7 @@ fn iter_properly_traverses() {
         }
     }
 
-    assert_eq!(trie.all_nodes_ordered().count(), trie.nodes.len());
+    assert_eq!(trie.iter_ordered().count(), trie.nodes.len());
 }
 
 #[test]
@@ -887,7 +887,7 @@ fn range() {
                     ops::Bound::Included(end) | ops::Bound::Excluded(end),
                 ) if start > end => {
                     let trie_result = trie
-                        .range(start_range_trie, end_range_trie)
+                        .range_iter(start_range_trie, end_range_trie)
                         .collect::<Vec<_>>();
                     assert!(
                         trie_result.is_empty(),
@@ -901,7 +901,7 @@ fn range() {
                 }
                 (ops::Bound::Excluded(start), ops::Bound::Excluded(end)) if start == end => {
                     let trie_result = trie
-                        .range(start_range_trie, end_range_trie)
+                        .range_iter(start_range_trie, end_range_trie)
                         .collect::<Vec<_>>();
                     assert!(
                         trie_result.is_empty(),
@@ -921,7 +921,7 @@ fn range() {
                 .map(|(_, idx)| *idx)
                 .collect::<Vec<_>>();
             let trie_result = trie
-                .range(start_range_trie, end_range_trie)
+                .range_iter(start_range_trie, end_range_trie)
                 .collect::<Vec<_>>();
             assert_eq!(
                 btree_result, trie_result,

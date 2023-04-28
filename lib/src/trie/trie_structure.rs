@@ -20,7 +20,9 @@
 //!
 //! See the [`TrieStructure`] struct.
 
-use super::nibble::Nibble;
+// TODO: the API of `TrieStructure` is rather wonky and could be simplified
+
+use super::nibble::{bytes_to_nibbles, Nibble};
 
 use alloc::{borrow::ToOwned as _, vec, vec::Vec};
 use core::{cmp, fmt, iter, mem, ops};
@@ -166,6 +168,11 @@ impl<TUd> TrieStructure<TUd> {
         self.nodes.iter().map(|(k, _)| NodeIndex(k))
     }
 
+    /// Returns a list of all nodes in the structure in lexicographic order of keys.
+    pub fn iter_ordered(&'_ self) -> impl Iterator<Item = NodeIndex> + '_ {
+        self.all_node_lexicographic_ordered().map(NodeIndex)
+    }
+
     /// Returns the root node of the trie, or `None` if the trie is empty.
     ///
     /// # Examples
@@ -276,6 +283,17 @@ impl<TUd> TrieStructure<TUd> {
                 closest_ancestor: closest_ancestor.map(|(i, _)| i),
             }),
         }
+    }
+
+    /// Returns `true` if the node with the given index is a storage node. Returns `false` if it
+    /// is a branch node.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`NodeIndex`] is invalid.
+    ///
+    pub fn is_storage(&self, node: NodeIndex) -> bool {
+        self.nodes[node.0].has_storage_value
     }
 
     /// Returns the node with the given key, or `None` if no such node exists.
@@ -566,8 +584,8 @@ impl<TUd> TrieStructure<TUd> {
             return false;
         }
 
-        let mut me_iter = self.all_nodes_ordered();
-        let mut other_iter = other.all_nodes_ordered();
+        let mut me_iter = self.all_node_lexicographic_ordered();
+        let mut other_iter = other.all_node_lexicographic_ordered();
 
         loop {
             let (me_node_idx, other_node_idx) = match (me_iter.next(), other_iter.next()) {
@@ -596,8 +614,38 @@ impl<TUd> TrieStructure<TUd> {
     }
 
     /// Returns all nodes whose full key is within the given range, in lexicographic order.
-    // TODO: change API to accept the range trait
+    // TODO: change API to accept the range trait?
+    #[inline]
     pub fn range<'a>(
+        &'a self,
+        start_bound: ops::Bound<&'a [u8]>, // TODO: why does this require a `'a` lifetime? I don't get it
+        end_bound: ops::Bound<&'a [u8]>,
+    ) -> impl Iterator<Item = NodeIndex> + 'a {
+        let start_bound = match start_bound {
+            ops::Bound::Included(key) => {
+                ops::Bound::Included(bytes_to_nibbles(key.iter().copied()))
+            }
+            ops::Bound::Excluded(key) => {
+                ops::Bound::Excluded(bytes_to_nibbles(key.iter().copied()))
+            }
+            ops::Bound::Unbounded => ops::Bound::Unbounded,
+        };
+
+        let end_bound = match end_bound {
+            ops::Bound::Included(key) => {
+                ops::Bound::Included(bytes_to_nibbles(key.iter().copied()))
+            }
+            ops::Bound::Excluded(key) => {
+                ops::Bound::Excluded(bytes_to_nibbles(key.iter().copied()))
+            }
+            ops::Bound::Unbounded => ops::Bound::Unbounded,
+        };
+
+        self.range_inner(start_bound, end_bound).map(NodeIndex)
+    }
+
+    /// Returns all nodes whose full key is within the given range, in lexicographic order.
+    pub fn range_iter<'a>(
         &'a self,
         start_bound: ops::Bound<impl Iterator<Item = Nibble>>,
         end_bound: ops::Bound<impl Iterator<Item = Nibble> + 'a>,
@@ -905,8 +953,8 @@ impl<TUd> TrieStructure<TUd> {
         }))
     }
 
-    /// Iterates over all nodes of the trie, in a specific but unspecified order.
-    fn all_nodes_ordered(&'_ self) -> impl Iterator<Item = usize> + '_ {
+    /// Iterates over all nodes of the trie in a lexicographic order.
+    fn all_node_lexicographic_ordered(&'_ self) -> impl Iterator<Item = usize> + '_ {
         fn ancestry_order_next<TUd>(tree: &TrieStructure<TUd>, node_index: usize) -> Option<usize> {
             if let Some(first_child) = tree
                 .nodes
@@ -1090,7 +1138,7 @@ impl<TUd: fmt::Debug> fmt::Debug for TrieStructure<TUd> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_list()
             .entries(
-                self.all_nodes_ordered()
+                self.all_node_lexicographic_ordered()
                     .map(|idx| (idx, self.nodes.get(idx).unwrap())),
             )
             .finish()
@@ -1268,6 +1316,14 @@ impl<'a, TUd> NodeAccess<'a, TUd> {
         }
     }
 
+    /// Returns the user data stored in the node.
+    pub fn into_user_data(self) -> &'a mut TUd {
+        match self {
+            NodeAccess::Storage(n) => n.into_user_data(),
+            NodeAccess::Branch(n) => n.into_user_data(),
+        }
+    }
+
     /// Returns true if the node has a storage value associated to it.
     pub fn has_storage_value(&self) -> bool {
         match self {
@@ -1389,6 +1445,11 @@ impl<'a, TUd> StorageNodeAccess<'a, TUd> {
             .partial_key
             .iter()
             .cloned()
+    }
+
+    /// Returns the user data associated to this node.
+    pub fn into_user_data(self) -> &'a mut TUd {
+        &mut self.trie.nodes.get_mut(self.node_index).unwrap().user_data
     }
 
     /// Returns the user data associated to this node.
@@ -1773,6 +1834,11 @@ impl<'a, TUd> BranchNodeAccess<'a, TUd> {
             trie: self.trie,
             node_index: self.node_index,
         }
+    }
+
+    /// Returns the user data associated to this node.
+    pub fn into_user_data(self) -> &'a mut TUd {
+        &mut self.trie.nodes.get_mut(self.node_index).unwrap().user_data
     }
 
     /// Returns the user data associated to this node.
