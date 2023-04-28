@@ -752,14 +752,14 @@ impl<TUd> TrieStructure<TUd> {
         // the end. This is done in the iterator that is returned from the function.
 
         either::Left(iter::from_fn(move || {
-            // `end_key` must not be empty at this point, as otherwise the iteration has ended.
-            // We return `None` instead of panicking, as it is legitimately possible to reach this
-            // situation through some code paths.
-            if end_key.peek().is_none() {
-                return None;
-            }
-
             loop {
+                // `end_key` must never be empty, as otherwise the iteration has ended.
+                // We return `None` instead of panicking, as it is legitimately possible to reach
+                // this situation through some code paths.
+                if end_key.peek().is_none() {
+                    return None;
+                }
+
                 // If `iter` points to an actual node, yield it and jump to the position right
                 // after.
                 let Some(iter_1) = iter.1 else {
@@ -791,17 +791,14 @@ impl<TUd> TrieStructure<TUd> {
                             cmp::Ordering::Equal => {
                                 debug_assert_eq!(iter_key_nibbles_extra, 0);
                                 let _ = end_key.next();
-                                // `child` is superior or equal to `end_key`. Iteration is
-                                // over.
-                                if end_key.peek().is_none() {
-                                    return None;
-                                }
                             }
                         }
                     }
 
                     iter = (child, None);
                 } else if iter_key_nibbles_extra == 0 {
+                    return None;
+                } else if iter_key_nibbles_extra == 1 && iter_1 > *end_key.peek().unwrap() {
                     return None;
                 } else if let Some(child_index) = node.children[(usize::from(u8::from(iter_1)))
                     ..=usize::from(u8::from(if iter_key_nibbles_extra == 1 {
@@ -812,24 +809,31 @@ impl<TUd> TrieStructure<TUd> {
                     .iter()
                     .position(|c| c.is_some())
                 {
-                    iter.1 = Some(
-                        Nibble::try_from(
-                            u8::try_from(usize::from(u8::from(iter_1)) + child_index).unwrap(),
-                        )
-                        .unwrap(),
-                    );
+                    let child_nibble = Nibble::try_from(
+                        u8::try_from(usize::from(u8::from(iter_1)) + child_index).unwrap(),
+                    )
+                    .unwrap();
+
+                    if iter_key_nibbles_extra == 1 && child_nibble == *end_key.peek().unwrap() {
+                        iter_key_nibbles_extra = 0;
+                        let _ = end_key.next();
+                    }
+
+                    iter.1 = Some(child_nibble);
                 } else {
                     // `iter` has no child. Go up the tree.
                     loop {
                         let node = self.nodes.get(iter.0).unwrap();
 
                         // End the iterator if we were about to jump out of the end bound.
-                        if iter_key_nibbles_extra < 2 + node.partial_key.len() {
+                        if iter_key_nibbles_extra
+                            < if iter.1.is_some() { 2 } else { 1 } + node.partial_key.len()
+                        {
                             return None;
                         }
 
                         let Some((parent_node_index, parent_nibble_direction)) = node.parent else { return None; };
-                        iter_key_nibbles_extra -= 2;
+                        iter_key_nibbles_extra -= if iter.1.is_some() { 2 } else { 1 };
                         iter_key_nibbles_extra -= node.partial_key.len();
                         iter = (parent_node_index, None);
                         let next_sibling_nibble = match parent_nibble_direction.checked_add(1) {
