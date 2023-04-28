@@ -891,7 +891,7 @@ fn range() {
                         .collect::<Vec<_>>();
                     assert!(
                         trie_result.is_empty(),
-                        "{:?} {:?} {:?} {:?}",
+                        "\nbtree: {:?}\ntrie_result: {:?}\nstart: {:?}\nend: {:?}",
                         btree_map,
                         trie_result,
                         start_range_btree,
@@ -899,16 +899,13 @@ fn range() {
                     );
                     continue;
                 }
-                (
-                    ops::Bound::Excluded(start),
-                    ops::Bound::Excluded(end),
-                ) if start == end => {
+                (ops::Bound::Excluded(start), ops::Bound::Excluded(end)) if start == end => {
                     let trie_result = trie
                         .range(start_range_trie, end_range_trie)
                         .collect::<Vec<_>>();
                     assert!(
                         trie_result.is_empty(),
-                        "{:?} {:?} {:?} {:?}",
+                        "\nbtree: {:?}\ntrie_result: {:?}\nstart: {:?}\nend: {:?}",
                         btree_map,
                         trie_result,
                         start_range_btree,
