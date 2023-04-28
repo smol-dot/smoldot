@@ -35,7 +35,7 @@
 //! applications are connected to the node using the JSON-RPC protocol.
 //!
 //! > **Note**: An example application that can be put on top of a node is
-//! >           [PolkadotJS](https://polkadot.js.org/).
+//! >           [PolkadotJS Apps](https://cloudflare-ipfs.com/ipns/dotapps.io/).
 //!
 //! Contrary to the traffic with the blockchain network, the communication between the JSON-RPC
 //! client (i.e. the application) and the JSON-RPC server (i.e. the node) is not trustless. In

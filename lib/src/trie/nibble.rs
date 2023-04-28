@@ -21,6 +21,28 @@ use core::fmt;
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Nibble(u8);
 
+impl Nibble {
+    /// Returns the equivalent of `Nibble::try_from(0).unwrap()`.
+    pub fn zero() -> Self {
+        Nibble(0)
+    }
+
+    /// Returns the equivalent of `Nibble::try_from(15).unwrap()`. It is the maximum possible value
+    /// for a nibble.
+    pub fn max() -> Self {
+        Nibble(15)
+    }
+
+    /// Add the given number to the nibble. Returns `None` on overflow.
+    pub fn checked_add(self, val: u8) -> Option<Self> {
+        let new_nibble = self.0.checked_add(val)?;
+        if new_nibble >= 16 {
+            return None;
+        }
+        Some(Nibble(new_nibble))
+    }
+}
+
 impl TryFrom<u8> for Nibble {
     type Error = NibbleFromU8Error;
 
@@ -65,7 +87,16 @@ pub enum NibbleFromU8Error {
     TooLarge,
 }
 
-/// Returns an iterator of all possible nibble values.
+/// Returns an iterator of all possible nibble values, in ascending order.
+///
+/// # Example
+///
+/// ```
+/// assert_eq!(
+///     smoldot::trie::all_nibbles().map(u8::from).collect::<Vec<_>>(),
+///     &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+/// );
+/// ```
 pub fn all_nibbles() -> impl ExactSizeIterator<Item = Nibble> {
     (0..16).map(Nibble)
 }
@@ -73,6 +104,22 @@ pub fn all_nibbles() -> impl ExactSizeIterator<Item = Nibble> {
 /// Turns an iterator of nibbles into an iterator of bytes.
 ///
 /// If the number of nibbles is uneven, adds a `0` nibble at the end.
+///
+/// # Examples
+///
+/// ```
+/// use smoldot::trie::{Nibble, nibbles_to_bytes_suffix_extend};
+///
+/// let input = [Nibble::try_from(0x5).unwrap(), Nibble::try_from(0xa).unwrap()];
+/// assert_eq!(nibbles_to_bytes_suffix_extend(input.into_iter()).collect::<Vec<_>>(), &[0x5a]);
+/// ```
+///
+/// ```
+/// use smoldot::trie::{Nibble, nibbles_to_bytes_suffix_extend};
+///
+/// let input = [Nibble::try_from(0x5).unwrap(), Nibble::try_from(0xa).unwrap(), Nibble::try_from(0x9).unwrap()];
+/// assert_eq!(nibbles_to_bytes_suffix_extend(input.into_iter()).collect::<Vec<_>>(), &[0x5a, 0x90]);
+/// ```
 pub fn nibbles_to_bytes_suffix_extend<I: Iterator<Item = Nibble>>(
     nibbles: I,
 ) -> impl Iterator<Item = u8> {
@@ -104,6 +151,22 @@ pub fn nibbles_to_bytes_suffix_extend<I: Iterator<Item = Nibble>>(
 /// Turns an iterator of nibbles into an iterator of bytes.
 ///
 /// If the number of nibbles is uneven, adds a `0` nibble at the beginning.
+///
+/// # Examples
+///
+/// ```
+/// use smoldot::trie::{Nibble, nibbles_to_bytes_prefix_extend};
+///
+/// let input = [Nibble::try_from(0x5).unwrap(), Nibble::try_from(0xa).unwrap()];
+/// assert_eq!(nibbles_to_bytes_prefix_extend(input.into_iter()).collect::<Vec<_>>(), &[0x5a]);
+/// ```
+///
+/// ```
+/// use smoldot::trie::{Nibble, nibbles_to_bytes_prefix_extend};
+///
+/// let input = [Nibble::try_from(0x5).unwrap(), Nibble::try_from(0xa).unwrap(), Nibble::try_from(0x9).unwrap()];
+/// assert_eq!(nibbles_to_bytes_prefix_extend(input.into_iter()).collect::<Vec<_>>(), &[0x05, 0xa9]);
+/// ```
 pub fn nibbles_to_bytes_prefix_extend<I: ExactSizeIterator<Item = Nibble>>(
     nibbles: I,
 ) -> impl ExactSizeIterator<Item = u8> {

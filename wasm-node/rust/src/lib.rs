@@ -20,15 +20,8 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 
-use core::{
-    cmp::Ordering,
-    ops::{Add, Sub},
-    pin::Pin,
-    str,
-    sync::atomic,
-    time::Duration,
-};
-use futures::prelude::*;
+use core::{num::NonZeroU32, pin::Pin, str, sync::atomic, time::Duration};
+use futures_util::{stream, FutureExt as _, Stream as _, StreamExt as _};
 use smoldot_light::HandleRpcError;
 use std::{
     sync::{Arc, Mutex},
@@ -51,77 +44,6 @@ fn start_timer_wrap(duration: Duration, closure: impl FnOnce() + 'static) {
     // truncated, but the precision of an `f64` is so high and the precision of the operating
     // system generally so low that this is not worth dealing with.
     unsafe { bindings::start_timer(timer_id, duration.as_secs_f64() * 1000.0) }
-}
-
-#[derive(Debug, Copy, Clone)]
-pub struct Instant {
-    /// Milliseconds.
-    inner: f64,
-}
-
-impl PartialEq for Instant {
-    fn eq(&self, other: &Instant) -> bool {
-        debug_assert!(self.inner.is_finite());
-        self.inner == other.inner
-    }
-}
-
-// This trait is ok to implement because `self.inner` is always finite.
-impl Eq for Instant {}
-
-impl PartialOrd for Instant {
-    fn partial_cmp(&self, other: &Instant) -> Option<Ordering> {
-        self.inner.partial_cmp(&other.inner)
-    }
-}
-
-impl Ord for Instant {
-    fn cmp(&self, other: &Self) -> Ordering {
-        debug_assert!(self.inner.is_finite());
-        self.inner.partial_cmp(&other.inner).unwrap()
-    }
-}
-
-impl Instant {
-    pub fn now() -> Instant {
-        let value = unsafe { bindings::monotonic_clock_ms() };
-        debug_assert!(value.is_finite());
-        Instant { inner: value }
-    }
-}
-
-impl Add<Duration> for Instant {
-    type Output = Instant;
-
-    fn add(self, other: Duration) -> Instant {
-        let new_val = self.inner + other.as_millis() as f64;
-        // Just like the `Add` implementation of the actual `Instant`, we panic if the value can't
-        // be represented.
-        assert!(new_val.is_finite());
-        Instant { inner: new_val }
-    }
-}
-
-impl Sub<Duration> for Instant {
-    type Output = Instant;
-
-    fn sub(self, other: Duration) -> Instant {
-        let new_val = self.inner - other.as_millis() as f64;
-        // Just like the `Sub` implementation of the actual `Instant`, we panic if the value can't
-        // be represented.
-        assert!(new_val.is_finite());
-        Instant { inner: new_val }
-    }
-}
-
-impl Sub<Instant> for Instant {
-    type Output = Duration;
-
-    fn sub(self, other: Instant) -> Duration {
-        let ms = self.inner - other.inner;
-        assert!(ms >= 0.0);
-        Duration::from_millis(ms as u64)
-    }
 }
 
 static CLIENT: Mutex<Option<init::Client<platform::Platform, ()>>> = Mutex::new(None);
@@ -216,7 +138,15 @@ fn add_chain(
                 .unwrap_or_else(|_| panic!("non-utf8 chain spec")),
             database_content: str::from_utf8(&database_content)
                 .unwrap_or_else(|_| panic!("non-utf8 database content")),
-            disable_json_rpc: json_rpc_running == 0,
+            json_rpc: if json_rpc_running == 0 {
+                smoldot_light::AddChainConfigJsonRpc::Disabled
+            } else {
+                smoldot_light::AddChainConfigJsonRpc::Enabled {
+                    max_pending_requests: NonZeroU32::new(128).unwrap(),
+                    // Note: the PolkadotJS UI is very heavy in terms of subscriptions.
+                    max_subscriptions: 1024,
+                }
+            },
             potential_relay_chains: potential_relay_chains.into_iter(),
         }) {
         Ok(c) => c,
@@ -307,7 +237,7 @@ fn remove_chain(chain_id: u32) {
             // purpose of erasing the previously-registered waker.
             if let Some(mut json_rpc_responses_rx) = json_rpc_responses_rx {
                 let _ = Pin::new(&mut json_rpc_responses_rx).poll_next(
-                    &mut task::Context::from_waker(futures::task::noop_waker_ref()),
+                    &mut task::Context::from_waker(futures_util::task::noop_waker_ref()),
                 );
             }
 

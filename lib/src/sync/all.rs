@@ -139,7 +139,7 @@ pub enum Status<'a, TSrc> {
         /// [`AllSync::as_chain_information`], as this function first has to download extra
         /// information compared to just the finalized block.
         finalized_block_hash: [u8; 32],
-        /// Height of the block indicated by [`Status::ChainInformation::finalized_block_hash`].
+        /// Height of the block indicated by [`Status::WarpSyncFragments::finalized_block_hash`].
         finalized_block_number: u64,
     },
     /// Warp syncing algorithm has reached the head of the finalized chain and is downloading and
@@ -153,7 +153,8 @@ pub enum Status<'a, TSrc> {
         /// [`AllSync::as_chain_information`], as this function first has to download extra
         /// information compared to just the finalized block.
         finalized_block_hash: [u8; 32],
-        /// Height of the block indicated by [`Status::ChainInformation::finalized_block_hash`].
+        /// Height of the block indicated by
+        /// [`Status::WarpSyncChainInformation::finalized_block_hash`].
         finalized_block_number: u64,
     },
 }
@@ -2692,6 +2693,18 @@ pub struct StorageNextKey<TRq, TSrc, TBl> {
 impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
     pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
         self.inner.key()
+    }
+
+    /// If `true`, then the provided value must the one superior or equal to the requested key.
+    /// If `false`, then the provided value must be strictly superior to the requested key.
+    pub fn or_equal(&self) -> bool {
+        self.inner.or_equal()
+    }
+
+    /// Returns the prefix the next key must start with. If the next key doesn't start with the
+    /// given prefix, then `None` should be provided.
+    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+        self.inner.prefix()
     }
 
     /// Injects the key.

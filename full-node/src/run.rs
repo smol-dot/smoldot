@@ -17,7 +17,8 @@
 
 use crate::cli;
 
-use futures::{channel::oneshot, prelude::*};
+use futures_channel::oneshot;
+use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use smoldot::{
     chain, chain_spec,
     database::full_sqlite,
@@ -189,7 +190,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         .as_ref()
         .map(|relay_chain_spec| relay_chain_spec.as_chain_information().unwrap().0);
 
-    let threads_pool = futures::executor::ThreadPool::builder()
+    let threads_pool = futures_executor::ThreadPool::builder()
         .name_prefix("tasks-pool-")
         .create()
         .unwrap();
@@ -592,7 +593,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     debug_assert!(network_events_receivers.next().is_none());
 
     loop {
-        futures::select! {
+        futures_util::select! {
             _ = informant_timer.next() => {
                 if matches!(cli_output, cli::Output::Informant) {
                     // We end the informant line with a `\r` so that it overwrites itself every time.
@@ -826,7 +827,7 @@ async fn background_open_database(
     let mut next_progress_icon = ['-', '\\', '|', '/'].iter().copied().cycle();
 
     loop {
-        futures::select! {
+        futures_util::select! {
             res = rx => return res.unwrap(),
             _ = progress_timer.next() => {
                 if show_progress {

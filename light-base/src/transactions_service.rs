@@ -77,13 +77,16 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use async_lock::Mutex;
 use core::{
     cmp, iter,
     marker::PhantomData,
     num::{NonZeroU32, NonZeroUsize},
     time::Duration,
 };
-use futures::{channel::mpsc, lock::Mutex, prelude::*, stream::FuturesUnordered};
+use futures_channel::mpsc;
+use futures_util::stream::FuturesUnordered;
+use futures_util::{future, FutureExt as _, SinkExt as _, StreamExt as _};
 use itertools::Itertools as _;
 use smoldot::{
     header,
@@ -621,7 +624,7 @@ async fn background_task<TPlat: PlatformRef>(
                 }
             }
 
-            futures::select! {
+            futures_util::select! {
                 notification = subscribe_all.new_blocks.next().fuse() => {
                     match notification {
                         Some(runtime_service::Notification::Block(new_block)) => {

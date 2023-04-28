@@ -19,7 +19,7 @@
 
 use smoldot::libp2p::{
     connection::{
-        established::{Config, ConfigRequestResponse, ConfigRequestResponseIn, Event},
+        established::{Config, Event, InboundTy},
         noise, single_stream_handshake,
     },
     read_write::ReadWrite,
@@ -134,16 +134,11 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     // Turn `local` and `remote` into state machines corresponding to the established connection.
     let mut local = match local {
         single_stream_handshake::Handshake::Success { connection, .. } => connection
-            .into_connection::<_, (), ()>(Config {
+            .into_connection::<_, ()>(Config {
                 first_out_ping: Duration::new(60, 0),
+                max_protocol_name_len: 12,
                 max_inbound_substreams: 10,
-                notifications_protocols: Vec::new(),
-                request_protocols: vec![ConfigRequestResponse {
-                    inbound_allowed: true,
-                    inbound_config: ConfigRequestResponseIn::Payload { max_size: 128 },
-                    max_response_size: 1024,
-                    name: "test-request-protocol".to_owned(),
-                }],
+                substreams_capacity: 16,
                 ping_interval: Duration::from_secs(20),
                 ping_protocol: "ping".to_owned(),
                 ping_timeout: Duration::from_secs(20),
@@ -206,12 +201,36 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         // Process some of the events in order to drive the fuzz test as far as possible.
         match local_event {
             None => {}
+            Some(Event::InboundNegotiated { id, protocol_name }) => {
+                if protocol_name == "rq" {
+                    local.accept_inbound(
+                        id,
+                        InboundTy::Request {
+                            request_max_size: Some(128),
+                        },
+                        (),
+                    )
+                } else if protocol_name == "notif" {
+                    local.accept_inbound(
+                        id,
+                        InboundTy::Notifications {
+                            max_handshake_size: 128,
+                        },
+                        (),
+                    );
+                } else if protocol_name == "ping" {
+                    local.accept_inbound(id, InboundTy::Ping, ());
+                } else {
+                    local.reject_inbound(id);
+                }
+                continue;
+            }
             Some(Event::RequestIn { id, .. }) => {
                 let _ = local.respond_in_request(id, Ok(b"dummy response".to_vec()));
                 continue;
             }
             Some(Event::NotificationsInOpen { id, .. }) => {
-                local.accept_in_notifications_substream(id, b"dummy handshake".to_vec(), ());
+                local.accept_in_notifications_substream(id, b"dummy handshake".to_vec(), 16);
                 continue;
             }
 

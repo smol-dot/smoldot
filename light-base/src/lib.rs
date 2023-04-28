@@ -73,8 +73,9 @@
 extern crate alloc;
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
-use core::{num::NonZeroU32, pin::Pin};
-use futures::{channel::oneshot, prelude::*};
+use core::{num::NonZeroU32, pin};
+use futures_channel::oneshot;
+use futures_util::{future, FutureExt as _};
 use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
 use smoldot::{
@@ -128,9 +129,40 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
     /// be wrong to connect to the "Kusama" created by user A.
     pub potential_relay_chains: TRelays,
 
-    /// If `true`, then no JSON-RPC service is started for this chain. This saves up a lot of
-    /// resources, but will cause all JSON-RPC requests targeting this chain to fail.
-    pub disable_json_rpc: bool,
+    /// Configuration for the JSON-RPC endpoint.
+    pub json_rpc: AddChainConfigJsonRpc,
+}
+
+/// See [`AddChainConfig::json_rpc`].
+#[derive(Debug, Clone)]
+pub enum AddChainConfigJsonRpc {
+    /// No JSON-RPC endpoint is available for this chain.  This saves up a lot of resources, but
+    /// will cause all JSON-RPC requests targeting this chain to fail.
+    Disabled,
+
+    /// The JSON-RPC endpoint is enabled. Normal operations.
+    Enabled {
+        /// Maximum number of JSON-RPC requests that can be added to a queue if it is not ready to
+        /// be processed immediately. Any additional request will be immediately rejected.
+        ///
+        /// This parameter is necessary in order to prevent JSON-RPC clients from using up too
+        /// much memory within the client.
+        ///
+        /// A typical value is 128.
+        max_pending_requests: NonZeroU32,
+
+        /// Maximum number of active subscriptions that can be started through JSON-RPC functions.
+        /// Any request that causes the JSON-RPC server to generate notifications counts as a
+        /// subscription.
+        /// Any additional subscription over this limit will be immediately rejected.
+        ///
+        /// This parameter is necessary in order to prevent JSON-RPC clients from using up too
+        /// much memory within the client.
+        ///
+        /// While a typical reasonable value would be for example 64, existing UIs tend to start
+        /// a lot of subscriptions, and a value such as 1024 is recommended.
+        max_subscriptions: u32,
+    },
 }
 
 /// Chain registered in a [`Client`].
@@ -188,7 +220,7 @@ struct PublicApiChain<TChain> {
 
     /// Handle that sends requests to the JSON-RPC service that runs in the background.
     /// Destroying this handle also shuts down the service. `None` iff
-    /// [`AddChainConfig::disable_json_rpc`] was `true` when adding the chain.
+    /// [`AddChainConfig::json_rpc`] was [`AddChainConfigJsonRpc::Disabled`] when adding the chain.
     json_rpc_frontend: Option<json_rpc_service::Frontend>,
 
     /// Dummy channel. Nothing is ever sent on it, but the receiving side is stored in the
@@ -237,8 +269,6 @@ struct ChainServices<TPlat: platform::PlatformRef> {
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
-    // TODO: can be grabbed from the sync service instead
-    block_number_bytes: usize,
 }
 
 impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
@@ -249,7 +279,6 @@ impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
             sync_service: self.sync_service.clone(),
             runtime_service: self.runtime_service.clone(),
             transactions_service: self.transactions_service.clone(),
-            block_number_bytes: self.block_number_bytes,
         }
     }
 }
@@ -261,8 +290,9 @@ pub struct AddChainSuccess {
 
     /// Stream of JSON-RPC responses or notifications.
     ///
-    /// Is always `Some` if [`AddChainConfig::disable_json_rpc`] was `false`, and `None` if it was
-    /// `true`. In other words, you can unwrap this `Option` if you passed `false`.
+    /// Is always `Some` if [`AddChainConfig::json_rpc`] was [`AddChainConfigJsonRpc::Disabled`],
+    /// and `None` if it was [`AddChainConfigJsonRpc::Enabled`]. In other words, you can unwrap
+    /// this `Option` if you passed `Enabled`.
     pub json_rpc_responses: Option<JsonRpcResponses>,
 }
 
@@ -287,8 +317,7 @@ impl JsonRpcResponses {
     /// Returns the next response or notification, or `None` if the chain has been removed.
     pub async fn next(&mut self) -> Option<String> {
         if let Some(frontend) = self.inner.as_mut() {
-            let response_fut = frontend.next_json_rpc_response();
-            futures::pin_mut!(response_fut);
+            let response_fut = pin::pin!(frontend.next_json_rpc_response());
             match future::select(response_fut, &mut self.public_api_chain_destroyed_rx).await {
                 future::Either::Left((response, _)) => return Some(response),
                 future::Either::Right((_result, _)) => {
@@ -641,9 +670,10 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                                 relay_chain_ready_future
                             {
                                 (&mut relay_chain_ready_future).await;
-                                let running_relay_chain = Pin::new(&mut relay_chain_ready_future)
-                                    .take_output()
-                                    .unwrap();
+                                let running_relay_chain =
+                                    pin::Pin::new(&mut relay_chain_ready_future)
+                                        .take_output()
+                                        .unwrap();
                                 Some((running_relay_chain, relay_chain_log_name))
                             } else {
                                 None
@@ -788,7 +818,9 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 async move {
                     // Wait for the chain to finish initializing to proceed.
                     (&mut running_chain_init).await;
-                    let running_chain = Pin::new(&mut running_chain_init).take_output().unwrap();
+                    let running_chain = pin::Pin::new(&mut running_chain_init)
+                        .take_output()
+                        .unwrap();
                     running_chain
                         .network_service
                         .discover(&platform.now(), 0, checkpoint_nodes, false)
@@ -803,7 +835,11 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
 
         // JSON-RPC service initialization. This is done every time `add_chain` is called, even
         // if a similar chain already existed.
-        let json_rpc_frontend = if !config.disable_json_rpc {
+        let json_rpc_frontend = if let AddChainConfigJsonRpc::Enabled {
+            max_pending_requests,
+            max_subscriptions,
+        } = config.json_rpc
+        {
             // Clone `running_chain_init`.
             let mut running_chain_init = match services_init {
                 future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
@@ -813,8 +849,14 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
 
             let (frontend, service_starter) = json_rpc_service::service(json_rpc_service::Config {
                 log_name: log_name.clone(), // TODO: add a way to differentiate multiple different json-rpc services under the same chain
-                max_pending_requests: NonZeroU32::new(128).unwrap(),
-                max_subscriptions: 1024, // Note: the PolkadotJS UI is very heavy in terms of subscriptions.
+                max_pending_requests,
+                max_subscriptions,
+                // Note that the settings below are intentionally not exposed in the publicly
+                // available configuration, as "good" values depend on the global number of tasks.
+                // In other words, these constants are relative to the number of other things that
+                // happen within the client rather than absolute values. Since the user isn't
+                // supposed to know what happens within the client, they can't rationally decide
+                // what value is appropriate.
                 max_parallel_requests: NonZeroU32::new(24).unwrap(),
                 max_parallel_subscription_updates: NonZeroU32::new(8).unwrap(),
             });
@@ -826,7 +868,9 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
             let init_future = async move {
                 // Wait for the chain to finish initializing before starting the JSON-RPC service.
                 (&mut running_chain_init).await;
-                let running_chain = Pin::new(&mut running_chain_init).take_output().unwrap();
+                let running_chain = pin::Pin::new(&mut running_chain_init)
+                    .take_output()
+                    .unwrap();
 
                 service_starter.start(json_rpc_service::StartConfig {
                     platform,
@@ -927,8 +971,8 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
     ///
     /// # Panic
     ///
-    /// Panics if the [`ChainId`] is invalid, or if [`AddChainConfig::disable_json_rpc`] was
-    /// `true` when adding the chain.
+    /// Panics if the [`ChainId`] is invalid, or if [`AddChainConfig::json_rpc`] was
+    /// [`AddChainConfigJsonRpc::Disabled`] when adding the chain.
     ///
     pub fn json_rpc_request(
         &mut self,
@@ -1050,7 +1094,7 @@ async fn start_services<TPlat: platform::PlatformRef>(
                 parachain: Some(sync_service::ConfigParachain {
                     parachain_id: chain_spec.relay_chain().unwrap().1,
                     relay_chain_sync: relay_chain.runtime_service.clone(),
-                    relay_chain_block_number_bytes: relay_chain.block_number_bytes,
+                    relay_chain_block_number_bytes: relay_chain.sync_service.block_number_bytes(),
                 }),
             })
             .await,
@@ -1127,6 +1171,5 @@ async fn start_services<TPlat: platform::PlatformRef>(
         runtime_service,
         sync_service,
         transactions_service,
-        block_number_bytes: usize::from(chain_spec.block_number_bytes()),
     }
 }

@@ -58,6 +58,7 @@ use alloc::{
 };
 use core::{
     hash::Hash,
+    iter,
     ops::{self, Add, Sub},
     time::Duration,
 };
@@ -66,10 +67,7 @@ use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 
 pub use super::peer_id::PeerId;
 pub use super::read_write::ReadWrite;
-pub use established::{
-    ConfigNotifications, ConfigRequestResponse, ConfigRequestResponseIn, InboundError,
-    SubstreamFate,
-};
+pub use established::{InboundError, SubstreamFate};
 pub use single_stream_handshake::HandshakeError;
 
 pub use multi_stream::MultiStreamConnectionTask;
@@ -130,6 +128,36 @@ pub struct Config {
 
     /// Name of the ping protocol on the network.
     pub ping_protocol: String,
+}
+
+/// Configuration for a request-response protocol.
+#[derive(Debug, Clone)]
+pub struct ConfigRequestResponse {
+    /// Name of the protocol transferred on the wire.
+    pub name: String,
+
+    /// Configuration related to sending out requests through this protocol.
+    ///
+    /// > **Note**: This is used even if `inbound_allowed` is `false` when performing outgoing
+    /// >           requests.
+    pub inbound_config: ConfigRequestResponseIn,
+
+    pub max_response_size: usize,
+
+    /// If true, incoming substreams are allowed to negotiate this protocol.
+    pub inbound_allowed: bool,
+}
+
+/// See [`ConfigRequestResponse::inbound_config`].
+#[derive(Debug, Clone)]
+pub enum ConfigRequestResponseIn {
+    /// Request must be completely empty, not even a length prefix.
+    Empty,
+    /// Request must contain a length prefix plus a potentially empty payload.
+    Payload {
+        /// Maximum allowed size for the payload in bytes.
+        max_size: usize,
+    },
 }
 
 /// Configuration for a specific overlay network.
@@ -257,11 +285,11 @@ pub struct Network<TConn, TNow> {
     /// See [`Config::handshake_timeout`].
     handshake_timeout: Duration,
 
-    /// See [`OverlayNetwork`].
-    notification_protocols: Arc<[OverlayNetwork]>,
+    /// See [`Config::notification_protocols`].
+    notification_protocols: Vec<NotificationProtocolConfig>,
 
     /// See [`Config::request_response_protocols`].
-    request_response_protocols: Arc<[ConfigRequestResponse]>,
+    request_response_protocols: Vec<ConfigRequestResponse>,
 
     /// See [`Config::ping_protocol`].
     ping_protocol: Arc<str>,
@@ -292,14 +320,6 @@ enum InnerConnectionState {
     },
 }
 
-/// State of a specific overlay network.
-///
-/// This struct is a slight variation to [`NotificationProtocolConfig`].
-struct OverlayNetwork {
-    /// See [`NotificationProtocolConfig`].
-    config: NotificationProtocolConfig,
-}
-
 /// See [`Network::outgoing_notification_substreams`] and
 /// [`Network::ingoing_notification_substreams`].
 ///
@@ -317,12 +337,6 @@ where
 {
     /// Initializes a new network data structure.
     pub fn new(config: Config) -> Self {
-        let notification_protocols = config
-            .notification_protocols
-            .into_iter()
-            .map(|config| OverlayNetwork { config })
-            .collect::<Arc<[_]>>();
-
         // The initial capacities given to the containers below are more or less arbitrary, the
         // objective being to avoid relocating the containers.
         Network {
@@ -343,18 +357,18 @@ where
             ),
             ingoing_requests_by_connection: BTreeSet::new(),
             outgoing_notification_substreams: hashbrown::HashMap::with_capacity_and_hasher(
-                notification_protocols.len() * config.capacity,
+                config.notification_protocols.len() * config.capacity,
                 Default::default(),
             ),
             outgoing_notification_substreams_by_connection: BTreeSet::new(),
             ingoing_notification_substreams: hashbrown::HashMap::with_capacity_and_hasher(
-                notification_protocols.len() * config.capacity,
+                config.notification_protocols.len() * config.capacity,
                 Default::default(),
             ),
             ingoing_notification_substreams_by_connection: BTreeMap::new(),
             randomness_seeds: ChaCha20Rng::from_seed(config.randomness_seed),
             max_inbound_substreams: config.max_inbound_substreams,
-            notification_protocols,
+            notification_protocols: config.notification_protocols,
             request_response_protocols: config.request_response_protocols.into_iter().collect(), // TODO: stupid overhead
             ping_protocol: config.ping_protocol.into(),
         }
@@ -381,6 +395,26 @@ where
         // the value provided as parameter is indeed the one expected.
         let SingleStreamHandshakeKind::MultistreamSelectNoiseYamux { noise_key } = handshake_kind;
 
+        // TODO: could be precalculated
+        let max_protocol_name_len = self
+            .request_response_protocols
+            .iter()
+            .map(|r| r.name.len())
+            .chain(
+                self.notification_protocols
+                    .iter()
+                    .map(|n| n.protocol_name.len()),
+            )
+            .chain(iter::once(self.ping_protocol.len()))
+            .max()
+            .unwrap_or(0);
+
+        // We expect at maximum one parallel request per protocol, plus one substream per direction
+        // (in and out) per notification substream, plus one ping substream per direction.
+        // TODO: could be precalculated
+        let substreams_capacity =
+            self.request_response_protocols.len() + self.notification_protocols.len() * 2 + 2;
+
         let connection_task = SingleStreamConnectionTask::new(single_stream::Config {
             randomness_seed: self.randomness_seeds.gen(),
             handshake: single_stream_handshake::HealthyHandshake::noise_yamux(
@@ -389,8 +423,8 @@ where
             ),
             handshake_timeout: when_connected + self.handshake_timeout,
             max_inbound_substreams: self.max_inbound_substreams,
-            notification_protocols: self.notification_protocols.clone(),
-            request_response_protocols: self.request_response_protocols.clone(),
+            substreams_capacity,
+            max_protocol_name_len,
             ping_protocol: self.ping_protocol.clone(),
         });
 
@@ -450,6 +484,26 @@ where
             (noise_key, out)
         };
 
+        // TODO: could be precalculated
+        let max_protocol_name_len = self
+            .request_response_protocols
+            .iter()
+            .map(|r| r.name.len())
+            .chain(
+                self.notification_protocols
+                    .iter()
+                    .map(|n| n.protocol_name.len()),
+            )
+            .chain(iter::once(self.ping_protocol.len()))
+            .max()
+            .unwrap_or(0);
+
+        // We expect at maximum one parallel request per protocol, plus one substream per direction
+        // (in and out) per notification substream, plus one ping substream per direction.
+        // TODO: could be precalculated
+        let substreams_capacity =
+            self.request_response_protocols.len() + self.notification_protocols.len() * 2 + 2;
+
         let handshake = noise::HandshakeInProgress::new(noise::Config {
             key: &noise_key,
             // It's the "server" that initiates the Noise handshake.
@@ -462,8 +516,8 @@ where
             now,
             handshake,
             self.max_inbound_substreams,
-            self.notification_protocols.clone(),
-            self.request_response_protocols.clone(),
+            substreams_capacity,
+            max_protocol_name_len,
             self.ping_protocol.clone(),
         );
 
@@ -571,7 +625,7 @@ where
     pub fn notification_protocols(
         &self,
     ) -> impl ExactSizeIterator<Item = &NotificationProtocolConfig> {
-        self.notification_protocols.iter().map(|v| &v.config)
+        self.notification_protocols.iter()
     }
 
     /// Returns the list the request-response protocols originally passed as
@@ -639,19 +693,25 @@ where
 
         let request_data = request_data.into();
 
-        // We check the size limit before sending the message. This size limit is the only reason
-        // why start a request can fail. By checking it here, we are guaranteed that the request
-        // start will succeed in the background.
-        if request_data.len()
-            > self
-                .request_response_protocols
-                .get(protocol_index)
-                .unwrap_or_else(|| panic!())
-                .inbound_config
-                .max_size()
-        {
-            return Err(StartRequestError::RequestTooLarge);
-        }
+        let protocol_info = self
+            .request_response_protocols
+            .get(protocol_index)
+            .unwrap_or_else(|| panic!());
+
+        let has_length_prefix = match protocol_info.inbound_config {
+            ConfigRequestResponseIn::Payload { max_size } => {
+                if request_data.len() > max_size {
+                    return Err(StartRequestError::RequestTooLarge);
+                }
+                true
+            }
+            ConfigRequestResponseIn::Empty => {
+                if !request_data.is_empty() {
+                    return Err(StartRequestError::RequestTooLarge);
+                }
+                false
+            }
+        };
 
         let substream_id = self.next_substream_id;
         self.next_substream_id.0 += 1;
@@ -662,9 +722,14 @@ where
         self.messages_to_connections.push_back((
             target,
             CoordinatorToConnectionInner::StartRequest {
-                protocol_index,
-                request_data,
+                protocol_name: protocol_info.name.clone(),
+                request_data: if has_length_prefix {
+                    Some(request_data)
+                } else {
+                    None
+                },
                 timeout,
+                max_response_size: protocol_info.max_response_size,
                 substream_id,
             },
         ));
@@ -706,10 +771,13 @@ where
             InnerConnectionState::Established
         ));
 
-        assert!(self
-            .notification_protocols
-            .get(overlay_network_index)
-            .is_some());
+        let (protocol_name, max_handshake_size) = {
+            let info = self
+                .notification_protocols
+                .get(overlay_network_index)
+                .unwrap_or_else(|| panic!());
+            (info.protocol_name.clone(), info.max_handshake_size)
+        };
 
         let substream_id = self.next_substream_id;
         self.next_substream_id.0 += 1;
@@ -726,9 +794,10 @@ where
         self.messages_to_connections.push_back((
             connection_id,
             CoordinatorToConnectionInner::OpenOutNotifications {
+                protocol_name,
                 handshake: handshake.into(),
                 now,
-                overlay_network_index,
+                max_handshake_size,
                 substream_id,
             },
         ));
@@ -856,6 +925,7 @@ where
             CoordinatorToConnectionInner::AcceptInNotifications {
                 substream_id: *inner_substream_id,
                 handshake,
+                max_notification_size: 16 * 1024 * 1024, // TODO: obtain from protocol configuration
             },
         ));
 
@@ -1226,6 +1296,78 @@ where
                         error,
                     }
                 }
+                ConnectionToCoordinatorInner::InboundNegotiated {
+                    id: connection_substream_id,
+                    protocol_name,
+                } => {
+                    // Ignore events if a shutdown has been initiated by the coordinator.
+                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
+                        connection.state
+                    {
+                        debug_assert!(api_initiated);
+                        continue;
+                    }
+
+                    if let Some((protocol_index, protocol)) = self
+                        .request_response_protocols
+                        .iter()
+                        .enumerate()
+                        .find(|(_, p)| p.name == protocol_name)
+                    {
+                        self.messages_to_connections.push_back((
+                            connection_id,
+                            CoordinatorToConnectionInner::AcceptInbound {
+                                substream_id: connection_substream_id,
+                                inbound_ty: InboundTy::Request {
+                                    protocol_index,
+                                    request_max_size: match protocol.inbound_config {
+                                        ConfigRequestResponseIn::Empty => None,
+                                        ConfigRequestResponseIn::Payload { max_size } => {
+                                            Some(max_size)
+                                        }
+                                    },
+                                },
+                            },
+                        ));
+                    } else if let Some((protocol_index, protocol)) = self
+                        .notification_protocols
+                        .iter()
+                        .enumerate()
+                        .find(|(_, p)| p.protocol_name == protocol_name)
+                    {
+                        self.messages_to_connections.push_back((
+                            connection_id,
+                            CoordinatorToConnectionInner::AcceptInbound {
+                                substream_id: connection_substream_id,
+                                inbound_ty: InboundTy::Notifications {
+                                    protocol_index,
+                                    max_handshake_size: protocol.max_handshake_size,
+                                },
+                            },
+                        ));
+                    } else if &*self.ping_protocol == &*protocol_name {
+                        self.messages_to_connections.push_back((
+                            connection_id,
+                            CoordinatorToConnectionInner::AcceptInbound {
+                                substream_id: connection_substream_id,
+                                inbound_ty: InboundTy::Ping,
+                            },
+                        ));
+                    } else {
+                        self.messages_to_connections.push_back((
+                            connection_id,
+                            CoordinatorToConnectionInner::RejectInbound {
+                                substream_id: connection_substream_id,
+                            },
+                        ));
+                    }
+
+                    continue;
+                }
+                ConnectionToCoordinatorInner::InboundAcceptedCancel { .. } => {
+                    // Nothing to do, as we don't track inbound accepted substreams.
+                    continue;
+                }
                 ConnectionToCoordinatorInner::RequestIn {
                     id: connection_substream_id,
                     protocol_index,
@@ -1563,6 +1705,18 @@ enum ConnectionToCoordinatorInner {
     InboundError(established::InboundError),
 
     /// See the corresponding event in [`established::Event`].
+    InboundNegotiated {
+        id: established::SubstreamId,
+        protocol_name: String,
+    },
+
+    /// See the corresponding event in [`established::Event`].
+    InboundAcceptedCancel {
+        // TODO: this field is currently unused but is planned to be used in the future; if plans change then remove it
+        _id: established::SubstreamId,
+    },
+
+    /// See the corresponding event in [`established::Event`].
     RequestIn {
         id: established::SubstreamId,
         protocol_index: usize,
@@ -1665,11 +1819,20 @@ enum CoordinatorToConnectionInner<TNow> {
     /// [`ConnectionToCoordinatorInner::StartShutdown`] has been sent.
     StartShutdown,
 
+    AcceptInbound {
+        substream_id: established::SubstreamId,
+        /// Configuration of the protocol.
+        inbound_ty: InboundTy,
+    },
+    RejectInbound {
+        substream_id: established::SubstreamId,
+    },
+
     StartRequest {
-        protocol_index: usize,
-        /// The size of the data is guaranteed to fit in the maximum allowed.
-        request_data: Vec<u8>,
+        protocol_name: String,
+        request_data: Option<Vec<u8>>,
         timeout: TNow,
+        max_response_size: usize,
         /// Id of the substream assigned by the coordinator.
         /// This is **not** the same as the actual substream used in the connection.
         substream_id: SubstreamId,
@@ -1678,7 +1841,8 @@ enum CoordinatorToConnectionInner<TNow> {
         /// Id of the substream assigned by the coordinator.
         /// This is **not** the same as the actual substream used in the connection.
         substream_id: SubstreamId,
-        overlay_network_index: usize,
+        protocol_name: String,
+        max_handshake_size: usize,
         now: TNow,
         handshake: Vec<u8>,
     },
@@ -1696,6 +1860,7 @@ enum CoordinatorToConnectionInner<TNow> {
     AcceptInNotifications {
         substream_id: established::SubstreamId,
         handshake: Vec<u8>,
+        max_notification_size: usize,
     },
     RejectInNotifications {
         substream_id: established::SubstreamId,
@@ -1711,6 +1876,23 @@ enum CoordinatorToConnectionInner<TNow> {
     AnswerRequest {
         substream_id: established::SubstreamId,
         response: Result<Vec<u8>, ()>,
+    },
+}
+
+/// Type of inbound protocol. Similar to [`established::InboundTy`], but contains the protocol
+/// index.
+enum InboundTy {
+    Ping,
+    Request {
+        protocol_index: usize,
+        /// Maximum allowed size of the request.
+        /// If `None`, then no data is expected on the substream, not even the length of the
+        /// request.
+        request_max_size: Option<usize>,
+    },
+    Notifications {
+        protocol_index: usize,
+        max_handshake_size: usize,
     },
 }
 

@@ -30,17 +30,17 @@ import { createConnection as nodeCreateConnection } from 'node:net';
 import { randomFillSync } from 'node:crypto';
 
 export {
-  AddChainError,
-  AddChainOptions,
-  AlreadyDestroyedError,
-  Chain,
-  Client,
-  ClientOptions,
-  CrashError,
-  MalformedJsonRpcError,
-  QueueFullError,
-  JsonRpcDisabledError,
-  LogCallback
+    AddChainError,
+    AddChainOptions,
+    AlreadyDestroyedError,
+    Chain,
+    Client,
+    ClientOptions,
+    CrashError,
+    MalformedJsonRpcError,
+    QueueFullError,
+    JsonRpcDisabledError,
+    LogCallback
 } from './client.js';
 
 /**
@@ -51,27 +51,27 @@ export {
  * @param options Configuration of the client. Defaults to `{}`.
  */
 export function start(options?: ClientOptions): Client {
-  options = options || {};
+    options = options || {};
 
-  return innerStart(options || {}, {
-    trustedBase64DecodeAndZlibInflate: (input) => {
-        return Promise.resolve(inflate(Buffer.from(input, 'base64')))
-    },
-    registerShouldPeriodicallyYield: (_callback) => {
-      return [true, () => {}]
-    },
-    performanceNow: () => {
-        return performance.now()
-    },
-    getRandomValues: (buffer) => {
-      if (buffer.length >= 1024 * 1024)
-        throw new Error('getRandomValues buffer too large')
-      randomFillSync(buffer)
-    },
-    connect: (config) => {
-      return connect(config, options?.forbidTcp || false, options?.forbidWs || false, options?.forbidNonLocalWs || false, options?.forbidWss || false)
-    }
-  })
+    return innerStart(options || {}, {
+        trustedBase64DecodeAndZlibInflate: (input) => {
+            return Promise.resolve(inflate(Buffer.from(input, 'base64')))
+        },
+        registerShouldPeriodicallyYield: (_callback) => {
+            return [true, () => { }]
+        },
+        performanceNow: () => {
+            return performance.now()
+        },
+        getRandomValues: (buffer) => {
+            if (buffer.length >= 1024 * 1024)
+                throw new Error('getRandomValues buffer too large')
+            randomFillSync(buffer)
+        },
+        connect: (config) => {
+            return connect(config, options?.forbidTcp || false, options?.forbidWs || false, options?.forbidNonLocalWs || false, options?.forbidWss || false)
+        }
+    })
 }
 
 /**
@@ -163,8 +163,8 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             send: (data: Uint8Array): void => {
                 socket.send(data);
                 if (bufferedAmountCheck.quenedUnreportedBytes == 0) {
-                  bufferedAmountCheck.nextTimeout = 10;
-                  setTimeout(checkBufferedAmount, 10);
+                    bufferedAmountCheck.nextTimeout = 10;
+                    setTimeout(checkBufferedAmount, 10);
                 }
                 bufferedAmountCheck.quenedUnreportedBytes += data.length;
             },

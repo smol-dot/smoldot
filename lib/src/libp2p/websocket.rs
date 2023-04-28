@@ -21,7 +21,7 @@
 #![cfg(all(feature = "std"))]
 #![cfg_attr(docsrs, doc(cfg(all(feature = "std"))))]
 
-use futures::prelude::*;
+use futures_util::{future, AsyncRead, AsyncWrite, Future as _};
 
 use core::{
     cmp, mem,
@@ -374,7 +374,7 @@ fn convert_err(err: &soketto::connection::Error) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use futures::prelude::*;
+    use futures_util::{AsyncRead, AsyncWrite};
 
     #[test]
     fn is_send() {

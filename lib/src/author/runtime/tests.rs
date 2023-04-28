@@ -65,7 +65,23 @@ fn block_building_works() {
                     .map(|(_, v)| iter::once(v));
                 builder = get.inject_value(value.map(|v| (v, super::TrieEntryVersion::V0)));
             }
-            super::BlockBuild::NextKey(_) => unimplemented!(), // Not needed for this test.
+            super::BlockBuild::NextKey(next_key) => {
+                let result = genesis_storage.iter().fold(None, |iter, (key, _)| {
+                    if key < next_key.key().as_ref()
+                        || (key == next_key.key().as_ref() && !next_key.or_equal())
+                        || !key.starts_with(next_key.prefix().as_ref())
+                    {
+                        return iter;
+                    }
+
+                    if iter.map_or(false, |iter| iter < key) {
+                        iter
+                    } else {
+                        Some(key)
+                    }
+                });
+                builder = next_key.inject_key(result);
+            }
             super::BlockBuild::PrefixKeys(prefix) => {
                 let p = prefix.prefix().as_ref().to_owned();
                 let list = genesis_storage

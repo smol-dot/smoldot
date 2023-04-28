@@ -15,16 +15,47 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Data structure containing trees of nodes.
+//! Performing asynchronous operations on blocks.
 //!
-//! The [`AsyncTree`] data structure can be used in situations where there exists a finalized
-//! block, plus a tree of non-finalized blocks that all descend from that finalized block.
+//! # Summary
 //!
-//! The [`AsyncTree`] only contains the non-finalized blocks. The finalized block, virtual root
-//! of the tree, is only implicitly there.
+//! This module contains the [`AsyncTree`] data structure.
 //!
-//! When a block is inserted in the [`AsyncTree`], it is marked as "pending".
-//! TODO: finish doc
+//! When a block is inserted in the data structure, it is added to the so-called "input tree" and
+//! its status is marked as pending. The data structure then starts, for each block marked as
+//! pending, an asynchronous operation (what this operation consists of is decided by the API
+//! user). Once an asynchronous operation is successful, the status of the block is switched to
+//! "finished". The data structure then puts the blocks in the so-called "output tree".
+//!
+//! The output tree is consistent, meaning that if the asynchronous operation of a child finishes
+//! before the one of its parent, the child will be added to the output tree only after its
+//! parent has finished its operation.
+//! Similarly, if a block is finalized in the input tree, it only gets finalized in the output
+//! tree after all of its ancestors have all finished their asynchronous operations.
+//!
+//! An example use case is: you insert block headers, then for each block you download its body,
+//! and thus obtain as output a tree of block headers and bodies.
+//!
+//! # Details
+//!
+//! The [`AsyncTree`] data structure contains two trees of blocks: one input tree and one output
+//! tree. The output tree is a subset of the input tree.
+//!
+//! Each of the two trees (input and output) has the following properties:
+//!
+//! - A finalized block.
+//! - A tree of non-finalized blocks that all descend from the finalized block.
+//! - A best block that can be either the finalized block or one of the non-finalized blocks.
+//!
+//! Furthermore, each block has the following properties:
+//!
+//! - An opaque user data.
+//! - A status: pending, in progress, or finished. Once finished, an "asynchronous user data" is
+//! also attached to the block. All the blocks of the output tree are always in the "finished"
+//! state.
+//!
+//! At initialization, both the input and output trees are initialized to the same finalized
+//! block (that is also the best block), and don't have any non-finalized block.
 //!
 //! # Example
 //!
@@ -38,7 +69,7 @@
 //!     blocks_capacity: 32,
 //! });
 //!
-//! // Insert a new best block, parent of the finalized block.
+//! // Insert a new best block, child of the finalized block.
 //! // When doing so, we insert a "user data", a value opaque to the tree and that can be
 //! // retreived later. Here we pass "my block".
 //! let _my_block_index = tree.input_insert_block("my block", None, false, true);
@@ -128,6 +159,7 @@ pub struct Config<TAsync> {
     pub blocks_capacity: usize,
 }
 
+/// See [the module-level documentation](..).
 pub struct AsyncTree<TNow, TBl, TAsync> {
     /// State of all the non-finalized blocks.
     non_finalized_blocks: fork_tree::ForkTree<Block<TNow, TBl, TAsync>>,
@@ -867,8 +899,8 @@ where
 
     /// Tries to update the output blocks to follow the input.
     ///
-    /// Should be called after inserting a new block, finalizing a block, or when an operation is
-    /// finished.
+    /// Should be called after inserting a new block, finalizing a block, or when an asynchronous
+    /// operation is finished.
     ///
     /// Returns `None` if the state machine doesn't have any update. This method should be called
     /// repeatedly until it returns `None`. Each call can perform an additional update.

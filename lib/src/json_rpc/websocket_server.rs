@@ -118,7 +118,8 @@ mod tests;
 
 use async_std::net::{TcpListener, TcpStream};
 use core::{fmt, ops, str};
-use futures::{channel::mpsc, prelude::*};
+use futures_channel::mpsc;
+use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use soketto::handshake::{server::Response, Server};
 use std::{io, net::SocketAddr};
 
@@ -375,7 +376,7 @@ impl<T> WsServer<T> {
     /// Returns the next event happening on the server.
     pub async fn next_event(&'_ mut self) -> Event<'_, T> {
         loop {
-            futures::select! {
+            futures_util::select! {
                 // Only try to fetch a new incoming connection if none is pending.
                 socket = {
                     let listener = &self.listener;
@@ -384,7 +385,7 @@ impl<T> WsServer<T> {
                         if !has_pending {
                             listener.accept().await
                         } else {
-                            loop { futures::pending!() }
+                            loop { futures_util::future::pending::<()>().await }
                         }
                     }
                 }.fuse() => {

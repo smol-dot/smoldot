@@ -22,6 +22,8 @@ use core::{
     time::Duration,
 };
 
+use std::time::Instant;
+
 /// Wraps around a `Future` and enforces an upper bound to the CPU consumed by the polling of
 /// this `Future`.
 ///
@@ -33,6 +35,10 @@ pub struct CpuRateLimiter<T> {
     #[pin]
     inner: T,
     max_divided_by_rate_limit_minus_one: f64,
+
+    /// Instead of sleeping regularly for short amounts of time, we instead continue running only
+    /// until the time we have to sleep reaches a certain threshold.
+    sleep_deprevation_sec: f64,
 
     /// Prevent `self.inner.poll` from being called before this `Delay` is ready.
     #[pin]
@@ -55,6 +61,7 @@ impl<T> CpuRateLimiter<T> {
         CpuRateLimiter {
             inner,
             max_divided_by_rate_limit_minus_one,
+            sleep_deprevation_sec: 0.0,
             prevent_poll_until: crate::timers::Delay::new(Duration::new(0, 0)),
         }
     }
@@ -69,18 +76,18 @@ impl<T: Future> Future for CpuRateLimiter<T> {
         // Note that `crate::timers::Delay` is a `FusedFuture`, making it ok to call `poll` even
         // if it is possible for the `Delay` to already be resolved.
         // We add a small zero-cost shim to ensure at compile time that this is indeed the case.
-        fn enforce_fused<T: futures::future::FusedFuture>(_: &T) {}
+        fn enforce_fused<T: futures_util::future::FusedFuture>(_: &T) {}
         enforce_fused(&this.prevent_poll_until);
         if Future::poll(this.prevent_poll_until.as_mut(), cx).is_pending() {
             return Poll::Pending;
         }
 
-        let before_polling = crate::Instant::now();
+        let before_polling = Instant::now();
 
         match this.inner.poll(cx) {
             Poll::Ready(value) => Poll::Ready(value),
             Poll::Pending => {
-                let after_polling = crate::Instant::now();
+                let after_polling = Instant::now();
 
                 // Time it took to execute `poll`.
                 let poll_duration = after_polling - before_polling;
@@ -88,17 +95,19 @@ impl<T: Future> Future for CpuRateLimiter<T> {
                 // In order to enforce the rate limiting, we prevent `poll` from executing
                 // for a certain amount of time.
                 // The base equation here is: `(after_poll_sleep + poll_duration) * rate_limit == poll_duration * u32::max_value()`.
-                // Because `Duration::mul_f64` and `Duration::from_secs_f64` panic in case of
-                // overflow, we need to do the operation of multiplying and checking the bounds
-                // manually.
                 let after_poll_sleep =
                     poll_duration.as_secs_f64() * *this.max_divided_by_rate_limit_minus_one;
                 debug_assert!(after_poll_sleep >= 0.0 && !after_poll_sleep.is_nan());
+                *this.sleep_deprevation_sec += after_poll_sleep;
 
-                this.prevent_poll_until.set(crate::timers::Delay::new_at(
-                    after_polling
-                        + Duration::try_from_secs_f64(after_poll_sleep).unwrap_or(Duration::MAX),
-                ));
+                if *this.sleep_deprevation_sec > 0.005 {
+                    this.prevent_poll_until.set(crate::timers::Delay::new_at(
+                        after_polling
+                            + Duration::try_from_secs_f64(*this.sleep_deprevation_sec)
+                                .unwrap_or(Duration::MAX),
+                    ));
+                    *this.sleep_deprevation_sec = 0.0;
+                }
 
                 Poll::Pending
             }
@@ -106,7 +115,7 @@ impl<T: Future> Future for CpuRateLimiter<T> {
     }
 }
 
-impl<T: futures::future::FusedFuture> futures::future::FusedFuture for CpuRateLimiter<T> {
+impl<T: futures_util::future::FusedFuture> futures_util::future::FusedFuture for CpuRateLimiter<T> {
     fn is_terminated(&self) -> bool {
         self.inner.is_terminated()
     }

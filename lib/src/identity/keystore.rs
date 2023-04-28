@@ -45,7 +45,7 @@
 
 use crate::{identity::seed_phrase, util::SipHasherBuild};
 
-use futures::lock::Mutex;
+use async_lock::Mutex;
 use rand::{Rng as _, SeedableRng as _};
 use std::{borrow::Cow, fs, io, path, str};
 
@@ -650,7 +650,7 @@ mod tests {
 
     #[test]
     fn disk_storage_works_ed25519() {
-        futures::executor::block_on(async move {
+        futures_executor::block_on(async move {
             let path = tempfile::tempdir().unwrap();
 
             let keystore1 = Keystore::new(Some(path.path().to_owned()), rand::random())
@@ -684,7 +684,7 @@ mod tests {
 
     #[test]
     fn disk_storage_works_sr25519() {
-        futures::executor::block_on(async move {
+        futures_executor::block_on(async move {
             let path = tempfile::tempdir().unwrap();
 
             let keystore1 = Keystore::new(Some(path.path().to_owned()), rand::random())
