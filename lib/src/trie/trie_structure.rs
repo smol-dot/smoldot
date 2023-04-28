@@ -712,69 +712,6 @@ impl<TUd> TrieStructure<TUd> {
         Some(self.node_full_key(node_index.0))
     }
 
-    /// Returns a list of all nodes in the structure in lexicographic order of keys.
-    #[inline] // Given that the bounds are often hard-coded, it seems better to inline this function.
-    pub fn range(
-        &'_ self,
-        range: impl ops::RangeBounds<[u8]>,
-    ) -> impl Iterator<Item = NodeIndex> + '_ {
-        let start_bound = range.start_bound();
-        let end_bound = range.end_bound();
-
-        let (start, skip_first) = match start_bound {
-            ops::Bound::Included(key) | ops::Bound::Excluded(key) => {
-                match self.existing_node_inner(bytes_to_nibbles(key.iter().copied())) {
-                    ExistingNodeInnerResult::Found { node_index, .. } => (
-                        Some(node_index),
-                        matches!(start_bound, ops::Bound::Excluded(_)),
-                    ),
-                    ExistingNodeInnerResult::NotFound {
-                        closest_ancestor: Some((node_index, _)),
-                    } => (Some(node_index), true),
-                    ExistingNodeInnerResult::NotFound {
-                        closest_ancestor: None,
-                    } => (None, false),
-                }
-            }
-            ops::Bound::Unbounded => (None, false),
-        };
-
-        let (end, include_end) = match end_bound {
-            ops::Bound::Included(key) | ops::Bound::Excluded(key) => {
-                match self.existing_node_inner(bytes_to_nibbles(key.iter().copied())) {
-                    ExistingNodeInnerResult::Found { node_index, .. } => (
-                        Some(node_index),
-                        matches!(start_bound, ops::Bound::Included(_)),
-                    ),
-                    ExistingNodeInnerResult::NotFound {
-                        closest_ancestor: Some((node_index, _)),
-                    } => (Some(node_index), true),
-                    ExistingNodeInnerResult::NotFound {
-                        closest_ancestor: None,
-                    } => (None, false),
-                }
-            }
-            ops::Bound::Unbounded => (None, false),
-        };
-
-        self.all_node_lexicographic_ordered(start)
-            .skip(if skip_first { 1 } else { 0 })
-            .take_while({
-                let mut previous_matched_end = false;
-                move |index| {
-                    if previous_matched_end {
-                        return false;
-                    }
-                    previous_matched_end = end.map_or(false, |end| *index == end);
-                    if previous_matched_end && !include_end {
-                        return false;
-                    }
-                    true
-                }
-            })
-            .map(NodeIndex)
-    }
-
     /// Returns the full key of the node with the given index.
     ///
     /// # Panic
