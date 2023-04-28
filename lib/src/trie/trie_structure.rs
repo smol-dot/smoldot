@@ -714,6 +714,10 @@ impl<TUd> TrieStructure<TUd> {
                             if end_key.peek().is_none() {
                                 return either::Right(iter::empty());
                             }
+                        } else if iter_key_nibbles_extra == 0
+                            && iter_node_pk_nibble > *end_key.peek().unwrap()
+                        {
+                            return either::Right(iter::empty());
                         } else {
                             iter_key_nibbles_extra += 1;
                         }
@@ -885,7 +889,6 @@ impl<TUd> TrieStructure<TUd> {
                     let Some((parent_node_index, parent_nibble_direction)) = node.parent else { return None; };
                     iter_key_nibbles_extra -= 2;
                     iter_key_nibbles_extra -= node.partial_key.len();
-                    iter = (parent_node_index, None);
                     let next_sibling_nibble = parent_nibble_direction.checked_add(1);
                     if iter_key_nibbles_extra == 0
                         && next_sibling_nibble == Some(*end_key.peek().unwrap())
