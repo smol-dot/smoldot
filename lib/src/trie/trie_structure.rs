@@ -731,7 +731,18 @@ impl<TUd> TrieStructure<TUd> {
                     // Stop the search immediately after the current node in the parent.
                     let Some((parent, parent_nibble)) = iter_node.parent
                         else { return either::Right(iter::empty()); };
-                    iter = (parent, Some(parent_nibble.checked_add(1)));
+                    let next_nibble = parent_nibble.checked_add(1);
+                    if iter_key_nibbles_extra == 0 && next_nibble == Some(*end_key.peek().unwrap())
+                    {
+                        let _ = end_key.next();
+                        // `iter` is already past the end bound. Return an empty range.
+                        if end_key.peek().is_none() {
+                            return either::Right(iter::empty());
+                        }
+                    } else {
+                        iter_key_nibbles_extra += 1;
+                    }
+                    iter = (parent, Some(next_nibble));
                     break 'start_search;
                 }
             }
