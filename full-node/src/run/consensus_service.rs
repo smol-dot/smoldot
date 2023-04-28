@@ -776,21 +776,24 @@ impl SyncBackground {
                         // in full mode, in which case we shouldn't have reached this code.
                         let best_block_storage_access = self.sync.best_block_storage().unwrap();
 
-                        let value = match self
-                            .finalized_block_storage
-                            .node(bytes_to_nibbles(req.key().as_ref().iter().copied()))
-                        {
-                            trie_structure::Entry::Occupied(
-                                trie_structure::NodeAccess::Storage(node),
-                            ) => {
-                                let (val, vers) = node.into_user_data().as_ref().unwrap();
-                                Some((&val[..], *vers))
-                            }
-                            trie_structure::Entry::Occupied(
-                                trie_structure::NodeAccess::Branch(_),
-                            )
-                            | trie_structure::Entry::Vacant(_) => None,
-                        };
+                        let value =
+                            best_block_storage_access.get(req.key().as_ref(), || {
+                                match self
+                                    .finalized_block_storage
+                                    .node(bytes_to_nibbles(req.key().as_ref().iter().copied()))
+                                {
+                                    trie_structure::Entry::Occupied(
+                                        trie_structure::NodeAccess::Storage(node),
+                                    ) => {
+                                        let (val, vers) = node.into_user_data().as_ref().unwrap();
+                                        Some((&val[..], *vers))
+                                    }
+                                    trie_structure::Entry::Occupied(
+                                        trie_structure::NodeAccess::Branch(_),
+                                    )
+                                    | trie_structure::Entry::Vacant(_) => None,
+                                }
+                            });
 
                         block_authoring =
                             req.inject_value(value.map(|(val, vers)| (iter::once(val), vers)));
@@ -806,7 +809,7 @@ impl SyncBackground {
 
                         // TODO: to_vec() :-/ range() immediately calculates the range of keys so there's no borrowing issue, but the take_while needs to keep req borrowed, which isn't possible
                         let prefix = prefix_key.prefix().as_ref().to_vec();
-                        let keys = self
+                        let finalized_keys = self
                             .finalized_block_storage
                             .range(ops::Bound::Included(&prefix), ops::Bound::Unbounded)
                             .filter(|node_index| {
@@ -823,7 +826,12 @@ impl SyncBackground {
                             })
                             .take_while(|k| k.starts_with(&prefix));
 
-                        block_authoring = prefix_key.inject_keys_ordered(keys);
+                        let keys = best_block_storage_access
+                            .prefix_keys_ordered(prefix_key.prefix().as_ref(), finalized_keys)
+                            .map(|k| k.as_ref().to_vec()) // TODO: overhead
+                            .collect::<Vec<_>>();
+
+                        block_authoring = prefix_key.inject_keys_ordered(keys.into_iter());
                         continue;
                     }
                 }
