@@ -639,7 +639,9 @@ impl<TUd> TrieStructure<TUd> {
         // `iter` also contains an optional nibble. If this optional nibble is `None`, the
         // iteration is currently at the node itself. If it is `Some`, the iteration isn't at the
         // node itself but at its child of the given nibble (which potentially doesn't exist).
-        let mut iter: (usize, Option<Nibble>) = match self.root_index {
+        // If it is `Some(None)`, then the iteration is right after the last children of the node.
+        // In other words, `Some(None)` represents an overflow.
+        let mut iter: (usize, Option<Option<Nibble>>) = match self.root_index {
             Some(idx) => (idx, None),
             None => {
                 // Trie is empty. Special case.
@@ -723,7 +725,7 @@ impl<TUd> TrieStructure<TUd> {
                     iter = (child, None);
                 } else {
                     // `iter` is strictly inferior to `start_key`.
-                    iter.1 = Some(next_nibble);
+                    iter.1 = Some(Some(next_nibble));
                     break 'start_search;
                 }
             } else {
@@ -732,7 +734,7 @@ impl<TUd> TrieStructure<TUd> {
                 // which we do by adding a zero nibble afterwards.
                 debug_assert!(iter.1.is_none());
                 if !start_key_is_inclusive {
-                    iter.1 = Some(Nibble::zero());
+                    iter.1 = Some(Some(Nibble::zero()));
                     if iter_key_nibbles_extra == 0 && *end_key.peek().unwrap() == Nibble::zero() {
                         let _ = end_key.next();
                         // `iter` is already past the end bound. Return an empty range.
@@ -763,7 +765,7 @@ impl<TUd> TrieStructure<TUd> {
                 // If `iter` points to an actual node, yield it and jump to the position right
                 // after.
                 let Some(iter_1) = iter.1 else {
-                    iter.1 = Some(Nibble::zero());
+                    iter.1 = Some(Some(Nibble::zero()));
                     if iter_key_nibbles_extra == 0 && *end_key.peek().unwrap() == Nibble::zero() {
                         let _ = end_key.next();
                     } else {
@@ -774,7 +776,9 @@ impl<TUd> TrieStructure<TUd> {
 
                 let node = self.nodes.get(iter.0).unwrap();
 
-                if let Some(child) = node.children[usize::from(u8::from(iter_1))] {
+                if let Some(child) =
+                    iter_1.and_then(|iter_1| node.children[usize::from(u8::from(iter_1))])
+                {
                     // `child` might be after the end bound if its partial key is superior or
                     // equal to the `end_key`.
                     for child_pk_nibble in
@@ -798,19 +802,22 @@ impl<TUd> TrieStructure<TUd> {
                     iter = (child, None);
                 } else if iter_key_nibbles_extra == 0 {
                     return None;
-                } else if iter_key_nibbles_extra == 1 && iter_1 > *end_key.peek().unwrap() {
-                    return None;
-                } else if let Some(child_index) = node.children[(usize::from(u8::from(iter_1)))
-                    ..=usize::from(u8::from(if iter_key_nibbles_extra == 1 {
-                        *end_key.peek().unwrap()
-                    } else {
-                        Nibble::max()
-                    }))]
-                    .iter()
-                    .position(|c| c.is_some())
+                } else if iter_key_nibbles_extra == 1
+                    && iter_1.map_or(true, |iter_1| iter_1 > *end_key.peek().unwrap())
                 {
+                    return None;
+                } else if let Some(child_index) = iter_1.and_then(|iter_1| {
+                    node.children[(usize::from(u8::from(iter_1)))
+                        ..=usize::from(u8::from(if iter_key_nibbles_extra == 1 {
+                            *end_key.peek().unwrap()
+                        } else {
+                            Nibble::max()
+                        }))]
+                        .iter()
+                        .position(|c| c.is_some())
+                }) {
                     let child_nibble = Nibble::try_from(
-                        u8::try_from(usize::from(u8::from(iter_1)) + child_index).unwrap(),
+                        u8::try_from(usize::from(u8::from(iter_1.unwrap())) + child_index).unwrap(),
                     )
                     .unwrap();
 
@@ -819,37 +826,31 @@ impl<TUd> TrieStructure<TUd> {
                         let _ = end_key.next();
                     }
 
-                    iter.1 = Some(child_nibble);
+                    iter.1 = Some(Some(child_nibble));
                 } else {
-                    // `iter` has no child. Go up the tree.
-                    loop {
-                        let node = self.nodes.get(iter.0).unwrap();
+                    // `iter` has no child. Go to the parent.
+                    let node = self.nodes.get(iter.0).unwrap();
 
-                        // End the iterator if we were about to jump out of the end bound.
-                        if iter_key_nibbles_extra
-                            < if iter.1.is_some() { 2 } else { 1 } + node.partial_key.len()
-                        {
-                            return None;
-                        }
-
-                        let Some((parent_node_index, parent_nibble_direction)) = node.parent else { return None; };
-                        iter_key_nibbles_extra -= if iter.1.is_some() { 2 } else { 1 };
-                        iter_key_nibbles_extra -= node.partial_key.len();
-                        iter = (parent_node_index, None);
-                        let next_sibling_nibble = match parent_nibble_direction.checked_add(1) {
-                            Some(idx) => idx,
-                            None => continue,
-                        };
-                        if iter_key_nibbles_extra == 0
-                            && *end_key.peek().unwrap() == next_sibling_nibble
-                        {
-                            let _ = end_key.next();
-                        } else {
-                            iter_key_nibbles_extra += 1;
-                        }
-                        iter.1 = Some(next_sibling_nibble);
-                        break;
+                    // End the iterator if we were about to jump out of the end bound.
+                    if iter_key_nibbles_extra
+                        < if iter.1.is_some() { 2 } else { 1 } + node.partial_key.len()
+                    {
+                        return None;
                     }
+
+                    let Some((parent_node_index, parent_nibble_direction)) = node.parent else { return None; };
+                    iter_key_nibbles_extra -= if iter.1.is_some() { 2 } else { 1 };
+                    iter_key_nibbles_extra -= node.partial_key.len();
+                    iter = (parent_node_index, None);
+                    let next_sibling_nibble = parent_nibble_direction.checked_add(1);
+                    if iter_key_nibbles_extra == 0
+                        && next_sibling_nibble == Some(*end_key.peek().unwrap())
+                    {
+                        let _ = end_key.next();
+                    } else {
+                        iter_key_nibbles_extra += 1;
+                    }
+                    iter.1 = Some(next_sibling_nibble);
                 }
             }
         }))
