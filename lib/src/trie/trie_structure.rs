@@ -678,37 +678,65 @@ impl<TUd> TrieStructure<TUd> {
             debug_assert!(iter.1.is_none());
             let iter_node = self.nodes.get(iter.0).unwrap();
 
-            // Update the value of `iter_key_nibbles_extra` to take the current value of `iter`
-            // into account, as it isn't the case yet.
-            for iter_node_pk_nibble in iter_node.partial_key.iter().cloned() {
-                if iter_key_nibbles_extra == 0 && iter_node_pk_nibble == *end_key.peek().unwrap() {
-                    let _ = end_key.next();
-                    // `iter` is already past the end bound. Return an empty range.
-                    if end_key.peek().is_none() {
-                        return either::Right(iter::empty());
+            // Compare the nibbles at the front of `start_key` with the ones of `iter_node`.
+            // Consumes the nibbles at the start of `start_key`.
+            let pk_compare = {
+                let mut result = cmp::Ordering::Equal;
+                for iter_node_pk_nibble in iter_node.partial_key.iter().cloned() {
+                    match start_key
+                        .next()
+                        .map(|nibble| nibble.cmp(&iter_node_pk_nibble))
+                    {
+                        None | Some(cmp::Ordering::Less) => {
+                            result = cmp::Ordering::Less;
+                            break;
+                        }
+                        Some(cmp::Ordering::Equal) => {}
+                        Some(cmp::Ordering::Greater) => {
+                            result = cmp::Ordering::Greater;
+                            break;
+                        }
                     }
-                } else {
-                    iter_key_nibbles_extra += 1;
                 }
-            }
+                result
+            };
 
-            // Remove nibbles at the front of `start_key` and compare them with `iter_node`'s
-            // partial key in order to determine whether to stop iterating.
-            for iter_node_pk_nibble in iter_node.partial_key.iter().cloned() {
-                match start_key
-                    .next()
-                    .map(|nibble| nibble.cmp(&iter_node_pk_nibble))
-                {
-                    None | Some(cmp::Ordering::Less) => {
-                        // `iter` is superior or equal or strictly superior to `start_key`.
-                        // `iter` is now at the correct position.
+            match pk_compare {
+                cmp::Ordering::Less | cmp::Ordering::Equal => {
+                    // Update the value of `iter_key_nibbles_extra` to take the current value
+                    // of `iter` into account, as it hasn't been done yet.
+                    for iter_node_pk_nibble in iter_node.partial_key.iter().cloned() {
+                        if iter_key_nibbles_extra == 0
+                            && iter_node_pk_nibble == *end_key.peek().unwrap()
+                        {
+                            let _ = end_key.next();
+                            // `iter` is already past the end bound. Return an empty range.
+                            if end_key.peek().is_none() {
+                                return either::Right(iter::empty());
+                            }
+                        } else {
+                            iter_key_nibbles_extra += 1;
+                        }
+                    }
+
+                    if pk_compare == cmp::Ordering::Less {
+                        // `iter` is strictly superior to `start_key`. `iter` is now at the
+                        // correct position.
                         break 'start_search;
                     }
-                    _ => {}
+                }
+                cmp::Ordering::Greater => {
+                    // `iter` is strictly inferior to `start_key`, and all of its children will
+                    // also be strictly inferior to `start_key`.
+                    // Stop the search immediately after the current node in the parent.
+                    let Some((parent, parent_nibble)) = iter_node.parent
+                        else { return either::Right(iter::empty()); };
+                    iter = (parent, Some(parent_nibble.checked_add(1)));
+                    break 'start_search;
                 }
             }
 
-            // Then, remove the next nibble from `start_key` and update `iter` based on it.
+            // Remove the next nibble from `start_key` and update `iter` based on it.
             if let Some(next_nibble) = start_key.next() {
                 if iter_key_nibbles_extra == 0 && next_nibble == *end_key.peek().unwrap() {
                     let _ = end_key.next();
