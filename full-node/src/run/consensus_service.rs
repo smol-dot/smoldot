@@ -813,6 +813,7 @@ impl SyncBackground {
                                 self.finalized_block_storage.is_storage(*node_index)
                             })
                             .map(|node_index| {
+                                // TODO: consider detecting if nibbles are uneven instead of ignoring the problem
                                 nibbles_to_bytes_suffix_extend(
                                     self.finalized_block_storage
                                         .node_full_key_by_index(node_index)
@@ -1210,6 +1211,10 @@ impl SyncBackground {
                                         )
                                         .collect::<Vec<_>>()
                                     });
+
+                                debug_assert!(next_key
+                                    .as_ref()
+                                    .map_or(true, |k| &**k > req.key().as_ref()));
                                 verify = req.inject_key(next_key);
                             }
                             all::BlockVerification::FinalizedStoragePrefixKeys(req) => {
@@ -1222,6 +1227,7 @@ impl SyncBackground {
                                         self.finalized_block_storage.is_storage(*node_index)
                                     })
                                     .map(|node_index| {
+                                        // TODO: consider detecting if nibbles are uneven instead of ignoring the problem
                                         nibbles_to_bytes_suffix_extend(
                                             self.finalized_block_storage
                                                 .node_full_key_by_index(node_index)
