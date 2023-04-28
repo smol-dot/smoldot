@@ -889,9 +889,8 @@ fn range() {
                     let trie_result = trie
                         .range(start_range_trie, end_range_trie)
                         .collect::<Vec<_>>();
-                    assert_eq!(
-                        trie_result,
-                        Vec::new(),
+                    assert!(
+                        trie_result.is_empty(),
                         "{:?} {:?} {:?} {:?}",
                         btree_map,
                         trie_result,
