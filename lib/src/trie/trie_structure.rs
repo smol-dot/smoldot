@@ -170,7 +170,7 @@ impl<TUd> TrieStructure<TUd> {
 
     /// Returns a list of all nodes in the structure in lexicographic order of keys.
     pub fn iter_ordered(&'_ self) -> impl Iterator<Item = NodeIndex> + '_ {
-        self.all_node_lexicographic_ordered(None).map(NodeIndex)
+        self.all_node_lexicographic_ordered().map(NodeIndex)
     }
 
     /// Returns the root node of the trie, or `None` if the trie is empty.
@@ -584,8 +584,8 @@ impl<TUd> TrieStructure<TUd> {
             return false;
         }
 
-        let mut me_iter = self.all_node_lexicographic_ordered(None);
-        let mut other_iter = other.all_node_lexicographic_ordered(None);
+        let mut me_iter = self.all_node_lexicographic_ordered();
+        let mut other_iter = other.all_node_lexicographic_ordered();
 
         loop {
             let (me_node_idx, other_node_idx) = match (me_iter.next(), other_iter.next()) {
@@ -954,13 +954,7 @@ impl<TUd> TrieStructure<TUd> {
     }
 
     /// Iterates over all nodes of the trie in a lexicographic order.
-    ///
-    /// If `start_node` is `Some`, the iteration always starts with the given node. If `None`, the
-    /// iteration always starts with the root node.
-    fn all_node_lexicographic_ordered(
-        &'_ self,
-        start_node: Option<usize>,
-    ) -> impl Iterator<Item = usize> + '_ {
+    fn all_node_lexicographic_ordered(&'_ self) -> impl Iterator<Item = usize> + '_ {
         fn ancestry_order_next<TUd>(tree: &TrieStructure<TUd>, node_index: usize) -> Option<usize> {
             if let Some(first_child) = tree
                 .nodes
@@ -987,9 +981,7 @@ impl<TUd> TrieStructure<TUd> {
             return_value
         }
 
-        iter::successors(start_node.or(self.root_index), move |n| {
-            ancestry_order_next(self, *n)
-        })
+        iter::successors(self.root_index, move |n| ancestry_order_next(self, *n))
     }
 
     /// Returns the [`NodeAccess`] of the node at the given index, or `None` if no such node
@@ -1146,7 +1138,7 @@ impl<TUd: fmt::Debug> fmt::Debug for TrieStructure<TUd> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_list()
             .entries(
-                self.all_node_lexicographic_ordered(None)
+                self.all_node_lexicographic_ordered()
                     .map(|idx| (idx, self.nodes.get(idx).unwrap())),
             )
             .finish()
