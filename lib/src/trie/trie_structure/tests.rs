@@ -782,7 +782,7 @@ fn iter_properly_traverses() {
         }
     }
 
-    assert_eq!(trie.all_node_lexicographic_ordered().count(), trie.nodes.len());
+    assert_eq!(trie.iter_ordered().count(), trie.nodes.len());
 }
 
 #[test]
