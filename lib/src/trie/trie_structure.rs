@@ -732,6 +732,10 @@ impl<TUd> TrieStructure<TUd> {
                     let Some((parent, parent_nibble)) = iter_node.parent
                         else { return either::Right(iter::empty()); };
                     let next_nibble = parent_nibble.checked_add(1);
+                    if iter_key_nibbles_extra == 0 {
+                        return either::Right(iter::empty());
+                    }
+                    iter_key_nibbles_extra -= 1;
                     if iter_key_nibbles_extra == 0 && next_nibble == Some(*end_key.peek().unwrap())
                     {
                         let _ = end_key.next();
