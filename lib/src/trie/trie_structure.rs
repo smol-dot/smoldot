@@ -763,6 +763,8 @@ impl<TUd> TrieStructure<TUd> {
                     if end_key.peek().is_none() {
                         return either::Right(iter::empty());
                     }
+                } else if iter_key_nibbles_extra == 0 && next_nibble > *end_key.peek().unwrap() {
+                    return either::Right(iter::empty());
                 } else {
                     iter_key_nibbles_extra += 1;
                 }
