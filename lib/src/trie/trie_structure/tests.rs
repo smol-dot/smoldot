@@ -912,7 +912,7 @@ fn range() {
                 .collect::<Vec<_>>();
             assert_eq!(
                 btree_result, trie_result,
-                "btree: {:?}\nbtree_result: {:?}\ntrie_result: {:?}\nstart: {:?}\nend: {:?}",
+                "\nbtree: {:?}\nbtree_result: {:?}\ntrie_result: {:?}\nstart: {:?}\nend: {:?}",
                 btree_map, btree_result, trie_result, start_range_btree, end_range_btree
             );
         }
