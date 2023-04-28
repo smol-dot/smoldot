@@ -1200,25 +1200,34 @@ impl SyncBackground {
                                 verify = req.inject_value(value);
                             }
                             all::BlockVerification::FinalizedStorageNextKey(req) => {
-                                let next_key = self
-                                    .finalized_block_storage
-                                    .range(
-                                        ops::Bound::Excluded(req.key().as_ref()),
-                                        ops::Bound::Unbounded,
-                                    )
-                                    .filter(|node_index| {
-                                        self.finalized_block_storage.is_storage(*node_index)
-                                    })
-                                    .next()
-                                    .map(|node_index| {
-                                        // TODO: consider detecting if nibbles are uneven instead of ignoring the problem
-                                        nibbles_to_bytes_suffix_extend(
-                                            self.finalized_block_storage
-                                                .node_full_key_by_index(node_index)
-                                                .unwrap(),
+                                let next_key = {
+                                    let req_key = req.key();
+                                    let out = self
+                                        .finalized_block_storage
+                                        .range(
+                                            if req.or_equal() {
+                                                ops::Bound::Included(req_key.as_ref())
+                                            } else {
+                                                ops::Bound::Excluded(req_key.as_ref())
+                                            },
+                                            ops::Bound::Unbounded,
                                         )
-                                        .collect::<Vec<_>>()
-                                    });
+                                        .filter(|node_index| {
+                                            self.finalized_block_storage.is_storage(*node_index)
+                                        })
+                                        .next()
+                                        .map(|node_index| {
+                                            // TODO: consider detecting if nibbles are uneven instead of ignoring the problem
+                                            nibbles_to_bytes_suffix_extend(
+                                                self.finalized_block_storage
+                                                    .node_full_key_by_index(node_index)
+                                                    .unwrap(),
+                                            )
+                                            .collect::<Vec<_>>()
+                                        })
+                                        .filter(|k| k.starts_with(req.prefix().as_ref()));
+                                    out
+                                };
 
                                 debug_assert!(next_key
                                     .as_ref()
