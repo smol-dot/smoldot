@@ -797,7 +797,7 @@ fn range() {
     }
 
     // We run the test multiple times because of randomness.
-    for _ in 0..256 {
+    for _ in 0..4096 {
         // Generate a set of random keys that will find themselves in the trie in the end.
         let final_storage: BTreeSet<Vec<Nibble>> = {
             let mut list = vec![Vec::new()];
