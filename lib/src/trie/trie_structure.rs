@@ -676,8 +676,8 @@ impl<TUd> TrieStructure<TUd> {
             debug_assert!(iter.1.is_none());
             let iter_node = self.nodes.get(iter.0).unwrap();
 
-            // First, we must remove nibbles at the front of `start_key` and compare them with
-            // `iter_node`'s partial key.
+            // Update the value of `iter_key_nibbles_extra` to take the current value of `iter`
+            // into account, as it isn't the case yet.
             for iter_node_pk_nibble in iter_node.partial_key.iter().cloned() {
                 if iter_key_nibbles_extra == 0 && iter_node_pk_nibble == *end_key.peek().unwrap() {
                     let _ = end_key.next();
@@ -688,7 +688,11 @@ impl<TUd> TrieStructure<TUd> {
                 } else {
                     iter_key_nibbles_extra += 1;
                 }
+            }
 
+            // Remove nibbles at the front of `start_key` and compare them with `iter_node`'s
+            // partial key in order to determine whether to stop iterating.
+            for iter_node_pk_nibble in iter_node.partial_key.iter().cloned() {
                 match start_key
                     .next()
                     .map(|nibble| nibble.cmp(&iter_node_pk_nibble))
@@ -704,51 +708,30 @@ impl<TUd> TrieStructure<TUd> {
 
             // Then, remove the next nibble from `start_key` and update `iter` based on it.
             if let Some(next_nibble) = start_key.next() {
-                if let Some(child) = iter_node.children[usize::from(u8::from(next_nibble))] {
-                    if iter_key_nibbles_extra == 0 && next_nibble == *end_key.peek().unwrap() {
-                        let _ = end_key.next();
-                        // `iter` is already past the end bound. Return an empty range.
-                        if end_key.peek().is_none() {
-                            return either::Right(iter::empty());
-                        }
-                    } else {
-                        iter_key_nibbles_extra += 1;
+                if iter_key_nibbles_extra == 0 && next_nibble == *end_key.peek().unwrap() {
+                    let _ = end_key.next();
+                    // `iter` is already past the end bound. Return an empty range.
+                    if end_key.peek().is_none() {
+                        return either::Right(iter::empty());
                     }
+                } else {
+                    iter_key_nibbles_extra += 1;
+                }
 
+                if let Some(child) = iter_node.children[usize::from(u8::from(next_nibble))] {
                     // Update `iter` and continue searching.
                     iter = (child, None);
                 } else {
-                    // `iter` is strictly inferior to `start_key`. Try to find the deepest child
-                    // of `iter` before that nibble and stop the search.
-                    let mut child_cap = usize::from(u8::from(next_nibble));
-                    while let Some(child) = self.nodes.get(iter.0).unwrap().children[..child_cap]
-                        .iter()
-                        .rev()
-                        .copied()
-                        .find_map(|c| c)
-                    {
-                        for child_pk_nibble in
-                            self.nodes.get(child).unwrap().partial_key.iter().cloned()
-                        {
-                            if iter_key_nibbles_extra == 0
-                                && child_pk_nibble == *end_key.peek().unwrap()
-                            {
-                                let _ = end_key.next();
-                                // `iter` is already past the end bound. Return an empty range.
-                                if end_key.peek().is_none() {
-                                    return either::Right(iter::empty());
-                                }
-                            } else {
-                                iter_key_nibbles_extra += 1;
-                            }
-                        }
-                        child_cap = 16;
-                        iter.0 = child;
-                    }
-
-                    // Make `iter` point to a non-existing node in-between `iter` and `start_key`
-                    // and stop searching.
-                    debug_assert!(iter.1.is_none());
+                    // `iter` is strictly inferior to `start_key`.
+                    iter.1 = Some(next_nibble);
+                    break 'start_search;
+                }
+            } else {
+                // `iter.0` is an exact match with `start_key`. If the starting bound is
+                // `Excluded`, we don't want to start iterating at `iter` but at `next(iter)`,
+                // which we do by adding a zero nibble afterwards.
+                debug_assert!(iter.1.is_none());
+                if !start_key_is_inclusive {
                     iter.1 = Some(Nibble::zero());
                     if iter_key_nibbles_extra == 0 && *end_key.peek().unwrap() == Nibble::zero() {
                         let _ = end_key.next();
@@ -759,27 +742,8 @@ impl<TUd> TrieStructure<TUd> {
                     } else {
                         iter_key_nibbles_extra += 1;
                     }
-                    break 'start_search;
                 }
-            } else {
-                // `iter.0` is an exact match with `start_key`. If the starting bound is
-                // `Excluded`, we don't want to start iterating at `iter` but at `next(iter)`,
-                // which we do by adding a zero nibble afterwards.
-                debug_assert!(iter.1.is_none());
-                iter.1 = if start_key_is_inclusive {
-                    None
-                } else {
-                    if iter_key_nibbles_extra == 0 && *end_key.peek().unwrap() == Nibble::zero() {
-                        let _ = end_key.next();
-                        // `iter` is already past the end bound. Return an empty range.
-                        if end_key.peek().is_none() {
-                            return either::Right(iter::empty());
-                        }
-                    } else {
-                        iter_key_nibbles_extra += 1;
-                    }
-                    Some(Nibble::zero())
-                };
+
                 break 'start_search;
             }
         }
