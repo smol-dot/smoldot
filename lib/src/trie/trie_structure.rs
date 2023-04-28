@@ -823,6 +823,9 @@ impl<TUd> TrieStructure<TUd> {
                             cmp::Ordering::Equal => {
                                 debug_assert_eq!(iter_key_nibbles_extra, 0);
                                 let _ = end_key.next();
+                                if end_key.peek().is_none() {
+                                    return None;
+                                }
                             }
                         }
                     }
