@@ -2409,7 +2409,6 @@ dependencies = [
  "directories",
  "either",
  "env_logger",
- "event-listener",
  "fnv",
  "futures-channel",
  "futures-executor",

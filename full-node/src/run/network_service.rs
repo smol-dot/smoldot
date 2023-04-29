@@ -178,13 +178,6 @@ struct Inner {
     /// Value provided through [`Config::identify_agent_version`].
     identify_agent_version: String,
 
-    /// Event to notify when the background task needs to be waken up.
-    ///
-    /// Waking up this event guarantees a full loop of the background task. In other words,
-    /// if the event is notified while the background task is already awake, the background task
-    /// will do an additional loop.
-    wake_up_main_background_task: event_listener::Event,
-
     /// Databases to use to read blocks from when answering requests.
     databases: Vec<Arc<database_thread::DatabaseThread>>,
 
@@ -222,6 +215,15 @@ struct Guarded {
 
     /// Channel receiving new incoming connections from listeners.
     incoming_sockets_rx: mpsc::Receiver<(TcpStream, Multiaddr, Instant)>,
+
+    /// Sending side of [`Guarded::incoming_sockets_rx`].
+    ///
+    /// We keep at least one sender alive at all time, even if there are no listener, in order to
+    /// guarantee that the receiver never ends.
+    _incoming_sockets_tx: mpsc::Sender<(TcpStream, Multiaddr, Instant)>,
+
+    next_kademlia_discovery: futures_timer::Delay,
+    next_kademlia_discovery_increment: Duration,
 
     messages_from_connections_tx: mpsc::Sender<(
         service::ConnectionId,
@@ -331,7 +333,6 @@ impl NetworkService {
                 )
                 .into_peer_id(),
                 identify_agent_version: config.identify_agent_version,
-                wake_up_main_background_task: event_listener::Event::new(),
                 databases,
                 guarded: Mutex::new(Guarded {
                     num_pending_out_attempts: 0,
@@ -339,6 +340,9 @@ impl NetworkService {
                     messages_from_connections_rx,
                     connection_opening_outcome_tx,
                     connection_opening_outcome_rx,
+                    next_kademlia_discovery: futures_timer::Delay::new(Duration::new(0, 0)),
+                    next_kademlia_discovery_increment: Duration::from_secs(1),
+                    _incoming_sockets_tx: incoming_sockets_tx.clone(),
                     incoming_sockets_rx,
                     foreground_to_background_rx,
                     process_network_service_events: future::Either::Left(future::ready(())),
@@ -373,35 +377,6 @@ impl NetworkService {
             abort_handle = h;
             abortable.map(|_| ())
         }));
-
-        // TODO: restore
-        /*// Spawn tasks dedicated to starting the Kademlia discovery queries.
-        for chain_index in 0..inner.databases.len() {
-            (inner.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
-                let inner = inner.clone();
-                let future = async move {
-                    let mut next_discovery = Duration::from_secs(1);
-
-                    loop {
-                        futures_timer::Delay::new(next_discovery).await;
-                        next_discovery = cmp::min(next_discovery * 2, Duration::from_secs(120));
-
-                        let mut guarded = inner.guarded.lock().await;
-                        let operation_id = guarded
-                            .network
-                            .start_kademlia_discovery_round(Instant::now(), chain_index);
-                        let _prev_val = guarded
-                            .kademlia_discovery_operations
-                            .insert(operation_id, chain_index);
-                        debug_assert!(_prev_val.is_none());
-                    }
-                };
-
-                let (abortable, abort_handle) = future::abortable(future);
-                abort_handles.push(abort_handle);
-                abortable.map(|_| ())
-            }));
-        }*/
 
         // For each listening address in the configuration, create a background task dedicated to
         // listening on that address.
@@ -726,6 +701,8 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                     let _was_in = guarded.active_connections.remove(&connection_id);
                     debug_assert!(_was_in.is_some());
                 }
+
+                guarded.process_network_service_events = future::Either::Left(future::ready(()));
             },
 
             (socket, multiaddr, when_connected) = guarded.incoming_sockets_rx.next().fuse().map(|v| v.unwrap()) => {
@@ -747,6 +724,8 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                     rx,
                     messages_from_connections_tx,
                 )));
+
+                guarded.process_network_service_events = future::Either::Left(future::ready(()));
             },
 
             (result, start_connect) = guarded.connection_opening_outcome_rx.next().fuse().map(|v| v.unwrap()) => {
@@ -776,7 +755,24 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                         guarded.unassign_slot_and_ban(chain_index, start_connect.expected_peer_id.clone());
                     }
                 }
+
+                guarded.process_network_service_events = future::Either::Left(future::ready(()));
             },
+
+            _ = (&mut guarded.next_kademlia_discovery).fuse() => {
+                guarded.next_kademlia_discovery = futures_timer::Delay::new(guarded.next_kademlia_discovery_increment);
+                guarded.next_kademlia_discovery_increment = cmp::min(guarded.next_kademlia_discovery_increment * 2, Duration::from_secs(120));
+
+                for chain_index in 0..inner.databases.len() {
+                    let operation_id = guarded
+                        .network
+                        .start_kademlia_discovery_round(Instant::now(), chain_index);
+                    let _prev_val = guarded
+                        .kademlia_discovery_operations
+                        .insert(operation_id, chain_index);
+                    debug_assert!(_prev_val.is_none());
+                }
+            }
 
             message = guarded.foreground_to_background_rx.next().fuse().map(|v| v.unwrap()) => {
                 match message {
@@ -912,7 +908,7 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                                     );
 
                                     guarded.unassign_slot_and_ban(chain_index, peer_id);
-                                    inner.wake_up_main_background_task.notify(1);
+                                    guarded.process_network_service_events = future::Either::Left(future::ready(()));
                                 }
                             }
                         }
@@ -949,7 +945,7 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                             );
 
                             guarded.unassign_slot_and_ban(chain_index, peer_id.clone());
-                            inner.wake_up_main_background_task.notify(1);
+                            guarded.process_network_service_events = future::Either::Left(future::ready(()));
 
                             break Some(Event::Disconnected {
                                 chain_index,
@@ -970,7 +966,7 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                             );
 
                             guarded.unassign_slot_and_ban(chain_index, peer_id);
-                            inner.wake_up_main_background_task.notify(1);
+                            guarded.process_network_service_events = future::Either::Left(future::ready(()));
                         }
                         service::Event::InboundSlotAssigned { .. } => {
                             // TODO: log this
@@ -1101,7 +1097,7 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                             for chain_index in 0..guarded.network.num_chains() {
                                 guarded.unassign_slot_and_ban(chain_index, peer_id.clone());
                             }
-                            inner.wake_up_main_background_task.notify(1);
+                            guarded.process_network_service_events = future::Either::Left(future::ready(()));
                         }
                     }
                 };
