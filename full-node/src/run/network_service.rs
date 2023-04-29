@@ -1094,7 +1094,7 @@ async fn background_task(mut inner: Inner) {
                 inner.num_pending_out_attempts += 1;
 
                 // Perform the connection process in a separate task.
-                let mut to_background_tx = inner.to_background_tx.clone();
+                let to_background_tx = inner.to_background_tx.clone();
                 (inner.tasks_executor)(Box::pin(async move {
                     // TODO: interrupt immediately if `to_background_tx` is dropped
                     if let Ok(socket) = tasks::opening_connection_task(start_connect.clone()).await
