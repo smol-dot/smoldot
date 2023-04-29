@@ -18,9 +18,8 @@
 //! As explained in the documentation of smoldot, the database uses synchronous I/O operations.
 //! For this reason, it is undesirable to access it from an asynchronous context.
 
-use futures_channel::{mpsc, oneshot};
-use futures_util::{SinkExt as _, StreamExt as _};
-use smol::lock::Mutex;
+use futures_channel::oneshot;
+use smol::{channel, lock::Mutex, stream::StreamExt as _};
 use smoldot::database::full_sqlite::SqliteFullDatabase;
 use std::thread;
 
@@ -30,7 +29,7 @@ use std::thread;
 ///
 /// Use the `From` trait implementation to build a [`DatabaseThread`].
 pub struct DatabaseThread {
-    sender: Mutex<mpsc::Sender<Exec>>,
+    sender: Mutex<channel::Sender<Exec>>,
 }
 
 type Exec = Box<dyn FnOnce(&SqliteFullDatabase) + Send>;
@@ -73,7 +72,7 @@ impl DatabaseThread {
 
 impl From<SqliteFullDatabase> for DatabaseThread {
     fn from(db: SqliteFullDatabase) -> DatabaseThread {
-        let (sender, mut rx) = mpsc::channel::<Box<dyn FnOnce(&SqliteFullDatabase) + Send>>(256);
+        let (sender, mut rx) = channel::bounded::<Box<dyn FnOnce(&SqliteFullDatabase) + Send>>(256);
 
         thread::Builder::new()
             .name("sqlite-database".into())

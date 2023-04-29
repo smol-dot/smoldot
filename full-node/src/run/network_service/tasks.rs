@@ -17,7 +17,9 @@
 
 use core::{future::Future, pin};
 use futures_channel::mpsc;
-use futures_util::{future, AsyncRead, AsyncWrite, FutureExt as _, StreamExt as _};
+use futures_util::{future, FutureExt as _, StreamExt as _};
+use smol::future::FutureExt as _;
+use smol::io::{AsyncRead, AsyncWrite};
 use smoldot::{
     libp2p::{
         async_std_connection::with_buffers,
@@ -51,23 +53,12 @@ pub(super) async fn opening_connection_task(
     };
 
     // Finishing ongoing connection process.
-    let socket = {
-        let mut timeout = future::FutureExt::fuse(smol::Timer::at(start_connect.timeout));
-        let mut socket = pin::pin!(socket.fuse());
-        futures_util::select! {
-            _ = timeout => {
-                return Err(());
-            }
-            result = socket => {
-                match result {
-                    Ok(s) => s,
-                    Err(_) => {
-                        return Err(());
-                    }
-                }
-            }
-        }
-    };
+    let socket = async move { socket.await.map_err(|_| ()) }
+        .or(async move {
+            smol::Timer::at(start_connect.timeout).await;
+            Err(())
+        })
+        .await?;
 
     Ok(socket)
 }
