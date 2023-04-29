@@ -317,7 +317,8 @@ impl NetworkService {
             abortable.map(|_| ())
         }));
 
-        // Spawn tasks dedicated to starting the Kademlia discovery queries.
+        // TODO: restore
+        /*// Spawn tasks dedicated to starting the Kademlia discovery queries.
         for chain_index in 0..inner.databases.len() {
             (inner.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
                 let inner = inner.clone();
@@ -343,7 +344,7 @@ impl NetworkService {
                 abort_handles.push(abort_handle);
                 abortable.map(|_| ())
             }));
-        }
+        }*/
 
         // For each listening address in the configuration, create a background task dedicated to
         // listening on that address.
