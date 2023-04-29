@@ -132,15 +132,14 @@ pub enum Event {
 }
 
 pub struct NetworkService {
-    /// Actual network service.
-    inner: Arc<Inner>,
+    /// Identity of the local node.
+    local_peer_id: PeerId,
+
+    /// Service to use to report traces.
+    jaeger_service: Arc<jaeger_service::JaegerService>,
 
     /// Channel to send messages to the background task.
     foreground_to_background_tx: Mutex<mpsc::Sender<ForegroundToBackground>>,
-
-    /// Handle connected to the background task of the network service. Makes it possible to abort
-    /// everything.
-    abort_handle: future::AbortHandle,
 }
 
 enum ForegroundToBackground {
@@ -170,11 +169,7 @@ enum ForegroundToBackground {
         result_tx: oneshot::Sender<usize>,
     },
 }
-
 struct Inner {
-    /// Fields behind a mutex.
-    guarded: Mutex<Guarded>,
-
     /// Value provided through [`Config::identify_agent_version`].
     identify_agent_version: String,
 
@@ -186,9 +181,7 @@ struct Inner {
 
     /// Service to use to report traces.
     jaeger_service: Arc<jaeger_service::JaegerService>,
-}
 
-struct Guarded {
     /// Data structure holding the entire state of the networking.
     network: service::ChainNetwork<Instant>,
 
@@ -322,61 +315,48 @@ impl NetworkService {
         let (foreground_to_background_tx, foreground_to_background_rx) = mpsc::channel(4);
         let (incoming_sockets_tx, incoming_sockets_rx) = mpsc::channel(4);
         let (connection_opening_outcome_tx, connection_opening_outcome_rx) = mpsc::channel(4);
+        let (messages_from_connections_tx, messages_from_connections_rx) = mpsc::channel(64);
+
+        let local_peer_id =
+            peer_id::PublicKey::Ed25519(*network.noise_key().libp2p_public_ed25519_key())
+                .into_peer_id();
 
         // Initialize the inner network service.
-        let inner = {
-            let (messages_from_connections_tx, messages_from_connections_rx) = mpsc::channel(64);
-
-            Arc::new(Inner {
-                local_peer_id: peer_id::PublicKey::Ed25519(
-                    *network.noise_key().libp2p_public_ed25519_key(),
-                )
-                .into_peer_id(),
-                identify_agent_version: config.identify_agent_version,
-                databases,
-                guarded: Mutex::new(Guarded {
-                    num_pending_out_attempts: 0,
-                    messages_from_connections_tx,
-                    messages_from_connections_rx,
-                    connection_opening_outcome_tx,
-                    connection_opening_outcome_rx,
-                    next_kademlia_discovery: futures_timer::Delay::new(Duration::new(0, 0)),
-                    next_kademlia_discovery_increment: Duration::from_secs(1),
-                    _incoming_sockets_tx: incoming_sockets_tx.clone(),
-                    incoming_sockets_rx,
-                    foreground_to_background_rx,
-                    process_network_service_events: future::Either::Left(future::ready(())),
-                    tasks_executor: config.tasks_executor,
-                    network,
-                    slots_assign_backoff: hashbrown::HashMap::with_capacity_and_hasher(
-                        50, // TODO: ?
-                        Default::default(),
-                    ),
-                    active_connections: hashbrown::HashMap::with_capacity_and_hasher(
-                        100, // TODO: ?
-                        Default::default(),
-                    ),
-                    blocks_requests: hashbrown::HashMap::with_capacity_and_hasher(
-                        50, // TODO: ?
-                        Default::default(),
-                    ),
-                    kademlia_discovery_operations: hashbrown::HashMap::with_capacity_and_hasher(
-                        4,
-                        Default::default(),
-                    ),
-                }),
-                jaeger_service: config.jaeger_service,
-            })
+        let mut inner = Inner {
+            local_peer_id: local_peer_id.clone(),
+            identify_agent_version: config.identify_agent_version,
+            databases,
+            num_pending_out_attempts: 0,
+            messages_from_connections_tx,
+            messages_from_connections_rx,
+            connection_opening_outcome_tx,
+            connection_opening_outcome_rx,
+            next_kademlia_discovery: futures_timer::Delay::new(Duration::new(0, 0)),
+            next_kademlia_discovery_increment: Duration::from_secs(1),
+            _incoming_sockets_tx: incoming_sockets_tx.clone(),
+            incoming_sockets_rx,
+            foreground_to_background_rx,
+            process_network_service_events: future::Either::Left(future::ready(())),
+            tasks_executor: config.tasks_executor,
+            network,
+            slots_assign_backoff: hashbrown::HashMap::with_capacity_and_hasher(
+                50, // TODO: ?
+                Default::default(),
+            ),
+            active_connections: hashbrown::HashMap::with_capacity_and_hasher(
+                100, // TODO: ?
+                Default::default(),
+            ),
+            blocks_requests: hashbrown::HashMap::with_capacity_and_hasher(
+                50, // TODO: ?
+                Default::default(),
+            ),
+            kademlia_discovery_operations: hashbrown::HashMap::with_capacity_and_hasher(
+                4,
+                Default::default(),
+            ),
+            jaeger_service: config.jaeger_service.clone(),
         };
-
-        // Spawn the main task dedicated to processing the network.
-        let abort_handle;
-        (inner.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
-            let future = background_task(inner.clone(), senders);
-            let (abortable, h) = future::abortable(future);
-            abort_handle = h;
-            abortable.map(|_| ())
-        }));
 
         // For each listening address in the configuration, create a background task dedicated to
         // listening on that address.
@@ -413,7 +393,7 @@ impl NetworkService {
             };
 
             // Spawn a background task dedicated to this listener.
-            (inner.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
+            (inner.tasks_executor)(Box::pin({
                 let mut incoming_sockets_tx = incoming_sockets_tx.clone();
                 async move {
                     while !incoming_sockets_tx.is_closed() {
@@ -461,10 +441,13 @@ impl NetworkService {
 
         // Build the final network service.
         let network_service = Arc::new(NetworkService {
-            inner,
+            local_peer_id,
+            jaeger_service: config.jaeger_service,
             foreground_to_background_tx: Mutex::new(foreground_to_background_tx),
-            abort_handle,
         });
+
+        // Spawn the main task dedicated to processing the network.
+        run(inner, senders);
 
         // Adjust the receivers to keep the `network_service` alive.
         let receivers = receivers
@@ -593,8 +576,8 @@ impl NetworkService {
         }
         let _log_if_cancel = LogIfCancel(target.clone(), chain_index);
 
-        let _jaeger_span = self.inner.jaeger_service.outgoing_block_request_span(
-            &self.inner.local_peer_id,
+        let _jaeger_span = self.jaeger_service.outgoing_block_request_span(
+            &self.local_peer_id,
             &target,
             config.desired_count.get(),
             if let (1, protocol::BlocksRequestConfigStart::Hash(block_hash)) =
@@ -646,12 +629,6 @@ impl NetworkService {
     }
 }
 
-impl Drop for NetworkService {
-    fn drop(&mut self) {
-        self.abort_handle.abort();
-    }
-}
-
 /// Error when initializing the network service.
 #[derive(Debug, derive_more::Display)]
 pub enum InitError {
@@ -683,41 +660,51 @@ pub enum QueueNotificationError {
     Queue(peers::QueueNotificationError),
 }
 
-async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<Event>>) {
-    let mut guarded = inner.guarded.lock().await;
-    let guarded = &mut *guarded;
+fn run(mut inner: Inner, event_senders: Vec<mpsc::Sender<Event>>) {
+    // This function is a small hack because I didn't find a better way to store the executor
+    // within `Inner` while at the same time spawning the `Inner` using said executor.
+    let mut actual_executor = mem::replace(&mut inner.tasks_executor, Box::new(|_| unreachable!()));
+    let (tx, rx) = oneshot::channel();
+    actual_executor(Box::pin(async move {
+        let actual_executor = rx.await.unwrap();
+        inner.tasks_executor = actual_executor;
+        background_task(inner, event_senders).await;
+    }));
+    tx.send(actual_executor).unwrap_or_else(|_| panic!());
+}
 
+async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<Event>>) {
     loop {
         // TODO: this code block is obviously way too long; split into a struct
         futures_util::select! {
             // Inject in the coordinator the messages that the connections have generated.
-            (connection_id, message, connection_is_dead) = guarded.messages_from_connections_rx.next().fuse().map(|v| v.unwrap()) => {
-                guarded
+            (connection_id, message, connection_is_dead) = inner.messages_from_connections_rx.next().fuse().map(|v| v.unwrap()) => {
+                inner
                     .network
                     .inject_connection_message(connection_id, message);
 
                 // TODO: it should be indicated by the coordinator when a connection dies
                 if connection_is_dead {
-                    let _was_in = guarded.active_connections.remove(&connection_id);
+                    let _was_in = inner.active_connections.remove(&connection_id);
                     debug_assert!(_was_in.is_some());
                 }
 
-                guarded.process_network_service_events = future::Either::Left(future::ready(()));
+                inner.process_network_service_events = future::Either::Left(future::ready(()));
             },
 
-            (socket, multiaddr, when_connected) = guarded.incoming_sockets_rx.next().fuse().map(|v| v.unwrap()) => {
+            (socket, multiaddr, when_connected) = inner.incoming_sockets_rx.next().fuse().map(|v| v.unwrap()) => {
                 let (connection_id, connection_task) =
-                    guarded.network.add_single_stream_incoming_connection(
+                    inner.network.add_single_stream_incoming_connection(
                         when_connected,
                         service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
                         multiaddr,
                     );
 
                 let (tx, rx) = mpsc::channel(16); // TODO: ?!
-                guarded.active_connections.insert(connection_id, tx);
+                inner.active_connections.insert(connection_id, tx);
 
-                let messages_from_connections_tx = guarded.messages_from_connections_tx.clone();
-                (guarded.tasks_executor)(Box::pin(tasks::established_connection_task(
+                let messages_from_connections_tx = inner.messages_from_connections_tx.clone();
+                (inner.tasks_executor)(Box::pin(tasks::established_connection_task(
                     socket,
                     connection_id,
                     connection_task,
@@ -725,24 +712,24 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                     messages_from_connections_tx,
                 )));
 
-                guarded.process_network_service_events = future::Either::Left(future::ready(()));
+                inner.process_network_service_events = future::Either::Left(future::ready(()));
             },
 
-            (result, start_connect) = guarded.connection_opening_outcome_rx.next().fuse().map(|v| v.unwrap()) => {
-                guarded.num_pending_out_attempts -= 1;
+            (result, start_connect) = inner.connection_opening_outcome_rx.next().fuse().map(|v| v.unwrap()) => {
+                inner.num_pending_out_attempts -= 1;
 
                 if let Ok(socket) = result {
                     let (connection_id, connection_task) =
-                        guarded.network.pending_outcome_ok_single_stream(
+                        inner.network.pending_outcome_ok_single_stream(
                             start_connect.id,
                             service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
                         );
 
                     let (tx, rx) = mpsc::channel(16); // TODO: ?!
-                    guarded.active_connections.insert(connection_id, tx);
+                    inner.active_connections.insert(connection_id, tx);
 
-                    let messages_from_connections_tx = guarded.messages_from_connections_tx.clone();
-                    (guarded.tasks_executor)(Box::pin(tasks::established_connection_task(
+                    let messages_from_connections_tx = inner.messages_from_connections_tx.clone();
+                    (inner.tasks_executor)(Box::pin(tasks::established_connection_task(
                         socket,
                         connection_id,
                         connection_task,
@@ -750,33 +737,33 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                         messages_from_connections_tx,
                     )));
                 } else {
-                    guarded.network.pending_outcome_err(start_connect.id, true);
-                    for chain_index in 0..guarded.network.num_chains() {
-                        guarded.unassign_slot_and_ban(chain_index, start_connect.expected_peer_id.clone());
+                    inner.network.pending_outcome_err(start_connect.id, true);
+                    for chain_index in 0..inner.network.num_chains() {
+                        inner.unassign_slot_and_ban(chain_index, start_connect.expected_peer_id.clone());
                     }
                 }
 
-                guarded.process_network_service_events = future::Either::Left(future::ready(()));
+                inner.process_network_service_events = future::Either::Left(future::ready(()));
             },
 
-            _ = (&mut guarded.next_kademlia_discovery).fuse() => {
-                guarded.next_kademlia_discovery = futures_timer::Delay::new(guarded.next_kademlia_discovery_increment);
-                guarded.next_kademlia_discovery_increment = cmp::min(guarded.next_kademlia_discovery_increment * 2, Duration::from_secs(120));
+            _ = (&mut inner.next_kademlia_discovery).fuse() => {
+                inner.next_kademlia_discovery = futures_timer::Delay::new(inner.next_kademlia_discovery_increment);
+                inner.next_kademlia_discovery_increment = cmp::min(inner.next_kademlia_discovery_increment * 2, Duration::from_secs(120));
 
                 for chain_index in 0..inner.databases.len() {
-                    let operation_id = guarded
+                    let operation_id = inner
                         .network
                         .start_kademlia_discovery_round(Instant::now(), chain_index);
-                    let _prev_val = guarded
+                    let _prev_val = inner
                         .kademlia_discovery_operations
                         .insert(operation_id, chain_index);
                     debug_assert!(_prev_val.is_none());
                 }
 
-                guarded.process_network_service_events = future::Either::Left(future::ready(()));
+                inner.process_network_service_events = future::Either::Left(future::ready(()));
             }
 
-            message = guarded.foreground_to_background_rx.next().fuse().map(|v| v.unwrap()) => {
+            message = inner.foreground_to_background_rx.next().fuse().map(|v| v.unwrap()) => {
                 match message {
                     ForegroundToBackground::AnnounceBlock {
                         target,
@@ -786,11 +773,11 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                         result_tx,
                     } => {
                         // The call to `send_block_announce` below panics if we have no active connection.
-                        let result = if guarded
+                        let result = if inner
                             .network
                             .can_send_block_announces(&target, chain_index)
                         {
-                            guarded
+                            inner
                                 .network
                                 .send_block_announce(&target, chain_index, &scale_encoded_header, is_best)
                                 .map_err(QueueNotificationError::Queue)
@@ -805,7 +792,7 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                         best_hash,
                         best_number,
                     } => {
-                        guarded
+                        inner
                             .network
                             .set_local_best_block(chain_index, best_hash, best_number);
                     }
@@ -816,8 +803,8 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                         result_tx,
                     } => {
                         // The call to `start_blocks_request` below panics if we have no active connection.
-                        if guarded.network.can_start_requests(&target) {
-                            let request_id = guarded.network.start_blocks_request(
+                        if inner.network.can_start_requests(&target) {
+                            let request_id = inner.network.start_blocks_request(
                                 Instant::now(),
                                 &target,
                                 chain_index,
@@ -826,28 +813,28 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                             );
 
                             // TODO: somehow cancel the request if the `rx` is dropped?
-                            guarded.blocks_requests.insert(request_id, result_tx);
+                            inner.blocks_requests.insert(request_id, result_tx);
                         } else {
                             let _ = result_tx.send(Err(BlocksRequestError::NoConnection));
                         }
                     }
                     ForegroundToBackground::GetNumEstablishedConnections { result_tx } => {
-                        let _ = result_tx.send(guarded.network.num_established_connections());
+                        let _ = result_tx.send(inner.network.num_established_connections());
                     }
                     ForegroundToBackground::GetNumPeers {
                         chain_index,
                         result_tx,
                     } => {
-                        let _ = result_tx.send(guarded.network.num_peers(chain_index));
+                        let _ = result_tx.send(inner.network.num_peers(chain_index));
                     }
                 }
             }
 
-            _ = &mut guarded.process_network_service_events => {
-                guarded.process_network_service_events = future::Either::Right(future::pending());
+            _ = &mut inner.process_network_service_events => {
+                inner.process_network_service_events = future::Either::Right(future::pending());
 
                 let event = loop {
-                    let inner_event = match guarded.network.next_event(Instant::now()) {
+                    let inner_event = match inner.network.next_event(Instant::now()) {
                         Some(ev) => ev,
                         None => break None,
                     };
@@ -879,7 +866,7 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                                 header::hash_from_scale_encoded_header(decoded.scale_encoded_header);
                             match header::decode(
                                 decoded.scale_encoded_header,
-                                guarded.network.block_number_bytes(chain_index),
+                                inner.network.block_number_bytes(chain_index),
                             ) {
                                 Ok(decoded_header) => {
                                     let mut _jaeger_span =
@@ -888,7 +875,7 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                                             &peer_id,
                                             decoded_header.number,
                                             &decoded_header
-                                                .hash(guarded.network.block_number_bytes(chain_index)),
+                                                .hash(inner.network.block_number_bytes(chain_index)),
                                         );
 
                                     log::debug!(
@@ -909,8 +896,8 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                                         peer_id, chain_index, HashDisplay(&header_hash), decoded.is_best, error
                                     );
 
-                                    guarded.unassign_slot_and_ban(chain_index, peer_id);
-                                    guarded.process_network_service_events = future::Either::Left(future::ready(()));
+                                    inner.unassign_slot_and_ban(chain_index, peer_id);
+                                    inner.process_network_service_events = future::Either::Left(future::ready(()));
                                 }
                             }
                         }
@@ -946,8 +933,8 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                                 chain_index
                             );
 
-                            guarded.unassign_slot_and_ban(chain_index, peer_id.clone());
-                            guarded.process_network_service_events = future::Either::Left(future::ready(()));
+                            inner.unassign_slot_and_ban(chain_index, peer_id.clone());
+                            inner.process_network_service_events = future::Either::Left(future::ready(()));
 
                             break Some(Event::Disconnected {
                                 chain_index,
@@ -967,8 +954,8 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                                 error
                             );
 
-                            guarded.unassign_slot_and_ban(chain_index, peer_id);
-                            guarded.process_network_service_events = future::Either::Left(future::ready(()));
+                            inner.unassign_slot_and_ban(chain_index, peer_id);
+                            inner.process_network_service_events = future::Either::Left(future::ready(()));
                         }
                         service::Event::InboundSlotAssigned { .. } => {
                             // TODO: log this
@@ -977,7 +964,7 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                             request_id,
                             response: service::RequestResult::Blocks(response),
                         } => {
-                            let _ = guarded
+                            let _ = inner
                                 .blocks_requests
                                 .remove(&request_id)
                                 .unwrap()
@@ -995,7 +982,7 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                             operation_id,
                             result,
                         } => {
-                            let chain_index = guarded
+                            let chain_index = inner
                                 .kademlia_discovery_operations
                                 .remove(&operation_id)
                                 .unwrap();
@@ -1003,7 +990,7 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                                 Ok(nodes) => {
                                     log::debug!("discovered; nodes={:?}", nodes);
                                     for (peer_id, addrs) in nodes {
-                                        guarded.network.discover(
+                                        inner.network.discover(
                                             &Instant::now(),
                                             chain_index,
                                             peer_id,
@@ -1021,7 +1008,7 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                             request_id,
                         } => {
                             log::debug!("identify-request; peer_id={}", peer_id);
-                            guarded
+                            inner
                                 .network
                                 .respond_identify(request_id, &inner.identify_agent_version);
                         }
@@ -1052,11 +1039,11 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                             // TODO: is it a good idea to await here while the lock is held and freezing the entire networking background task?
                             let response = blocks_request_response(
                                 &inner.databases[chain_index],
-                                guarded.network.block_number_bytes(chain_index),
+                                inner.network.block_number_bytes(chain_index),
                                 config,
                             )
                             .await;
-                            guarded.network.respond_blocks(
+                            inner.network.respond_blocks(
                                 request_id,
                                 match response {
                                     Ok(b) => Some(b),
@@ -1096,10 +1083,10 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                         }
                         service::Event::ProtocolError { peer_id, error } => {
                             log::warn!("protocol-error; peer_id={}; error={}", peer_id, error);
-                            for chain_index in 0..guarded.network.num_chains() {
-                                guarded.unassign_slot_and_ban(chain_index, peer_id.clone());
+                            for chain_index in 0..inner.network.num_chains() {
+                                inner.unassign_slot_and_ban(chain_index, peer_id.clone());
                             }
-                            guarded.process_network_service_events = future::Either::Left(future::ready(()));
+                            inner.process_network_service_events = future::Either::Left(future::ready(()));
                         }
                     }
                 };
@@ -1107,7 +1094,7 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                 // Dispatch the event to the various senders.
                 if let Some(event) = event {
                     // Continue processing events.
-                    guarded.process_network_service_events = future::Either::Left(future::ready(()));
+                    inner.process_network_service_events = future::Either::Left(future::ready(()));
 
                     // This little `if` avoids having to do `event.clone()` if we don't have to.
                     if event_senders.len() == 1 {
@@ -1124,23 +1111,23 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                 }
 
                 // TODO: doc
-                for chain_index in 0..guarded.network.num_chains() {
+                for chain_index in 0..inner.network.num_chains() {
                     let now = Instant::now();
 
                     // Clean up the content of `slots_assign_backoff`.
                     // TODO: the background task should be woken up when the ban expires
                     // TODO: O(n)
-                    guarded
+                    inner
                         .slots_assign_backoff
                         .retain(|_, expiration| *expiration > now);
 
                     // Assign outgoing slots.
                     loop {
-                        let peer_to_assign = guarded
+                        let peer_to_assign = inner
                             .network
                             .slots_to_assign(chain_index)
                             .find(|peer_id| {
-                                !guarded
+                                !inner
                                     .slots_assign_backoff
                                     .contains_key(&((**peer_id).clone(), chain_index)) // TODO: spurious cloning
                             })
@@ -1152,8 +1139,8 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                             peer_to_assign,
                             chain_index
                         );
-                        guarded.network.assign_out_slot(chain_index, peer_to_assign);
-                        guarded.process_network_service_events = future::Either::Left(future::ready(()));
+                        inner.network.assign_out_slot(chain_index, peer_to_assign);
+                        inner.process_network_service_events = future::Either::Left(future::ready(()));
                     }
                 }
 
@@ -1161,21 +1148,21 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                 // Grab this list and start opening a connection for each.
                 // TODO: restore the rate limiting for connections openings
                 loop {
-                    if guarded.num_pending_out_attempts >= 16 {
+                    if inner.num_pending_out_attempts >= 16 {
                         // TODO: constant
                         break;
                     }
 
-                    let start_connect = match guarded.network.next_start_connect(Instant::now) {
+                    let start_connect = match inner.network.next_start_connect(Instant::now) {
                         Some(sc) => sc,
                         None => break,
                     };
 
-                    guarded.num_pending_out_attempts += 1;
+                    inner.num_pending_out_attempts += 1;
 
                     // Perform the connection process in a separate task.
-                    let mut connection_opening_outcome_tx = guarded.connection_opening_outcome_tx.clone();
-                    (guarded.tasks_executor)(Box::pin(async move {
+                    let mut connection_opening_outcome_tx = inner.connection_opening_outcome_tx.clone();
+                    (inner.tasks_executor)(Box::pin(async move {
                         // TODO: interrupt immediately if `connection_opening_outcome_tx` is dropped
                         let result = tasks::opening_connection_task(start_connect.clone()).await;
                         let _ = connection_opening_outcome_tx
@@ -1183,19 +1170,19 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                             .await;
                     }));
 
-                    guarded.process_network_service_events = future::Either::Left(future::ready(()));
+                    inner.process_network_service_events = future::Either::Left(future::ready(()));
                 }
 
                 // Pull messages that the coordinator has generated in destination to the various
                 // connections.
-                while let Some((connection_id, message)) = guarded.network.pull_message_to_connection() {
+                while let Some((connection_id, message)) = inner.network.pull_message_to_connection() {
                     // Note that it is critical for the sending to not take too long here, in order to not
                     // block the process of the network service.
                     // In particular, if sending the message to the connection is blocked due to sending
                     // a message on the connection-to-coordinator channel, this will result in a deadlock.
                     // For this reason, the connection task is always ready to immediately accept a message
                     // on the coordinator-to-connection channel.
-                    guarded
+                    inner
                         .active_connections
                         .get_mut(&connection_id)
                         .unwrap()
@@ -1208,7 +1195,7 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
     }
 }
 
-impl Guarded {
+impl Inner {
     fn unassign_slot_and_ban(&mut self, chain_index: usize, peer_id: PeerId) {
         self.network.unassign_slot(chain_index, &peer_id);
 
