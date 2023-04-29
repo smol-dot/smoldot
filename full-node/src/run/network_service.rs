@@ -194,6 +194,9 @@ struct Inner {
     /// Value provided through [`Config::identify_agent_version`].
     identify_agent_version: String,
 
+    /// Sending events through the public API.
+    event_senders: Vec<mpsc::Sender<Event>>,
+
     /// Databases to use to read blocks from when answering requests.
     databases: Vec<Arc<database_thread::DatabaseThread>>,
 
@@ -252,7 +255,7 @@ impl NetworkService {
     pub async fn new(
         config: Config,
     ) -> Result<(Arc<Self>, Vec<stream::BoxStream<'static, Event>>), InitError> {
-        let (senders, receivers): (Vec<_>, Vec<_>) = (0..config.num_events_receivers)
+        let (event_senders, event_receivers): (Vec<_>, Vec<_>) = (0..config.num_events_receivers)
             .map(|_| mpsc::channel(16))
             .unzip();
 
@@ -312,6 +315,7 @@ impl NetworkService {
         let mut inner = Inner {
             local_peer_id: local_peer_id.clone(),
             identify_agent_version: config.identify_agent_version,
+            event_senders,
             databases,
             num_pending_out_attempts: 0,
             to_background_rx,
@@ -452,10 +456,11 @@ impl NetworkService {
         });
 
         // Spawn the main task dedicated to processing the network.
-        run(inner, senders);
+        run(inner);
 
         // Adjust the receivers to keep the `network_service` alive.
-        let receivers = receivers
+        // TODO: no, hacky
+        let receivers = event_receivers
             .into_iter()
             .map(|rx| {
                 let mut network_service = Some(network_service.clone());
@@ -665,7 +670,7 @@ pub enum QueueNotificationError {
     Queue(peers::QueueNotificationError),
 }
 
-fn run(mut inner: Inner, event_senders: Vec<mpsc::Sender<Event>>) {
+fn run(mut inner: Inner) {
     // This function is a small hack because I didn't find a better way to store the executor
     // within `Inner` while at the same time spawning the `Inner` using said executor.
     let mut actual_executor = mem::replace(&mut inner.tasks_executor, Box::new(|_| unreachable!()));
@@ -673,12 +678,12 @@ fn run(mut inner: Inner, event_senders: Vec<mpsc::Sender<Event>>) {
     actual_executor(Box::pin(async move {
         let actual_executor = rx.await.unwrap();
         inner.tasks_executor = actual_executor;
-        background_task(inner, event_senders).await;
+        background_task(inner).await;
     }));
     tx.send(actual_executor).unwrap_or_else(|_| panic!());
 }
 
-async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<Event>>) {
+async fn background_task(mut inner: Inner) {
     loop {
         // Pull messages that the coordinator has generated in destination to the various
         // connections.
@@ -963,10 +968,10 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
                 inner.process_network_service_events = true;
 
                 // This little `if` avoids having to do `event.clone()` if we don't have to.
-                if event_senders.len() == 1 {
-                    let _ = event_senders[0].send(event).await;
+                if inner.event_senders.len() == 1 {
+                    let _ = inner.event_senders[0].send(event).await;
                 } else {
-                    for sender in event_senders.iter_mut() {
+                    for sender in inner.event_senders.iter_mut() {
                         // For simplicity we don't get rid of closed senders because senders
                         // aren't supposed to close, and that leaving closed senders in the
                         // list doesn't have any consequence other than one extra iteration
@@ -1050,6 +1055,10 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
 
                 inner.process_network_service_events = true;
             }
+        }
+
+        if inner.process_network_service_events {
+            continue;
         }
 
         // TODO: this code block is obviously way too long; split into a struct
