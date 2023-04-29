@@ -34,7 +34,7 @@
 
 // TODO: more documentation
 
-use smol::net::UdpSocket;
+use smol::{future, net::UdpSocket};
 use smoldot::libp2p::PeerId;
 use std::{
     convert::TryFrom as _, future::Future, io, net::SocketAddr, num::NonZeroU128, pin::Pin,
@@ -57,6 +57,9 @@ pub struct Config<'a> {
 
 pub struct JaegerService {
     traces_in: Arc<mick_jaeger::TracesIn>,
+
+    /// Notified when the service is destroyed.
+    shutdown_notify: event_listener::Event,
 }
 
 impl JaegerService {
@@ -65,13 +68,25 @@ impl JaegerService {
             service_name: config.service_name,
         });
 
+        let shutdown_notify = event_listener::Event::new();
+
         if let Some(jaeger_agent) = config.jaeger_agent {
             let udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
+            let mut on_shutdown = shutdown_notify.listen();
 
             // Spawn a background task that pulls span information and sends them on the network.
             (config.tasks_executor)(Box::pin(async move {
                 loop {
-                    let buf = traces_out.next().await;
+                    let Some(buf) = future::or(
+                        async {
+                            (&mut on_shutdown).await;
+                            None
+                        },
+                        async { Some(traces_out.next().await) },
+                    )
+                    .await
+                    else { break };
+
                     // UDP sending errors happen only either if the API is misused (in which case
                     // panicking is desirable) or in case of missing priviledge, in which case a
                     // panic is preferable in order to inform the user.
@@ -80,7 +95,10 @@ impl JaegerService {
             }));
         }
 
-        Ok(Arc::new(JaegerService { traces_in }))
+        Ok(Arc::new(JaegerService {
+            traces_in,
+            shutdown_notify,
+        }))
     }
 
     pub fn block_announce_receive_span(
@@ -215,5 +233,11 @@ impl JaegerService {
 
         let trace_id = NonZeroU128::new(u128::from_be_bytes(buf)).unwrap();
         self.traces_in.span(trace_id, operation_name)
+    }
+}
+
+impl Drop for JaegerService {
+    fn drop(&mut self) {
+        self.shutdown_notify.notify(usize::max_value());
     }
 }
