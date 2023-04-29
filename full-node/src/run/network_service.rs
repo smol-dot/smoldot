@@ -227,7 +227,7 @@ struct Inner {
     next_kademlia_discovery: futures_timer::Delay,
     next_kademlia_discovery_increment: Duration,
 
-    process_network_service_events: future::Either<future::Ready<()>, future::Pending<()>>,
+    process_network_service_events: bool,
 
     /// Channel for the various tasks to send messages to the background task.
     to_background_rx: mpsc::Receiver<ToBackground>,
@@ -318,7 +318,7 @@ impl NetworkService {
             next_kademlia_discovery_increment: Duration::from_secs(1),
             to_background_rx,
             to_background_tx: to_background_tx.clone(),
-            process_network_service_events: future::Either::Left(future::ready(())),
+            process_network_service_events: true,
             tasks_executor: config.tasks_executor,
             network,
             slots_assign_backoff: hashbrown::HashMap::with_capacity_and_hasher(
@@ -661,6 +661,378 @@ fn run(mut inner: Inner, event_senders: Vec<mpsc::Sender<Event>>) {
 
 async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<Event>>) {
     loop {
+        // Pull messages that the coordinator has generated in destination to the various
+        // connections.
+        while let Some((connection_id, message)) = inner.network.pull_message_to_connection() {
+            // Note that it is critical for the sending to not take too long here, in order to not
+            // block the process of the network service.
+            // In particular, if sending the message to the connection is blocked due to sending
+            // a message on the connection-to-coordinator channel, this will result in a deadlock.
+            // For this reason, the connection task is always ready to immediately accept a message
+            // on the coordinator-to-connection channel.
+            inner
+                .active_connections
+                .get_mut(&connection_id)
+                .unwrap()
+                .send(message)
+                .await
+                .unwrap();
+        }
+
+        if inner.process_network_service_events {
+            let event = loop {
+                let inner_event = match inner.network.next_event(Instant::now()) {
+                    Some(ev) => ev,
+                    None => break None,
+                };
+
+                match inner_event {
+                    service::Event::Connected(peer_id) => {
+                        log::debug!("connected; peer_id={}", peer_id);
+                    }
+                    service::Event::Disconnected {
+                        peer_id,
+                        chain_indices,
+                    } => {
+                        log::debug!("disconnected; peer_id={}", peer_id);
+                        if !chain_indices.is_empty() {
+                            debug_assert_eq!(chain_indices.len(), 1); // TODO: not implemented
+                            break Some(Event::Disconnected {
+                                chain_index: chain_indices[0],
+                                peer_id,
+                            });
+                        }
+                    }
+                    service::Event::BlockAnnounce {
+                        chain_index,
+                        peer_id,
+                        announce,
+                    } => {
+                        let decoded = announce.decode();
+                        let header_hash =
+                            header::hash_from_scale_encoded_header(decoded.scale_encoded_header);
+                        match header::decode(
+                            decoded.scale_encoded_header,
+                            inner.network.block_number_bytes(chain_index),
+                        ) {
+                            Ok(decoded_header) => {
+                                let mut _jaeger_span =
+                                    inner.jaeger_service.block_announce_receive_span(
+                                        &inner.local_peer_id,
+                                        &peer_id,
+                                        decoded_header.number,
+                                        &decoded_header
+                                            .hash(inner.network.block_number_bytes(chain_index)),
+                                    );
+
+                                log::debug!(
+                                    "block-announce; peer_id={}; chain_index={}; hash={}; number={}; is_best={:?}",
+                                    peer_id, chain_index, HashDisplay(&header_hash), decoded_header.number, decoded.is_best
+                                );
+
+                                break Some(Event::BlockAnnounce {
+                                    chain_index,
+                                    peer_id,
+                                    is_best: decoded.is_best,
+                                    header: decoded_header.into(), // TODO: somewhat wasteful allocation here
+                                });
+                            }
+                            Err(error) => {
+                                log::warn!(
+                                    "block-announce-bad-header; peer_id={}; chain_index={}; hash={}; is_best={:?}; error={}",
+                                    peer_id, chain_index, HashDisplay(&header_hash), decoded.is_best, error
+                                );
+
+                                inner.unassign_slot_and_ban(chain_index, peer_id);
+                                inner.process_network_service_events = true;
+                            }
+                        }
+                    }
+                    service::Event::ChainConnected {
+                        peer_id,
+                        chain_index,
+                        best_number,
+                        best_hash,
+                        ..
+                    } => {
+                        log::debug!(
+                            "chain-connected; peer_id={}; chain_index={}; best_number={}; best_hash={}",
+                            peer_id,
+                            chain_index,
+                            best_number,
+                            HashDisplay(&best_hash),
+                        );
+                        break Some(Event::Connected {
+                            peer_id,
+                            chain_index,
+                            best_block_number: best_number,
+                            best_block_hash: best_hash,
+                        });
+                    }
+                    service::Event::ChainDisconnected {
+                        peer_id,
+                        chain_index,
+                        ..
+                    } => {
+                        log::debug!(
+                            "chain-disconnected; peer_id={}; chain_index={}",
+                            peer_id,
+                            chain_index
+                        );
+
+                        inner.unassign_slot_and_ban(chain_index, peer_id.clone());
+                        inner.process_network_service_events = true;
+
+                        break Some(Event::Disconnected {
+                            chain_index,
+                            peer_id,
+                        });
+                    }
+                    service::Event::ChainConnectAttemptFailed {
+                        chain_index,
+                        peer_id,
+                        error,
+                        ..
+                    } => {
+                        log::debug!(
+                            "chain-connect-attempt-failed; peer_id={}; chain_index={}; error={}",
+                            peer_id,
+                            chain_index,
+                            error
+                        );
+
+                        inner.unassign_slot_and_ban(chain_index, peer_id);
+                        inner.process_network_service_events = true;
+                    }
+                    service::Event::InboundSlotAssigned { .. } => {
+                        // TODO: log this
+                    }
+                    service::Event::RequestResult {
+                        request_id,
+                        response: service::RequestResult::Blocks(response),
+                    } => {
+                        let _ = inner
+                            .blocks_requests
+                            .remove(&request_id)
+                            .unwrap()
+                            .send(response.map_err(BlocksRequestError::Request));
+                    }
+                    service::Event::RequestResult { .. } => {
+                        // We never start a request of any other kind.
+                        unreachable!()
+                    }
+                    service::Event::RequestInCancel { .. } => {
+                        // Requests are answered immediately, and thus cancelling events can't happen.
+                        unreachable!()
+                    }
+                    service::Event::KademliaDiscoveryResult {
+                        operation_id,
+                        result,
+                    } => {
+                        let chain_index = inner
+                            .kademlia_discovery_operations
+                            .remove(&operation_id)
+                            .unwrap();
+                        match result {
+                            Ok(nodes) => {
+                                log::debug!("discovered; nodes={:?}", nodes);
+                                for (peer_id, addrs) in nodes {
+                                    inner.network.discover(
+                                        &Instant::now(),
+                                        chain_index,
+                                        peer_id,
+                                        addrs,
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                log::debug!("discovery-error; error={}", error);
+                            }
+                        }
+                    }
+                    service::Event::IdentifyRequestIn {
+                        peer_id,
+                        request_id,
+                    } => {
+                        log::debug!("identify-request; peer_id={}", peer_id);
+                        inner
+                            .network
+                            .respond_identify(request_id, &inner.identify_agent_version);
+                    }
+                    service::Event::BlocksRequestIn {
+                        peer_id,
+                        chain_index,
+                        config,
+                        request_id,
+                    } => {
+                        log::debug!(
+                            "incoming-blocks-request; peer_id={}; chain_index={}",
+                            peer_id,
+                            chain_index
+                        );
+                        let mut _jaeger_span = inner.jaeger_service.incoming_block_request_span(
+                            &inner.local_peer_id,
+                            &peer_id,
+                            config.desired_count.get(),
+                            if let (1, protocol::BlocksRequestConfigStart::Hash(block_hash)) =
+                                (config.desired_count.get(), &config.start)
+                            {
+                                Some(block_hash)
+                            } else {
+                                None
+                            },
+                        );
+
+                        // TODO: is it a good idea to await here while the lock is held and freezing the entire networking background task?
+                        let response = blocks_request_response(
+                            &inner.databases[chain_index],
+                            inner.network.block_number_bytes(chain_index),
+                            config,
+                        )
+                        .await;
+                        inner.network.respond_blocks(
+                            request_id,
+                            match response {
+                                Ok(b) => Some(b),
+                                Err(error) => {
+                                    log::warn!("incoming-blocks-request-error; error={}", error);
+                                    None
+                                }
+                            },
+                        );
+                    }
+                    service::Event::GrandpaNeighborPacket {
+                        chain_index,
+                        peer_id,
+                        state,
+                    } => {
+                        log::debug!(
+                            "grandpa-neighbor-packet; peer_id={}; chain_index={}; round_number={}; set_id={}; commit_finalized_height={}",
+                            peer_id,
+                            chain_index,
+                            state.round_number,
+                            state.set_id,
+                            state.commit_finalized_height,
+                        );
+                        // TODO: report to the sync state machine
+                    }
+                    service::Event::GrandpaCommitMessage {
+                        chain_index,
+                        peer_id,
+                        message,
+                    } => {
+                        log::debug!(
+                            "grandpa-commit-message; peer_id={}; chain_index={}; target_hash={}",
+                            peer_id,
+                            chain_index,
+                            HashDisplay(message.decode().message.target_hash),
+                        );
+                    }
+                    service::Event::ProtocolError { peer_id, error } => {
+                        log::warn!("protocol-error; peer_id={}; error={}", peer_id, error);
+                        for chain_index in 0..inner.network.num_chains() {
+                            inner.unassign_slot_and_ban(chain_index, peer_id.clone());
+                        }
+                        inner.process_network_service_events = true;
+                    }
+                }
+            };
+
+            // Dispatch the event to the various senders.
+            if let Some(event) = event {
+                // Continue processing events.
+                inner.process_network_service_events = true;
+
+                // This little `if` avoids having to do `event.clone()` if we don't have to.
+                if event_senders.len() == 1 {
+                    let _ = event_senders[0].send(event).await;
+                } else {
+                    for sender in event_senders.iter_mut() {
+                        // For simplicity we don't get rid of closed senders because senders
+                        // aren't supposed to close, and that leaving closed senders in the
+                        // list doesn't have any consequence other than one extra iteration
+                        // every time.
+                        let _ = sender.send(event.clone()).await;
+                    }
+                }
+            }
+
+            // TODO: doc
+            for chain_index in 0..inner.network.num_chains() {
+                let now = Instant::now();
+
+                // Clean up the content of `slots_assign_backoff`.
+                // TODO: the background task should be woken up when the ban expires
+                // TODO: O(n)
+                inner
+                    .slots_assign_backoff
+                    .retain(|_, expiration| *expiration > now);
+
+                // Assign outgoing slots.
+                loop {
+                    let peer_to_assign = inner
+                        .network
+                        .slots_to_assign(chain_index)
+                        .find(|peer_id| {
+                            !inner
+                                .slots_assign_backoff
+                                .contains_key(&((**peer_id).clone(), chain_index))
+                            // TODO: spurious cloning
+                        })
+                        .cloned();
+
+                    let Some(peer_to_assign) = peer_to_assign else { break };
+                    log::debug!(
+                        "slot-assigned; peer_id={}; chain_index={}",
+                        peer_to_assign,
+                        chain_index
+                    );
+                    inner.network.assign_out_slot(chain_index, peer_to_assign);
+                    inner.process_network_service_events = true;
+                }
+            }
+
+            // The networking service contains a list of connections that should be opened.
+            // Grab this list and start opening a connection for each.
+            // TODO: restore the rate limiting for connections openings
+            loop {
+                if inner.num_pending_out_attempts >= 16 {
+                    // TODO: constant
+                    break;
+                }
+
+                let start_connect = match inner.network.next_start_connect(Instant::now) {
+                    Some(sc) => sc,
+                    None => break,
+                };
+
+                inner.num_pending_out_attempts += 1;
+
+                // Perform the connection process in a separate task.
+                let mut to_background_tx = inner.to_background_tx.clone();
+                (inner.tasks_executor)(Box::pin(async move {
+                    // TODO: interrupt immediately if `connection_opening_outcome_tx` is dropped
+                    if let Ok(socket) = tasks::opening_connection_task(start_connect.clone()).await
+                    {
+                        let _ = to_background_tx
+                            .send(ToBackground::ConnectionEstablishSuccess {
+                                socket: Box::new(socket),
+                                info: start_connect,
+                            })
+                            .await;
+                    } else {
+                        let _ = to_background_tx
+                            .send(ToBackground::ConnectionEstablishFail {
+                                info: start_connect,
+                            })
+                            .await;
+                    }
+                }));
+
+                inner.process_network_service_events = true;
+            }
+        }
+
         // TODO: this code block is obviously way too long; split into a struct
         futures_util::select! {
             // Inject in the coordinator the messages that the connections have generated.
@@ -679,7 +1051,7 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
                     debug_assert!(_prev_val.is_none());
                 }
 
-                inner.process_network_service_events = future::Either::Left(future::ready(()));
+                inner.process_network_service_events = true;
             }
 
             message = inner.to_background_rx.next().fuse().map(|v| v.unwrap()) => {
@@ -697,7 +1069,7 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
                             debug_assert!(_was_in.is_some());
                         }
 
-                        inner.process_network_service_events = future::Either::Left(future::ready(()));
+                        inner.process_network_service_events = true;
                     }
 
                     ToBackground::ConnectionEstablishFail { info } => {
@@ -706,7 +1078,7 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
                         for chain_index in 0..inner.network.num_chains() {
                             inner.unassign_slot_and_ban(chain_index, info.expected_peer_id.clone());
                         }
-                        inner.process_network_service_events = future::Either::Left(future::ready(()));
+                        inner.process_network_service_events = true;
                     }
 
                     ToBackground::ConnectionEstablishSuccess { socket, info } => {
@@ -729,7 +1101,7 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
                             inner.to_background_tx.clone(),
                         )));
 
-                        inner.process_network_service_events = future::Either::Left(future::ready(()));
+                        inner.process_network_service_events = true;
                     }
 
                     ToBackground::IncomingConnection { socket, multiaddr, when_connected } => {
@@ -751,7 +1123,7 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
                             inner.to_background_tx.clone(),
                         )));
 
-                        inner.process_network_service_events = future::Either::Left(future::ready(()));
+                        inner.process_network_service_events = true;
                     }
 
                     ToBackground::ForegroundAnnounceBlock {
@@ -816,373 +1188,6 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
                     } => {
                         let _ = result_tx.send(inner.network.num_peers(chain_index));
                     }
-                }
-            }
-
-            _ = &mut inner.process_network_service_events => {
-                inner.process_network_service_events = future::Either::Right(future::pending());
-
-                let event = loop {
-                    let inner_event = match inner.network.next_event(Instant::now()) {
-                        Some(ev) => ev,
-                        None => break None,
-                    };
-
-                    match inner_event {
-                        service::Event::Connected(peer_id) => {
-                            log::debug!("connected; peer_id={}", peer_id);
-                        }
-                        service::Event::Disconnected {
-                            peer_id,
-                            chain_indices,
-                        } => {
-                            log::debug!("disconnected; peer_id={}", peer_id);
-                            if !chain_indices.is_empty() {
-                                debug_assert_eq!(chain_indices.len(), 1); // TODO: not implemented
-                                break Some(Event::Disconnected {
-                                    chain_index: chain_indices[0],
-                                    peer_id,
-                                });
-                            }
-                        }
-                        service::Event::BlockAnnounce {
-                            chain_index,
-                            peer_id,
-                            announce,
-                        } => {
-                            let decoded = announce.decode();
-                            let header_hash =
-                                header::hash_from_scale_encoded_header(decoded.scale_encoded_header);
-                            match header::decode(
-                                decoded.scale_encoded_header,
-                                inner.network.block_number_bytes(chain_index),
-                            ) {
-                                Ok(decoded_header) => {
-                                    let mut _jaeger_span =
-                                        inner.jaeger_service.block_announce_receive_span(
-                                            &inner.local_peer_id,
-                                            &peer_id,
-                                            decoded_header.number,
-                                            &decoded_header
-                                                .hash(inner.network.block_number_bytes(chain_index)),
-                                        );
-
-                                    log::debug!(
-                                        "block-announce; peer_id={}; chain_index={}; hash={}; number={}; is_best={:?}",
-                                        peer_id, chain_index, HashDisplay(&header_hash), decoded_header.number, decoded.is_best
-                                    );
-
-                                    break Some(Event::BlockAnnounce {
-                                        chain_index,
-                                        peer_id,
-                                        is_best: decoded.is_best,
-                                        header: decoded_header.into(), // TODO: somewhat wasteful allocation here
-                                    });
-                                }
-                                Err(error) => {
-                                    log::warn!(
-                                        "block-announce-bad-header; peer_id={}; chain_index={}; hash={}; is_best={:?}; error={}",
-                                        peer_id, chain_index, HashDisplay(&header_hash), decoded.is_best, error
-                                    );
-
-                                    inner.unassign_slot_and_ban(chain_index, peer_id);
-                                    inner.process_network_service_events = future::Either::Left(future::ready(()));
-                                }
-                            }
-                        }
-                        service::Event::ChainConnected {
-                            peer_id,
-                            chain_index,
-                            best_number,
-                            best_hash,
-                            ..
-                        } => {
-                            log::debug!(
-                                "chain-connected; peer_id={}; chain_index={}; best_number={}; best_hash={}",
-                                peer_id,
-                                chain_index,
-                                best_number,
-                                HashDisplay(&best_hash),
-                            );
-                            break Some(Event::Connected {
-                                peer_id,
-                                chain_index,
-                                best_block_number: best_number,
-                                best_block_hash: best_hash,
-                            });
-                        }
-                        service::Event::ChainDisconnected {
-                            peer_id,
-                            chain_index,
-                            ..
-                        } => {
-                            log::debug!(
-                                "chain-disconnected; peer_id={}; chain_index={}",
-                                peer_id,
-                                chain_index
-                            );
-
-                            inner.unassign_slot_and_ban(chain_index, peer_id.clone());
-                            inner.process_network_service_events = future::Either::Left(future::ready(()));
-
-                            break Some(Event::Disconnected {
-                                chain_index,
-                                peer_id,
-                            });
-                        }
-                        service::Event::ChainConnectAttemptFailed {
-                            chain_index,
-                            peer_id,
-                            error,
-                            ..
-                        } => {
-                            log::debug!(
-                                "chain-connect-attempt-failed; peer_id={}; chain_index={}; error={}",
-                                peer_id,
-                                chain_index,
-                                error
-                            );
-
-                            inner.unassign_slot_and_ban(chain_index, peer_id);
-                            inner.process_network_service_events = future::Either::Left(future::ready(()));
-                        }
-                        service::Event::InboundSlotAssigned { .. } => {
-                            // TODO: log this
-                        }
-                        service::Event::RequestResult {
-                            request_id,
-                            response: service::RequestResult::Blocks(response),
-                        } => {
-                            let _ = inner
-                                .blocks_requests
-                                .remove(&request_id)
-                                .unwrap()
-                                .send(response.map_err(BlocksRequestError::Request));
-                        }
-                        service::Event::RequestResult { .. } => {
-                            // We never start a request of any other kind.
-                            unreachable!()
-                        }
-                        service::Event::RequestInCancel { .. } => {
-                            // Requests are answered immediately, and thus cancelling events can't happen.
-                            unreachable!()
-                        }
-                        service::Event::KademliaDiscoveryResult {
-                            operation_id,
-                            result,
-                        } => {
-                            let chain_index = inner
-                                .kademlia_discovery_operations
-                                .remove(&operation_id)
-                                .unwrap();
-                            match result {
-                                Ok(nodes) => {
-                                    log::debug!("discovered; nodes={:?}", nodes);
-                                    for (peer_id, addrs) in nodes {
-                                        inner.network.discover(
-                                            &Instant::now(),
-                                            chain_index,
-                                            peer_id,
-                                            addrs,
-                                        );
-                                    }
-                                }
-                                Err(error) => {
-                                    log::debug!("discovery-error; error={}", error);
-                                }
-                            }
-                        }
-                        service::Event::IdentifyRequestIn {
-                            peer_id,
-                            request_id,
-                        } => {
-                            log::debug!("identify-request; peer_id={}", peer_id);
-                            inner
-                                .network
-                                .respond_identify(request_id, &inner.identify_agent_version);
-                        }
-                        service::Event::BlocksRequestIn {
-                            peer_id,
-                            chain_index,
-                            config,
-                            request_id,
-                        } => {
-                            log::debug!(
-                                "incoming-blocks-request; peer_id={}; chain_index={}",
-                                peer_id,
-                                chain_index
-                            );
-                            let mut _jaeger_span = inner.jaeger_service.incoming_block_request_span(
-                                &inner.local_peer_id,
-                                &peer_id,
-                                config.desired_count.get(),
-                                if let (1, protocol::BlocksRequestConfigStart::Hash(block_hash)) =
-                                    (config.desired_count.get(), &config.start)
-                                {
-                                    Some(block_hash)
-                                } else {
-                                    None
-                                },
-                            );
-
-                            // TODO: is it a good idea to await here while the lock is held and freezing the entire networking background task?
-                            let response = blocks_request_response(
-                                &inner.databases[chain_index],
-                                inner.network.block_number_bytes(chain_index),
-                                config,
-                            )
-                            .await;
-                            inner.network.respond_blocks(
-                                request_id,
-                                match response {
-                                    Ok(b) => Some(b),
-                                    Err(error) => {
-                                        log::warn!("incoming-blocks-request-error; error={}", error);
-                                        None
-                                    }
-                                },
-                            );
-                        }
-                        service::Event::GrandpaNeighborPacket {
-                            chain_index,
-                            peer_id,
-                            state,
-                        } => {
-                            log::debug!(
-                                "grandpa-neighbor-packet; peer_id={}; chain_index={}; round_number={}; set_id={}; commit_finalized_height={}",
-                                peer_id,
-                                chain_index,
-                                state.round_number,
-                                state.set_id,
-                                state.commit_finalized_height,
-                            );
-                            // TODO: report to the sync state machine
-                        }
-                        service::Event::GrandpaCommitMessage {
-                            chain_index,
-                            peer_id,
-                            message,
-                        } => {
-                            log::debug!(
-                                "grandpa-commit-message; peer_id={}; chain_index={}; target_hash={}",
-                                peer_id,
-                                chain_index,
-                                HashDisplay(message.decode().message.target_hash),
-                            );
-                        }
-                        service::Event::ProtocolError { peer_id, error } => {
-                            log::warn!("protocol-error; peer_id={}; error={}", peer_id, error);
-                            for chain_index in 0..inner.network.num_chains() {
-                                inner.unassign_slot_and_ban(chain_index, peer_id.clone());
-                            }
-                            inner.process_network_service_events = future::Either::Left(future::ready(()));
-                        }
-                    }
-                };
-
-                // Dispatch the event to the various senders.
-                if let Some(event) = event {
-                    // Continue processing events.
-                    inner.process_network_service_events = future::Either::Left(future::ready(()));
-
-                    // This little `if` avoids having to do `event.clone()` if we don't have to.
-                    if event_senders.len() == 1 {
-                        let _ = event_senders[0].send(event).await;
-                    } else {
-                        for sender in event_senders.iter_mut() {
-                            // For simplicity we don't get rid of closed senders because senders
-                            // aren't supposed to close, and that leaving closed senders in the
-                            // list doesn't have any consequence other than one extra iteration
-                            // every time.
-                            let _ = sender.send(event.clone()).await;
-                        }
-                    }
-                }
-
-                // TODO: doc
-                for chain_index in 0..inner.network.num_chains() {
-                    let now = Instant::now();
-
-                    // Clean up the content of `slots_assign_backoff`.
-                    // TODO: the background task should be woken up when the ban expires
-                    // TODO: O(n)
-                    inner
-                        .slots_assign_backoff
-                        .retain(|_, expiration| *expiration > now);
-
-                    // Assign outgoing slots.
-                    loop {
-                        let peer_to_assign = inner
-                            .network
-                            .slots_to_assign(chain_index)
-                            .find(|peer_id| {
-                                !inner
-                                    .slots_assign_backoff
-                                    .contains_key(&((**peer_id).clone(), chain_index)) // TODO: spurious cloning
-                            })
-                            .cloned();
-
-                        let Some(peer_to_assign) = peer_to_assign else { break };
-                        log::debug!(
-                            "slot-assigned; peer_id={}; chain_index={}",
-                            peer_to_assign,
-                            chain_index
-                        );
-                        inner.network.assign_out_slot(chain_index, peer_to_assign);
-                        inner.process_network_service_events = future::Either::Left(future::ready(()));
-                    }
-                }
-
-                // The networking service contains a list of connections that should be opened.
-                // Grab this list and start opening a connection for each.
-                // TODO: restore the rate limiting for connections openings
-                loop {
-                    if inner.num_pending_out_attempts >= 16 {
-                        // TODO: constant
-                        break;
-                    }
-
-                    let start_connect = match inner.network.next_start_connect(Instant::now) {
-                        Some(sc) => sc,
-                        None => break,
-                    };
-
-                    inner.num_pending_out_attempts += 1;
-
-                    // Perform the connection process in a separate task.
-                    let mut to_background_tx = inner.to_background_tx.clone();
-                    (inner.tasks_executor)(Box::pin(async move {
-                        // TODO: interrupt immediately if `connection_opening_outcome_tx` is dropped
-                        if let Ok(socket) = tasks::opening_connection_task(start_connect.clone()).await {
-                            let _ = to_background_tx
-                                .send(ToBackground::ConnectionEstablishSuccess { socket: Box::new(socket), info: start_connect })
-                                .await;
-                        } else {
-                            let _ = to_background_tx
-                                .send(ToBackground::ConnectionEstablishFail { info: start_connect })
-                                .await;
-                        }
-                    }));
-
-                    inner.process_network_service_events = future::Either::Left(future::ready(()));
-                }
-
-                // Pull messages that the coordinator has generated in destination to the various
-                // connections.
-                while let Some((connection_id, message)) = inner.network.pull_message_to_connection() {
-                    // Note that it is critical for the sending to not take too long here, in order to not
-                    // block the process of the network service.
-                    // In particular, if sending the message to the connection is blocked due to sending
-                    // a message on the connection-to-coordinator channel, this will result in a deadlock.
-                    // For this reason, the connection task is always ready to immediately accept a message
-                    // on the coordinator-to-connection channel.
-                    inner
-                        .active_connections
-                        .get_mut(&connection_id)
-                        .unwrap()
-                        .send(message)
-                        .await
-                        .unwrap();
                 }
             }
         }
