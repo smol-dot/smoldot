@@ -701,10 +701,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     // Stop the task that holds everything alive, in order to start dropping the services.
     drop(main_task);
 
-    // Finish running all tasks so that everything is shut down in a clean way.
-    while !executor.is_empty() {
-        executor.tick().await;
-    }
+    // TODO: consider waiting for all the tasks to have ended, unfortunately that's not really possible
 }
 
 /// Opens the database from the file system, or create a new database if none is found.

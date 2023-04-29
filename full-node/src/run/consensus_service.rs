@@ -551,6 +551,7 @@ impl SyncBackground {
                 },
 
                 frontend_event = self.to_background_rx.next().fuse() => {
+                    // TODO: this isn't processed quickly enough when under load
                     match frontend_event {
                         Some(ToBackground::GetSyncState { result_tx }) => {
                             let _ = result_tx.send(SyncState {
