@@ -29,12 +29,12 @@
 
 use crate::run::{database_thread, jaeger_service};
 
-use async_lock::Mutex;
-use async_std::net::TcpStream;
 use core::{cmp, future::Future, mem, pin::Pin, task::Poll, time::Duration};
 use futures_channel::{mpsc, oneshot};
 use futures_util::{future, stream, SinkExt as _, StreamExt as _};
 use hashbrown::HashMap;
+use smol::lock::Mutex;
+use smol::net::TcpStream;
 use smoldot::{
     database::full_sqlite,
     header,
@@ -352,7 +352,7 @@ impl NetworkService {
         // listening on that address.
         for listen_address in config.listen_addresses {
             // Try to parse the requested address and create the corresponding listening socket.
-            let tcp_listener: async_std::net::TcpListener = {
+            let tcp_listener: smol::net::TcpListener = {
                 let addr = {
                     let mut iter = listen_address.iter();
                     let proto1 = iter.next();
@@ -370,7 +370,7 @@ impl NetworkService {
                 };
 
                 if let Some(addr) = addr {
-                    match async_std::net::TcpListener::bind(addr).await {
+                    match smol::net::TcpListener::bind(addr).await {
                         Ok(l) => l,
                         Err(err) => {
                             return Err(InitError::ListenerIo(listen_address, err));
@@ -395,7 +395,7 @@ impl NetworkService {
                                 // file descriptor is available.
                                 // A wait is added in order to avoid having a busy-loop failing to
                                 // accept connections.
-                                futures_timer::Delay::new(Duration::from_secs(2)).await;
+                                smol::Timer::after(Duration::from_secs(2)).await;
                                 continue;
                             }
                         };
@@ -441,7 +441,7 @@ impl NetworkService {
                 let mut next_discovery = Duration::from_secs(1);
 
                 loop {
-                    futures_timer::Delay::new(next_discovery).await;
+                    smol::Timer::after(next_discovery).await;
                     next_discovery = cmp::min(next_discovery * 2, Duration::from_secs(120));
                     let (when_done, when_done_rx) = oneshot::channel();
                     let _ = to_background_tx

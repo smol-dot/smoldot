@@ -15,9 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use core::{future::Future, pin, time::Duration};
+use core::{future::Future, pin};
 use futures_channel::mpsc;
-use futures_timer::Delay;
 use futures_util::{future, AsyncRead, AsyncWrite, FutureExt as _, StreamExt as _};
 use smoldot::{
     libp2p::{
@@ -53,14 +52,7 @@ pub(super) async fn opening_connection_task(
 
     // Finishing ongoing connection process.
     let socket = {
-        let now = Instant::now();
-        let mut timeout = Delay::new(if start_connect.timeout >= now {
-            start_connect.timeout - now
-        } else {
-            // `timeout - now` would panic
-            Duration::new(0, 0)
-        })
-        .fuse();
+        let mut timeout = future::FutureExt::fuse(smol::Timer::at(start_connect.timeout));
         let mut socket = pin::pin!(socket.fuse());
         futures_util::select! {
             _ = timeout => {
@@ -218,8 +210,7 @@ pub(super) async fn established_connection_task(
         let poll_after = if let Some(wake_up) = wake_up_after {
             let now = Instant::now();
             if wake_up > now {
-                let dur = wake_up - now;
-                future::Either::Left(futures_timer::Delay::new(dur))
+                future::Either::Left(smol::Timer::at(wake_up))
             } else {
                 // "Wake up" immediately.
                 continue;
@@ -304,10 +295,8 @@ fn multiaddr_to_socket(
 
     Ok(async move {
         let tcp_socket = match addr {
-            either::Left(socket_addr) => async_std::net::TcpStream::connect(socket_addr).await,
-            either::Right((dns, port)) => {
-                async_std::net::TcpStream::connect((&dns[..], port)).await
-            }
+            either::Left(socket_addr) => smol::net::TcpStream::connect(socket_addr).await,
+            either::Right((dns, port)) => smol::net::TcpStream::connect((&dns[..], port)).await,
         };
 
         if let Ok(tcp_socket) = &tcp_socket {

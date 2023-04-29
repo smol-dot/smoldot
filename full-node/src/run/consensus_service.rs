@@ -26,11 +26,11 @@
 
 use crate::run::{database_thread, jaeger_service, network_service};
 
-use async_lock::Mutex;
 use core::{num::NonZeroU32, ops};
 use futures_channel::{mpsc, oneshot};
 use futures_util::{future, stream, FutureExt as _, SinkExt as _, StreamExt as _};
 use hashbrown::HashSet;
+use smol::lock::Mutex;
 use smoldot::{
     author,
     chain::chain_information,
@@ -47,7 +47,7 @@ use std::{
     iter, mem,
     num::NonZeroU64,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH, Instant},
 };
 
 /// Configuration for a [`ConsensusService`].
@@ -502,28 +502,28 @@ impl SyncBackground {
 
                 match &block_authoring {
                     Some((author::build::Builder::Ready(_), _)) => {
-                        future::Either::Left(future::Either::Left(future::ready(())))
+                        future::Either::Left(future::Either::Left(future::ready(Instant::now())))
                     }
                     Some((author::build::Builder::WaitSlot(when), _)) => {
                         let delay = (UNIX_EPOCH + when.when())
                             .duration_since(SystemTime::now())
                             .unwrap_or_else(|_| Duration::new(0, 0));
-                        future::Either::Right(futures_timer::Delay::new(delay).fuse())
+                        future::Either::Right(future::FutureExt::fuse(smol::Timer::after(delay)))
                     }
-                    None => future::Either::Left(future::Either::Right(future::pending::<()>())),
+                    None => future::Either::Left(future::Either::Right(future::pending())),
                     Some((author::build::Builder::Idle, _)) => {
                         // If the block authoring is idle, which happens in case of error,
                         // sleep for an arbitrary duration before resetting it.
                         // This prevents the authoring from trying over and over again to generate
                         // a bad block.
                         let delay = Duration::from_secs(2);
-                        future::Either::Right(futures_timer::Delay::new(delay).fuse())
+                        future::Either::Right(future::FutureExt::fuse(smol::Timer::after(delay)))
                     }
                 }
             };
 
             futures_util::select! {
-                () = authoring_ready_future => {
+                _ = authoring_ready_future => {
                     // Ready to author a block. Call `author_block()`.
                     // While a block is being authored, the whole syncing state machine is
                     // deliberately frozen.

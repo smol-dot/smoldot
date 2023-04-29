@@ -18,9 +18,9 @@
 //! As explained in the documentation of smoldot, the database uses synchronous I/O operations.
 //! For this reason, it is undesirable to access it from an asynchronous context.
 
-use async_lock::Mutex;
 use futures_channel::{mpsc, oneshot};
 use futures_util::{SinkExt as _, StreamExt as _};
+use smol::lock::Mutex;
 use smoldot::database::full_sqlite::SqliteFullDatabase;
 use std::thread;
 
@@ -80,7 +80,7 @@ impl From<SqliteFullDatabase> for DatabaseThread {
             .spawn(move || {
                 // When the `DatabaseThread` is dropped, the sender will close, `rx.next()`
                 // will return `None`, and the closure here will finish, ending the thread.
-                while let Some(closure) = futures_executor::block_on(rx.next()) {
+                while let Some(closure) = smol::block_on(rx.next()) {
                     closure(&db)
                 }
             })

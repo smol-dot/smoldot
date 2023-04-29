@@ -190,10 +190,23 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         .as_ref()
         .map(|relay_chain_spec| relay_chain_spec.as_chain_information().unwrap().0);
 
-    let threads_pool = futures_executor::ThreadPool::builder()
-        .name_prefix("tasks-pool-")
-        .create()
-        .unwrap();
+    // Create an executor where tasks are going to be spawned onto.
+    let executor = {
+        let executor = Arc::new(smol::Executor::new());
+        for n in 0..thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+        {
+            let executor = executor.clone();
+            let _ = thread::Builder::new()
+                .name(format!("tasks-pool-{}", n))
+                .spawn(move || smol::block_on(executor.run(future::pending::<()>())));
+        }
+        if Arc::strong_count(&executor) <= 1 {
+            panic!("failed to spawn running threads");
+        }
+        executor
+    };
 
     // Directory where we will store everything on the disk, such as the database, secret keys,
     // etc.
@@ -316,7 +329,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         .hash(chain_spec.block_number_bytes().into());
 
     let jaeger_service = jaeger_service::JaegerService::new(jaeger_service::Config {
-        tasks_executor: &mut |task| threads_pool.spawn_ok(task),
+        tasks_executor: &mut |task| executor.spawn(task).detach(),
         service_name: local_peer_id.to_string(),
         jaeger_agent: cli_options.jaeger,
     })
@@ -437,8 +450,8 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
             identify_agent_version: concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION")).to_owned(),
             noise_key,
             tasks_executor: {
-                let threads_pool = threads_pool.clone();
-                Box::new(move |task| threads_pool.spawn_ok(task))
+                let executor = executor.clone();
+                Box::new(move |task| executor.spawn(task).detach())
             },
             jaeger_service: jaeger_service.clone(),
         })
@@ -464,8 +477,8 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
     let consensus_service = consensus_service::ConsensusService::new(consensus_service::Config {
         tasks_executor: {
-            let threads_pool = threads_pool.clone();
-            Box::new(move |task| threads_pool.spawn_ok(task))
+            let executor = executor.clone();
+            Box::new(move |task| executor.spawn(task).detach())
         },
         genesis_block_hash,
         network_events_receiver: network_events_receivers.next().unwrap(),
@@ -482,8 +495,8 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         Some(
             consensus_service::ConsensusService::new(consensus_service::Config {
                 tasks_executor: {
-                    let threads_pool = threads_pool.clone();
-                    Box::new(move |task| threads_pool.spawn_ok(task))
+                    let executor = executor.clone();
+                    Box::new(move |task| executor.spawn(task).detach())
                 },
                 genesis_block_hash: relay_genesis_chain_information
                     .as_ref()
@@ -527,7 +540,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     // something else.
     let _json_rpc_service = if let Some(bind_address) = cli_options.json_rpc_address.0 {
         let result = json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
-            tasks_executor: { &mut move |task| threads_pool.spawn_ok(task) },
+            tasks_executor: { &mut move |task| executor.spawn(task).detach() },
             bind_address,
         })
         .await;
@@ -550,7 +563,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
             endpoints: smoldot::telemetry::TelemetryEndpoints::new(endpoints).unwrap(),
             wasm_external_transport: None,
             tasks_executor: {
-                let threads_pool = threads_pool.clone();
+                let executor = executor.clone();
                 Box::new(move |task| threads_pool.spawn_obj_ok(From::from(task))) as Box<_>
             },
         })
@@ -583,24 +596,17 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         rx.fuse()
     };
 
-    let mut informant_timer = stream::once(future::ready(())).chain(
-        stream::unfold((), move |_| {
-            futures_timer::Delay::new(Duration::from_millis(100)).map(|_| Some(((), ())))
-        })
-        .map(|_| ()),
-    );
+    let mut informant_timer =
+        stream::StreamExt::fuse(smol::Timer::interval(Duration::from_millis(100)));
 
-    let mut telemetry_timer = stream::once(future::ready(())).chain(
-        stream::unfold((), move |_| {
-            futures_timer::Delay::new(Duration::from_secs(5)).map(|_| Some(((), ())))
-        })
-        .map(|_| ()),
-    );
+    let mut telemetry_timer =
+        stream::StreamExt::fuse(smol::Timer::interval(Duration::from_secs(5)));
 
     let mut network_known_best = None;
     let mut main_network_events_receiver = network_events_receivers.next().unwrap();
     debug_assert!(network_events_receivers.next().is_none());
 
+    // TODO: spawn this as task
     loop {
         futures_util::select! {
             _ = informant_timer.next() => {
@@ -828,10 +834,8 @@ async fn background_open_database(
         });
     }
 
-    let mut progress_timer = stream::unfold((), move |_| {
-        futures_timer::Delay::new(Duration::from_millis(200)).map(|_| Some(((), ())))
-    })
-    .map(|_| ());
+    let mut progress_timer =
+        stream::StreamExt::fuse(smol::Timer::after(Duration::from_millis(200)));
 
     let mut next_progress_icon = ['-', '\\', '|', '/'].iter().copied().cycle();
 
