@@ -150,6 +150,11 @@ enum ToBackground {
     ConnectionEstablishFail {
         info: service::StartConnect<Instant>,
     },
+    IncomingConnection {
+        socket: TcpStream,
+        multiaddr: Multiaddr,
+        when_connected: Instant,
+    },
     ForegroundAnnounceBlock {
         target: PeerId,
         chain_index: usize,
@@ -212,15 +217,6 @@ struct Inner {
     /// The values are the moment when the ban expires.
     // TODO: use SipHasher
     slots_assign_backoff: HashMap<(PeerId, usize), Instant, fnv::FnvBuildHasher>,
-
-    /// Channel receiving new incoming connections from listeners.
-    incoming_sockets_rx: mpsc::Receiver<(TcpStream, Multiaddr, Instant)>,
-
-    /// Sending side of [`Guarded::incoming_sockets_rx`].
-    ///
-    /// We keep at least one sender alive at all time, even if there are no listener, in order to
-    /// guarantee that the receiver never ends.
-    _incoming_sockets_tx: mpsc::Sender<(TcpStream, Multiaddr, Instant)>,
 
     next_kademlia_discovery: futures_timer::Delay,
     next_kademlia_discovery_increment: Duration,
@@ -313,7 +309,6 @@ impl NetworkService {
         }
 
         let (to_background_tx, to_background_rx) = mpsc::channel(4);
-        let (incoming_sockets_tx, incoming_sockets_rx) = mpsc::channel(4);
         let (messages_from_connections_tx, messages_from_connections_rx) = mpsc::channel(64);
 
         let local_peer_id =
@@ -330,8 +325,6 @@ impl NetworkService {
             messages_from_connections_rx,
             next_kademlia_discovery: futures_timer::Delay::new(Duration::new(0, 0)),
             next_kademlia_discovery_increment: Duration::from_secs(1),
-            _incoming_sockets_tx: incoming_sockets_tx.clone(),
-            incoming_sockets_rx,
             to_background_rx,
             to_background_tx: to_background_tx.clone(),
             process_network_service_events: future::Either::Left(future::ready(())),
@@ -392,10 +385,10 @@ impl NetworkService {
 
             // Spawn a background task dedicated to this listener.
             (inner.tasks_executor)(Box::pin({
-                let mut incoming_sockets_tx = incoming_sockets_tx.clone();
+                let mut to_background_tx = to_background_tx.clone();
                 async move {
-                    while !incoming_sockets_tx.is_closed() {
-                        // TODO: stop the await if `incoming_sockets_tx` gets closed
+                    while !to_background_tx.is_closed() {
+                        // TODO: stop the await if `to_background_rx` gets closed
                         let (socket, addr) = match tcp_listener.accept().await {
                             Ok(v) => v,
                             Err(_) => {
@@ -429,8 +422,12 @@ impl NetworkService {
 
                         log::debug!("incoming-connection; multiaddr={}", multiaddr);
 
-                        let _ = incoming_sockets_tx
-                            .send((socket, multiaddr, Instant::now()))
+                        let _ = to_background_tx
+                            .send(ToBackground::IncomingConnection {
+                                socket,
+                                multiaddr,
+                                when_connected: Instant::now(),
+                            })
                             .await;
                     }
                 }
@@ -692,29 +689,6 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
                 inner.process_network_service_events = future::Either::Left(future::ready(()));
             },
 
-            (socket, multiaddr, when_connected) = inner.incoming_sockets_rx.next().fuse().map(|v| v.unwrap()) => {
-                let (connection_id, connection_task) =
-                    inner.network.add_single_stream_incoming_connection(
-                        when_connected,
-                        service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
-                        multiaddr,
-                    );
-
-                let (tx, rx) = mpsc::channel(16); // TODO: ?!
-                inner.active_connections.insert(connection_id, tx);
-
-                let messages_from_connections_tx = inner.messages_from_connections_tx.clone();
-                (inner.tasks_executor)(Box::pin(tasks::established_connection_task(
-                    socket,
-                    connection_id,
-                    connection_task,
-                    rx,
-                    messages_from_connections_tx,
-                )));
-
-                inner.process_network_service_events = future::Either::Left(future::ready(()));
-            },
-
             _ = (&mut inner.next_kademlia_discovery).fuse() => {
                 inner.next_kademlia_discovery = futures_timer::Delay::new(inner.next_kademlia_discovery_increment);
                 inner.next_kademlia_discovery_increment = cmp::min(inner.next_kademlia_discovery_increment * 2, Duration::from_secs(120));
@@ -750,6 +724,29 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
                             inner.network.pending_outcome_ok_single_stream(
                                 info.id,
                                 service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
+                            );
+
+                        let (tx, rx) = mpsc::channel(16); // TODO: ?!
+                        inner.active_connections.insert(connection_id, tx);
+
+                        let messages_from_connections_tx = inner.messages_from_connections_tx.clone();
+                        (inner.tasks_executor)(Box::pin(tasks::established_connection_task(
+                            socket,
+                            connection_id,
+                            connection_task,
+                            rx,
+                            messages_from_connections_tx,
+                        )));
+
+                        inner.process_network_service_events = future::Either::Left(future::ready(()));
+                    }
+
+                    ToBackground::IncomingConnection { socket, multiaddr, when_connected } => {
+                        let (connection_id, connection_task) =
+                            inner.network.add_single_stream_incoming_connection(
+                                when_connected,
+                                service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
+                                multiaddr,
                             );
 
                         let (tx, rx) = mpsc::channel(16); // TODO: ?!
