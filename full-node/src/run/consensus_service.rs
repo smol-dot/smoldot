@@ -47,7 +47,7 @@ use std::{
     iter, mem,
     num::NonZeroU64,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 /// Configuration for a [`ConsensusService`].
@@ -115,8 +115,15 @@ pub struct SyncState {
 
 /// Background task that verifies blocks and emits requests.
 pub struct ConsensusService {
-    /// State kept up-to-date with the background task.
-    sync_state: Arc<Mutex<SyncState>>,
+    /// Used to communicate with the background task. Also used for the background task to detect
+    /// a shutdown.
+    to_background_tx: Mutex<mpsc::Sender<ToBackground>>,
+}
+
+enum ToBackground {
+    GetSyncState {
+        result_tx: oneshot::Sender<SyncState>,
+    },
 }
 
 impl ConsensusService {
@@ -124,7 +131,6 @@ impl ConsensusService {
     pub async fn new(config: Config) -> Arc<Self> {
         // Perform the initial access to the database to load a bunch of information.
         let (
-            finalized_block_hash,
             finalized_block_number,
             best_block_hash,
             best_block_number,
@@ -177,7 +183,6 @@ impl ConsensusService {
                         .to_chain_information(&finalized_block_hash)
                         .unwrap();
                     (
-                        finalized_block_hash,
                         finalized_block_number,
                         best_block_hash,
                         best_block_number,
@@ -206,13 +211,6 @@ impl ConsensusService {
                 does not support this hardcoded fork and will thus fail to sync past this block."
             );
         }
-
-        let sync_state = Arc::new(Mutex::new(SyncState {
-            best_block_number,
-            best_block_hash,
-            finalized_block_number,
-            finalized_block_hash,
-        }));
 
         let mut sync = all::AllSync::new(all::Config {
             chain_information: finalized_chain_information,
@@ -267,6 +265,7 @@ impl ConsensusService {
         let block_author_sync_source = sync.add_source(None, best_block_number, best_block_hash);
 
         let (block_requests_finished_tx, block_requests_finished_rx) = mpsc::channel(0);
+        let (to_background_tx, to_background_rx) = mpsc::channel(4);
 
         let background_sync = SyncBackground {
             sync,
@@ -276,9 +275,9 @@ impl ConsensusService {
             slot_duration_author_ratio: config.slot_duration_author_ratio,
             keystore: config.keystore,
             finalized_block_storage,
-            sync_state: sync_state.clone(),
             network_service: config.network_service.0,
             network_chain_index: config.network_service.1,
+            to_background_rx,
             from_network_service: config.network_events_receiver,
             database: config.database,
             peers_source_id_map: Default::default(),
@@ -290,7 +289,9 @@ impl ConsensusService {
 
         background_sync.start();
 
-        Arc::new(ConsensusService { sync_state })
+        Arc::new(ConsensusService {
+            to_background_tx: Mutex::new(to_background_tx),
+        })
     }
 
     /// Returns a summary of the state of the service.
@@ -298,7 +299,14 @@ impl ConsensusService {
     /// > **Important**: This doesn't represent the content of the database.
     // TODO: maybe remove this in favour of the database; seems like a better idea
     pub async fn sync_state(&self) -> SyncState {
-        self.sync_state.lock().await.clone()
+        let (result_tx, result_rx) = oneshot::channel();
+        let _ = self
+            .to_background_tx
+            .lock()
+            .await
+            .send(ToBackground::GetSyncState { result_tx })
+            .await;
+        result_rx.await.unwrap()
     }
 }
 
@@ -356,7 +364,8 @@ struct SyncBackground {
     /// parallel of this verification.
     finalized_block_storage: trie_structure::TrieStructure<Option<(Vec<u8>, TrieEntryVersion)>>,
 
-    sync_state: Arc<Mutex<SyncState>>,
+    /// Used to receive messages from the frontend service, and to detect when it shuts down.
+    to_background_rx: mpsc::Receiver<ToBackground>,
 
     /// Service managing the connections to the networking peers.
     network_service: Arc<network_service::NetworkService>,
@@ -433,15 +442,9 @@ impl SyncBackground {
             self.start_network_requests().await;
             self = self.process_blocks().await;
 
-            // Update the current best block, used for CLI-related purposes.
-            {
-                let mut lock = self.sync_state.lock().await;
-                lock.best_block_hash = self.sync.best_block_hash();
-                lock.best_block_number = self.sync.best_block_number();
-            }
-
             // Creating the block authoring state and prepare a future that is ready when something
             // related to the block authoring is ready.
+            // TODO: refactor as a separate task?
             let mut authoring_ready_future = {
                 // TODO: overhead to call best_block_consensus() multiple times
                 let local_authorities = {
@@ -544,6 +547,23 @@ impl SyncBackground {
                         None => {
                             unreachable!()
                         }
+                    }
+                },
+
+                frontend_event = self.to_background_rx.next().fuse() => {
+                    match frontend_event {
+                        Some(ToBackground::GetSyncState { result_tx }) => {
+                            let _ = result_tx.send(SyncState {
+                                best_block_hash: self.sync.best_block_hash(),
+                                best_block_number: self.sync.best_block_number(),
+                                finalized_block_hash: self.sync.finalized_block_header().hash(self.sync.block_number_bytes()),
+                                finalized_block_number: self.sync.finalized_block_header().number,
+                            });
+                        },
+                        None => {
+                            // Shutdown.
+                            return
+                        },
                     }
                 },
 
@@ -1127,12 +1147,6 @@ impl SyncBackground {
                                     // Reset the block authoring, in order to potentially build a
                                     // block on top of this new best.
                                     self.block_authoring = None;
-
-                                    // Update the externally visible best block state.
-                                    let mut lock = self.sync_state.lock().await;
-                                    lock.best_block_hash = sync_out.best_block_hash();
-                                    lock.best_block_number = sync_out.best_block_number();
-                                    drop(lock);
                                 }
 
                                 self.sync = sync_out;
@@ -1300,18 +1314,6 @@ impl SyncBackground {
                                 // Reset the block authoring, in order to potentially build a
                                 // block on top of this new best.
                                 self.block_authoring = None;
-                            }
-
-                            let mut lock = self.sync_state.lock().await;
-                            lock.best_block_hash = self.sync.best_block_hash();
-                            lock.best_block_number = self.sync.best_block_number();
-                            drop(lock);
-
-                            if let Some(last_finalized) = finalized_blocks.last() {
-                                let mut lock = self.sync_state.lock().await;
-                                lock.finalized_block_hash =
-                                    last_finalized.header.hash(self.sync.block_number_bytes());
-                                lock.finalized_block_number = last_finalized.header.number;
                             }
 
                             // TODO: maybe write in a separate task? but then we can't access the finalized storage immediately after?
