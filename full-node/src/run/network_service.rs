@@ -33,7 +33,9 @@ use async_lock::Mutex;
 use async_std::net::TcpStream;
 use core::{cmp, mem, task::Poll, time::Duration};
 use futures_channel::{mpsc, oneshot};
-use futures_util::{future, stream, FutureExt as _, SinkExt as _, StreamExt as _};
+use futures_util::{
+    future, stream, AsyncRead, AsyncWrite, FutureExt as _, SinkExt as _, StreamExt as _,
+};
 use hashbrown::HashMap;
 use smoldot::{
     database::full_sqlite,
@@ -223,11 +225,27 @@ struct Guarded {
     /// Channel receiving new incoming connections from listeners.
     incoming_sockets_rx: mpsc::Receiver<(TcpStream, Multiaddr, Instant)>,
 
-    messages_from_connections_tx:
-        mpsc::Sender<(service::ConnectionId, service::ConnectionToCoordinator)>,
+    messages_from_connections_tx: mpsc::Sender<(
+        service::ConnectionId,
+        service::ConnectionToCoordinator,
+        bool,
+    )>,
 
-    messages_from_connections_rx:
-        mpsc::Receiver<(service::ConnectionId, service::ConnectionToCoordinator)>,
+    messages_from_connections_rx: mpsc::Receiver<(
+        service::ConnectionId,
+        service::ConnectionToCoordinator,
+        bool,
+    )>,
+
+    connection_opening_outcome_tx: mpsc::Sender<(
+        Result<Box<dyn tasks::AsyncReadWrite + Send + Unpin>, ()>,
+        service::StartConnect<Instant>,
+    )>,
+
+    connection_opening_outcome_rx: mpsc::Receiver<(
+        Result<Box<dyn tasks::AsyncReadWrite + Send + Unpin>, ()>,
+        service::StartConnect<Instant>,
+    )>,
 
     /// Channel for the foreground to send messages to the background task.
     foreground_to_background_rx: mpsc::Receiver<ForegroundToBackground>,
@@ -301,6 +319,7 @@ impl NetworkService {
 
         let (foreground_to_background_tx, foreground_to_background_rx) = mpsc::channel(4);
         let (incoming_sockets_tx, incoming_sockets_rx) = mpsc::channel(4);
+        let (connection_opening_outcome_tx, connection_opening_outcome_rx) = mpsc::channel(4);
 
         // Initialize the inner network service.
         let inner = {
@@ -318,6 +337,8 @@ impl NetworkService {
                     num_pending_out_attempts: 0,
                     messages_from_connections_tx,
                     messages_from_connections_rx,
+                    connection_opening_outcome_tx,
+                    connection_opening_outcome_rx,
                     incoming_sockets_rx,
                     foreground_to_background_rx,
                     tasks_executor: config.tasks_executor,
@@ -702,12 +723,18 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
     let mut guarded = inner.guarded.lock().await;
 
     // Inject in the coordinator the messages that the connections have generated.
-    while let Some(Some((connection_id, message))) =
+    while let Some(Some((connection_id, message, connection_is_dead))) =
         guarded.messages_from_connections_rx.next().now_or_never()
     {
         guarded
             .network
             .inject_connection_message(connection_id, message);
+
+        // TODO: it should be indicated by the coordinator when a connection dies
+        if connection_is_dead {
+            let _was_in = guarded.active_connections.remove(&connection_id);
+            debug_assert!(_was_in.is_some());
+        }
     }
 
     // TODO: must be done properly
@@ -725,13 +752,41 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
         let messages_from_connections_tx = guarded.messages_from_connections_tx.clone();
         (guarded.tasks_executor)(Box::pin(tasks::established_connection_task(
             socket,
-            inner.clone(),
             connection_id,
             connection_task,
             rx,
             messages_from_connections_tx,
         )));
     }*/
+
+    if let Some((result, start_connect)) = guarded.connection_opening_outcome_rx.next().await {
+        guarded.num_pending_out_attempts -= 1;
+
+        if let Ok(socket) = result {
+            let (connection_id, connection_task) =
+                guarded.network.pending_outcome_ok_single_stream(
+                    start_connect.id,
+                    service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
+                );
+
+            let (tx, rx) = mpsc::channel(16); // TODO: ?!
+            guarded.active_connections.insert(connection_id, tx);
+
+            let messages_from_connections_tx = guarded.messages_from_connections_tx.clone();
+            (guarded.tasks_executor)(Box::pin(tasks::established_connection_task(
+                socket,
+                connection_id,
+                connection_task,
+                rx,
+                messages_from_connections_tx,
+            )));
+        } else {
+            guarded.network.pending_outcome_err(start_connect.id, true);
+            for chain_index in 0..guarded.network.num_chains() {
+                guarded.unassign_slot_and_ban(chain_index, start_connect.expected_peer_id.clone());
+            }
+        }
+    }
 
     // TODO: do properly
     while let Some(message) = guarded.foreground_to_background_rx.next().await {
@@ -1134,13 +1189,13 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
         guarded.num_pending_out_attempts += 1;
 
         // Perform the connection process in a separate task.
-        let task = tasks::opening_connection_task(
-            start_connect,
-            inner.clone(),
-            guarded.messages_from_connections_tx.clone(),
-        );
-
-        (guarded.tasks_executor)(Box::pin(task));
+        let mut connection_opening_outcome_tx = guarded.connection_opening_outcome_tx.clone();
+        (guarded.tasks_executor)(Box::pin(async move {
+            // TODO: interrupt immediately if `connection_opening_outcome_tx` is dropped
+            let result = tasks::opening_connection_task(start_connect.clone()).await;
+            let _ = connection_opening_outcome_tx
+                .send((result.map(|s| Box::new(s) as Box<_>), start_connect));
+        }));
     }
 
     // Pull messages that the coordinator has generated in destination to the various
