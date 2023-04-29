@@ -30,10 +30,14 @@
 use crate::run::{database_thread, jaeger_service};
 
 use core::{cmp, future::Future, mem, pin::Pin, task::Poll, time::Duration};
-use futures_channel::{mpsc, oneshot};
-use futures_util::{stream, SinkExt as _, StreamExt as _};
+use futures_channel::oneshot;
 use hashbrown::HashMap;
-use smol::{future, lock::Mutex, net::TcpStream};
+use smol::{
+    channel, future,
+    lock::Mutex,
+    net::TcpStream,
+    stream::{Stream, StreamExt as _},
+};
 use smoldot::{
     database::full_sqlite,
     header,
@@ -138,7 +142,7 @@ pub struct NetworkService {
     jaeger_service: Arc<jaeger_service::JaegerService>,
 
     /// Channel to send messages to the background task.
-    to_background_tx: Mutex<mpsc::Sender<ToBackground>>,
+    to_background_tx: Mutex<channel::Sender<ToBackground>>,
 
     /// Notified when the service shuts down.
     foreground_shutdown: event_listener::Event,
@@ -201,8 +205,8 @@ struct Inner {
     /// Contains either senders, or a `Future` that is currently sending an event and will yield
     /// the senders back once it is finished.
     event_senders: either::Either<
-        Vec<mpsc::Sender<Event>>,
-        Pin<Box<dyn Future<Output = Vec<mpsc::Sender<Event>>> + Send>>,
+        Vec<channel::Sender<Event>>,
+        Pin<Box<dyn Future<Output = Vec<channel::Sender<Event>>> + Send>>,
     >,
 
     /// Databases to use to read blocks from when answering requests.
@@ -228,7 +232,7 @@ struct Inner {
 
     active_connections: HashMap<
         service::ConnectionId,
-        mpsc::Sender<service::CoordinatorToConnection<Instant>>,
+        channel::Sender<service::CoordinatorToConnection<Instant>>,
         fnv::FnvBuildHasher,
     >,
 
@@ -241,10 +245,10 @@ struct Inner {
     process_network_service_events: bool,
 
     /// Channel for the various tasks to send messages to the background task.
-    to_background_rx: mpsc::Receiver<ToBackground>,
+    to_background_rx: channel::Receiver<ToBackground>,
 
     /// Sending side of [`Inner::to_background_rx`].
-    to_background_tx: mpsc::Sender<ToBackground>,
+    to_background_tx: channel::Sender<ToBackground>,
 
     /// List of all block requests that have been started but not finished yet.
     blocks_requests: HashMap<
@@ -262,9 +266,9 @@ impl NetworkService {
     /// Initializes the network service with the given configuration.
     pub async fn new(
         config: Config,
-    ) -> Result<(Arc<Self>, Vec<stream::BoxStream<'static, Event>>), InitError> {
+    ) -> Result<(Arc<Self>, Vec<Pin<Box<dyn Stream<Item = Event> + Send>>>), InitError> {
         let (event_senders, event_receivers): (Vec<_>, Vec<_>) = (0..config.num_events_receivers)
-            .map(|_| mpsc::channel(16))
+            .map(|_| channel::bounded(16))
             .unzip();
 
         let mut chains = Vec::with_capacity(config.chains.len());
@@ -313,7 +317,7 @@ impl NetworkService {
             }
         }
 
-        let (to_background_tx, to_background_rx) = mpsc::channel(64);
+        let (to_background_tx, to_background_rx) = channel::bounded(64);
         let foreground_shutdown = event_listener::Event::new();
 
         let local_peer_id =
@@ -387,7 +391,7 @@ impl NetworkService {
 
             // Spawn a background task dedicated to this listener.
             (inner.tasks_executor)(Box::pin({
-                let mut to_background_tx = to_background_tx.clone();
+                let to_background_tx = to_background_tx.clone();
                 let mut on_foreground_shutdown = foreground_shutdown.listen();
                 async move {
                     loop {
@@ -447,7 +451,7 @@ impl NetworkService {
         // Spawn a task that sends a "shutdown" message whenever the service shuts down.
         (inner.tasks_executor)({
             let on_foreground_shutdown = foreground_shutdown.listen();
-            let mut to_background_tx = to_background_tx.clone();
+            let to_background_tx = to_background_tx.clone();
             Box::pin(async move {
                 let _ = on_foreground_shutdown.await;
                 let _ = to_background_tx
@@ -459,7 +463,7 @@ impl NetworkService {
         // Spawn task starts a discovery request at a periodic interval.
         // This is done through a separate task due to ease of implementation.
         (inner.tasks_executor)(Box::pin({
-            let mut to_background_tx = to_background_tx.clone();
+            let to_background_tx = to_background_tx.clone();
             let mut on_foreground_shutdown = foreground_shutdown.listen();
             async move {
                 let mut next_discovery = Duration::from_secs(1);
@@ -507,7 +511,7 @@ impl NetworkService {
             .into_iter()
             .map(|rx| {
                 let mut network_service = Some(network_service.clone());
-                rx.chain(stream::poll_fn(move |_| {
+                rx.chain(smol::stream::poll_fn(move |_| {
                     drop(network_service.take());
                     Poll::Ready(None)
                 }))
@@ -1170,7 +1174,7 @@ async fn background_task(mut inner: Inner) {
                         service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
                     );
 
-                let (tx, rx) = mpsc::channel(16); // TODO: ?!
+                let (tx, rx) = channel::bounded(16); // TODO: ?!
                 inner.active_connections.insert(connection_id, tx);
 
                 (inner.tasks_executor)(Box::pin(tasks::established_connection_task(
@@ -1196,7 +1200,7 @@ async fn background_task(mut inner: Inner) {
                         multiaddr,
                     );
 
-                let (tx, rx) = mpsc::channel(16); // TODO: ?!
+                let (tx, rx) = channel::bounded(16); // TODO: ?!
                 inner.active_connections.insert(connection_id, tx);
 
                 (inner.tasks_executor)(Box::pin(tasks::established_connection_task(

@@ -16,10 +16,12 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use core::{future::Future, pin};
-use futures_channel::mpsc;
-use futures_util::{future, FutureExt as _, StreamExt as _};
-use smol::future::FutureExt as _;
-use smol::io::{AsyncRead, AsyncWrite};
+use futures_util::{FutureExt as _, StreamExt as _};
+use smol::{
+    channel,
+    future::{self, FutureExt as _},
+    io::{AsyncRead, AsyncWrite},
+};
 use smoldot::{
     libp2p::{
         async_std_connection::with_buffers,
@@ -68,8 +70,8 @@ pub(super) async fn established_connection_task(
     socket: impl AsyncReadWrite + Unpin,
     connection_id: service::ConnectionId,
     mut connection_task: service::SingleStreamConnectionTask<Instant>,
-    coordinator_to_connection: mpsc::Receiver<service::CoordinatorToConnection<Instant>>,
-    mut connection_to_coordinator: mpsc::Sender<super::ToBackground>,
+    coordinator_to_connection: channel::Receiver<service::CoordinatorToConnection<Instant>>,
+    connection_to_coordinator: channel::Sender<super::ToBackground>,
 ) {
     // The socket is wrapped around a `WithBuffers` object containing a read buffer and a write
     // buffer. These are the buffers whose pointer is passed to `read(2)` and `write(2)` when
@@ -88,8 +90,8 @@ pub(super) async fn established_connection_task(
                 Some(message) => connection_task.inject_coordinator_message(message),
                 None => {
                     // The coordinator is dead. Shut down the task.
-                    return
-                },
+                    return;
+                }
             }
         }
 
@@ -170,26 +172,34 @@ pub(super) async fn established_connection_task(
             // an element. Due to the way channels work, once a channel is ready it will
             // always remain ready until we push an element. While waiting, we process
             // incoming messages.
-            loop {
-                futures_util::select! {
-                    _ = future::poll_fn(|cx| connection_to_coordinator.poll_ready(cx)).fuse() => break,
-                    message = coordinator_to_connection.next() => {
-                        if let Some(message) = message {
-                            if let Some(task_update) = &mut task_update {
-                                task_update.inject_coordinator_message(message);
+            let result = {
+                let mut send_future =
+                    connection_to_coordinator.send(super::ToBackground::FromConnectionTask {
+                        connection_id,
+                        opaque_message: message,
+                        connection_now_dead: task_update.is_none(),
+                    });
+
+                loop {
+                    match future::or(async { either::Left((&mut send_future).await) }, async {
+                        either::Right(coordinator_to_connection.next().await)
+                    })
+                    .await
+                    {
+                        either::Left(result) => break result,
+                        either::Right(message) => {
+                            if let Some(message) = message {
+                                if let Some(task_update) = &mut task_update {
+                                    task_update.inject_coordinator_message(message);
+                                }
+                            } else {
+                                return;
                             }
-                        } else {
-                            return;
                         }
                     }
                 }
-            }
-            let result =
-                connection_to_coordinator.try_send(super::ToBackground::FromConnectionTask {
-                    connection_id,
-                    opaque_message: message,
-                    connection_now_dead: task_update.is_none(),
-                });
+            };
+
             if result.is_err() {
                 return;
             }
@@ -207,21 +217,21 @@ pub(super) async fn established_connection_task(
         let poll_after = if let Some(wake_up) = wake_up_after {
             let now = Instant::now();
             if wake_up > now {
-                future::Either::Left(smol::Timer::at(wake_up))
+                futures_util::future::Either::Left(smol::Timer::at(wake_up))
             } else {
                 // "Wake up" immediately.
                 continue;
             }
         } else {
-            future::Either::Right(future::pending())
+            futures_util::future::Either::Right(future::pending())
         }
         .fuse();
 
         // Future that is woken up when new data is ready on the socket.
         let connection_ready = pin::pin!(if let Some(socket) = socket_container.as_mut() {
-            future::Either::Left(Pin::new(socket).process())
+            futures_util::future::Either::Left(Pin::new(socket).process())
         } else {
-            future::Either::Right(future::pending())
+            futures_util::future::Either::Right(future::pending())
         });
 
         // Future that is woken up when a new message is coming from the coordinator.
@@ -229,8 +239,8 @@ pub(super) async fn established_connection_task(
 
         // Wait until either some data is ready on the socket, or the connection state machine
         // has requested to be polled again, or a message is coming from the coordinator.
-        future::select(
-            future::select(connection_ready, message_from_coordinator),
+        futures_util::future::select(
+            futures_util::future::select(connection_ready, message_from_coordinator),
             poll_after,
         )
         .await;
@@ -315,9 +325,9 @@ fn multiaddr_to_socket(
                     url: "/",
                 })
                 .await
-                .map(future::Either::Right)
+                .map(futures_util::future::Either::Right)
             }
-            (Ok(tcp_socket), None) => Ok(future::Either::Left(tcp_socket)),
+            (Ok(tcp_socket), None) => Ok(futures_util::future::Either::Left(tcp_socket)),
             (Err(err), _) => Err(err),
         }
     })
