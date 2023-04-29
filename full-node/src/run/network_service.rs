@@ -1092,7 +1092,7 @@ async fn background_task(mut inner: Inner) {
                 // Perform the connection process in a separate task.
                 let mut to_background_tx = inner.to_background_tx.clone();
                 (inner.tasks_executor)(Box::pin(async move {
-                    // TODO: interrupt immediately if `connection_opening_outcome_tx` is dropped
+                    // TODO: interrupt immediately if `to_background_tx` is dropped
                     if let Ok(socket) = tasks::opening_connection_task(start_connect.clone()).await
                     {
                         let _ = to_background_tx
@@ -1227,6 +1227,7 @@ async fn background_task(mut inner: Inner) {
             }
 
             ToBackground::ForegroundShutdown => {
+                // TODO: do a clean shutdown of all the connections
                 return;
             }
 

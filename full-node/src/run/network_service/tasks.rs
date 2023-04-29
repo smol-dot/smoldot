@@ -83,8 +83,14 @@ pub(super) async fn established_connection_task(
 
     loop {
         // Inject in the connection task the messages coming from the coordinator, if any.
-        while let Some(Some(message)) = coordinator_to_connection.next().now_or_never() {
-            connection_task.inject_coordinator_message(message);
+        while let Some(message) = coordinator_to_connection.next().now_or_never() {
+            match message {
+                Some(message) => connection_task.inject_coordinator_message(message),
+                None => {
+                    // The coordinator is dead. Shut down the task.
+                    return
+                },
+            }
         }
 
         let wake_up_after = if let Some(socket) = socket_container.as_mut() {
