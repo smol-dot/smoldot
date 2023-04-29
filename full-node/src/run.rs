@@ -18,7 +18,8 @@
 use crate::cli;
 
 use futures_channel::oneshot;
-use futures_util::{future, stream, FutureExt as _, StreamExt as _};
+use futures_util::{stream, FutureExt as _, StreamExt as _};
+use smol::future;
 use smoldot::{
     chain, chain_spec,
     database::full_sqlite,
@@ -191,22 +192,23 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         .map(|relay_chain_spec| relay_chain_spec.as_chain_information().unwrap().0);
 
     // Create an executor where tasks are going to be spawned onto.
-    let executor = {
-        let executor = Arc::new(smol::Executor::new());
-        for n in 0..thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-        {
-            let executor = executor.clone();
-            let _ = thread::Builder::new()
-                .name(format!("tasks-pool-{}", n))
-                .spawn(move || smol::block_on(executor.run(future::pending::<()>())));
+    let executor = Arc::new(smol::Executor::new());
+    for n in 0..thread::available_parallelism()
+        .map(|n| n.get() - 1)
+        .unwrap_or(3)
+    {
+        let executor = executor.clone();
+
+        let spawn_result = thread::Builder::new()
+            .name(format!("tasks-pool-{}", n))
+            .spawn(move || smol::block_on(executor.run(future::pending::<()>())));
+
+        // Ignore a failure to spawn a thread, as we're going to run tasks on the current thread
+        // later down this function.
+        if let Err(err) = spawn_result {
+            log::warn!("tasks-pool-thread-spawn-failure; err={}", err);
         }
-        if Arc::strong_count(&executor) <= 1 {
-            panic!("failed to spawn running threads");
-        }
-        executor
-    };
+    }
 
     // Directory where we will store everything on the disk, such as the database, secret keys,
     // etc.
@@ -540,7 +542,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     // something else.
     let _json_rpc_service = if let Some(bind_address) = cli_options.json_rpc_address.0 {
         let result = json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
-            tasks_executor: { &mut move |task| executor.spawn(task).detach() },
+            tasks_executor: { &mut |task| executor.spawn(task).detach() },
             bind_address,
         })
         .await;
@@ -553,22 +555,6 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         None
     };
 
-    /*let mut telemetry = {
-        let endpoints = chain_spec
-            .telemetry_endpoints()
-            .map(|addr| (addr.as_ref().to_owned(), 0))
-            .collect::<Vec<_>>();
-
-        smoldot::telemetry::init_telemetry(smoldot::telemetry::TelemetryConfig {
-            endpoints: smoldot::telemetry::TelemetryEndpoints::new(endpoints).unwrap(),
-            wasm_external_transport: None,
-            tasks_executor: {
-                let executor = executor.clone();
-                Box::new(move |task| threads_pool.spawn_obj_ok(From::from(task))) as Box<_>
-            },
-        })
-    };*/
-
     log::info!(
         "successful-initialization; local_peer_id={}; database_is_new={:?}; \
         finalized_block_hash={}; finalized_block_number={}",
@@ -580,11 +566,10 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
     // Starting from here, a SIGINT (or equivalent) handler is setup. If the user does Ctrl+C,
     // a message will be sent on `ctrlc_rx`.
-    // This should be performed after all the expensive initialization is done, as otherwise the
-    // fact that initialization isn't interrupted by Ctrl+C could be frustrating for the user, but
-    // also as soon as possible, as we want as many parts as possible to be cleanly destroyed on
-    // Ctrl+C.
-    let mut ctrlc_rx = {
+    // This should be performed after all the expensive initialization is done, as otherwise these
+    // expensive initializations aren't interrupted by Ctrl+C, which could be frustrating for the
+    // user.
+    let ctrlc_rx = {
         let (tx, rx) = oneshot::channel();
         let mut tx = Some(tx);
         ctrlc::set_handler(move || {
@@ -596,124 +581,120 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         rx.fuse()
     };
 
-    let mut informant_timer =
-        stream::StreamExt::fuse(smol::Timer::interval(Duration::from_millis(100)));
+    // Spawn the task printing the informant.
+    if matches!(cli_output, cli::Output::Informant) {
+        executor
+            .spawn({
+                let mut main_network_events_receiver = network_events_receivers.next().unwrap();
+                async move {
+                    let mut informant_timer = smol::Timer::interval(Duration::from_millis(100));
+                    let mut network_known_best = None;
 
-    let mut telemetry_timer =
-        stream::StreamExt::fuse(smol::Timer::interval(Duration::from_secs(5)));
+                    enum Event {
+                        NetworkEvent(network_service::Event),
+                        Informant,
+                    }
 
-    let mut network_known_best = None;
-    let mut main_network_events_receiver = network_events_receivers.next().unwrap();
+                    loop {
+                        match future::or(
+                            async {
+                                informant_timer.next().await;
+                                Event::Informant
+                            },
+                            async {
+                                Event::NetworkEvent(
+                                    main_network_events_receiver.next().await.unwrap(),
+                                )
+                            },
+                        )
+                        .await
+                        {
+                            Event::Informant => {
+                                // We end the informant line with a `\r` so that it overwrites itself
+                                // every time. If any other line gets printed, it will overwrite the
+                                // informant, and the informant will then print itself below, which is
+                                // a fine behaviour.
+                                let sync_state = consensus_service.sync_state().await;
+                                eprint!(
+                                    "{}\r",
+                                    smoldot::informant::InformantLine {
+                                        enable_colors: match cli_options.color {
+                                            cli::ColorChoice::Always => true,
+                                            cli::ColorChoice::Never => false,
+                                        },
+                                        chain_name: chain_spec.name(),
+                                        relay_chain: if let Some(relay_chain_spec) =
+                                            &relay_chain_spec
+                                        {
+                                            let relay_sync_state = relay_chain_consensus_service
+                                                .as_ref()
+                                                .unwrap()
+                                                .sync_state()
+                                                .await;
+                                            Some(smoldot::informant::RelayChain {
+                                                chain_name: relay_chain_spec.name(),
+                                                best_number: relay_sync_state.best_block_number,
+                                            })
+                                        } else {
+                                            None
+                                        },
+                                        max_line_width: terminal_size::terminal_size()
+                                            .map_or(80, |(w, _)| w.0.into()),
+                                        num_peers: u64::try_from(
+                                            network_service.num_peers(0).await
+                                        )
+                                        .unwrap_or(u64::max_value()),
+                                        num_network_connections: u64::try_from(
+                                            network_service.num_established_connections().await
+                                        )
+                                        .unwrap_or(u64::max_value()),
+                                        best_number: sync_state.best_block_number,
+                                        finalized_number: sync_state.finalized_block_number,
+                                        best_hash: &sync_state.best_block_hash,
+                                        finalized_hash: &sync_state.finalized_block_hash,
+                                        network_known_best,
+                                    }
+                                );
+                            }
+
+                            Event::NetworkEvent(network_event) => {
+                                // Update `network_known_best`.
+                                match network_event {
+                                    network_service::Event::BlockAnnounce {
+                                        chain_index: 0,
+                                        header,
+                                        ..
+                                    } => match network_known_best {
+                                        Some(n) if n >= header.number => {}
+                                        _ => network_known_best = Some(header.number),
+                                    },
+                                    network_service::Event::Connected {
+                                        chain_index: 0,
+                                        best_block_number,
+                                        ..
+                                    } => match network_known_best {
+                                        Some(n) if n >= best_block_number => {}
+                                        _ => network_known_best = Some(best_block_number),
+                                    },
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+            .detach();
+    }
+
     debug_assert!(network_events_receivers.next().is_none());
 
-    // TODO: spawn this as task
-    loop {
-        futures_util::select! {
-            _ = informant_timer.next() => {
-                if matches!(cli_output, cli::Output::Informant) {
-                    // We end the informant line with a `\r` so that it overwrites itself every time.
-                    // If any other line gets printed, it will overwrite the informant, and the
-                    // informant will then print itself below, which is a fine behaviour.
-                    let sync_state = consensus_service.sync_state().await;
-                    eprint!("{}\r", smoldot::informant::InformantLine {
-                        enable_colors: match cli_options.color {
-                            cli::ColorChoice::Always => true,
-                            cli::ColorChoice::Never => false,
-                        },
-                        chain_name: chain_spec.name(),
-                        relay_chain: if let Some(relay_chain_spec) = &relay_chain_spec {
-                            let relay_sync_state = relay_chain_consensus_service.as_ref().unwrap().sync_state().await;
-                            Some(smoldot::informant::RelayChain {
-                                chain_name: relay_chain_spec.name(),
-                                best_number: relay_sync_state.best_block_number,
-                            })
-                        } else {
-                            None
-                        },
-                        max_line_width: terminal_size::terminal_size().map_or(80, |(w, _)| w.0.into()),
-                        num_peers: u64::try_from(network_service.num_peers(0).await)
-                            .unwrap_or(u64::max_value()),
-                        num_network_connections: u64::try_from(network_service.num_established_connections().await)
-                            .unwrap_or(u64::max_value()),
-                        best_number: sync_state.best_block_number,
-                        finalized_number: sync_state.finalized_block_number,
-                        best_hash: &sync_state.best_block_hash,
-                        finalized_hash: &sync_state.finalized_block_hash,
-                        network_known_best,
-                    });
-                }
-            },
+    // Block the current thread until `ctrl-c` is invoked by the user.
+    let _ = executor.run(ctrlc_rx).await;
 
-            network_event = main_network_events_receiver.next().fuse() => {
-                // We expect the network events channel to never shut down.
-                let network_event = network_event.unwrap();
-
-                // Update `network_known_best`.
-                match network_event {
-                    network_service::Event::BlockAnnounce { chain_index: 0, header, .. } => {
-                        match network_known_best {
-                            Some(n) if n >= header.number => {},
-                            _ => network_known_best = Some(header.number),
-                        }
-                    }
-                    network_service::Event::Connected { chain_index: 0, best_block_number, .. } => {
-                        match network_known_best {
-                            Some(n) if n >= best_block_number => {},
-                            _ => network_known_best = Some(best_block_number),
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            /*telemetry_event = telemetry.next_event().fuse() => {
-                telemetry.send(smoldot::telemetry::message::TelemetryMessage::SystemConnected(smoldot::telemetry::message::SystemConnected {
-                    chain: chain_spec.name().to_owned().into_boxed_str(),
-                    name: String::from("✨ Smoldot ✨").into_boxed_str(),  // TODO: node name
-                    implementation: String::from("Secret projet 🤫").into_boxed_str(),  // TODO:
-                    version: String::from(env!("CARGO_PKG_VERSION")).into_boxed_str(),
-                    validator: None,
-                    network_id: None, // TODO: Some(service.local_peer_id().to_base58().into_boxed_str()),
-                }));
-            },*/
-
-            _ = telemetry_timer.next() => {
-                /*let sync_state = sync_state.lock().await.clone();
-
-                // Some of the fields below are set to `None` because there is no plan to
-                // implement reporting accurate metrics about the node.
-                telemetry.send(smoldot::telemetry::message::TelemetryMessage::SystemInterval(smoldot::telemetry::message::SystemInterval {
-                    stats: smoldot::telemetry::message::NodeStats {
-                        peers: network_state.num_network_connections.load(Ordering::Relaxed),
-                        txcount: 0,  // TODO:
-                    },
-                    memory: None,
-                    cpu: None,
-                    bandwidth_upload: Some(0.0), // TODO:
-                    bandwidth_download: Some(0.0), // TODO:
-                    finalized_height: Some(sync_state.finalized_block_number),
-                    finalized_hash: Some(sync_state.finalized_block_hash.into()),
-                    block: smoldot::telemetry::message::Block {
-                        hash: sync_state.best_block_hash.into(),
-                        height: sync_state.best_block_number,
-                    },
-                    used_state_cache_size: None,
-                    used_db_cache_size: None,
-                    disk_read_per_sec: None,
-                    disk_write_per_sec: None,
-                }));*/
-            },
-
-            _ = ctrlc_rx => {
-                if matches!(cli_output, cli::Output::Informant) {
-                    // Adding a new line after the informant so that the user's shell doesn't
-                    // overwrite it.
-                    eprintln!();
-                }
-
-                return
-            },
-        }
+    if matches!(cli_output, cli::Output::Informant) {
+        // Adding a new line after the informant so that the user's shell doesn't
+        // overwrite it.
+        eprintln!();
     }
 }
 
