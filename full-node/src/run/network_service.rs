@@ -772,6 +772,8 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                         .insert(operation_id, chain_index);
                     debug_assert!(_prev_val.is_none());
                 }
+
+                guarded.process_network_service_events = future::Either::Left(future::ready(()));
             }
 
             message = guarded.foreground_to_background_rx.next().fuse().map(|v| v.unwrap()) => {
@@ -1104,6 +1106,9 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
 
                 // Dispatch the event to the various senders.
                 if let Some(event) = event {
+                    // Continue processing events.
+                    guarded.process_network_service_events = future::Either::Left(future::ready(()));
+
                     // This little `if` avoids having to do `event.clone()` if we don't have to.
                     if event_senders.len() == 1 {
                         let _ = event_senders[0].send(event).await;
@@ -1148,6 +1153,7 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                             chain_index
                         );
                         guarded.network.assign_out_slot(chain_index, peer_to_assign);
+                        guarded.process_network_service_events = future::Either::Left(future::ready(()));
                     }
                 }
 
@@ -1175,6 +1181,8 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                         let _ = connection_opening_outcome_tx
                             .send((result.map(|s| Box::new(s) as Box<_>), start_connect));
                     }));
+
+                    guarded.process_network_service_events = future::Either::Left(future::ready(()));
                 }
 
                 // Pull messages that the coordinator has generated in destination to the various
