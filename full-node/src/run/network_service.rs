@@ -30,7 +30,7 @@
 use crate::run::{database_thread, jaeger_service};
 
 use async_lock::Mutex;
-use core::{cmp, future::Future, mem, task::Poll, time::Duration};
+use core::{cmp, mem, task::Poll, time::Duration};
 use futures_channel::{mpsc, oneshot};
 use futures_util::{future, stream, FutureExt as _, SinkExt as _, StreamExt as _};
 use hashbrown::HashMap;
@@ -50,9 +50,7 @@ use std::{
     io, iter,
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
-    pin::Pin,
     sync::Arc,
-    thread,
     time::Instant,
 };
 
@@ -175,7 +173,8 @@ struct Guarded {
     /// ISPs/cloud providers don't like seeing too many dialing connections at the same time.
     num_pending_out_attempts: usize,
 
-    conn_tasks_tx: mpsc::Sender<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    /// See [`Config::tasks_executor`].
+    tasks_executor: Box<dyn FnMut(future::BoxFuture<'static, ()>) + Send>,
 
     active_connections: HashMap<
         service::ConnectionId,
@@ -210,7 +209,7 @@ struct Guarded {
 impl NetworkService {
     /// Initializes the network service with the given configuration.
     pub async fn new(
-        mut config: Config,
+        config: Config,
     ) -> Result<(Arc<Self>, Vec<stream::BoxStream<'static, Event>>), InitError> {
         let (senders, receivers): (Vec<_>, Vec<_>) = (0..config.num_events_receivers)
             .map(|_| mpsc::channel(16))
@@ -262,13 +261,6 @@ impl NetworkService {
             }
         }
 
-        // A channel is used to communicate new tasks dedicated to handling connections.
-        let (conn_tasks_tx, mut conn_tasks_rx) = mpsc::channel(
-            thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4),
-        );
-
         // Initialize the inner network service.
         let inner = {
             let (messages_from_connections_tx, messages_from_connections_rx) = mpsc::channel(64);
@@ -285,7 +277,7 @@ impl NetworkService {
                     num_pending_out_attempts: 0,
                     messages_from_connections_tx,
                     messages_from_connections_rx,
-                    conn_tasks_tx: conn_tasks_tx.clone(),
+                    tasks_executor: config.tasks_executor,
                     network,
                     slots_assign_backoff: hashbrown::HashMap::with_capacity_and_hasher(
                         50, // TODO: ?
@@ -311,7 +303,7 @@ impl NetworkService {
         let mut abort_handles = Vec::new();
 
         // Spawn the main task dedicated to processing the network.
-        (config.tasks_executor)(Box::pin({
+        (inner.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
             let future = background_task(inner.clone(), senders);
             let (abortable, abort_handle) = future::abortable(future);
             abort_handles.push(abort_handle);
@@ -320,7 +312,7 @@ impl NetworkService {
 
         // Spawn tasks dedicated to starting the Kademlia discovery queries.
         for chain_index in 0..inner.databases.len() {
-            (config.tasks_executor)(Box::pin({
+            (inner.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
                 let inner = inner.clone();
                 let future = async move {
                     let mut next_discovery = Duration::from_secs(1);
@@ -381,8 +373,7 @@ impl NetworkService {
             };
 
             // Spawn a background task dedicated to this listener.
-            (config.tasks_executor)(Box::pin({
-                let mut conn_tasks_tx = conn_tasks_tx.clone();
+            (inner.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
                 let inner = inner.clone();
                 let future = async move {
                     loop {
@@ -419,31 +410,27 @@ impl NetworkService {
 
                         log::debug!("incoming-connection; multiaddr={}", multiaddr);
 
-                        let task = {
-                            let mut guarded = inner.guarded.lock().await;
-                            let (connection_id, connection_task) =
-                                guarded.network.add_single_stream_incoming_connection(
-                                    Instant::now(),
-                                    service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
-                                    multiaddr.clone(),
-                                );
+                        let mut guarded = inner.guarded.lock().await;
+                        let (connection_id, connection_task) =
+                            guarded.network.add_single_stream_incoming_connection(
+                                Instant::now(),
+                                service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
+                                multiaddr.clone(),
+                            );
 
-                            let (tx, rx) = mpsc::channel(16); // TODO: ?!
-                            guarded.active_connections.insert(connection_id, tx);
+                        let (tx, rx) = mpsc::channel(16); // TODO: ?!
+                        guarded.active_connections.insert(connection_id, tx);
 
-                            tasks::established_connection_task(
-                                socket,
-                                inner.clone(),
-                                connection_id,
-                                connection_task,
-                                rx,
-                                guarded.messages_from_connections_tx.clone(),
-                            )
-                        };
-
-                        // Ignore errors, as it is possible for the destination task to have been
-                        // aborted already.
-                        let _ = conn_tasks_tx.send(task.boxed()).await;
+                        let messages_from_connections_tx =
+                            guarded.messages_from_connections_tx.clone();
+                        (guarded.tasks_executor)(Box::pin(tasks::established_connection_task(
+                            socket,
+                            inner.clone(),
+                            connection_id,
+                            connection_task,
+                            rx,
+                            messages_from_connections_tx,
+                        )));
                     }
                 };
 
@@ -452,27 +439,6 @@ impl NetworkService {
                 abortable.map(|_| ())
             }))
         }
-
-        // Spawn task dedicated to processing connections.
-        // A single task is responsible for all connections, thereby ensuring that the networking
-        // won't use more than a single CPU core.
-        (config.tasks_executor)(Box::pin({
-            let future = async move {
-                let mut connections = stream::FuturesUnordered::new();
-                loop {
-                    futures_util::select! {
-                        new_connec = conn_tasks_rx.select_next_some() => {
-                            connections.push(new_connec);
-                        },
-                        () = connections.select_next_some() => {},
-                    }
-                }
-            };
-
-            let (abortable, abort_handle) = future::abortable(future);
-            abort_handles.push(abort_handle);
-            abortable.map(|_| ())
-        }));
 
         // Build the final network service.
         let network_service = Arc::new(NetworkService {
@@ -1063,10 +1029,7 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
             guarded.messages_from_connections_tx.clone(),
         );
 
-        // Sending the new task might fail in case a shutdown is happening, in which case
-        // we don't really care about the state of anything anymore.
-        // The sending here is normally very quick.
-        let _ = guarded.conn_tasks_tx.send(Box::pin(task)).await;
+        (guarded.tasks_executor)(Box::pin(task));
     }
 
     // Pull messages that the coordinator has generated in destination to the various
