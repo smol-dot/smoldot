@@ -135,9 +135,9 @@ pub struct NetworkService {
     /// Actual network service.
     inner: Arc<Inner>,
 
-    /// Handles connected to all the background tasks of the network service. Makes it possible to
-    /// abort everything.
-    abort_handles: Vec<future::AbortHandle>,
+    /// Handle connected to the background task of the network service. Makes it possible to abort
+    /// everything.
+    abort_handle: future::AbortHandle,
 }
 
 struct Inner {
@@ -307,13 +307,12 @@ impl NetworkService {
             })
         };
 
-        let mut abort_handles = Vec::new();
-
         // Spawn the main task dedicated to processing the network.
+        let abort_handle;
         (inner.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
             let future = background_task(inner.clone(), senders);
-            let (abortable, abort_handle) = future::abortable(future);
-            abort_handles.push(abort_handle);
+            let (abortable, h) = future::abortable(future);
+            abort_handle = h;
             abortable.map(|_| ())
         }));
 
@@ -430,10 +429,7 @@ impl NetworkService {
         // Build the final network service.
         let network_service = Arc::new(NetworkService {
             inner,
-            abort_handles: {
-                abort_handles.shrink_to_fit();
-                abort_handles
-            },
+            abort_handle,
         });
 
         // Adjust the receivers to keep the `network_service` alive.
@@ -616,9 +612,7 @@ impl NetworkService {
 
 impl Drop for NetworkService {
     fn drop(&mut self) {
-        for handle in &mut self.abort_handles {
-            handle.abort();
-        }
+        self.abort_handle.abort();
     }
 }
 
