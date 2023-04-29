@@ -139,32 +139,39 @@ pub struct NetworkService {
     jaeger_service: Arc<jaeger_service::JaegerService>,
 
     /// Channel to send messages to the background task.
-    foreground_to_background_tx: Mutex<mpsc::Sender<ForegroundToBackground>>,
+    to_background_tx: Mutex<mpsc::Sender<ToBackground>>,
 }
 
-enum ForegroundToBackground {
-    AnnounceBlock {
+enum ToBackground {
+    ConnectionEstablishSuccess {
+        socket: Box<dyn tasks::AsyncReadWrite + Send + Unpin>,
+        info: service::StartConnect<Instant>,
+    },
+    ConnectionEstablishFail {
+        info: service::StartConnect<Instant>,
+    },
+    ForegroundAnnounceBlock {
         target: PeerId,
         chain_index: usize,
         scale_encoded_header: Vec<u8>,
         is_best: bool,
         result_tx: oneshot::Sender<Result<(), QueueNotificationError>>,
     },
-    SetLocalBestBlock {
+    ForegroundSetLocalBestBlock {
         chain_index: usize,
         best_hash: [u8; 32],
         best_number: u64,
     },
-    BlocksRequest {
+    ForegroundBlocksRequest {
         target: PeerId,
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
         result_tx: oneshot::Sender<Result<Vec<protocol::BlockData>, BlocksRequestError>>,
     },
-    GetNumEstablishedConnections {
+    ForegroundGetNumEstablishedConnections {
         result_tx: oneshot::Sender<usize>,
     },
-    GetNumPeers {
+    ForegroundGetNumPeers {
         chain_index: usize,
         result_tx: oneshot::Sender<usize>,
     },
@@ -230,20 +237,13 @@ struct Inner {
         bool,
     )>,
 
-    connection_opening_outcome_tx: mpsc::Sender<(
-        Result<Box<dyn tasks::AsyncReadWrite + Send + Unpin>, ()>,
-        service::StartConnect<Instant>,
-    )>,
-
-    connection_opening_outcome_rx: mpsc::Receiver<(
-        Result<Box<dyn tasks::AsyncReadWrite + Send + Unpin>, ()>,
-        service::StartConnect<Instant>,
-    )>,
-
     process_network_service_events: future::Either<future::Ready<()>, future::Pending<()>>,
 
-    /// Channel for the foreground to send messages to the background task.
-    foreground_to_background_rx: mpsc::Receiver<ForegroundToBackground>,
+    /// Channel for the various tasks to send messages to the background task.
+    to_background_rx: mpsc::Receiver<ToBackground>,
+
+    /// Sending side of [`Inner::to_background_rx`].
+    to_background_tx: mpsc::Sender<ToBackground>,
 
     /// List of all block requests that have been started but not finished yet.
     blocks_requests: HashMap<
@@ -312,9 +312,8 @@ impl NetworkService {
             }
         }
 
-        let (foreground_to_background_tx, foreground_to_background_rx) = mpsc::channel(4);
+        let (to_background_tx, to_background_rx) = mpsc::channel(4);
         let (incoming_sockets_tx, incoming_sockets_rx) = mpsc::channel(4);
-        let (connection_opening_outcome_tx, connection_opening_outcome_rx) = mpsc::channel(4);
         let (messages_from_connections_tx, messages_from_connections_rx) = mpsc::channel(64);
 
         let local_peer_id =
@@ -329,13 +328,12 @@ impl NetworkService {
             num_pending_out_attempts: 0,
             messages_from_connections_tx,
             messages_from_connections_rx,
-            connection_opening_outcome_tx,
-            connection_opening_outcome_rx,
             next_kademlia_discovery: futures_timer::Delay::new(Duration::new(0, 0)),
             next_kademlia_discovery_increment: Duration::from_secs(1),
             _incoming_sockets_tx: incoming_sockets_tx.clone(),
             incoming_sockets_rx,
-            foreground_to_background_rx,
+            to_background_rx,
+            to_background_tx: to_background_tx.clone(),
             process_network_service_events: future::Either::Left(future::ready(())),
             tasks_executor: config.tasks_executor,
             network,
@@ -443,7 +441,7 @@ impl NetworkService {
         let network_service = Arc::new(NetworkService {
             local_peer_id,
             jaeger_service: config.jaeger_service,
-            foreground_to_background_tx: Mutex::new(foreground_to_background_tx),
+            to_background_tx: Mutex::new(to_background_tx),
         });
 
         // Spawn the main task dedicated to processing the network.
@@ -470,10 +468,10 @@ impl NetworkService {
         let (result_tx, result_rx) = oneshot::channel();
 
         let _ = self
-            .foreground_to_background_tx
+            .to_background_tx
             .lock()
             .await
-            .send(ForegroundToBackground::GetNumEstablishedConnections { result_tx })
+            .send(ToBackground::ForegroundGetNumEstablishedConnections { result_tx })
             .await;
 
         result_rx.await.unwrap()
@@ -484,10 +482,10 @@ impl NetworkService {
         let (result_tx, result_rx) = oneshot::channel();
 
         let _ = self
-            .foreground_to_background_tx
+            .to_background_tx
             .lock()
             .await
-            .send(ForegroundToBackground::GetNumPeers {
+            .send(ToBackground::ForegroundGetNumPeers {
                 chain_index,
                 result_tx,
             })
@@ -503,10 +501,10 @@ impl NetworkService {
         best_number: u64,
     ) {
         let _ = self
-            .foreground_to_background_tx
+            .to_background_tx
             .lock()
             .await
-            .send(ForegroundToBackground::SetLocalBestBlock {
+            .send(ToBackground::ForegroundSetLocalBestBlock {
                 chain_index,
                 best_hash,
                 best_number,
@@ -524,10 +522,10 @@ impl NetworkService {
         let (result_tx, result_rx) = oneshot::channel();
 
         let _ = self
-            .foreground_to_background_tx
+            .to_background_tx
             .lock()
             .await
-            .send(ForegroundToBackground::AnnounceBlock {
+            .send(ToBackground::ForegroundAnnounceBlock {
                 target,
                 chain_index,
                 scale_encoded_header,
@@ -592,10 +590,10 @@ impl NetworkService {
         let (result_tx, result_rx) = oneshot::channel();
 
         let _ = self
-            .foreground_to_background_tx
+            .to_background_tx
             .lock()
             .await
-            .send(ForegroundToBackground::BlocksRequest {
+            .send(ToBackground::ForegroundBlocksRequest {
                 target: target.clone(),
                 chain_index,
                 config,
@@ -717,37 +715,6 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
                 inner.process_network_service_events = future::Either::Left(future::ready(()));
             },
 
-            (result, start_connect) = inner.connection_opening_outcome_rx.next().fuse().map(|v| v.unwrap()) => {
-                inner.num_pending_out_attempts -= 1;
-
-                if let Ok(socket) = result {
-                    let (connection_id, connection_task) =
-                        inner.network.pending_outcome_ok_single_stream(
-                            start_connect.id,
-                            service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
-                        );
-
-                    let (tx, rx) = mpsc::channel(16); // TODO: ?!
-                    inner.active_connections.insert(connection_id, tx);
-
-                    let messages_from_connections_tx = inner.messages_from_connections_tx.clone();
-                    (inner.tasks_executor)(Box::pin(tasks::established_connection_task(
-                        socket,
-                        connection_id,
-                        connection_task,
-                        rx,
-                        messages_from_connections_tx,
-                    )));
-                } else {
-                    inner.network.pending_outcome_err(start_connect.id, true);
-                    for chain_index in 0..inner.network.num_chains() {
-                        inner.unassign_slot_and_ban(chain_index, start_connect.expected_peer_id.clone());
-                    }
-                }
-
-                inner.process_network_service_events = future::Either::Left(future::ready(()));
-            },
-
             _ = (&mut inner.next_kademlia_discovery).fuse() => {
                 inner.next_kademlia_discovery = futures_timer::Delay::new(inner.next_kademlia_discovery_increment);
                 inner.next_kademlia_discovery_increment = cmp::min(inner.next_kademlia_discovery_increment * 2, Duration::from_secs(120));
@@ -765,9 +732,42 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
                 inner.process_network_service_events = future::Either::Left(future::ready(()));
             }
 
-            message = inner.foreground_to_background_rx.next().fuse().map(|v| v.unwrap()) => {
+            message = inner.to_background_rx.next().fuse().map(|v| v.unwrap()) => {
                 match message {
-                    ForegroundToBackground::AnnounceBlock {
+                    ToBackground::ConnectionEstablishFail { info } => {
+                        inner.num_pending_out_attempts -= 1;
+                        inner.network.pending_outcome_err(info.id, true);
+                        for chain_index in 0..inner.network.num_chains() {
+                            inner.unassign_slot_and_ban(chain_index, info.expected_peer_id.clone());
+                        }
+                        inner.process_network_service_events = future::Either::Left(future::ready(()));
+                    }
+
+                    ToBackground::ConnectionEstablishSuccess { socket, info } => {
+                        inner.num_pending_out_attempts -= 1;
+
+                        let (connection_id, connection_task) =
+                            inner.network.pending_outcome_ok_single_stream(
+                                info.id,
+                                service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
+                            );
+
+                        let (tx, rx) = mpsc::channel(16); // TODO: ?!
+                        inner.active_connections.insert(connection_id, tx);
+
+                        let messages_from_connections_tx = inner.messages_from_connections_tx.clone();
+                        (inner.tasks_executor)(Box::pin(tasks::established_connection_task(
+                            socket,
+                            connection_id,
+                            connection_task,
+                            rx,
+                            messages_from_connections_tx,
+                        )));
+
+                        inner.process_network_service_events = future::Either::Left(future::ready(()));
+                    }
+
+                    ToBackground::ForegroundAnnounceBlock {
                         target,
                         chain_index,
                         scale_encoded_header,
@@ -789,7 +789,7 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
 
                         let _ = result_tx.send(result);
                     }
-                    ForegroundToBackground::SetLocalBestBlock {
+                    ToBackground::ForegroundSetLocalBestBlock {
                         chain_index,
                         best_hash,
                         best_number,
@@ -798,7 +798,7 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
                             .network
                             .set_local_best_block(chain_index, best_hash, best_number);
                     }
-                    ForegroundToBackground::BlocksRequest {
+                    ToBackground::ForegroundBlocksRequest {
                         target,
                         chain_index,
                         config,
@@ -820,10 +820,10 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
                             let _ = result_tx.send(Err(BlocksRequestError::NoConnection));
                         }
                     }
-                    ForegroundToBackground::GetNumEstablishedConnections { result_tx } => {
+                    ToBackground::ForegroundGetNumEstablishedConnections { result_tx } => {
                         let _ = result_tx.send(inner.network.num_established_connections());
                     }
-                    ForegroundToBackground::GetNumPeers {
+                    ToBackground::ForegroundGetNumPeers {
                         chain_index,
                         result_tx,
                     } => {
@@ -1163,13 +1163,18 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
                     inner.num_pending_out_attempts += 1;
 
                     // Perform the connection process in a separate task.
-                    let mut connection_opening_outcome_tx = inner.connection_opening_outcome_tx.clone();
+                    let mut to_background_tx = inner.to_background_tx.clone();
                     (inner.tasks_executor)(Box::pin(async move {
                         // TODO: interrupt immediately if `connection_opening_outcome_tx` is dropped
-                        let result = tasks::opening_connection_task(start_connect.clone()).await;
-                        let _ = connection_opening_outcome_tx
-                            .send((result.map(|s| Box::new(s) as Box<_>), start_connect))
-                            .await;
+                        if let Ok(socket) = tasks::opening_connection_task(start_connect.clone()).await {
+                            let _ = to_background_tx
+                                .send(ToBackground::ConnectionEstablishSuccess { socket: Box::new(socket), info: start_connect })
+                                .await;
+                        } else {
+                            let _ = to_background_tx
+                                .send(ToBackground::ConnectionEstablishFail { info: start_connect })
+                                .await;
+                        }
                     }));
 
                     inner.process_network_service_events = future::Either::Left(future::ready(()));
