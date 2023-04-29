@@ -135,9 +135,40 @@ pub struct NetworkService {
     /// Actual network service.
     inner: Arc<Inner>,
 
+    /// Channel to send messages to the background task.
+    foreground_to_background_tx: Mutex<mpsc::Sender<ForegroundToBackground>>,
+
     /// Handle connected to the background task of the network service. Makes it possible to abort
     /// everything.
     abort_handle: future::AbortHandle,
+}
+
+enum ForegroundToBackground {
+    AnnounceBlock {
+        target: PeerId,
+        chain_index: usize,
+        scale_encoded_header: Vec<u8>,
+        is_best: bool,
+        result_tx: oneshot::Sender<Result<(), QueueNotificationError>>,
+    },
+    SetLocalBestBlock {
+        chain_index: usize,
+        best_hash: [u8; 32],
+        best_number: u64,
+    },
+    BlocksRequest {
+        target: PeerId,
+        chain_index: usize,
+        config: protocol::BlocksRequestConfig,
+        result_tx: oneshot::Sender<Result<Vec<protocol::BlockData>, BlocksRequestError>>,
+    },
+    GetNumEstablishedConnections {
+        result_tx: oneshot::Sender<usize>,
+    },
+    GetNumPeers {
+        chain_index: usize,
+        result_tx: oneshot::Sender<usize>,
+    },
 }
 
 struct Inner {
@@ -198,10 +229,13 @@ struct Guarded {
     messages_from_connections_rx:
         mpsc::Receiver<(service::ConnectionId, service::ConnectionToCoordinator)>,
 
+    /// Channel for the foreground to send messages to the background task.
+    foreground_to_background_rx: mpsc::Receiver<ForegroundToBackground>,
+
     /// List of all block requests that have been started but not finished yet.
     blocks_requests: HashMap<
         service::OutRequestId,
-        oneshot::Sender<Result<Vec<protocol::BlockData>, service::BlocksRequestError>>,
+        oneshot::Sender<Result<Vec<protocol::BlockData>, BlocksRequestError>>,
         fnv::FnvBuildHasher,
     >,
 
@@ -265,6 +299,7 @@ impl NetworkService {
             }
         }
 
+        let (foreground_to_background_tx, foreground_to_background_rx) = mpsc::channel(4);
         let (incoming_sockets_tx, incoming_sockets_rx) = mpsc::channel(4);
 
         // Initialize the inner network service.
@@ -284,6 +319,7 @@ impl NetworkService {
                     messages_from_connections_tx,
                     messages_from_connections_rx,
                     incoming_sockets_rx,
+                    foreground_to_background_rx,
                     tasks_executor: config.tasks_executor,
                     network,
                     slots_assign_backoff: hashbrown::HashMap::with_capacity_and_hasher(
@@ -429,6 +465,7 @@ impl NetworkService {
         // Build the final network service.
         let network_service = Arc::new(NetworkService {
             inner,
+            foreground_to_background_tx: Mutex::new(foreground_to_background_tx),
             abort_handle,
         });
 
@@ -450,22 +487,33 @@ impl NetworkService {
 
     /// Returns the number of established TCP connections, both incoming and outgoing.
     pub async fn num_established_connections(&self) -> usize {
-        self.inner
-            .guarded
+        let (result_tx, result_rx) = oneshot::channel();
+
+        let _ = self
+            .foreground_to_background_tx
             .lock()
             .await
-            .network
-            .num_established_connections()
+            .send(ForegroundToBackground::GetNumEstablishedConnections { result_tx })
+            .await;
+
+        result_rx.await.unwrap()
     }
 
     /// Returns the number of peers we have a substream with.
     pub async fn num_peers(&self, chain_index: usize) -> usize {
-        self.inner
-            .guarded
+        let (result_tx, result_rx) = oneshot::channel();
+
+        let _ = self
+            .foreground_to_background_tx
             .lock()
             .await
-            .network
-            .num_peers(chain_index)
+            .send(ForegroundToBackground::GetNumPeers {
+                chain_index,
+                result_tx,
+            })
+            .await;
+
+        result_rx.await.unwrap()
     }
 
     pub async fn set_local_best_block(
@@ -474,39 +522,41 @@ impl NetworkService {
         best_hash: [u8; 32],
         best_number: u64,
     ) {
-        self.inner
-            .guarded
+        let _ = self
+            .foreground_to_background_tx
             .lock()
             .await
-            .network
-            .set_local_best_block(chain_index, best_hash, best_number);
-        self.inner.wake_up_main_background_task.notify(1);
+            .send(ForegroundToBackground::SetLocalBestBlock {
+                chain_index,
+                best_hash,
+                best_number,
+            })
+            .await;
     }
 
     pub async fn send_block_announce(
         self: Arc<Self>,
-        target: &PeerId,
+        target: PeerId,
         chain_index: usize,
-        scale_encoded_header: &[u8],
+        scale_encoded_header: Vec<u8>,
         is_best: bool,
     ) -> Result<(), QueueNotificationError> {
-        let mut guarded = self.inner.guarded.lock().await;
+        let (result_tx, result_rx) = oneshot::channel();
 
-        // The call to `send_block_announce` below panics if we have no active connection.
-        if !guarded
-            .network
-            .can_send_block_announces(target, chain_index)
-        {
-            return Err(QueueNotificationError::NoConnection);
-        }
+        let _ = self
+            .foreground_to_background_tx
+            .lock()
+            .await
+            .send(ForegroundToBackground::AnnounceBlock {
+                target,
+                chain_index,
+                scale_encoded_header,
+                is_best,
+                result_tx,
+            })
+            .await;
 
-        let result = guarded
-            .network
-            .send_block_announce(target, chain_index, scale_encoded_header, is_best)
-            .map_err(QueueNotificationError::Queue);
-
-        self.inner.wake_up_main_background_task.notify(1);
-        result
+        result_rx.await.unwrap()
     }
 
     /// Sends a blocks request to the given peer.
@@ -559,32 +609,21 @@ impl NetworkService {
             },
         );
 
-        let rx = {
-            let mut guarded = self.inner.guarded.lock().await;
+        let (result_tx, result_rx) = oneshot::channel();
 
-            // The call to `start_blocks_request` below panics if we have no active connection.
-            if !guarded.network.can_start_requests(&target) {
-                return Err(BlocksRequestError::NoConnection);
-            }
-
-            let (tx, rx) = oneshot::channel();
-
-            let request_id = guarded.network.start_blocks_request(
-                Instant::now(),
-                &target,
+        let _ = self
+            .foreground_to_background_tx
+            .lock()
+            .await
+            .send(ForegroundToBackground::BlocksRequest {
+                target: target.clone(),
                 chain_index,
                 config,
-                Duration::from_secs(12),
-            );
+                result_tx,
+            })
+            .await;
 
-            // TODO: somehow cancel the request if the `rx` is dropped?
-            guarded.blocks_requests.insert(request_id, tx);
-
-            self.inner.wake_up_main_background_task.notify(1);
-            rx
-        };
-
-        let result = rx.await.unwrap().map_err(BlocksRequestError::Request);
+        let result = result_rx.await.unwrap();
 
         // Requet has finished. Print the log and prevent the cancellation message from being
         // printed.
@@ -693,6 +732,74 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
             messages_from_connections_tx,
         )));
     }*/
+
+    // TODO: do properly
+    while let Some(message) = guarded.foreground_to_background_rx.next().await {
+        match message {
+            ForegroundToBackground::AnnounceBlock {
+                target,
+                chain_index,
+                scale_encoded_header,
+                is_best,
+                result_tx,
+            } => {
+                // The call to `send_block_announce` below panics if we have no active connection.
+                let result = if guarded
+                    .network
+                    .can_send_block_announces(&target, chain_index)
+                {
+                    guarded
+                        .network
+                        .send_block_announce(&target, chain_index, &scale_encoded_header, is_best)
+                        .map_err(QueueNotificationError::Queue)
+                } else {
+                    Err(QueueNotificationError::NoConnection)
+                };
+
+                let _ = result_tx.send(result);
+            }
+            ForegroundToBackground::SetLocalBestBlock {
+                chain_index,
+                best_hash,
+                best_number,
+            } => {
+                guarded
+                    .network
+                    .set_local_best_block(chain_index, best_hash, best_number);
+            }
+            ForegroundToBackground::BlocksRequest {
+                target,
+                chain_index,
+                config,
+                result_tx,
+            } => {
+                // The call to `start_blocks_request` below panics if we have no active connection.
+                if guarded.network.can_start_requests(&target) {
+                    let request_id = guarded.network.start_blocks_request(
+                        Instant::now(),
+                        &target,
+                        chain_index,
+                        config,
+                        Duration::from_secs(12),
+                    );
+
+                    // TODO: somehow cancel the request if the `rx` is dropped?
+                    guarded.blocks_requests.insert(request_id, result_tx);
+                } else {
+                    let _ = result_tx.send(Err(BlocksRequestError::NoConnection));
+                }
+            }
+            ForegroundToBackground::GetNumEstablishedConnections { result_tx } => {
+                let _ = result_tx.send(guarded.network.num_established_connections());
+            }
+            ForegroundToBackground::GetNumPeers {
+                chain_index,
+                result_tx,
+            } => {
+                let _ = result_tx.send(guarded.network.num_peers(chain_index));
+            }
+        }
+    }
 
     // Process events generated by the state machine.
     'events_loop: loop {
@@ -831,7 +938,7 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                         .blocks_requests
                         .remove(&request_id)
                         .unwrap()
-                        .send(response);
+                        .send(response.map_err(BlocksRequestError::Request));
                 }
                 service::Event::RequestResult { .. } => {
                     // We never start a request of any other kind.

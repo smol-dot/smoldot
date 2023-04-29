@@ -1172,9 +1172,9 @@ impl SyncBackground {
                                         .network_service
                                         .clone()
                                         .send_block_announce(
-                                            peer_id,
+                                            peer_id.clone(),
                                             0,
-                                            &scale_encoded_header_to_verify,
+                                            scale_encoded_header_to_verify.clone(),
                                             is_new_best,
                                         )
                                         .await
