@@ -59,9 +59,9 @@ use std::{
 mod tasks;
 
 /// Configuration for a [`NetworkService`].
-pub struct Config<'a> {
+pub struct Config {
     /// Closure that spawns background tasks.
-    pub tasks_executor: &'a mut dyn FnMut(future::BoxFuture<'static, ()>),
+    pub tasks_executor: Box<dyn FnMut(future::BoxFuture<'static, ()>) + Send>,
 
     /// Number of event receivers returned by [`NetworkService::new`].
     pub num_events_receivers: usize,
@@ -210,7 +210,7 @@ struct Guarded {
 impl NetworkService {
     /// Initializes the network service with the given configuration.
     pub async fn new(
-        config: Config<'_>,
+        mut config: Config,
     ) -> Result<(Arc<Self>, Vec<stream::BoxStream<'static, Event>>), InitError> {
         let (senders, receivers): (Vec<_>, Vec<_>) = (0..config.num_events_receivers)
             .map(|_| mpsc::channel(16))

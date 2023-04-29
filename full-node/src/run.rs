@@ -436,7 +436,10 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
             .collect(),
             identify_agent_version: concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION")).to_owned(),
             noise_key,
-            tasks_executor: &mut |task| threads_pool.spawn_ok(task),
+            tasks_executor: {
+                let threads_pool = threads_pool.clone();
+                Box::new(move |task| threads_pool.spawn_ok(task))
+            },
             jaeger_service: jaeger_service.clone(),
         })
         .await
