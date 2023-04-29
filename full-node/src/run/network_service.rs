@@ -33,9 +33,7 @@ use async_lock::Mutex;
 use async_std::net::TcpStream;
 use core::{cmp, mem, task::Poll, time::Duration};
 use futures_channel::{mpsc, oneshot};
-use futures_util::{
-    future, stream, AsyncRead, AsyncWrite, FutureExt as _, SinkExt as _, StreamExt as _,
-};
+use futures_util::{future, stream, FutureExt as _, SinkExt as _, StreamExt as _};
 use hashbrown::HashMap;
 use smoldot::{
     database::full_sqlite,
@@ -247,6 +245,8 @@ struct Guarded {
         service::StartConnect<Instant>,
     )>,
 
+    process_network_service_events: future::Either<future::Ready<()>, future::Pending<()>>,
+
     /// Channel for the foreground to send messages to the background task.
     foreground_to_background_rx: mpsc::Receiver<ForegroundToBackground>,
 
@@ -341,6 +341,7 @@ impl NetworkService {
                     connection_opening_outcome_rx,
                     incoming_sockets_rx,
                     foreground_to_background_rx,
+                    process_network_service_events: future::Either::Left(future::ready(())),
                     tasks_executor: config.tasks_executor,
                     network,
                     slots_assign_backoff: hashbrown::HashMap::with_capacity_and_hasher(
@@ -708,512 +709,497 @@ pub enum QueueNotificationError {
 }
 
 async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<Event>>) {
-    loop {
-        // In order to guarantee that waking up `wake_up_background` will run an entirely
-        // loop of `update_round`, we grab the listener at the start. If `wake_up_background`
-        // is notified while `update_round` is running, the `notified.await` below will be
-        // instantaneous.
-        let notified = inner.wake_up_main_background_task.listen();
-        update_round(&inner, &mut event_senders).await;
-        notified.await;
-    }
-}
-
-async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Event>]) {
     let mut guarded = inner.guarded.lock().await;
+    let guarded = &mut *guarded;
 
-    // Inject in the coordinator the messages that the connections have generated.
-    while let Some(Some((connection_id, message, connection_is_dead))) =
-        guarded.messages_from_connections_rx.next().now_or_never()
-    {
-        guarded
-            .network
-            .inject_connection_message(connection_id, message);
-
-        // TODO: it should be indicated by the coordinator when a connection dies
-        if connection_is_dead {
-            let _was_in = guarded.active_connections.remove(&connection_id);
-            debug_assert!(_was_in.is_some());
-        }
-    }
-
-    // TODO: must be done properly
-    /*if let Some((socket, multiaddr, when_connected)) = guarded.incoming_sockets_rx.next().await {
-        let (connection_id, connection_task) =
-            guarded.network.add_single_stream_incoming_connection(
-                when_connected,
-                service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
-                multiaddr,
-            );
-
-        let (tx, rx) = mpsc::channel(16); // TODO: ?!
-        guarded.active_connections.insert(connection_id, tx);
-
-        let messages_from_connections_tx = guarded.messages_from_connections_tx.clone();
-        (guarded.tasks_executor)(Box::pin(tasks::established_connection_task(
-            socket,
-            connection_id,
-            connection_task,
-            rx,
-            messages_from_connections_tx,
-        )));
-    }*/
-
-    if let Some((result, start_connect)) = guarded.connection_opening_outcome_rx.next().await {
-        guarded.num_pending_out_attempts -= 1;
-
-        if let Ok(socket) = result {
-            let (connection_id, connection_task) =
-                guarded.network.pending_outcome_ok_single_stream(
-                    start_connect.id,
-                    service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
-                );
-
-            let (tx, rx) = mpsc::channel(16); // TODO: ?!
-            guarded.active_connections.insert(connection_id, tx);
-
-            let messages_from_connections_tx = guarded.messages_from_connections_tx.clone();
-            (guarded.tasks_executor)(Box::pin(tasks::established_connection_task(
-                socket,
-                connection_id,
-                connection_task,
-                rx,
-                messages_from_connections_tx,
-            )));
-        } else {
-            guarded.network.pending_outcome_err(start_connect.id, true);
-            for chain_index in 0..guarded.network.num_chains() {
-                guarded.unassign_slot_and_ban(chain_index, start_connect.expected_peer_id.clone());
-            }
-        }
-    }
-
-    // TODO: do properly
-    while let Some(message) = guarded.foreground_to_background_rx.next().await {
-        match message {
-            ForegroundToBackground::AnnounceBlock {
-                target,
-                chain_index,
-                scale_encoded_header,
-                is_best,
-                result_tx,
-            } => {
-                // The call to `send_block_announce` below panics if we have no active connection.
-                let result = if guarded
-                    .network
-                    .can_send_block_announces(&target, chain_index)
-                {
-                    guarded
-                        .network
-                        .send_block_announce(&target, chain_index, &scale_encoded_header, is_best)
-                        .map_err(QueueNotificationError::Queue)
-                } else {
-                    Err(QueueNotificationError::NoConnection)
-                };
-
-                let _ = result_tx.send(result);
-            }
-            ForegroundToBackground::SetLocalBestBlock {
-                chain_index,
-                best_hash,
-                best_number,
-            } => {
+    loop {
+        // TODO: this code block is obviously way too long; split into a struct
+        futures_util::select! {
+            // Inject in the coordinator the messages that the connections have generated.
+            (connection_id, message, connection_is_dead) = guarded.messages_from_connections_rx.next().fuse().map(|v| v.unwrap()) => {
                 guarded
                     .network
-                    .set_local_best_block(chain_index, best_hash, best_number);
-            }
-            ForegroundToBackground::BlocksRequest {
-                target,
-                chain_index,
-                config,
-                result_tx,
-            } => {
-                // The call to `start_blocks_request` below panics if we have no active connection.
-                if guarded.network.can_start_requests(&target) {
-                    let request_id = guarded.network.start_blocks_request(
-                        Instant::now(),
-                        &target,
-                        chain_index,
-                        config,
-                        Duration::from_secs(12),
+                    .inject_connection_message(connection_id, message);
+
+                // TODO: it should be indicated by the coordinator when a connection dies
+                if connection_is_dead {
+                    let _was_in = guarded.active_connections.remove(&connection_id);
+                    debug_assert!(_was_in.is_some());
+                }
+            },
+
+            (socket, multiaddr, when_connected) = guarded.incoming_sockets_rx.next().fuse().map(|v| v.unwrap()) => {
+                let (connection_id, connection_task) =
+                    guarded.network.add_single_stream_incoming_connection(
+                        when_connected,
+                        service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
+                        multiaddr,
                     );
 
-                    // TODO: somehow cancel the request if the `rx` is dropped?
-                    guarded.blocks_requests.insert(request_id, result_tx);
+                let (tx, rx) = mpsc::channel(16); // TODO: ?!
+                guarded.active_connections.insert(connection_id, tx);
+
+                let messages_from_connections_tx = guarded.messages_from_connections_tx.clone();
+                (guarded.tasks_executor)(Box::pin(tasks::established_connection_task(
+                    socket,
+                    connection_id,
+                    connection_task,
+                    rx,
+                    messages_from_connections_tx,
+                )));
+            },
+
+            (result, start_connect) = guarded.connection_opening_outcome_rx.next().fuse().map(|v| v.unwrap()) => {
+                guarded.num_pending_out_attempts -= 1;
+
+                if let Ok(socket) = result {
+                    let (connection_id, connection_task) =
+                        guarded.network.pending_outcome_ok_single_stream(
+                            start_connect.id,
+                            service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
+                        );
+
+                    let (tx, rx) = mpsc::channel(16); // TODO: ?!
+                    guarded.active_connections.insert(connection_id, tx);
+
+                    let messages_from_connections_tx = guarded.messages_from_connections_tx.clone();
+                    (guarded.tasks_executor)(Box::pin(tasks::established_connection_task(
+                        socket,
+                        connection_id,
+                        connection_task,
+                        rx,
+                        messages_from_connections_tx,
+                    )));
                 } else {
-                    let _ = result_tx.send(Err(BlocksRequestError::NoConnection));
-                }
-            }
-            ForegroundToBackground::GetNumEstablishedConnections { result_tx } => {
-                let _ = result_tx.send(guarded.network.num_established_connections());
-            }
-            ForegroundToBackground::GetNumPeers {
-                chain_index,
-                result_tx,
-            } => {
-                let _ = result_tx.send(guarded.network.num_peers(chain_index));
-            }
-        }
-    }
-
-    // Process events generated by the state machine.
-    'events_loop: loop {
-        let event = loop {
-            let inner_event = match guarded.network.next_event(Instant::now()) {
-                Some(ev) => ev,
-                None => break 'events_loop,
-            };
-
-            match inner_event {
-                service::Event::Connected(peer_id) => {
-                    log::debug!("connected; peer_id={}", peer_id);
-                }
-                service::Event::Disconnected {
-                    peer_id,
-                    chain_indices,
-                } => {
-                    log::debug!("disconnected; peer_id={}", peer_id);
-                    if !chain_indices.is_empty() {
-                        debug_assert_eq!(chain_indices.len(), 1); // TODO: not implemented
-                        break Event::Disconnected {
-                            chain_index: chain_indices[0],
-                            peer_id,
-                        };
+                    guarded.network.pending_outcome_err(start_connect.id, true);
+                    for chain_index in 0..guarded.network.num_chains() {
+                        guarded.unassign_slot_and_ban(chain_index, start_connect.expected_peer_id.clone());
                     }
                 }
-                service::Event::BlockAnnounce {
-                    chain_index,
-                    peer_id,
-                    announce,
-                } => {
-                    let decoded = announce.decode();
-                    let header_hash =
-                        header::hash_from_scale_encoded_header(decoded.scale_encoded_header);
-                    match header::decode(
-                        decoded.scale_encoded_header,
-                        guarded.network.block_number_bytes(chain_index),
-                    ) {
-                        Ok(decoded_header) => {
-                            let mut _jaeger_span =
-                                inner.jaeger_service.block_announce_receive_span(
-                                    &inner.local_peer_id,
-                                    &peer_id,
-                                    decoded_header.number,
-                                    &decoded_header
-                                        .hash(guarded.network.block_number_bytes(chain_index)),
-                                );
+            },
 
-                            log::debug!(
-                                "block-announce; peer_id={}; chain_index={}; hash={}; number={}; is_best={:?}",
-                                peer_id, chain_index, HashDisplay(&header_hash), decoded_header.number, decoded.is_best
+            message = guarded.foreground_to_background_rx.next().fuse().map(|v| v.unwrap()) => {
+                match message {
+                    ForegroundToBackground::AnnounceBlock {
+                        target,
+                        chain_index,
+                        scale_encoded_header,
+                        is_best,
+                        result_tx,
+                    } => {
+                        // The call to `send_block_announce` below panics if we have no active connection.
+                        let result = if guarded
+                            .network
+                            .can_send_block_announces(&target, chain_index)
+                        {
+                            guarded
+                                .network
+                                .send_block_announce(&target, chain_index, &scale_encoded_header, is_best)
+                                .map_err(QueueNotificationError::Queue)
+                        } else {
+                            Err(QueueNotificationError::NoConnection)
+                        };
+
+                        let _ = result_tx.send(result);
+                    }
+                    ForegroundToBackground::SetLocalBestBlock {
+                        chain_index,
+                        best_hash,
+                        best_number,
+                    } => {
+                        guarded
+                            .network
+                            .set_local_best_block(chain_index, best_hash, best_number);
+                    }
+                    ForegroundToBackground::BlocksRequest {
+                        target,
+                        chain_index,
+                        config,
+                        result_tx,
+                    } => {
+                        // The call to `start_blocks_request` below panics if we have no active connection.
+                        if guarded.network.can_start_requests(&target) {
+                            let request_id = guarded.network.start_blocks_request(
+                                Instant::now(),
+                                &target,
+                                chain_index,
+                                config,
+                                Duration::from_secs(12),
                             );
 
-                            break Event::BlockAnnounce {
+                            // TODO: somehow cancel the request if the `rx` is dropped?
+                            guarded.blocks_requests.insert(request_id, result_tx);
+                        } else {
+                            let _ = result_tx.send(Err(BlocksRequestError::NoConnection));
+                        }
+                    }
+                    ForegroundToBackground::GetNumEstablishedConnections { result_tx } => {
+                        let _ = result_tx.send(guarded.network.num_established_connections());
+                    }
+                    ForegroundToBackground::GetNumPeers {
+                        chain_index,
+                        result_tx,
+                    } => {
+                        let _ = result_tx.send(guarded.network.num_peers(chain_index));
+                    }
+                }
+            }
+
+            _ = &mut guarded.process_network_service_events => {
+                guarded.process_network_service_events = future::Either::Right(future::pending());
+
+                let event = loop {
+                    let inner_event = match guarded.network.next_event(Instant::now()) {
+                        Some(ev) => ev,
+                        None => break None,
+                    };
+
+                    match inner_event {
+                        service::Event::Connected(peer_id) => {
+                            log::debug!("connected; peer_id={}", peer_id);
+                        }
+                        service::Event::Disconnected {
+                            peer_id,
+                            chain_indices,
+                        } => {
+                            log::debug!("disconnected; peer_id={}", peer_id);
+                            if !chain_indices.is_empty() {
+                                debug_assert_eq!(chain_indices.len(), 1); // TODO: not implemented
+                                break Some(Event::Disconnected {
+                                    chain_index: chain_indices[0],
+                                    peer_id,
+                                });
+                            }
+                        }
+                        service::Event::BlockAnnounce {
+                            chain_index,
+                            peer_id,
+                            announce,
+                        } => {
+                            let decoded = announce.decode();
+                            let header_hash =
+                                header::hash_from_scale_encoded_header(decoded.scale_encoded_header);
+                            match header::decode(
+                                decoded.scale_encoded_header,
+                                guarded.network.block_number_bytes(chain_index),
+                            ) {
+                                Ok(decoded_header) => {
+                                    let mut _jaeger_span =
+                                        inner.jaeger_service.block_announce_receive_span(
+                                            &inner.local_peer_id,
+                                            &peer_id,
+                                            decoded_header.number,
+                                            &decoded_header
+                                                .hash(guarded.network.block_number_bytes(chain_index)),
+                                        );
+
+                                    log::debug!(
+                                        "block-announce; peer_id={}; chain_index={}; hash={}; number={}; is_best={:?}",
+                                        peer_id, chain_index, HashDisplay(&header_hash), decoded_header.number, decoded.is_best
+                                    );
+
+                                    break Some(Event::BlockAnnounce {
+                                        chain_index,
+                                        peer_id,
+                                        is_best: decoded.is_best,
+                                        header: decoded_header.into(), // TODO: somewhat wasteful allocation here
+                                    });
+                                }
+                                Err(error) => {
+                                    log::warn!(
+                                        "block-announce-bad-header; peer_id={}; chain_index={}; hash={}; is_best={:?}; error={}",
+                                        peer_id, chain_index, HashDisplay(&header_hash), decoded.is_best, error
+                                    );
+
+                                    guarded.unassign_slot_and_ban(chain_index, peer_id);
+                                    inner.wake_up_main_background_task.notify(1);
+                                }
+                            }
+                        }
+                        service::Event::ChainConnected {
+                            peer_id,
+                            chain_index,
+                            best_number,
+                            best_hash,
+                            ..
+                        } => {
+                            log::debug!(
+                                "chain-connected; peer_id={}; chain_index={}; best_number={}; best_hash={}",
+                                peer_id,
+                                chain_index,
+                                best_number,
+                                HashDisplay(&best_hash),
+                            );
+                            break Some(Event::Connected {
+                                peer_id,
+                                chain_index,
+                                best_block_number: best_number,
+                                best_block_hash: best_hash,
+                            });
+                        }
+                        service::Event::ChainDisconnected {
+                            peer_id,
+                            chain_index,
+                            ..
+                        } => {
+                            log::debug!(
+                                "chain-disconnected; peer_id={}; chain_index={}",
+                                peer_id,
+                                chain_index
+                            );
+
+                            guarded.unassign_slot_and_ban(chain_index, peer_id.clone());
+                            inner.wake_up_main_background_task.notify(1);
+
+                            break Some(Event::Disconnected {
                                 chain_index,
                                 peer_id,
-                                is_best: decoded.is_best,
-                                header: decoded_header.into(), // TODO: somewhat wasteful allocation here
-                            };
+                            });
                         }
-                        Err(error) => {
-                            log::warn!(
-                                "block-announce-bad-header; peer_id={}; chain_index={}; hash={}; is_best={:?}; error={}",
-                                peer_id, chain_index, HashDisplay(&header_hash), decoded.is_best, error
+                        service::Event::ChainConnectAttemptFailed {
+                            chain_index,
+                            peer_id,
+                            error,
+                            ..
+                        } => {
+                            log::debug!(
+                                "chain-connect-attempt-failed; peer_id={}; chain_index={}; error={}",
+                                peer_id,
+                                chain_index,
+                                error
                             );
 
                             guarded.unassign_slot_and_ban(chain_index, peer_id);
                             inner.wake_up_main_background_task.notify(1);
                         }
-                    }
-                }
-                service::Event::ChainConnected {
-                    peer_id,
-                    chain_index,
-                    best_number,
-                    best_hash,
-                    ..
-                } => {
-                    log::debug!(
-                        "chain-connected; peer_id={}; chain_index={}; best_number={}; best_hash={}",
-                        peer_id,
-                        chain_index,
-                        best_number,
-                        HashDisplay(&best_hash),
-                    );
-                    break Event::Connected {
-                        peer_id,
-                        chain_index,
-                        best_block_number: best_number,
-                        best_block_hash: best_hash,
-                    };
-                }
-                service::Event::ChainDisconnected {
-                    peer_id,
-                    chain_index,
-                    ..
-                } => {
-                    log::debug!(
-                        "chain-disconnected; peer_id={}; chain_index={}",
-                        peer_id,
-                        chain_index
-                    );
-
-                    guarded.unassign_slot_and_ban(chain_index, peer_id.clone());
-                    inner.wake_up_main_background_task.notify(1);
-
-                    break Event::Disconnected {
-                        chain_index,
-                        peer_id,
-                    };
-                }
-                service::Event::ChainConnectAttemptFailed {
-                    chain_index,
-                    peer_id,
-                    error,
-                    ..
-                } => {
-                    log::debug!(
-                        "chain-connect-attempt-failed; peer_id={}; chain_index={}; error={}",
-                        peer_id,
-                        chain_index,
-                        error
-                    );
-
-                    guarded.unassign_slot_and_ban(chain_index, peer_id);
-                    inner.wake_up_main_background_task.notify(1);
-                }
-                service::Event::InboundSlotAssigned { .. } => {
-                    // TODO: log this
-                }
-                service::Event::RequestResult {
-                    request_id,
-                    response: service::RequestResult::Blocks(response),
-                } => {
-                    let _ = guarded
-                        .blocks_requests
-                        .remove(&request_id)
-                        .unwrap()
-                        .send(response.map_err(BlocksRequestError::Request));
-                }
-                service::Event::RequestResult { .. } => {
-                    // We never start a request of any other kind.
-                    unreachable!()
-                }
-                service::Event::RequestInCancel { .. } => {
-                    // Requests are answered immediately, and thus cancelling events can't happen.
-                    unreachable!()
-                }
-                service::Event::KademliaDiscoveryResult {
-                    operation_id,
-                    result,
-                } => {
-                    let chain_index = guarded
-                        .kademlia_discovery_operations
-                        .remove(&operation_id)
-                        .unwrap();
-                    match result {
-                        Ok(nodes) => {
-                            log::debug!("discovered; nodes={:?}", nodes);
-                            for (peer_id, addrs) in nodes {
-                                guarded.network.discover(
-                                    &Instant::now(),
-                                    chain_index,
-                                    peer_id,
-                                    addrs,
-                                );
+                        service::Event::InboundSlotAssigned { .. } => {
+                            // TODO: log this
+                        }
+                        service::Event::RequestResult {
+                            request_id,
+                            response: service::RequestResult::Blocks(response),
+                        } => {
+                            let _ = guarded
+                                .blocks_requests
+                                .remove(&request_id)
+                                .unwrap()
+                                .send(response.map_err(BlocksRequestError::Request));
+                        }
+                        service::Event::RequestResult { .. } => {
+                            // We never start a request of any other kind.
+                            unreachable!()
+                        }
+                        service::Event::RequestInCancel { .. } => {
+                            // Requests are answered immediately, and thus cancelling events can't happen.
+                            unreachable!()
+                        }
+                        service::Event::KademliaDiscoveryResult {
+                            operation_id,
+                            result,
+                        } => {
+                            let chain_index = guarded
+                                .kademlia_discovery_operations
+                                .remove(&operation_id)
+                                .unwrap();
+                            match result {
+                                Ok(nodes) => {
+                                    log::debug!("discovered; nodes={:?}", nodes);
+                                    for (peer_id, addrs) in nodes {
+                                        guarded.network.discover(
+                                            &Instant::now(),
+                                            chain_index,
+                                            peer_id,
+                                            addrs,
+                                        );
+                                    }
+                                }
+                                Err(error) => {
+                                    log::debug!("discovery-error; error={}", error);
+                                }
                             }
                         }
-                        Err(error) => {
-                            log::debug!("discovery-error; error={}", error);
+                        service::Event::IdentifyRequestIn {
+                            peer_id,
+                            request_id,
+                        } => {
+                            log::debug!("identify-request; peer_id={}", peer_id);
+                            guarded
+                                .network
+                                .respond_identify(request_id, &inner.identify_agent_version);
+                        }
+                        service::Event::BlocksRequestIn {
+                            peer_id,
+                            chain_index,
+                            config,
+                            request_id,
+                        } => {
+                            log::debug!(
+                                "incoming-blocks-request; peer_id={}; chain_index={}",
+                                peer_id,
+                                chain_index
+                            );
+                            let mut _jaeger_span = inner.jaeger_service.incoming_block_request_span(
+                                &inner.local_peer_id,
+                                &peer_id,
+                                config.desired_count.get(),
+                                if let (1, protocol::BlocksRequestConfigStart::Hash(block_hash)) =
+                                    (config.desired_count.get(), &config.start)
+                                {
+                                    Some(block_hash)
+                                } else {
+                                    None
+                                },
+                            );
+
+                            // TODO: is it a good idea to await here while the lock is held and freezing the entire networking background task?
+                            let response = blocks_request_response(
+                                &inner.databases[chain_index],
+                                guarded.network.block_number_bytes(chain_index),
+                                config,
+                            )
+                            .await;
+                            guarded.network.respond_blocks(
+                                request_id,
+                                match response {
+                                    Ok(b) => Some(b),
+                                    Err(error) => {
+                                        log::warn!("incoming-blocks-request-error; error={}", error);
+                                        None
+                                    }
+                                },
+                            );
+                        }
+                        service::Event::GrandpaNeighborPacket {
+                            chain_index,
+                            peer_id,
+                            state,
+                        } => {
+                            log::debug!(
+                                "grandpa-neighbor-packet; peer_id={}; chain_index={}; round_number={}; set_id={}; commit_finalized_height={}",
+                                peer_id,
+                                chain_index,
+                                state.round_number,
+                                state.set_id,
+                                state.commit_finalized_height,
+                            );
+                            // TODO: report to the sync state machine
+                        }
+                        service::Event::GrandpaCommitMessage {
+                            chain_index,
+                            peer_id,
+                            message,
+                        } => {
+                            log::debug!(
+                                "grandpa-commit-message; peer_id={}; chain_index={}; target_hash={}",
+                                peer_id,
+                                chain_index,
+                                HashDisplay(message.decode().message.target_hash),
+                            );
+                        }
+                        service::Event::ProtocolError { peer_id, error } => {
+                            log::warn!("protocol-error; peer_id={}; error={}", peer_id, error);
+                            for chain_index in 0..guarded.network.num_chains() {
+                                guarded.unassign_slot_and_ban(chain_index, peer_id.clone());
+                            }
+                            inner.wake_up_main_background_task.notify(1);
+                        }
+                    }
+                };
+
+                // Dispatch the event to the various senders.
+                if let Some(event) = event {
+                    // This little `if` avoids having to do `event.clone()` if we don't have to.
+                    if event_senders.len() == 1 {
+                        let _ = event_senders[0].send(event).await;
+                    } else {
+                        for sender in event_senders.iter_mut() {
+                            // For simplicity we don't get rid of closed senders because senders
+                            // aren't supposed to close, and that leaving closed senders in the
+                            // list doesn't have any consequence other than one extra iteration
+                            // every time.
+                            let _ = sender.send(event.clone()).await;
                         }
                     }
                 }
-                service::Event::IdentifyRequestIn {
-                    peer_id,
-                    request_id,
-                } => {
-                    log::debug!("identify-request; peer_id={}", peer_id);
+
+                // TODO: doc
+                for chain_index in 0..guarded.network.num_chains() {
+                    let now = Instant::now();
+
+                    // Clean up the content of `slots_assign_backoff`.
+                    // TODO: the background task should be woken up when the ban expires
+                    // TODO: O(n)
                     guarded
-                        .network
-                        .respond_identify(request_id, &inner.identify_agent_version);
-                }
-                service::Event::BlocksRequestIn {
-                    peer_id,
-                    chain_index,
-                    config,
-                    request_id,
-                } => {
-                    log::debug!(
-                        "incoming-blocks-request; peer_id={}; chain_index={}",
-                        peer_id,
-                        chain_index
-                    );
-                    let mut _jaeger_span = inner.jaeger_service.incoming_block_request_span(
-                        &inner.local_peer_id,
-                        &peer_id,
-                        config.desired_count.get(),
-                        if let (1, protocol::BlocksRequestConfigStart::Hash(block_hash)) =
-                            (config.desired_count.get(), &config.start)
-                        {
-                            Some(block_hash)
-                        } else {
-                            None
-                        },
-                    );
-
-                    // TODO: is it a good idea to await here while the lock is held and freezing the entire networking background task?
-                    let response = blocks_request_response(
-                        &inner.databases[chain_index],
-                        guarded.network.block_number_bytes(chain_index),
-                        config,
-                    )
-                    .await;
-                    guarded.network.respond_blocks(
-                        request_id,
-                        match response {
-                            Ok(b) => Some(b),
-                            Err(error) => {
-                                log::warn!("incoming-blocks-request-error; error={}", error);
-                                None
-                            }
-                        },
-                    );
-                }
-                service::Event::GrandpaNeighborPacket {
-                    chain_index,
-                    peer_id,
-                    state,
-                } => {
-                    log::debug!(
-                        "grandpa-neighbor-packet; peer_id={}; chain_index={}; round_number={}; set_id={}; commit_finalized_height={}",
-                        peer_id,
-                        chain_index,
-                        state.round_number,
-                        state.set_id,
-                        state.commit_finalized_height,
-                    );
-                    // TODO: report to the sync state machine
-                }
-                service::Event::GrandpaCommitMessage {
-                    chain_index,
-                    peer_id,
-                    message,
-                } => {
-                    log::debug!(
-                        "grandpa-commit-message; peer_id={}; chain_index={}; target_hash={}",
-                        peer_id,
-                        chain_index,
-                        HashDisplay(message.decode().message.target_hash),
-                    );
-                }
-                service::Event::ProtocolError { peer_id, error } => {
-                    log::warn!("protocol-error; peer_id={}; error={}", peer_id, error);
-                    for chain_index in 0..guarded.network.num_chains() {
-                        guarded.unassign_slot_and_ban(chain_index, peer_id.clone());
-                    }
-                    inner.wake_up_main_background_task.notify(1);
-                }
-            }
-        };
-
-        // Dispatch the event to the various senders.
-
-        // Because the tasks processing the receivers might be waiting to acquire the lock, we
-        // need to unlock the lock before sending. This guarantees that the sending finishes at
-        // some point in the future.
-        drop(guarded);
-
-        // This little `if` avoids having to do `event.clone()` if we don't have to.
-        if event_senders.len() == 1 {
-            let _ = event_senders[0].send(event).await;
-        } else {
-            for sender in event_senders.iter_mut() {
-                // For simplicity we don't get rid of closed senders because senders aren't
-                // supposed to close, and that leaving closed senders in the list doesn't have any
-                // consequence other than one extra iteration every time.
-                let _ = sender.send(event.clone()).await;
-            }
-        }
-
-        // Re-acquire lock to continue the function.
-        guarded = inner.guarded.lock().await;
-    }
-
-    // TODO: doc
-    for chain_index in 0..guarded.network.num_chains() {
-        let now = Instant::now();
-
-        // Clean up the content of `slots_assign_backoff`.
-        // TODO: the background task should be woken up when the ban expires
-        // TODO: O(n)
-        guarded
-            .slots_assign_backoff
-            .retain(|_, expiration| *expiration > now);
-
-        // Assign outgoing slots.
-        loop {
-            let peer_to_assign = guarded
-                .network
-                .slots_to_assign(chain_index)
-                .find(|peer_id| {
-                    !guarded
                         .slots_assign_backoff
-                        .contains_key(&((**peer_id).clone(), chain_index)) // TODO: spurious cloning
-                })
-                .cloned();
+                        .retain(|_, expiration| *expiration > now);
 
-            let Some(peer_to_assign) = peer_to_assign else { break };
-            log::debug!(
-                "slot-assigned; peer_id={}; chain_index={}",
-                peer_to_assign,
-                chain_index
-            );
-            guarded.network.assign_out_slot(chain_index, peer_to_assign);
+                    // Assign outgoing slots.
+                    loop {
+                        let peer_to_assign = guarded
+                            .network
+                            .slots_to_assign(chain_index)
+                            .find(|peer_id| {
+                                !guarded
+                                    .slots_assign_backoff
+                                    .contains_key(&((**peer_id).clone(), chain_index)) // TODO: spurious cloning
+                            })
+                            .cloned();
+
+                        let Some(peer_to_assign) = peer_to_assign else { break };
+                        log::debug!(
+                            "slot-assigned; peer_id={}; chain_index={}",
+                            peer_to_assign,
+                            chain_index
+                        );
+                        guarded.network.assign_out_slot(chain_index, peer_to_assign);
+                    }
+                }
+
+                // The networking service contains a list of connections that should be opened.
+                // Grab this list and start opening a connection for each.
+                // TODO: restore the rate limiting for connections openings
+                loop {
+                    if guarded.num_pending_out_attempts >= 16 {
+                        // TODO: constant
+                        break;
+                    }
+
+                    let start_connect = match guarded.network.next_start_connect(Instant::now) {
+                        Some(sc) => sc,
+                        None => break,
+                    };
+
+                    guarded.num_pending_out_attempts += 1;
+
+                    // Perform the connection process in a separate task.
+                    let mut connection_opening_outcome_tx = guarded.connection_opening_outcome_tx.clone();
+                    (guarded.tasks_executor)(Box::pin(async move {
+                        // TODO: interrupt immediately if `connection_opening_outcome_tx` is dropped
+                        let result = tasks::opening_connection_task(start_connect.clone()).await;
+                        let _ = connection_opening_outcome_tx
+                            .send((result.map(|s| Box::new(s) as Box<_>), start_connect));
+                    }));
+                }
+
+                // Pull messages that the coordinator has generated in destination to the various
+                // connections.
+                while let Some((connection_id, message)) = guarded.network.pull_message_to_connection() {
+                    // Note that it is critical for the sending to not take too long here, in order to not
+                    // block the process of the network service.
+                    // In particular, if sending the message to the connection is blocked due to sending
+                    // a message on the connection-to-coordinator channel, this will result in a deadlock.
+                    // For this reason, the connection task is always ready to immediately accept a message
+                    // on the coordinator-to-connection channel.
+                    guarded
+                        .active_connections
+                        .get_mut(&connection_id)
+                        .unwrap()
+                        .send(message)
+                        .await
+                        .unwrap();
+                }
+            }
         }
-    }
-
-    // The networking service contains a list of connections that should be opened.
-    // Grab this list and start opening a connection for each.
-    // TODO: restore the rate limiting for connections openings
-    loop {
-        if guarded.num_pending_out_attempts >= 16 {
-            // TODO: constant
-            break;
-        }
-
-        let start_connect = match guarded.network.next_start_connect(Instant::now) {
-            Some(sc) => sc,
-            None => break,
-        };
-
-        guarded.num_pending_out_attempts += 1;
-
-        // Perform the connection process in a separate task.
-        let mut connection_opening_outcome_tx = guarded.connection_opening_outcome_tx.clone();
-        (guarded.tasks_executor)(Box::pin(async move {
-            // TODO: interrupt immediately if `connection_opening_outcome_tx` is dropped
-            let result = tasks::opening_connection_task(start_connect.clone()).await;
-            let _ = connection_opening_outcome_tx
-                .send((result.map(|s| Box::new(s) as Box<_>), start_connect));
-        }));
-    }
-
-    // Pull messages that the coordinator has generated in destination to the various
-    // connections.
-    while let Some((connection_id, message)) = guarded.network.pull_message_to_connection() {
-        // Note that it is critical for the sending to not take too long here, in order to not
-        // block the process of the network service.
-        // In particular, if sending the message to the connection is blocked due to sending
-        // a message on the connection-to-coordinator channel, this will result in a deadlock.
-        // For this reason, the connection task is always ready to immediately accept a message
-        // on the coordinator-to-connection channel.
-        guarded
-            .active_connections
-            .get_mut(&connection_id)
-            .unwrap()
-            .send(message)
-            .await
-            .unwrap();
     }
 }
 
