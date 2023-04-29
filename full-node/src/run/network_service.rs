@@ -161,6 +161,9 @@ enum ToBackground {
         multiaddr: Multiaddr,
         when_connected: Instant,
     },
+    StartKademliaDiscoveries {
+        when_done: oneshot::Sender<()>,
+    },
     ForegroundAnnounceBlock {
         target: PeerId,
         chain_index: usize,
@@ -223,9 +226,6 @@ struct Inner {
     /// The values are the moment when the ban expires.
     // TODO: use SipHasher
     slots_assign_backoff: HashMap<(PeerId, usize), Instant, fnv::FnvBuildHasher>,
-
-    next_kademlia_discovery: futures_timer::Delay,
-    next_kademlia_discovery_increment: Duration,
 
     process_network_service_events: bool,
 
@@ -314,8 +314,6 @@ impl NetworkService {
             identify_agent_version: config.identify_agent_version,
             databases,
             num_pending_out_attempts: 0,
-            next_kademlia_discovery: futures_timer::Delay::new(Duration::new(0, 0)),
-            next_kademlia_discovery_increment: Duration::from_secs(1),
             to_background_rx,
             to_background_tx: to_background_tx.clone(),
             process_network_service_events: true,
@@ -424,6 +422,27 @@ impl NetworkService {
                 }
             }))
         }
+
+        // Spawn task starts a discovery request at a periodic interval.
+        // This is done through a separate task due to ease of implementation.
+        (inner.tasks_executor)(Box::pin({
+            let mut to_background_tx = to_background_tx.clone();
+            async move {
+                let mut next_discovery = Duration::from_secs(1);
+
+                loop {
+                    futures_timer::Delay::new(next_discovery).await;
+                    next_discovery = cmp::min(next_discovery * 2, Duration::from_secs(120));
+                    let (when_done, when_done_rx) = oneshot::channel();
+                    let _ = to_background_tx
+                        .send(ToBackground::StartKademliaDiscoveries { when_done })
+                        .await;
+                    if when_done_rx.await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }));
 
         // Build the final network service.
         let network_service = Arc::new(NetworkService {
@@ -1037,23 +1056,6 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
         futures_util::select! {
             // Inject in the coordinator the messages that the connections have generated.
 
-            _ = (&mut inner.next_kademlia_discovery).fuse() => {
-                inner.next_kademlia_discovery = futures_timer::Delay::new(inner.next_kademlia_discovery_increment);
-                inner.next_kademlia_discovery_increment = cmp::min(inner.next_kademlia_discovery_increment * 2, Duration::from_secs(120));
-
-                for chain_index in 0..inner.databases.len() {
-                    let operation_id = inner
-                        .network
-                        .start_kademlia_discovery_round(Instant::now(), chain_index);
-                    let _prev_val = inner
-                        .kademlia_discovery_operations
-                        .insert(operation_id, chain_index);
-                    debug_assert!(_prev_val.is_none());
-                }
-
-                inner.process_network_service_events = true;
-            }
-
             message = inner.to_background_rx.next().fuse().map(|v| v.unwrap()) => {
                 match message {
                     ToBackground::FromConnectionTask { connection_id, opaque_message, connection_now_dead } => {
@@ -1122,6 +1124,22 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
                             rx,
                             inner.to_background_tx.clone(),
                         )));
+
+                        inner.process_network_service_events = true;
+                    }
+
+                    ToBackground::StartKademliaDiscoveries { when_done } => {
+                        for chain_index in 0..inner.databases.len() {
+                            let operation_id = inner
+                                .network
+                                .start_kademlia_discovery_round(Instant::now(), chain_index);
+                            let _prev_val = inner
+                                .kademlia_discovery_operations
+                                .insert(operation_id, chain_index);
+                            debug_assert!(_prev_val.is_none());
+                        }
+
+                        let _ = when_done.send(());
 
                         inner.process_network_service_events = true;
                     }
