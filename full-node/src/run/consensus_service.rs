@@ -316,11 +316,9 @@ struct SyncBackground {
     /// This "trick" is necessary in order to not cancel requests that have already been started
     /// against a peer when it disconnects and that might already have a response.
     ///
-    /// Each on-going request has a corresponding future within
-    /// [`SyncBackground::block_requests_finished`]. This future is wrapped within an aborter, and
-    /// the an `AbortHandle` is held within this state machine. It can be used to abort the
-    /// request if necessary.
-    sync: all::AllSync<future::AbortHandle, Option<NetworkSourceInfo>, ()>,
+    /// Each on-going request has a corresponding background task that sends its result to
+    /// [`SyncBackground::block_requests_finished_rx`].
+    sync: all::AllSync<(), Option<NetworkSourceInfo>, ()>,
 
     /// Source within the [`SyncBackground::sync`] to use to import locally-authored blocks.
     block_author_sync_source: all::SourceId,
@@ -975,11 +973,7 @@ impl SyncBackground {
                     let _jaeger_span = self.jaeger_service.block_import_queue_span(&block_hash);
 
                     // Create a request that is immediately answered right below.
-                    let request_id = self.sync.add_request(
-                        source_id,
-                        request_info.into(),
-                        future::AbortHandle::new_pair().0, // Temporary dummy.
-                    );
+                    let request_id = self.sync.add_request(source_id, request_info.into(), ());
 
                     // TODO: announce the block on the network, but only after it's been imported
                     self.sync.blocks_request_response(
@@ -1039,18 +1033,16 @@ impl SyncBackground {
                         },
                     );
 
-                    let (request, abort) = future::abortable(request);
-                    let request_id = self.sync.add_request(source_id, request_info.into(), abort);
+                    let request_id = self.sync.add_request(source_id, request_info.into(), ());
 
                     (self.tasks_executor)(Box::pin({
                         let mut block_requests_finished_tx =
                             self.block_requests_finished_tx.clone();
                         async move {
-                            if let Ok(result) = request.await {
-                                let _ = block_requests_finished_tx
-                                    .send((request_id, source_id, result))
-                                    .await;
-                            }
+                            let result = request.await;
+                            let _ = block_requests_finished_tx
+                                .send((request_id, source_id, result))
+                                .await;
                         }
                     }));
                 }
