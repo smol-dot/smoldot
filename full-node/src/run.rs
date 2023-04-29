@@ -569,132 +569,141 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     // This should be performed after all the expensive initialization is done, as otherwise these
     // expensive initializations aren't interrupted by Ctrl+C, which could be frustrating for the
     // user.
-    let ctrlc_rx = {
-        let (tx, rx) = oneshot::channel();
-        let mut tx = Some(tx);
-        ctrlc::set_handler(move || {
-            if let Some(tx) = tx.take() {
-                let _ = tx.send(());
-            }
-        })
-        .expect("Error setting Ctrl-C handler");
-        rx.fuse()
+    let ctrlc_detected = {
+        let event = event_listener::Event::new();
+        let listen = event.listen();
+        if let Err(err) = ctrlc::set_handler(move || {
+            event.notify(usize::max_value());
+        }) {
+            // It is not critical to fail to setup the Ctrl-C handler.
+            log::warn!("ctrlc-handler-setup-fail; err={}", err);
+        }
+        listen
     };
 
     // Spawn the task printing the informant.
-    if matches!(cli_output, cli::Output::Informant) {
-        executor
-            .spawn({
-                let mut main_network_events_receiver = network_events_receivers.next().unwrap();
-                async move {
-                    let mut informant_timer = smol::Timer::interval(Duration::from_millis(100));
-                    let mut network_known_best = None;
+    // This is not just a dummy task that just prints on the output, but is actually the main
+    // task that holds everything else alive. Without it, all the services that we have created
+    // above would be cleanly dropped and nothing would happen.
+    // For this reason, it must be spawned even if no informant is started, in which case we simply
+    // inhibit the printing.
+    let main_task = executor.spawn({
+        let mut main_network_events_receiver = network_events_receivers.next().unwrap();
+        let has_informant = matches!(cli_output, cli::Output::Informant);
 
-                    enum Event {
-                        NetworkEvent(network_service::Event),
-                        Informant,
+        async move {
+            let mut informant_timer = if has_informant {
+                smol::Timer::interval(Duration::from_millis(100))
+            } else {
+                smol::Timer::never()
+            };
+            let mut network_known_best = None;
+
+            enum Event {
+                NetworkEvent(network_service::Event),
+                Informant,
+            }
+
+            loop {
+                match future::or(
+                    async {
+                        informant_timer.next().await;
+                        Event::Informant
+                    },
+                    async {
+                        Event::NetworkEvent(main_network_events_receiver.next().await.unwrap())
+                    },
+                )
+                .await
+                {
+                    Event::Informant => {
+                        // We end the informant line with a `\r` so that it overwrites itself
+                        // every time. If any other line gets printed, it will overwrite the
+                        // informant, and the informant will then print itself below, which is
+                        // a fine behaviour.
+                        let sync_state = consensus_service.sync_state().await;
+                        eprint!(
+                            "{}\r",
+                            smoldot::informant::InformantLine {
+                                enable_colors: match cli_options.color {
+                                    cli::ColorChoice::Always => true,
+                                    cli::ColorChoice::Never => false,
+                                },
+                                chain_name: chain_spec.name(),
+                                relay_chain: if let Some(relay_chain_spec) = &relay_chain_spec {
+                                    let relay_sync_state = relay_chain_consensus_service
+                                        .as_ref()
+                                        .unwrap()
+                                        .sync_state()
+                                        .await;
+                                    Some(smoldot::informant::RelayChain {
+                                        chain_name: relay_chain_spec.name(),
+                                        best_number: relay_sync_state.best_block_number,
+                                    })
+                                } else {
+                                    None
+                                },
+                                max_line_width: terminal_size::terminal_size()
+                                    .map_or(80, |(w, _)| w.0.into()),
+                                num_peers: u64::try_from(network_service.num_peers(0).await)
+                                    .unwrap_or(u64::max_value()),
+                                num_network_connections: u64::try_from(
+                                    network_service.num_established_connections().await
+                                )
+                                .unwrap_or(u64::max_value()),
+                                best_number: sync_state.best_block_number,
+                                finalized_number: sync_state.finalized_block_number,
+                                best_hash: &sync_state.best_block_hash,
+                                finalized_hash: &sync_state.finalized_block_hash,
+                                network_known_best,
+                            }
+                        );
                     }
 
-                    loop {
-                        match future::or(
-                            async {
-                                informant_timer.next().await;
-                                Event::Informant
+                    Event::NetworkEvent(network_event) => {
+                        // Update `network_known_best`.
+                        match network_event {
+                            network_service::Event::BlockAnnounce {
+                                chain_index: 0,
+                                header,
+                                ..
+                            } => match network_known_best {
+                                Some(n) if n >= header.number => {}
+                                _ => network_known_best = Some(header.number),
                             },
-                            async {
-                                Event::NetworkEvent(
-                                    main_network_events_receiver.next().await.unwrap(),
-                                )
+                            network_service::Event::Connected {
+                                chain_index: 0,
+                                best_block_number,
+                                ..
+                            } => match network_known_best {
+                                Some(n) if n >= best_block_number => {}
+                                _ => network_known_best = Some(best_block_number),
                             },
-                        )
-                        .await
-                        {
-                            Event::Informant => {
-                                // We end the informant line with a `\r` so that it overwrites itself
-                                // every time. If any other line gets printed, it will overwrite the
-                                // informant, and the informant will then print itself below, which is
-                                // a fine behaviour.
-                                let sync_state = consensus_service.sync_state().await;
-                                eprint!(
-                                    "{}\r",
-                                    smoldot::informant::InformantLine {
-                                        enable_colors: match cli_options.color {
-                                            cli::ColorChoice::Always => true,
-                                            cli::ColorChoice::Never => false,
-                                        },
-                                        chain_name: chain_spec.name(),
-                                        relay_chain: if let Some(relay_chain_spec) =
-                                            &relay_chain_spec
-                                        {
-                                            let relay_sync_state = relay_chain_consensus_service
-                                                .as_ref()
-                                                .unwrap()
-                                                .sync_state()
-                                                .await;
-                                            Some(smoldot::informant::RelayChain {
-                                                chain_name: relay_chain_spec.name(),
-                                                best_number: relay_sync_state.best_block_number,
-                                            })
-                                        } else {
-                                            None
-                                        },
-                                        max_line_width: terminal_size::terminal_size()
-                                            .map_or(80, |(w, _)| w.0.into()),
-                                        num_peers: u64::try_from(
-                                            network_service.num_peers(0).await
-                                        )
-                                        .unwrap_or(u64::max_value()),
-                                        num_network_connections: u64::try_from(
-                                            network_service.num_established_connections().await
-                                        )
-                                        .unwrap_or(u64::max_value()),
-                                        best_number: sync_state.best_block_number,
-                                        finalized_number: sync_state.finalized_block_number,
-                                        best_hash: &sync_state.best_block_hash,
-                                        finalized_hash: &sync_state.finalized_block_hash,
-                                        network_known_best,
-                                    }
-                                );
-                            }
-
-                            Event::NetworkEvent(network_event) => {
-                                // Update `network_known_best`.
-                                match network_event {
-                                    network_service::Event::BlockAnnounce {
-                                        chain_index: 0,
-                                        header,
-                                        ..
-                                    } => match network_known_best {
-                                        Some(n) if n >= header.number => {}
-                                        _ => network_known_best = Some(header.number),
-                                    },
-                                    network_service::Event::Connected {
-                                        chain_index: 0,
-                                        best_block_number,
-                                        ..
-                                    } => match network_known_best {
-                                        Some(n) if n >= best_block_number => {}
-                                        _ => network_known_best = Some(best_block_number),
-                                    },
-                                    _ => {}
-                                }
-                            }
+                            _ => {}
                         }
                     }
                 }
-            })
-            .detach();
-    }
+            }
+        }
+    });
 
     debug_assert!(network_events_receivers.next().is_none());
 
     // Block the current thread until `ctrl-c` is invoked by the user.
-    let _ = executor.run(ctrlc_rx).await;
+    let _ = executor.run(ctrlc_detected).await;
 
     if matches!(cli_output, cli::Output::Informant) {
         // Adding a new line after the informant so that the user's shell doesn't
         // overwrite it.
         eprintln!();
+    }
+
+    // Stop the task that holds everything alive, in order to start dropping the services.
+    drop(main_task);
+
+    // Finish running all tasks so that everything is shut down in a clean way.
+    while !executor.is_empty() {
+        executor.tick().await;
     }
 }
 
