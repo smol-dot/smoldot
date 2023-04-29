@@ -31,10 +31,9 @@ use crate::run::{database_thread, jaeger_service};
 
 use core::{cmp, future::Future, mem, pin::Pin, task::Poll, time::Duration};
 use futures_channel::{mpsc, oneshot};
-use futures_util::{future, stream, SinkExt as _, StreamExt as _};
+use futures_util::{stream, SinkExt as _, StreamExt as _};
 use hashbrown::HashMap;
-use smol::lock::Mutex;
-use smol::net::TcpStream;
+use smol::{future, lock::Mutex, net::TcpStream};
 use smoldot::{
     database::full_sqlite,
     header,
@@ -60,7 +59,7 @@ mod tasks;
 /// Configuration for a [`NetworkService`].
 pub struct Config {
     /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(future::BoxFuture<'static, ()>) + Send>,
+    pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
 
     /// Number of event receivers returned by [`NetworkService::new`].
     pub num_events_receivers: usize,
@@ -139,8 +138,10 @@ pub struct NetworkService {
     jaeger_service: Arc<jaeger_service::JaegerService>,
 
     /// Channel to send messages to the background task.
-    // TODO: shut down the background task when the service gets dropped
     to_background_tx: Mutex<mpsc::Sender<ToBackground>>,
+
+    /// Notified when the service shuts down.
+    foreground_shutdown: event_listener::Event,
 }
 
 enum ToBackground {
@@ -189,6 +190,7 @@ enum ToBackground {
         chain_index: usize,
         result_tx: oneshot::Sender<usize>,
     },
+    ForegroundShutdown,
 }
 struct Inner {
     /// Value provided through [`Config::identify_agent_version`].
@@ -222,7 +224,7 @@ struct Inner {
     num_pending_out_attempts: usize,
 
     /// See [`Config::tasks_executor`].
-    tasks_executor: Box<dyn FnMut(future::BoxFuture<'static, ()>) + Send>,
+    tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
 
     active_connections: HashMap<
         service::ConnectionId,
@@ -312,6 +314,7 @@ impl NetworkService {
         }
 
         let (to_background_tx, to_background_rx) = mpsc::channel(64);
+        let foreground_shutdown = event_listener::Event::new();
 
         let local_peer_id =
             peer_id::PublicKey::Ed25519(*network.noise_key().libp2p_public_ed25519_key())
@@ -385,10 +388,18 @@ impl NetworkService {
             // Spawn a background task dedicated to this listener.
             (inner.tasks_executor)(Box::pin({
                 let mut to_background_tx = to_background_tx.clone();
+                let mut on_foreground_shutdown = foreground_shutdown.listen();
                 async move {
-                    while !to_background_tx.is_closed() {
-                        // TODO: stop the await if `to_background_rx` gets closed
-                        let (socket, addr) = match tcp_listener.accept().await {
+                    loop {
+                        let Some(accept_result) =
+                            future::or(async {
+                                (&mut on_foreground_shutdown).await;
+                                None
+                            }, async { Some(tcp_listener.accept().await) })
+                            .await
+                            else { break };
+
+                        let (socket, addr) = match accept_result {
                             Ok(v) => v,
                             Err(_) => {
                                 // Errors here can happen if the accept failed, for example if no
@@ -433,23 +444,48 @@ impl NetworkService {
             }))
         }
 
+        // Spawn a task that sends a "shutdown" message whenever the service shuts down.
+        (inner.tasks_executor)({
+            let on_foreground_shutdown = foreground_shutdown.listen();
+            let mut to_background_tx = to_background_tx.clone();
+            Box::pin(async move {
+                let _ = on_foreground_shutdown.await;
+                let _ = to_background_tx
+                    .send(ToBackground::ForegroundShutdown)
+                    .await;
+            })
+        });
+
         // Spawn task starts a discovery request at a periodic interval.
         // This is done through a separate task due to ease of implementation.
         (inner.tasks_executor)(Box::pin({
             let mut to_background_tx = to_background_tx.clone();
+            let mut on_foreground_shutdown = foreground_shutdown.listen();
             async move {
                 let mut next_discovery = Duration::from_secs(1);
 
                 loop {
-                    smol::Timer::after(next_discovery).await;
+                    let still_alive = future::race(
+                        async {
+                            smol::Timer::after(next_discovery).await;
+                            true
+                        },
+                        async {
+                            (&mut on_foreground_shutdown).await;
+                            false
+                        },
+                    )
+                    .await;
+                    if !still_alive {
+                        break;
+                    }
+
                     next_discovery = cmp::min(next_discovery * 2, Duration::from_secs(120));
                     let (when_done, when_done_rx) = oneshot::channel();
                     let _ = to_background_tx
                         .send(ToBackground::StartKademliaDiscoveries { when_done })
                         .await;
-                    if when_done_rx.await.is_err() {
-                        return;
-                    }
+                    let _ = when_done_rx.await;
                 }
             }
         }));
@@ -459,6 +495,7 @@ impl NetworkService {
             local_peer_id,
             jaeger_service: config.jaeger_service,
             to_background_tx: Mutex::new(to_background_tx),
+            foreground_shutdown,
         });
 
         // Spawn the main task dedicated to processing the network.
@@ -642,6 +679,12 @@ impl NetworkService {
         }
 
         result
+    }
+}
+
+impl Drop for NetworkService {
+    fn drop(&mut self) {
+        self.foreground_shutdown.notify(usize::max_value());
     }
 }
 
@@ -1074,12 +1117,12 @@ async fn background_task(mut inner: Inner) {
         let message = match inner.event_senders {
             either::Left(_) => inner.to_background_rx.next().await.unwrap(),
             either::Right(sending) => {
-                match future::select(inner.to_background_rx.next(), sending).await {
-                    future::Either::Left((message, sending)) => {
+                match futures_util::future::select(inner.to_background_rx.next(), sending).await {
+                    futures_util::future::Either::Left((message, sending)) => {
                         inner.event_senders = either::Right(sending);
                         message.unwrap()
                     }
-                    future::Either::Right((event_senders, _)) => {
+                    futures_util::future::Either::Right((event_senders, _)) => {
                         inner.event_senders = either::Left(event_senders);
                         continue;
                     }
@@ -1181,6 +1224,10 @@ async fn background_task(mut inner: Inner) {
                 let _ = when_done.send(());
 
                 inner.process_network_service_events = true;
+            }
+
+            ToBackground::ForegroundShutdown => {
+                return;
             }
 
             ToBackground::ForegroundAnnounceBlock {
