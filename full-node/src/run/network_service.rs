@@ -1053,160 +1053,159 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
         }
 
         // TODO: this code block is obviously way too long; split into a struct
-        futures_util::select! {
-            // Inject in the coordinator the messages that the connections have generated.
+        match inner.to_background_rx.next().await.unwrap() {
+            ToBackground::FromConnectionTask {
+                connection_id,
+                opaque_message,
+                connection_now_dead,
+            } => {
+                if let Some(opaque_message) = opaque_message {
+                    inner
+                        .network
+                        .inject_connection_message(connection_id, opaque_message);
+                }
 
-            message = inner.to_background_rx.next().fuse().map(|v| v.unwrap()) => {
-                match message {
-                    ToBackground::FromConnectionTask { connection_id, opaque_message, connection_now_dead } => {
-                        if let Some(opaque_message) = opaque_message {
-                            inner
-                                .network
-                                .inject_connection_message(connection_id, opaque_message);
-                        }
+                // TODO: it should be indicated by the coordinator when a connection dies
+                if connection_now_dead {
+                    let _was_in = inner.active_connections.remove(&connection_id);
+                    debug_assert!(_was_in.is_some());
+                }
 
-                        // TODO: it should be indicated by the coordinator when a connection dies
-                        if connection_now_dead {
-                            let _was_in = inner.active_connections.remove(&connection_id);
-                            debug_assert!(_was_in.is_some());
-                        }
+                inner.process_network_service_events = true;
+            }
 
-                        inner.process_network_service_events = true;
-                    }
+            ToBackground::ConnectionEstablishFail { info } => {
+                inner.num_pending_out_attempts -= 1;
+                inner.network.pending_outcome_err(info.id, true);
+                for chain_index in 0..inner.network.num_chains() {
+                    inner.unassign_slot_and_ban(chain_index, info.expected_peer_id.clone());
+                }
+                inner.process_network_service_events = true;
+            }
 
-                    ToBackground::ConnectionEstablishFail { info } => {
-                        inner.num_pending_out_attempts -= 1;
-                        inner.network.pending_outcome_err(info.id, true);
-                        for chain_index in 0..inner.network.num_chains() {
-                            inner.unassign_slot_and_ban(chain_index, info.expected_peer_id.clone());
-                        }
-                        inner.process_network_service_events = true;
-                    }
+            ToBackground::ConnectionEstablishSuccess { socket, info } => {
+                inner.num_pending_out_attempts -= 1;
 
-                    ToBackground::ConnectionEstablishSuccess { socket, info } => {
-                        inner.num_pending_out_attempts -= 1;
+                let (connection_id, connection_task) =
+                    inner.network.pending_outcome_ok_single_stream(
+                        info.id,
+                        service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
+                    );
 
-                        let (connection_id, connection_task) =
-                            inner.network.pending_outcome_ok_single_stream(
-                                info.id,
-                                service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
-                            );
+                let (tx, rx) = mpsc::channel(16); // TODO: ?!
+                inner.active_connections.insert(connection_id, tx);
 
-                        let (tx, rx) = mpsc::channel(16); // TODO: ?!
-                        inner.active_connections.insert(connection_id, tx);
+                (inner.tasks_executor)(Box::pin(tasks::established_connection_task(
+                    socket,
+                    connection_id,
+                    connection_task,
+                    rx,
+                    inner.to_background_tx.clone(),
+                )));
 
-                        (inner.tasks_executor)(Box::pin(tasks::established_connection_task(
-                            socket,
-                            connection_id,
-                            connection_task,
-                            rx,
-                            inner.to_background_tx.clone(),
-                        )));
+                inner.process_network_service_events = true;
+            }
 
-                        inner.process_network_service_events = true;
-                    }
+            ToBackground::IncomingConnection {
+                socket,
+                multiaddr,
+                when_connected,
+            } => {
+                let (connection_id, connection_task) =
+                    inner.network.add_single_stream_incoming_connection(
+                        when_connected,
+                        service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
+                        multiaddr,
+                    );
 
-                    ToBackground::IncomingConnection { socket, multiaddr, when_connected } => {
-                        let (connection_id, connection_task) =
-                            inner.network.add_single_stream_incoming_connection(
-                                when_connected,
-                                service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
-                                multiaddr,
-                            );
+                let (tx, rx) = mpsc::channel(16); // TODO: ?!
+                inner.active_connections.insert(connection_id, tx);
 
-                        let (tx, rx) = mpsc::channel(16); // TODO: ?!
-                        inner.active_connections.insert(connection_id, tx);
+                (inner.tasks_executor)(Box::pin(tasks::established_connection_task(
+                    socket,
+                    connection_id,
+                    connection_task,
+                    rx,
+                    inner.to_background_tx.clone(),
+                )));
 
-                        (inner.tasks_executor)(Box::pin(tasks::established_connection_task(
-                            socket,
-                            connection_id,
-                            connection_task,
-                            rx,
-                            inner.to_background_tx.clone(),
-                        )));
+                inner.process_network_service_events = true;
+            }
 
-                        inner.process_network_service_events = true;
-                    }
+            ToBackground::StartKademliaDiscoveries { when_done } => {
+                for chain_index in 0..inner.databases.len() {
+                    let operation_id = inner
+                        .network
+                        .start_kademlia_discovery_round(Instant::now(), chain_index);
+                    let _prev_val = inner
+                        .kademlia_discovery_operations
+                        .insert(operation_id, chain_index);
+                    debug_assert!(_prev_val.is_none());
+                }
 
-                    ToBackground::StartKademliaDiscoveries { when_done } => {
-                        for chain_index in 0..inner.databases.len() {
-                            let operation_id = inner
-                                .network
-                                .start_kademlia_discovery_round(Instant::now(), chain_index);
-                            let _prev_val = inner
-                                .kademlia_discovery_operations
-                                .insert(operation_id, chain_index);
-                            debug_assert!(_prev_val.is_none());
-                        }
+                let _ = when_done.send(());
 
-                        let _ = when_done.send(());
+                inner.process_network_service_events = true;
+            }
 
-                        inner.process_network_service_events = true;
-                    }
+            ToBackground::ForegroundAnnounceBlock {
+                target,
+                chain_index,
+                scale_encoded_header,
+                is_best,
+                result_tx,
+            } => {
+                // The call to `send_block_announce` below panics if we have no active connection.
+                let result = if inner.network.can_send_block_announces(&target, chain_index) {
+                    inner
+                        .network
+                        .send_block_announce(&target, chain_index, &scale_encoded_header, is_best)
+                        .map_err(QueueNotificationError::Queue)
+                } else {
+                    Err(QueueNotificationError::NoConnection)
+                };
 
-                    ToBackground::ForegroundAnnounceBlock {
-                        target,
-                        chain_index,
-                        scale_encoded_header,
-                        is_best,
-                        result_tx,
-                    } => {
-                        // The call to `send_block_announce` below panics if we have no active connection.
-                        let result = if inner
-                            .network
-                            .can_send_block_announces(&target, chain_index)
-                        {
-                            inner
-                                .network
-                                .send_block_announce(&target, chain_index, &scale_encoded_header, is_best)
-                                .map_err(QueueNotificationError::Queue)
-                        } else {
-                            Err(QueueNotificationError::NoConnection)
-                        };
-
-                        let _ = result_tx.send(result);
-                    }
-                    ToBackground::ForegroundSetLocalBestBlock {
-                        chain_index,
-                        best_hash,
-                        best_number,
-                    } => {
-                        inner
-                            .network
-                            .set_local_best_block(chain_index, best_hash, best_number);
-                    }
-                    ToBackground::ForegroundBlocksRequest {
-                        target,
+                let _ = result_tx.send(result);
+            }
+            ToBackground::ForegroundSetLocalBestBlock {
+                chain_index,
+                best_hash,
+                best_number,
+            } => {
+                inner
+                    .network
+                    .set_local_best_block(chain_index, best_hash, best_number);
+            }
+            ToBackground::ForegroundBlocksRequest {
+                target,
+                chain_index,
+                config,
+                result_tx,
+            } => {
+                // The call to `start_blocks_request` below panics if we have no active connection.
+                if inner.network.can_start_requests(&target) {
+                    let request_id = inner.network.start_blocks_request(
+                        Instant::now(),
+                        &target,
                         chain_index,
                         config,
-                        result_tx,
-                    } => {
-                        // The call to `start_blocks_request` below panics if we have no active connection.
-                        if inner.network.can_start_requests(&target) {
-                            let request_id = inner.network.start_blocks_request(
-                                Instant::now(),
-                                &target,
-                                chain_index,
-                                config,
-                                Duration::from_secs(12),
-                            );
+                        Duration::from_secs(12),
+                    );
 
-                            // TODO: somehow cancel the request if the `rx` is dropped?
-                            inner.blocks_requests.insert(request_id, result_tx);
-                        } else {
-                            let _ = result_tx.send(Err(BlocksRequestError::NoConnection));
-                        }
-                    }
-                    ToBackground::ForegroundGetNumEstablishedConnections { result_tx } => {
-                        let _ = result_tx.send(inner.network.num_established_connections());
-                    }
-                    ToBackground::ForegroundGetNumPeers {
-                        chain_index,
-                        result_tx,
-                    } => {
-                        let _ = result_tx.send(inner.network.num_peers(chain_index));
-                    }
+                    // TODO: somehow cancel the request if the `rx` is dropped?
+                    inner.blocks_requests.insert(request_id, result_tx);
+                } else {
+                    let _ = result_tx.send(Err(BlocksRequestError::NoConnection));
                 }
+            }
+            ToBackground::ForegroundGetNumEstablishedConnections { result_tx } => {
+                let _ = result_tx.send(inner.network.num_established_connections());
+            }
+            ToBackground::ForegroundGetNumPeers {
+                chain_index,
+                result_tx,
+            } => {
+                let _ = result_tx.send(inner.network.num_peers(chain_index));
             }
         }
     }
