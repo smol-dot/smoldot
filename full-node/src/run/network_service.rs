@@ -220,13 +220,13 @@ struct Inner {
 
     messages_from_connections_tx: mpsc::Sender<(
         service::ConnectionId,
-        service::ConnectionToCoordinator,
+        Option<service::ConnectionToCoordinator>,
         bool,
     )>,
 
     messages_from_connections_rx: mpsc::Receiver<(
         service::ConnectionId,
-        service::ConnectionToCoordinator,
+        Option<service::ConnectionToCoordinator>,
         bool,
     )>,
 
@@ -679,9 +679,11 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
         futures_util::select! {
             // Inject in the coordinator the messages that the connections have generated.
             (connection_id, message, connection_is_dead) = inner.messages_from_connections_rx.next().fuse().map(|v| v.unwrap()) => {
-                inner
-                    .network
-                    .inject_connection_message(connection_id, message);
+                if let Some(message) = message {
+                    inner
+                        .network
+                        .inject_connection_message(connection_id, message);
+                }
 
                 // TODO: it should be indicated by the coordinator when a connection dies
                 if connection_is_dead {

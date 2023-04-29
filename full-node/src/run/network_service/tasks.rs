@@ -88,7 +88,7 @@ pub(super) async fn established_connection_task(
     coordinator_to_connection: mpsc::Receiver<service::CoordinatorToConnection<Instant>>,
     mut connection_to_coordinator: mpsc::Sender<(
         service::ConnectionId,
-        service::ConnectionToCoordinator,
+        Option<service::ConnectionToCoordinator>,
         bool,
     )>,
 ) {
@@ -175,10 +175,7 @@ pub(super) async fn established_connection_task(
         // this function.
         let (mut task_update, message) = connection_task.pull_message_to_coordinator();
 
-        // TODO: the logic of this module relies on the fact that we send a message to the coordinator to indicate that the task is going to die, otherwise no clean up is done in the background task
-        debug_assert!(task_update.is_some() || message.is_some());
-
-        if let Some(message) = message {
+        if message.is_some() || task_update.is_none() {
             // Sending this message might take a long time (in case the coordinator is busy),
             // but this is intentional and serves as a back-pressure mechanism.
             // However, it is important to continue processing the messages coming from the
