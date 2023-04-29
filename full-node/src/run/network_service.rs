@@ -31,9 +31,9 @@ use crate::run::{database_thread, jaeger_service};
 
 use async_lock::Mutex;
 use async_std::net::TcpStream;
-use core::{cmp, mem, task::Poll, time::Duration};
+use core::{cmp, future::Future, mem, pin::Pin, task::Poll, time::Duration};
 use futures_channel::{mpsc, oneshot};
-use futures_util::{future, stream, FutureExt as _, SinkExt as _, StreamExt as _};
+use futures_util::{future, stream, SinkExt as _, StreamExt as _};
 use hashbrown::HashMap;
 use smoldot::{
     database::full_sqlite,
@@ -195,7 +195,13 @@ struct Inner {
     identify_agent_version: String,
 
     /// Sending events through the public API.
-    event_senders: Vec<mpsc::Sender<Event>>,
+    ///
+    /// Contains either senders, or a `Future` that is currently sending an event and will yield
+    /// the senders back once it is finished.
+    event_senders: either::Either<
+        Vec<mpsc::Sender<Event>>,
+        Pin<Box<dyn Future<Output = Vec<mpsc::Sender<Event>>> + Send>>,
+    >,
 
     /// Databases to use to read blocks from when answering requests.
     databases: Vec<Arc<database_thread::DatabaseThread>>,
@@ -315,7 +321,7 @@ impl NetworkService {
         let mut inner = Inner {
             local_peer_id: local_peer_id.clone(),
             identify_agent_version: config.identify_agent_version,
-            event_senders,
+            event_senders: either::Left(event_senders),
             databases,
             num_pending_out_attempts: 0,
             to_background_rx,
@@ -703,7 +709,7 @@ async fn background_task(mut inner: Inner) {
                 .unwrap();
         }
 
-        if inner.process_network_service_events {
+        if inner.process_network_service_events && matches!(inner.event_senders, either::Left(_)) {
             let event = loop {
                 let inner_event = match inner.network.next_event(Instant::now()) {
                     Some(ev) => ev,
@@ -967,18 +973,26 @@ async fn background_task(mut inner: Inner) {
                 // Continue processing events.
                 inner.process_network_service_events = true;
 
-                // This little `if` avoids having to do `event.clone()` if we don't have to.
-                if inner.event_senders.len() == 1 {
-                    let _ = inner.event_senders[0].send(event).await;
-                } else {
-                    for sender in inner.event_senders.iter_mut() {
-                        // For simplicity we don't get rid of closed senders because senders
-                        // aren't supposed to close, and that leaving closed senders in the
-                        // list doesn't have any consequence other than one extra iteration
-                        // every time.
-                        let _ = sender.send(event.clone()).await;
+                // We check this before generating an event.
+                let either::Left(mut event_senders) = inner.event_senders
+                    else { unreachable!() };
+
+                inner.event_senders = either::Right(Box::pin(async move {
+                    // This little `if` avoids having to do `event.clone()` if we don't have to.
+                    if event_senders.len() == 1 {
+                        let _ = event_senders[0].send(event).await;
+                    } else {
+                        for sender in event_senders.iter_mut() {
+                            // For simplicity we don't get rid of closed senders because senders
+                            // aren't supposed to close, and that leaving closed senders in the
+                            // list doesn't have any consequence other than one extra iteration
+                            // every time.
+                            let _ = sender.send(event.clone()).await;
+                        }
                     }
-                }
+
+                    event_senders
+                }));
             }
 
             // TODO: doc
@@ -1057,12 +1071,24 @@ async fn background_task(mut inner: Inner) {
             }
         }
 
-        if inner.process_network_service_events {
-            continue;
-        }
+        let message = match inner.event_senders {
+            either::Left(_) => inner.to_background_rx.next().await.unwrap(),
+            either::Right(sending) => {
+                match future::select(inner.to_background_rx.next(), sending).await {
+                    future::Either::Left((message, sending)) => {
+                        inner.event_senders = either::Right(sending);
+                        message.unwrap()
+                    }
+                    future::Either::Right((event_senders, _)) => {
+                        inner.event_senders = either::Left(event_senders);
+                        continue;
+                    }
+                }
+            }
+        };
 
         // TODO: this code block is obviously way too long; split into a struct
-        match inner.to_background_rx.next().await.unwrap() {
+        match message {
             ToBackground::FromConnectionTask {
                 connection_id,
                 opaque_message,
