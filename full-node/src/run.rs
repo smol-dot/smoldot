@@ -460,7 +460,10 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     });
 
     let consensus_service = consensus_service::ConsensusService::new(consensus_service::Config {
-        tasks_executor: &mut |task| threads_pool.spawn_ok(task),
+        tasks_executor: {
+            let threads_pool = threads_pool.clone();
+            Box::new(move |task| threads_pool.spawn_ok(task))
+        },
         genesis_block_hash,
         network_events_receiver: network_events_receivers.next().unwrap(),
         network_service: (network_service.clone(), 0),
@@ -475,7 +478,10 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     let relay_chain_consensus_service = if let Some(relay_chain_database) = relay_chain_database {
         Some(
             consensus_service::ConsensusService::new(consensus_service::Config {
-                tasks_executor: &mut |task| threads_pool.spawn_ok(task),
+                tasks_executor: {
+                    let threads_pool = threads_pool.clone();
+                    Box::new(move |task| threads_pool.spawn_ok(task))
+                },
                 genesis_block_hash: relay_genesis_chain_information
                     .as_ref()
                     .unwrap()

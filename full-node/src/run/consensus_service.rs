@@ -28,7 +28,8 @@ use crate::run::{database_thread, jaeger_service, network_service};
 
 use async_lock::Mutex;
 use core::{num::NonZeroU32, ops};
-use futures_util::{future, stream, FutureExt as _, StreamExt as _};
+use futures_channel::{mpsc, oneshot};
+use futures_util::{future, stream, FutureExt as _, SinkExt as _, StreamExt as _};
 use hashbrown::HashSet;
 use smoldot::{
     author,
@@ -43,16 +44,16 @@ use smoldot::{
     trie::{bytes_to_nibbles, nibbles_to_bytes_suffix_extend, trie_structure},
 };
 use std::{
-    iter,
+    iter, mem,
     num::NonZeroU64,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 /// Configuration for a [`ConsensusService`].
-pub struct Config<'a> {
+pub struct Config {
     /// Closure that spawns background tasks.
-    pub tasks_executor: &'a mut dyn FnMut(future::BoxFuture<'static, ()>),
+    pub tasks_executor: Box<dyn FnMut(future::BoxFuture<'static, ()>) + Send>,
 
     /// Database to use to read and write information about the chain.
     pub database: Arc<database_thread::DatabaseThread>,
@@ -120,7 +121,7 @@ pub struct ConsensusService {
 
 impl ConsensusService {
     /// Initializes the [`ConsensusService`] with the given configuration.
-    pub async fn new(config: Config<'_>) -> Arc<Self> {
+    pub async fn new(config: Config) -> Arc<Self> {
         // Perform the initial access to the database to load a bunch of information.
         let (
             finalized_block_hash,
@@ -213,81 +214,81 @@ impl ConsensusService {
             finalized_block_hash,
         }));
 
-        // Spawn the background task that synchronizes blocks and updates the database.
-        (config.tasks_executor)({
-            let mut sync = all::AllSync::new(all::Config {
-                chain_information: finalized_chain_information,
-                block_number_bytes: config.block_number_bytes,
-                allow_unknown_consensus_engines: false,
-                sources_capacity: 32,
-                blocks_capacity: {
-                    // This is the maximum number of blocks between two consecutive justifications.
-                    1024
-                },
-                max_disjoint_headers: 1024,
-                max_requests_per_block: NonZeroU32::new(3).unwrap(),
-                download_ahead_blocks: {
-                    // Assuming a verification speed of 1k blocks/sec and a 99th download time
-                    // percentile of two second, the number of blocks to download ahead of time
-                    // in order to not block is 2000.
-                    // In practice, however, the verification speed and download speed depend on
-                    // the chain and the machine of the user.
-                    NonZeroU32::new(2000).unwrap()
-                },
-                full: Some(all::ConfigFull {
-                    finalized_runtime: {
-                        // Builds the runtime of the finalized block.
-                        // Assumed to always be valid, otherwise the block wouldn't have been
-                        // saved in the database, hence the large number of unwraps here.
-                        let heap_pages = executor::storage_heap_pages_to_value(
-                            finalized_block_storage
-                                .node(bytes_to_nibbles(b":heappages".iter().copied()))
-                                .into_occupied()
-                                .and_then(|node| node.into_user_data().as_ref())
-                                .map(|(hp, _)| &hp[..]),
-                        )
-                        .unwrap();
-                        let (module, _) = finalized_block_storage
-                            .node(bytes_to_nibbles(b":code".iter().copied()))
+        let mut sync = all::AllSync::new(all::Config {
+            chain_information: finalized_chain_information,
+            block_number_bytes: config.block_number_bytes,
+            allow_unknown_consensus_engines: false,
+            sources_capacity: 32,
+            blocks_capacity: {
+                // This is the maximum number of blocks between two consecutive justifications.
+                1024
+            },
+            max_disjoint_headers: 1024,
+            max_requests_per_block: NonZeroU32::new(3).unwrap(),
+            download_ahead_blocks: {
+                // Assuming a verification speed of 1k blocks/sec and a 99th download time
+                // percentile of two second, the number of blocks to download ahead of time
+                // in order to not block is 2000.
+                // In practice, however, the verification speed and download speed depend on
+                // the chain and the machine of the user.
+                NonZeroU32::new(2000).unwrap()
+            },
+            full: Some(all::ConfigFull {
+                finalized_runtime: {
+                    // Builds the runtime of the finalized block.
+                    // Assumed to always be valid, otherwise the block wouldn't have been
+                    // saved in the database, hence the large number of unwraps here.
+                    let heap_pages = executor::storage_heap_pages_to_value(
+                        finalized_block_storage
+                            .node(bytes_to_nibbles(b":heappages".iter().copied()))
                             .into_occupied()
-                            .unwrap()
-                            .into_user_data()
-                            .as_ref()
-                            .unwrap();
-                        executor::host::HostVmPrototype::new(executor::host::Config {
-                            module,
-                            heap_pages,
-                            exec_hint: executor::vm::ExecHint::CompileAheadOfTime, // TODO: probably should be decided by the optimisticsync
-                            allow_unresolved_imports: false,
-                        })
+                            .and_then(|node| node.into_user_data().as_ref())
+                            .map(|(hp, _)| &hp[..]),
+                    )
+                    .unwrap();
+                    let (module, _) = finalized_block_storage
+                        .node(bytes_to_nibbles(b":code".iter().copied()))
+                        .into_occupied()
                         .unwrap()
-                    },
-                }),
-            });
-
-            let block_author_sync_source =
-                sync.add_source(None, best_block_number, best_block_hash);
-
-            let background_sync = SyncBackground {
-                sync,
-                block_author_sync_source,
-                block_authoring: None,
-                authored_block: None,
-                slot_duration_author_ratio: config.slot_duration_author_ratio,
-                keystore: config.keystore,
-                finalized_block_storage,
-                sync_state: sync_state.clone(),
-                network_service: config.network_service.0,
-                network_chain_index: config.network_service.1,
-                from_network_service: config.network_events_receiver,
-                database: config.database,
-                peers_source_id_map: Default::default(),
-                block_requests_finished: stream::FuturesUnordered::new(),
-                jaeger_service: config.jaeger_service,
-            };
-
-            Box::pin(background_sync.run())
+                        .into_user_data()
+                        .as_ref()
+                        .unwrap();
+                    executor::host::HostVmPrototype::new(executor::host::Config {
+                        module,
+                        heap_pages,
+                        exec_hint: executor::vm::ExecHint::CompileAheadOfTime, // TODO: probably should be decided by the optimisticsync
+                        allow_unresolved_imports: false,
+                    })
+                    .unwrap()
+                },
+            }),
         });
+
+        let block_author_sync_source = sync.add_source(None, best_block_number, best_block_hash);
+
+        let (block_requests_finished_tx, block_requests_finished_rx) = mpsc::channel(0);
+
+        let background_sync = SyncBackground {
+            sync,
+            block_author_sync_source,
+            block_authoring: None,
+            authored_block: None,
+            slot_duration_author_ratio: config.slot_duration_author_ratio,
+            keystore: config.keystore,
+            finalized_block_storage,
+            sync_state: sync_state.clone(),
+            network_service: config.network_service.0,
+            network_chain_index: config.network_service.1,
+            from_network_service: config.network_events_receiver,
+            database: config.database,
+            peers_source_id_map: Default::default(),
+            tasks_executor: config.tasks_executor,
+            block_requests_finished_tx,
+            block_requests_finished_rx,
+            jaeger_service: config.jaeger_service,
+        };
+
+        background_sync.start();
 
         Arc::new(ConsensusService { sync_state })
     }
@@ -378,21 +379,23 @@ struct SyncBackground {
     /// source are removed.
     peers_source_id_map: hashbrown::HashMap<libp2p::PeerId, all::SourceId, fnv::FnvBuildHasher>,
 
+    /// See [`Config::tasks_executor`].
+    tasks_executor: Box<dyn FnMut(future::BoxFuture<'static, ()>) + Send>,
+
     /// Block requests that have been emitted on the networking service and that are still in
     /// progress. Each entry in this field also has an entry in [`SyncBackground::sync`].
-    block_requests_finished: stream::FuturesUnordered<
-        future::BoxFuture<
-            'static,
-            (
-                all::RequestId,
-                all::SourceId,
-                Result<
-                    Result<Vec<BlockData>, network_service::BlocksRequestError>,
-                    future::Aborted,
-                >,
-            ),
-        >,
-    >,
+    block_requests_finished_rx: mpsc::Receiver<(
+        all::RequestId,
+        all::SourceId,
+        Result<Vec<BlockData>, network_service::BlocksRequestError>,
+    )>,
+
+    /// Sending side of [`SyncBackground::block_requests_finished_rx`].
+    block_requests_finished_tx: mpsc::Sender<(
+        all::RequestId,
+        all::SourceId,
+        Result<Vec<BlockData>, network_service::BlocksRequestError>,
+    )>,
 
     /// See [`Config::database`].
     database: Arc<database_thread::DatabaseThread>,
@@ -412,6 +415,21 @@ struct NetworkSourceInfo {
 }
 
 impl SyncBackground {
+    fn start(mut self) {
+        // This function is a small hack because I didn't find a better way to store the executor
+        // within `Background` while at the same time spawning the `Background` using said
+        // executor.
+        let mut actual_executor =
+            mem::replace(&mut self.tasks_executor, Box::new(|_| unreachable!()));
+        let (tx, rx) = oneshot::channel();
+        actual_executor(Box::pin(async move {
+            let actual_executor = rx.await.unwrap();
+            self.tasks_executor = actual_executor;
+            self.run().await;
+        }));
+        tx.send(actual_executor).unwrap_or_else(|_| panic!());
+    }
+
     async fn run(mut self) {
         loop {
             self.start_network_requests().await;
@@ -601,36 +619,32 @@ impl SyncBackground {
                     }
                 },
 
-                (request_id, source_id, result) = self.block_requests_finished.select_next_some() => {
-                    // `result` is an error if the block request got cancelled by the sync state
-                    // machine.
+                (request_id, source_id, result) = self.block_requests_finished_rx.select_next_some() => {
                     // TODO: clarify this piece of code
-                    if let Ok(result) = result {
-                        let result = result.map_err(|_| ());
-                        let (_, response_outcome) = self.sync.blocks_request_response(request_id, result.map(|v| v.into_iter().map(|block| all::BlockRequestSuccessBlock {
-                            scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
-                            scale_encoded_extrinsics: block.body.unwrap(), // TODO: don't unwrap
-                            scale_encoded_justifications: block.justifications.unwrap_or_default(),
-                            user_data: (),
-                        })));
+                    let result = result.map_err(|_| ());
+                    let (_, response_outcome) = self.sync.blocks_request_response(request_id, result.map(|v| v.into_iter().map(|block| all::BlockRequestSuccessBlock {
+                        scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
+                        scale_encoded_extrinsics: block.body.unwrap(), // TODO: don't unwrap
+                        scale_encoded_justifications: block.justifications.unwrap_or_default(),
+                        user_data: (),
+                    })));
 
-                        match response_outcome {
-                            all::ResponseOutcome::Outdated
-                            | all::ResponseOutcome::Queued
-                            | all::ResponseOutcome::NotFinalizedChain { .. }
-                            | all::ResponseOutcome::AllAlreadyInChain { .. } => {
-                            }
+                    match response_outcome {
+                        all::ResponseOutcome::Outdated
+                        | all::ResponseOutcome::Queued
+                        | all::ResponseOutcome::NotFinalizedChain { .. }
+                        | all::ResponseOutcome::AllAlreadyInChain { .. } => {
                         }
+                    }
 
-                        // If the source was actually disconnected and has no other request in
-                        // progress, we clean it up.
-                        if self.sync[source_id].as_ref().map_or(false, |info| info.is_disconnected)
-                            && self.sync.source_num_ongoing_requests(source_id) == 0
-                        {
-                            let (info, mut _requests) = self.sync.remove_source(source_id);
-                            debug_assert!(_requests.next().is_none());
-                            self.peers_source_id_map.remove(&info.unwrap().peer_id).unwrap();
-                        }
+                    // If the source was actually disconnected and has no other request in
+                    // progress, we clean it up.
+                    if self.sync[source_id].as_ref().map_or(false, |info| info.is_disconnected)
+                        && self.sync.source_num_ongoing_requests(source_id) == 0
+                    {
+                        let (info, mut _requests) = self.sync.remove_source(source_id);
+                        debug_assert!(_requests.next().is_none());
+                        self.peers_source_id_map.remove(&info.unwrap().peer_id).unwrap();
                     }
                 },
             }
@@ -1028,8 +1042,17 @@ impl SyncBackground {
                     let (request, abort) = future::abortable(request);
                     let request_id = self.sync.add_request(source_id, request_info.into(), abort);
 
-                    self.block_requests_finished
-                        .push(request.map(move |r| (request_id, source_id, r)).boxed());
+                    (self.tasks_executor)(Box::pin({
+                        let mut block_requests_finished_tx =
+                            self.block_requests_finished_tx.clone();
+                        async move {
+                            if let Ok(result) = request.await {
+                                let _ = block_requests_finished_tx
+                                    .send((request_id, source_id, result))
+                                    .await;
+                            }
+                        }
+                    }));
                 }
                 all::DesiredRequest::GrandpaWarpSync { .. }
                 | all::DesiredRequest::StorageGetMerkleProof { .. }
