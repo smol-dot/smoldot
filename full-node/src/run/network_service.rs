@@ -1179,7 +1179,8 @@ async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<
                         // TODO: interrupt immediately if `connection_opening_outcome_tx` is dropped
                         let result = tasks::opening_connection_task(start_connect.clone()).await;
                         let _ = connection_opening_outcome_tx
-                            .send((result.map(|s| Box::new(s) as Box<_>), start_connect));
+                            .send((result.map(|s| Box::new(s) as Box<_>), start_connect))
+                            .await;
                     }));
 
                     guarded.process_network_service_events = future::Either::Left(future::ready(()));
