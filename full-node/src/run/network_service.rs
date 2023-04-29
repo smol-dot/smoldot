@@ -139,10 +139,16 @@ pub struct NetworkService {
     jaeger_service: Arc<jaeger_service::JaegerService>,
 
     /// Channel to send messages to the background task.
+    // TODO: shut down the background task when the service gets dropped
     to_background_tx: Mutex<mpsc::Sender<ToBackground>>,
 }
 
 enum ToBackground {
+    FromConnectionTask {
+        connection_id: service::ConnectionId,
+        opaque_message: Option<service::ConnectionToCoordinator>,
+        connection_now_dead: bool,
+    },
     ConnectionEstablishSuccess {
         socket: Box<dyn tasks::AsyncReadWrite + Send + Unpin>,
         info: service::StartConnect<Instant>,
@@ -221,18 +227,6 @@ struct Inner {
     next_kademlia_discovery: futures_timer::Delay,
     next_kademlia_discovery_increment: Duration,
 
-    messages_from_connections_tx: mpsc::Sender<(
-        service::ConnectionId,
-        Option<service::ConnectionToCoordinator>,
-        bool,
-    )>,
-
-    messages_from_connections_rx: mpsc::Receiver<(
-        service::ConnectionId,
-        Option<service::ConnectionToCoordinator>,
-        bool,
-    )>,
-
     process_network_service_events: future::Either<future::Ready<()>, future::Pending<()>>,
 
     /// Channel for the various tasks to send messages to the background task.
@@ -308,8 +302,7 @@ impl NetworkService {
             }
         }
 
-        let (to_background_tx, to_background_rx) = mpsc::channel(4);
-        let (messages_from_connections_tx, messages_from_connections_rx) = mpsc::channel(64);
+        let (to_background_tx, to_background_rx) = mpsc::channel(64);
 
         let local_peer_id =
             peer_id::PublicKey::Ed25519(*network.noise_key().libp2p_public_ed25519_key())
@@ -321,8 +314,6 @@ impl NetworkService {
             identify_agent_version: config.identify_agent_version,
             databases,
             num_pending_out_attempts: 0,
-            messages_from_connections_tx,
-            messages_from_connections_rx,
             next_kademlia_discovery: futures_timer::Delay::new(Duration::new(0, 0)),
             next_kademlia_discovery_increment: Duration::from_secs(1),
             to_background_rx,
@@ -673,21 +664,6 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
         // TODO: this code block is obviously way too long; split into a struct
         futures_util::select! {
             // Inject in the coordinator the messages that the connections have generated.
-            (connection_id, message, connection_is_dead) = inner.messages_from_connections_rx.next().fuse().map(|v| v.unwrap()) => {
-                if let Some(message) = message {
-                    inner
-                        .network
-                        .inject_connection_message(connection_id, message);
-                }
-
-                // TODO: it should be indicated by the coordinator when a connection dies
-                if connection_is_dead {
-                    let _was_in = inner.active_connections.remove(&connection_id);
-                    debug_assert!(_was_in.is_some());
-                }
-
-                inner.process_network_service_events = future::Either::Left(future::ready(()));
-            },
 
             _ = (&mut inner.next_kademlia_discovery).fuse() => {
                 inner.next_kademlia_discovery = futures_timer::Delay::new(inner.next_kademlia_discovery_increment);
@@ -708,6 +684,22 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
 
             message = inner.to_background_rx.next().fuse().map(|v| v.unwrap()) => {
                 match message {
+                    ToBackground::FromConnectionTask { connection_id, opaque_message, connection_now_dead } => {
+                        if let Some(opaque_message) = opaque_message {
+                            inner
+                                .network
+                                .inject_connection_message(connection_id, opaque_message);
+                        }
+
+                        // TODO: it should be indicated by the coordinator when a connection dies
+                        if connection_now_dead {
+                            let _was_in = inner.active_connections.remove(&connection_id);
+                            debug_assert!(_was_in.is_some());
+                        }
+
+                        inner.process_network_service_events = future::Either::Left(future::ready(()));
+                    }
+
                     ToBackground::ConnectionEstablishFail { info } => {
                         inner.num_pending_out_attempts -= 1;
                         inner.network.pending_outcome_err(info.id, true);
@@ -729,13 +721,12 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
                         let (tx, rx) = mpsc::channel(16); // TODO: ?!
                         inner.active_connections.insert(connection_id, tx);
 
-                        let messages_from_connections_tx = inner.messages_from_connections_tx.clone();
                         (inner.tasks_executor)(Box::pin(tasks::established_connection_task(
                             socket,
                             connection_id,
                             connection_task,
                             rx,
-                            messages_from_connections_tx,
+                            inner.to_background_tx.clone(),
                         )));
 
                         inner.process_network_service_events = future::Either::Left(future::ready(()));
@@ -752,13 +743,12 @@ async fn background_task(mut inner: Inner, mut event_senders: Vec<mpsc::Sender<E
                         let (tx, rx) = mpsc::channel(16); // TODO: ?!
                         inner.active_connections.insert(connection_id, tx);
 
-                        let messages_from_connections_tx = inner.messages_from_connections_tx.clone();
                         (inner.tasks_executor)(Box::pin(tasks::established_connection_task(
                             socket,
                             connection_id,
                             connection_task,
                             rx,
-                            messages_from_connections_tx,
+                            inner.to_background_tx.clone(),
                         )));
 
                         inner.process_network_service_events = future::Either::Left(future::ready(()));

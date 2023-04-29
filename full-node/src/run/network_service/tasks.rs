@@ -86,11 +86,7 @@ pub(super) async fn established_connection_task(
     connection_id: service::ConnectionId,
     mut connection_task: service::SingleStreamConnectionTask<Instant>,
     coordinator_to_connection: mpsc::Receiver<service::CoordinatorToConnection<Instant>>,
-    mut connection_to_coordinator: mpsc::Sender<(
-        service::ConnectionId,
-        Option<service::ConnectionToCoordinator>,
-        bool,
-    )>,
+    mut connection_to_coordinator: mpsc::Sender<super::ToBackground>,
 ) {
     // The socket is wrapped around a `WithBuffers` object containing a read buffer and a write
     // buffer. These are the buffers whose pointer is passed to `read(2)` and `write(2)` when
@@ -200,7 +196,11 @@ pub(super) async fn established_connection_task(
                 }
             }
             let result =
-                connection_to_coordinator.try_send((connection_id, message, task_update.is_none()));
+                connection_to_coordinator.try_send(super::ToBackground::FromConnectionTask {
+                    connection_id,
+                    opaque_message: message,
+                    connection_now_dead: task_update.is_none(),
+                });
             if result.is_err() {
                 return;
             }
