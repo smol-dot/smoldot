@@ -42,15 +42,20 @@ pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 pub(crate) struct Platform {
-    new_task_tx: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
+    new_task_tx: mpsc::UnboundedSender<future::BoxFuture<'static, ()>>,
+    enable_current_task: bool,
 }
 
 impl Platform {
     // TODO: consider doing the spawning entirely here, instead of providing a channel
     pub fn new(
-        new_task_tx: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
+        new_task_tx: mpsc::UnboundedSender<future::BoxFuture<'static, ()>>,
+        enable_current_task: bool,
     ) -> Self {
-        Self { new_task_tx }
+        Self {
+            new_task_tx,
+            enable_current_task,
+        }
     }
 }
 
@@ -98,9 +103,44 @@ impl smoldot_light::platform::PlatformRef for Platform {
     }
 
     fn spawn_task(&self, task_name: Cow<str>, task: future::BoxFuture<'static, ()>) {
-        self.new_task_tx
-            .unbounded_send((task_name.into_owned(), task))
-            .unwrap()
+        // The code below processes tasks that have names.
+        #[pin_project::pin_project]
+        struct FutureAdapter<F> {
+            name: String,
+            enable_current_task: bool,
+            #[pin]
+            future: F,
+        }
+
+        impl<F: Future> Future for FutureAdapter<F> {
+            type Output = F::Output;
+            fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
+                let this = self.project();
+                if *this.enable_current_task {
+                    unsafe {
+                        bindings::current_task_entered(
+                            u32::try_from(this.name.as_bytes().as_ptr() as usize).unwrap(),
+                            u32::try_from(this.name.as_bytes().len()).unwrap(),
+                        )
+                    }
+                }
+                let out = this.future.poll(cx);
+                if *this.enable_current_task {
+                    unsafe {
+                        bindings::current_task_exit();
+                    }
+                }
+                out
+            }
+        }
+
+        let task = FutureAdapter {
+            name: task_name.into_owned(),
+            enable_current_task: self.enable_current_task,
+            future: task,
+        };
+
+        self.new_task_tx.unbounded_send(Box::pin(task)).unwrap()
     }
 
     fn client_name(&self) -> Cow<str> {
