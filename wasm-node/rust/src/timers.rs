@@ -24,12 +24,11 @@
 
 use core::{
     cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd},
-    future::Future,
+    future,
     pin::Pin,
     task::{Context, Poll, Waker},
     time::Duration,
 };
-use futures_util::future;
 use std::{collections::BinaryHeap, sync::Mutex, time::Instant};
 
 pub(crate) fn timer_finished(timer_id: u32) {
@@ -93,7 +92,7 @@ impl Delay {
     }
 }
 
-impl Future for Delay {
+impl future::Future for Delay {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
@@ -114,12 +113,6 @@ impl Future for Delay {
 
         lock.timers[timer_id].waker = Some(cx.waker().clone());
         Poll::Pending
-    }
-}
-
-impl future::FusedFuture for Delay {
-    fn is_terminated(&self) -> bool {
-        self.timer_id.is_none()
     }
 }
 
