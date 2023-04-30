@@ -15,13 +15,16 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::{alloc, bindings, cpu_rate_limiter, platform, timers::Delay};
+use crate::{alloc, bindings, platform, timers::Delay};
 
-use core::{future::Future, pin::Pin, time::Duration};
-use futures_channel::mpsc;
-use futures_util::{future, stream, FutureExt as _, StreamExt as _};
+use core::time::Duration;
+use futures_util::stream;
 use smoldot::informant::BytesDisplay;
-use std::{panic, sync::atomic::Ordering, task};
+use smoldot_light::platform::PlatformRef;
+use std::{
+    panic,
+    sync::{atomic::Ordering, Arc},
+};
 
 pub(crate) struct Client<TPlat: smoldot_light::platform::PlatformRef, TChain> {
     pub(crate) smoldot: smoldot_light::Client<TPlat, TChain>,
@@ -31,8 +34,17 @@ pub(crate) struct Client<TPlat: smoldot_light::platform::PlatformRef, TChain> {
 
     pub(crate) periodically_yield: bool,
 
-    /// Infinite-running task that must be executed in order to drive the execution of the client.
-    pub(crate) main_task: future::BoxFuture<'static, core::convert::Infallible>, // TODO: use `!` once stable
+    /// Executor where background tasks are spawned.
+    pub(crate) executor: Arc<async_executor::Executor<'static>>,
+
+    pub(crate) max_divided_by_rate_limit_minus_one: f64,
+
+    /// Instead of sleeping regularly for short amounts of time, we instead continue running only
+    /// until the time we have to sleep reaches a certain threshold.
+    pub(crate) sleep_deprevation_sec: f64,
+
+    /// Prevent `main_task` from being called before this `Delay` is ready.
+    pub(crate) prevent_poll_until: crate::timers::Delay,
 }
 
 pub(crate) enum Chain {
@@ -92,119 +104,73 @@ pub(crate) fn init<TChain>(
     assert_ne!(rand::random::<u64>(), 0);
     assert_ne!(rand::random::<u64>(), rand::random::<u64>());
 
-    // A channel needs to be passed to the client in order for it to spawn background tasks.
-    // Since "spawning a task" isn't really something that a browser or Node environment can do
-    // efficiently, we instead combine all the asynchronous tasks into one `FuturesUnordered`
-    // below.
-    let (new_task_tx, mut new_task_rx) =
-        mpsc::unbounded::<(String, future::BoxFuture<'static, ()>)>();
+    // Since "spawning a task" isn't really something that a browser or Node environment do
+    // efficiently, we instead combine all the asynchronous tasks into one executor.
+    // TODO: we use an Executor instead of LocalExecutor because it is planned to allow multithreading; if this plan is abandoned, switch to SendWrapper<LocalExecutor>
+    let executor = Arc::new(async_executor::Executor::new());
 
-    // This is the main future that executes the entire client.
-    // It receives new tasks from `new_task_rx` and runs them.
-    let main_task = cpu_rate_limiter::CpuRateLimiter::new(
-        async move {
-            let mut all_tasks = stream::FuturesUnordered::new();
-
-            // The code below processes tasks that have names.
-            #[pin_project::pin_project]
-            struct FutureAdapter<F> {
-                name: String,
-                enable_current_task: bool,
-                #[pin]
-                future: F,
-            }
-
-            impl<F: Future> Future for FutureAdapter<F> {
-                type Output = F::Output;
-                fn poll(self: Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
-                    let this = self.project();
-                    if *this.enable_current_task {
-                        unsafe {
-                            bindings::current_task_entered(
-                                u32::try_from(this.name.as_bytes().as_ptr() as usize).unwrap(),
-                                u32::try_from(this.name.as_bytes().len()).unwrap(),
-                            )
-                        }
-                    }
-                    let out = this.future.poll(cx);
-                    if *this.enable_current_task {
-                        unsafe {
-                            bindings::current_task_exit();
-                        }
-                    }
-                    out
-                }
-            }
-
-            loop {
-                futures_util::select! {
-                    (new_task_name, new_task) = new_task_rx.select_next_some() => {
-                        all_tasks.push(FutureAdapter {
-                            name: new_task_name,
-                            enable_current_task,
-                            future: new_task,
-                        });
-                    },
-                    () = all_tasks.select_next_some() => {},
-                }
-            }
-        },
-        cpu_rate_limit,
-    )
-    .boxed();
+    let platform = platform::Platform::new(executor.clone(), enable_current_task);
 
     // Spawn a constantly-running task that periodically prints the total memory usage of
     // the node.
-    new_task_tx
-        .unbounded_send((
-            "memory-printer".to_owned(),
-            Box::pin(async move {
-                let mut previous_read_bytes = 0;
-                let mut previous_sent_bytes = 0;
-                let interval = 60;
+    platform.spawn_task(
+        "memory-printer".into(),
+        Box::pin(async move {
+            let mut previous_read_bytes = 0;
+            let mut previous_sent_bytes = 0;
+            let interval = 60;
 
-                loop {
-                    Delay::new(Duration::from_secs(interval)).await;
+            loop {
+                Delay::new(Duration::from_secs(interval)).await;
 
-                    // For the unwrap below to fail, the quantity of allocated would have to
-                    // not fit in a `u64`, which as of 2021 is basically impossible.
-                    let mem = u64::try_from(alloc::total_alloc_bytes()).unwrap();
+                // For the unwrap below to fail, the quantity of allocated would have to
+                // not fit in a `u64`, which as of 2021 is basically impossible.
+                let mem = u64::try_from(alloc::total_alloc_bytes()).unwrap();
 
-                    // Due to the way the calculation below is performed, sending or receiving
-                    // more than `type_of(TOTAL_BYTES_RECEIVED or TOTAL_BYTES_SENT)::max_value`
-                    // bytes within an interval will lead to an erroneous value being shown to the
-                    // user. At the time of writing of this comment, they are 64bits, so we just
-                    // assume that this can't happen. If it does happen, the fix would consist in
-                    // increasing the size of `TOTAL_BYTES_RECEIVED` or `TOTAL_BYTES_SENT`.
+                // Due to the way the calculation below is performed, sending or receiving
+                // more than `type_of(TOTAL_BYTES_RECEIVED or TOTAL_BYTES_SENT)::max_value`
+                // bytes within an interval will lead to an erroneous value being shown to the
+                // user. At the time of writing of this comment, they are 64bits, so we just
+                // assume that this can't happen. If it does happen, the fix would consist in
+                // increasing the size of `TOTAL_BYTES_RECEIVED` or `TOTAL_BYTES_SENT`.
 
-                    let bytes_rx = platform::TOTAL_BYTES_RECEIVED.load(Ordering::Relaxed);
-                    let avg_dl = bytes_rx.wrapping_sub(previous_read_bytes) / interval;
-                    previous_read_bytes = bytes_rx;
+                let bytes_rx = platform::TOTAL_BYTES_RECEIVED.load(Ordering::Relaxed);
+                let avg_dl = bytes_rx.wrapping_sub(previous_read_bytes) / interval;
+                previous_read_bytes = bytes_rx;
 
-                    let bytes_tx = platform::TOTAL_BYTES_SENT.load(Ordering::Relaxed);
-                    let avg_up = bytes_tx.wrapping_sub(previous_sent_bytes) / interval;
-                    previous_sent_bytes = bytes_tx;
+                let bytes_tx = platform::TOTAL_BYTES_SENT.load(Ordering::Relaxed);
+                let avg_up = bytes_tx.wrapping_sub(previous_sent_bytes) / interval;
+                previous_sent_bytes = bytes_tx;
 
-                    // Note that we also print the version at every interval, in order to increase
-                    // the chance of being able to know the version in case of truncated logs.
-                    log::info!(
-                        target: "smoldot",
-                        "Smoldot v{}. Current memory usage: {}. Average download: {}/s. Average upload: {}/s.",
-                        env!("CARGO_PKG_VERSION"),
-                        BytesDisplay(mem),
-                        BytesDisplay(avg_dl),
-                        BytesDisplay(avg_up)
-                    );
-                }
-            }),
-        ))
-        .unwrap();
+                // Note that we also print the version at every interval, in order to increase
+                // the chance of being able to know the version in case of truncated logs.
+                log::info!(
+                    target: "smoldot",
+                    "Smoldot v{}. Current memory usage: {}. Average download: {}/s. Average upload: {}/s.",
+                    env!("CARGO_PKG_VERSION"),
+                    BytesDisplay(mem),
+                    BytesDisplay(avg_dl),
+                    BytesDisplay(avg_up)
+                );
+            }
+        }),
+    );
+
+    let max_divided_by_rate_limit_minus_one =
+        (f64::from(u32::max_value()) / f64::from(cpu_rate_limit)) - 1.0;
+    // Note that it is legal for `max_divided_by_rate_limit_minus_one` to be +infinite
+    debug_assert!(
+        !max_divided_by_rate_limit_minus_one.is_nan() && max_divided_by_rate_limit_minus_one >= 0.0
+    );
 
     Client {
-        smoldot: smoldot_light::Client::new(platform::Platform::new(new_task_tx)),
+        smoldot: smoldot_light::Client::new(platform),
         chains: slab::Slab::with_capacity(8),
         periodically_yield,
-        main_task,
+        executor,
+        max_divided_by_rate_limit_minus_one,
+        sleep_deprevation_sec: 0.0,
+        prevent_poll_until: crate::timers::Delay::new(Duration::new(0, 0)),
     }
 }
 
