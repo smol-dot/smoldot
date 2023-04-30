@@ -25,6 +25,7 @@ import type { SmoldotWasmInstance } from './bindings.js';
 
 export interface Config {
     instance?: SmoldotWasmInstance,
+    memory: WebAssembly.Memory,
 
     /**
      * Array used to store the buffers provided to the Rust code.
@@ -253,12 +254,10 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
         // Must exit with an error. A human-readable message can be found in the WebAssembly
         // memory in the given buffer.
         panic: (ptr: number, len: number) => {
-            const instance = config.instance!;
-
             ptr >>>= 0;
             len >>>= 0;
 
-            const message = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), ptr, len);
+            const message = buffer.utf8BytesToString(new Uint8Array(config.memory.buffer), ptr, len);
             config.onPanic(message);
         },
 
@@ -268,11 +267,10 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
         },
 
         buffer_copy: (bufferIndex: number, targetPtr: number) => {
-            const instance = config.instance!;
             targetPtr = targetPtr >>> 0;
 
             const buf = config.bufferIndices[bufferIndex]!;
-            new Uint8Array(instance.exports.memory.buffer).set(buf, targetPtr);
+            new Uint8Array(config.memory.buffer).set(buf, targetPtr);
         },
 
         // Used by the Rust side to notify that a JSON-RPC response or subscription notification
@@ -287,15 +285,13 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
         log: (level: number, targetPtr: number, targetLen: number, messagePtr: number, messageLen: number) => {
             if (killedTracked.killed) return;
 
-            const instance = config.instance!;
-
             targetPtr >>>= 0;
             targetLen >>>= 0;
             messagePtr >>>= 0;
             messageLen >>>= 0;
 
             if (config.logCallback) {
-                const mem = new Uint8Array(instance.exports.memory.buffer);
+                const mem = new Uint8Array(config.memory.buffer);
                 let target = buffer.utf8BytesToString(mem, targetPtr, targetLen);
                 let message = buffer.utf8BytesToString(mem, messagePtr, messageLen);
                 config.logCallback(level, target, message);
@@ -352,7 +348,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                 if (killedTracked.killed)
                     throw new Error("killAll invoked");
 
-                const address = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), addrPtr, addrLen);
+                const address = buffer.utf8BytesToString(new Uint8Array(config.memory.buffer), addrPtr, addrLen);
 
                 const connec = config.connect({
                     address,
@@ -433,7 +429,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                     errorStr = error.toString();
                 }
 
-                const mem = new Uint8Array(instance.exports.memory.buffer);
+                const mem = new Uint8Array(config.memory.buffer);
                 config.bufferIndices[0] = new TextEncoder().encode(errorStr)
                 buffer.writeUInt32LE(mem, errorBufferIndexPtr, 0);
                 buffer.writeUInt8(mem, errorBufferIndexPtr + 4, isBadAddress ? 1 : 0);
@@ -466,12 +462,10 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
         stream_send: (connectionId: number, streamId: number, ptr: number, len: number) => {
             if (killedTracked.killed) return;
 
-            const instance = config.instance!;
-
             ptr >>>= 0;
             len >>>= 0;
 
-            const data = new Uint8Array(instance.exports.memory.buffer).slice(ptr, ptr + len);
+            const data = new Uint8Array(config.memory.buffer).slice(ptr, ptr + len);
             const connection = connections[connectionId]!;
             connection.send(data, streamId);  // TODO: docs says the streamId is provided only for multi-stream connections, but here it's always provided
         },
@@ -486,12 +480,10 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
         current_task_entered: (ptr: number, len: number) => {
             if (killedTracked.killed) return;
 
-            const instance = config.instance!;
-
             ptr >>>= 0;
             len >>>= 0;
 
-            const taskName = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), ptr, len);
+            const taskName = buffer.utf8BytesToString(new Uint8Array(config.memory.buffer), ptr, len);
             if (config.currentTaskCallback)
                 config.currentTaskCallback(taskName);
         },

@@ -91,7 +91,7 @@ export interface PlatformBindings {
     connect(config: ConnectionConfig): Connection;
 }
 
-export async function startInstance(config: Config, platformBindings: PlatformBindings): Promise<[SmoldotWasmInstance, Array<Uint8Array>]> {
+export async function startInstance(config: Config, platformBindings: PlatformBindings): Promise<[SmoldotWasmInstance, WebAssembly.Memory, Array<Uint8Array>]> {
     // The actual Wasm bytecode is base64-decoded then deflate-decoded from a constant found in a
     // different file.
     // This is suboptimal compared to using `instantiateStreaming`, but it is the most
@@ -102,8 +102,12 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
 
     const bufferIndices = new Array;
 
+    // TODO: proper initial/maximum values; it seems that they must exactly match what the wasm contains?
+    const memory = new WebAssembly.Memory({ shared: true, initial: 41, maximum: 16384 });
+
     // Used to bind with the smoldot-light bindings. See the `bindings-smoldot-light.js` file.
     const smoldotJsConfig: SmoldotBindingsConfig = {
+        memory,
         bufferIndices,
         connect: platformBindings.connect,
         onPanic: (message) => {
@@ -116,6 +120,7 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
 
     // Used to bind with the Wasi bindings. See the `bindings-wasi.js` file.
     const wasiConfig: WasiConfig = {
+        memory,
         envVars: [],
         getRandomValues: platformBindings.getRandomValues,
         performanceNow: platformBindings.performanceNow,
@@ -132,17 +137,18 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
     killAll = smoldotBindingsKillAll;
 
     // Start the Wasm virtual machine.
-    // The Rust code defines a list of imports that must be fulfilled by the environment. The second
-    // parameter provides their implementations.
+    // The Rust code defines a list of imports that must be fulfilled by the environment. The
+    // second parameter provides their implementations.
     const result = await WebAssembly.instantiate(wasmBytecode, {
         // The functions with the "smoldot" prefix are specific to smoldot.
         "smoldot": smoldotBindings,
         // As the Rust code is compiled for wasi, some more wasi-specific imports exist.
         "wasi_snapshot_preview1": wasiBindingsBuilder(wasiConfig),
+        // The memory is imported by the Wasm rather than exported.
+        "env": { "memory": memory, }
     });
 
     const instance = result.instance as SmoldotWasmInstance;
     smoldotJsConfig.instance = instance;
-    wasiConfig.instance = instance;
-    return [instance, bufferIndices];
+    return [instance, memory, bufferIndices];  // TODO: `as`
 }

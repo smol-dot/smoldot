@@ -39,7 +39,7 @@ if (buildProfile != 'debug' && buildProfile != 'min-size-release')
 // The Rust version is pinned because the wasi target is still unstable. Without pinning, it is
 // possible for the wasm-js bindings to change between two Rust versions. Feel free to update
 // this version pin whenever you like, provided it continues to build.
-const rustVersion = '1.69.0';
+const rustVersion = 'tmp-wasi-atomics-test';
 
 // Assume that the user has `rustup` installed and make sure that `rust_version` is available.
 // Because `rustup install` requires an Internet connection, check whether the toolchain is
@@ -55,11 +55,12 @@ try {
         { 'stdio': 'inherit' }
     );
 }
-// `rustup target add` doesn't require an Internet connection if the target is already installed.
+// TODO: commented out because of custom toolchain
+/*// `rustup target add` doesn't require an Internet connection if the target is already installed.
 child_process.execSync(
     "rustup target add --toolchain=" + rustVersion + " wasm32-wasi",
     { 'stdio': 'inherit' }
-);
+);*/
 
 // The important step in this script is running `cargo build --target wasm32-wasi` on the Rust
 // code. This generates a `wasm` file in `target/wasm32-wasi`.
@@ -76,7 +77,7 @@ child_process.execSync(
 child_process.execSync(
     "cargo +" + rustVersion + " build --package smoldot-light-wasm --target wasm32-wasi --no-default-features " +
     (buildProfile == 'debug' ? '' : ("--profile " + buildProfile)),
-    { 'stdio': 'inherit', 'env': { 'RUSTFLAGS': '-C target-feature=+bulk-memory,+sign-ext,+simd128', ...process.env } }
+    { 'stdio': 'inherit', 'env': { 'RUSTFLAGS': '-C target-feature=+bulk-memory,+atomics,+sign-ext,+simd128', ...process.env } }
 );
 
 // The code below will write a variable number of files to the `src/instance/autogen` directory.
@@ -96,7 +97,7 @@ try {
     const rustOutput = "../../target/wasm32-wasi/" + buildProfile + "/smoldot_light_wasm.wasm";
     let optimisationStageOutput = path.join(tmpDir, 'tmp.wasm');
 
-    if (buildProfile == 'min-size-release') {
+    if (false) {  // TODO: wasp-opt fails to parse the generated wasm
         child_process.execSync(
             "wasm-opt -o " + optimisationStageOutput + " -Oz --strip-debug --vacuum --dce "
             + "../../target/wasm32-wasi/" + buildProfile + "/smoldot_light_wasm.wasm",

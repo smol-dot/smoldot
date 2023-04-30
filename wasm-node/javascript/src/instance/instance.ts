@@ -76,7 +76,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
     // - At initialization, it is a Promise containing the Wasm VM is still initializing.
     // - After the Wasm VM has finished initialization, contains the `WebAssembly.Instance` object.
     //
-    let state: { initialized: false, promise: Promise<[SmoldotWasmInstance, Array<Uint8Array>]> } | { initialized: true, instance: SmoldotWasmInstance, bufferIndices: Array<Uint8Array>, unregisterCallback: () => void };
+    let state: { initialized: false, promise: Promise<[SmoldotWasmInstance, WebAssembly.Memory, Array<Uint8Array>]> } | { initialized: true, instance: SmoldotWasmInstance, memory: WebAssembly.Memory, bufferIndices: Array<Uint8Array>, unregisterCallback: () => void };
 
     const crashError: { error?: CrashError } = {};
 
@@ -127,7 +127,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
     };
 
     state = {
-        initialized: false, promise: instance.startInstance(config, platformBindings).then(([instance, bufferIndices]) => {
+        initialized: false, promise: instance.startInstance(config, platformBindings).then(([instance, memory, bufferIndices]) => {
             // `config.cpuRateLimit` is a floating point that should be between 0 and 1, while the value
             // to pass as parameter must be between `0` and `2^32-1`.
             // The few lines of code below should handle all possible values of `number`, including
@@ -148,22 +148,22 @@ export function start(configMessage: Config, platformBindings: instance.Platform
             });
             instance.exports.init(configMessage.maxLogLevel, configMessage.enableCurrentTask ? 1 : 0, cpuRateLimit, periodicallyYield ? 1 : 0);
 
-            state = { initialized: true, instance, bufferIndices, unregisterCallback };
-            return [instance, bufferIndices];
+            state = { initialized: true, instance, memory, bufferIndices, unregisterCallback };
+            return [instance, memory, bufferIndices];
         })
     };
 
-    async function queueOperation<T>(operation: (instance: SmoldotWasmInstance, bufferIndices: Array<Uint8Array>) => T): Promise<T> {
+    async function queueOperation<T>(operation: (instance: SmoldotWasmInstance, memory: WebAssembly.Memory, bufferIndices: Array<Uint8Array>) => T): Promise<T> {
         // What to do depends on the type of `state`.
         // See the documentation of the `state` variable for information.
         if (!state.initialized) {
             // A message has been received while the Wasm VM is still initializing. Queue it for when
             // initialization is over.
-            return state.promise.then(([instance, bufferIndices]) => operation(instance, bufferIndices))
+            return state.promise.then(([instance, memory, bufferIndices]) => operation(instance, memory, bufferIndices))
 
         } else {
             // Everything is already initialized. Process the message synchronously.
-            return operation(state.instance, state.bufferIndices)
+            return operation(state.instance, state.memory, state.bufferIndices)
         }
     }
 
@@ -207,7 +207,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
 
                 // Try to pop a message from the queue.
                 try {
-                    const mem = new Uint8Array(state.instance.exports.memory.buffer);
+                    const mem = new Uint8Array(state.memory.buffer);
                     const responseInfo = state.instance.exports.json_rpc_responses_peek(chainId) >>> 0;
                     const ptr = buffer.readUInt32LE(mem, responseInfo) >>> 0;
                     const len = buffer.readUInt32LE(mem, responseInfo + 4) >>> 0;
@@ -232,7 +232,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
         },
 
         addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean): Promise<{ success: true, chainId: number } | { success: false, error: string }> => {
-            return queueOperation((instance, bufferIndices) => {
+            return queueOperation((instance, memory, bufferIndices) => {
                 if (crashError.error)
                     throw crashError.error;
 
@@ -263,7 +263,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
                     } else {
                         const errorMsgLen = instance.exports.chain_error_len(chainId) >>> 0;
                         const errorMsgPtr = instance.exports.chain_error_ptr(chainId) >>> 0;
-                        const errorMsg = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), errorMsgPtr, errorMsgLen);
+                        const errorMsg = buffer.utf8BytesToString(new Uint8Array(memory.buffer), errorMsgPtr, errorMsgLen);
                         instance.exports.remove_chain(chainId);
                         return { success: false, error: errorMsg };
                     }
