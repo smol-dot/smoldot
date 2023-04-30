@@ -20,7 +20,7 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 
-use core::{num::NonZeroU32, pin::Pin, str, sync::atomic, time::Duration};
+use core::{num::NonZeroU32, pin::Pin, str, time::Duration};
 use futures_util::{stream, FutureExt as _, Stream as _, StreamExt as _};
 use smoldot_light::HandleRpcError;
 use std::{
@@ -428,22 +428,6 @@ fn advance_execution() {
     let mut client_lock = CLIENT.lock().unwrap();
     let client_lock = client_lock.as_mut().unwrap();
 
-    struct Waker {
-        woken_up: atomic::AtomicBool,
-    }
-
-    impl task::Wake for Waker {
-        fn wake(self: Arc<Self>) {
-            self.woken_up.store(true, atomic::Ordering::Release);
-        }
-    }
-
-    let waker = Arc::new(Waker {
-        woken_up: atomic::AtomicBool::new(false),
-    });
-
-    let before_polling = Instant::now();
-
     loop {
         if future::poll_fn(|cx| {
             future::Future::poll(Pin::new(&mut client_lock.prevent_poll_until), cx)
@@ -454,26 +438,25 @@ fn advance_execution() {
             break;
         }
 
-        match client_lock
-            .main_task
-            .poll_unpin(&mut task::Context::from_waker(&waker.clone().into()))
-        {
-            task::Poll::Ready(infallible) => match infallible {}, // Unreachable
-            task::Poll::Pending => {}
+        let before_polling = Instant::now();
+
+        // Advance one background task.
+        // If nothing is actually executed, break out of the loop as there is nothing to do.
+        if !client_lock.executor.try_tick() {
+            break;
         }
 
+        // Time it took to execute `try_tick`.
         let after_polling = Instant::now();
-
-        // Time it took to execute `poll`.
         let poll_duration = after_polling - before_polling;
 
-        // In order to enforce the rate limiting, we prevent `poll` from executing
+        // In order to enforce the rate limiting, we prevent `try_tick` from executing
         // for a certain amount of time.
-        // The base equation here is: `(after_poll_sleep + poll_duration) * rate_limit == poll_duration * u32::max_value()`.
-        let after_poll_sleep =
+        // The base equation here is: `(after_tick_sleep + poll_duration) * rate_limit == poll_duration * u32::max_value()`.
+        let after_tick_sleep =
             poll_duration.as_secs_f64() * client_lock.max_divided_by_rate_limit_minus_one;
-        debug_assert!(after_poll_sleep >= 0.0 && !after_poll_sleep.is_nan());
-        client_lock.sleep_deprevation_sec += after_poll_sleep;
+        debug_assert!(after_tick_sleep >= 0.0 && !after_tick_sleep.is_nan());
+        client_lock.sleep_deprevation_sec += after_tick_sleep;
 
         if client_lock.sleep_deprevation_sec > 0.005 {
             client_lock.prevent_poll_until = crate::timers::Delay::new_at(
@@ -482,12 +465,6 @@ fn advance_execution() {
                         .unwrap_or(Duration::MAX),
             );
             client_lock.sleep_deprevation_sec = 0.0;
-        }
-
-        // If the task didn't wake itself up, then there is nothing left to execute immediately
-        // and we break out of the loop.
-        if !waker.woken_up.swap(false, atomic::Ordering::AcqRel) {
-            break;
         }
 
         // If the task woke itself up (which means that it has more to execute), we continue

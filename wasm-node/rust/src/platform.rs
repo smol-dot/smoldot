@@ -21,14 +21,13 @@ use smoldot::libp2p::multihash;
 use smoldot_light::platform::{ConnectError, PlatformSubstreamDirection};
 
 use core::{future::Future, mem, pin, str, task, time::Duration};
-use futures_channel::mpsc;
 use futures_util::{future, FutureExt as _};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, VecDeque},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Mutex,
+        Arc, Mutex,
     },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -42,18 +41,17 @@ pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 pub(crate) struct Platform {
-    new_task_tx: mpsc::UnboundedSender<future::BoxFuture<'static, ()>>,
+    executor: Arc<async_executor::Executor<'static>>,
     enable_current_task: bool,
 }
 
 impl Platform {
-    // TODO: consider doing the spawning entirely here, instead of providing a channel
     pub fn new(
-        new_task_tx: mpsc::UnboundedSender<future::BoxFuture<'static, ()>>,
+        executor: Arc<async_executor::Executor<'static>>,
         enable_current_task: bool,
     ) -> Self {
         Self {
-            new_task_tx,
+            executor,
             enable_current_task,
         }
     }
@@ -140,7 +138,7 @@ impl smoldot_light::platform::PlatformRef for Platform {
             future: task,
         };
 
-        self.new_task_tx.unbounded_send(Box::pin(task)).unwrap()
+        self.executor.spawn(task).detach();
     }
 
     fn client_name(&self) -> Cow<str> {

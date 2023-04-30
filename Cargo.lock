@@ -2457,9 +2457,9 @@ dependencies = [
 name = "smoldot-light-wasm"
 version = "1.0.3"
 dependencies = [
+ "async-executor",
  "event-listener",
  "fnv",
- "futures-channel",
  "futures-util",
  "hashbrown 0.13.2",
  "lazy_static",
