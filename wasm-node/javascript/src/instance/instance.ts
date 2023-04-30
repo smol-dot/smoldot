@@ -65,6 +65,7 @@ export interface Instance {
     request: (request: string, chainId: number) => void
     nextJsonRpcResponse: (chainId: number) => Promise<string>
     addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean) => Promise<{ success: true, chainId: number } | { success: false, error: string }>
+    createBackgroundRunnable: () => Promise<any>
     removeChain: (chainId: number) => void
     startShutdown: () => void
 }
@@ -76,7 +77,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
     // - At initialization, it is a Promise containing the Wasm VM is still initializing.
     // - After the Wasm VM has finished initialization, contains the `WebAssembly.Instance` object.
     //
-    let state: { initialized: false, promise: Promise<[SmoldotWasmInstance, WebAssembly.Memory, Array<Uint8Array>]> } | { initialized: true, instance: SmoldotWasmInstance, memory: WebAssembly.Memory, bufferIndices: Array<Uint8Array>, unregisterCallback: () => void };
+    let state: { initialized: false, promise: Promise<[WebAssembly.Module, SmoldotWasmInstance, WebAssembly.Memory, Array<Uint8Array>]> } | { initialized: true, module: WebAssembly.Module, instance: SmoldotWasmInstance, memory: WebAssembly.Memory, bufferIndices: Array<Uint8Array>, unregisterCallback: () => void };
 
     const crashError: { error?: CrashError } = {};
 
@@ -127,7 +128,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
     };
 
     state = {
-        initialized: false, promise: instance.startInstance(config, platformBindings).then(([instance, memory, bufferIndices]) => {
+        initialized: false, promise: instance.startInstance(config, platformBindings).then(([module, instance, memory, bufferIndices]) => {
             // `config.cpuRateLimit` is a floating point that should be between 0 and 1, while the value
             // to pass as parameter must be between `0` and `2^32-1`.
             // The few lines of code below should handle all possible values of `number`, including
@@ -148,22 +149,22 @@ export function start(configMessage: Config, platformBindings: instance.Platform
             });
             instance.exports.init(configMessage.maxLogLevel, configMessage.enableCurrentTask ? 1 : 0, cpuRateLimit, periodicallyYield ? 1 : 0);
 
-            state = { initialized: true, instance, memory, bufferIndices, unregisterCallback };
-            return [instance, memory, bufferIndices];
+            state = { initialized: true, module, instance, memory, bufferIndices, unregisterCallback };
+            return [module, instance, memory, bufferIndices];
         })
     };
 
-    async function queueOperation<T>(operation: (instance: SmoldotWasmInstance, memory: WebAssembly.Memory, bufferIndices: Array<Uint8Array>) => T): Promise<T> {
+    async function queueOperation<T>(operation: (module: WebAssembly.Module, instance: SmoldotWasmInstance, memory: WebAssembly.Memory, bufferIndices: Array<Uint8Array>) => T): Promise<T> {
         // What to do depends on the type of `state`.
         // See the documentation of the `state` variable for information.
         if (!state.initialized) {
             // A message has been received while the Wasm VM is still initializing. Queue it for when
             // initialization is over.
-            return state.promise.then(([instance, memory, bufferIndices]) => operation(instance, memory, bufferIndices))
+            return state.promise.then(([module, instance, memory, bufferIndices]) => operation(module, instance, memory, bufferIndices))
 
         } else {
             // Everything is already initialized. Process the message synchronously.
-            return operation(state.instance, state.memory, state.bufferIndices)
+            return operation(state.module, state.instance, state.memory, state.bufferIndices)
         }
     }
 
@@ -231,8 +232,18 @@ export function start(configMessage: Config, platformBindings: instance.Platform
             }
         },
 
+        createBackgroundRunnable: (): Promise<any> => {
+            return queueOperation((module, _instance, memory, _bufferIndices) => {
+                if (crashError.error)
+                    throw crashError.error;
+
+                // TODO: use more opaque field names?
+                return { module, memory };
+            })
+        },
+
         addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean): Promise<{ success: true, chainId: number } | { success: false, error: string }> => {
-            return queueOperation((instance, memory, bufferIndices) => {
+            return queueOperation((_module, instance, memory, bufferIndices) => {
                 if (crashError.error)
                     throw crashError.error;
 
@@ -300,7 +311,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
         },
 
         startShutdown: () => {
-            return queueOperation((instance) => {
+            return queueOperation((_module, instance) => {
                 // `startShutdown` is a bit special in its handling of crashes.
                 // Shutting down will lead to `onWasmPanic` being called at some point, possibly during
                 // the call to `start_shutdown` itself. As such, we move into "don't print errors anymore"

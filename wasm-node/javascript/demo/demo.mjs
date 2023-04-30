@@ -21,6 +21,7 @@ import * as smoldot from '../dist/mjs/index-nodejs.js';
 import { WebSocketServer } from 'ws';
 import * as process from 'node:process';
 import * as fs from 'node:fs';
+import { Worker } from 'node:worker_threads';
 
 // List of files containing chains available to the user.
 // The first item has a specific role in that we always connect to it at initialization.
@@ -71,6 +72,11 @@ const client = smoldot.start({
         );
     }
 });
+
+client.createBackgroundRunnable().then((obj) => {
+    const worker = new Worker("./demo/demo-worker.mjs");
+    worker.postMessage(obj);
+})
 
 // Note that We call `addChain` again with the same chain spec again every time a new WebSocket
 // connection is established, but smoldot will de-duplicate them and only connect to the chain

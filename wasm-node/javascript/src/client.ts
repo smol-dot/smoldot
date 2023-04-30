@@ -83,6 +83,8 @@ export interface Client {
      */
     addChain(options: AddChainOptions): Promise<Chain>;
 
+    createBackgroundRunnable(): any;
+
     /**
      * Terminates the client.
      *
@@ -477,6 +479,9 @@ export function start(options: ClientOptions, platformBindings: PlatformBindings
 
             chainIds.set(newChain, chainId);
             return newChain;
+        },
+        createBackgroundRunnable(): Promise<any> {
+            return instance.createBackgroundRunnable();
         },
         terminate: async () => {
             if (alreadyDestroyedError.value)
