@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::{alloc, bindings, cpu_rate_limiter, platform, timers::Delay};
+use crate::{alloc, bindings, platform, timers::Delay};
 
 use core::{future::Future, pin::Pin, time::Duration};
 use futures_channel::mpsc;
@@ -33,6 +33,15 @@ pub(crate) struct Client<TPlat: smoldot_light::platform::PlatformRef, TChain> {
 
     /// Infinite-running task that must be executed in order to drive the execution of the client.
     pub(crate) main_task: future::BoxFuture<'static, core::convert::Infallible>, // TODO: use `!` once stable
+
+    pub(crate) max_divided_by_rate_limit_minus_one: f64,
+
+    /// Instead of sleeping regularly for short amounts of time, we instead continue running only
+    /// until the time we have to sleep reaches a certain threshold.
+    pub(crate) sleep_deprevation_sec: f64,
+
+    /// Prevent `main_task` from being called before this `Delay` is ready.
+    pub(crate) prevent_poll_until: crate::timers::Delay,
 }
 
 pub(crate) enum Chain {
@@ -101,56 +110,53 @@ pub(crate) fn init<TChain>(
 
     // This is the main future that executes the entire client.
     // It receives new tasks from `new_task_rx` and runs them.
-    let main_task = cpu_rate_limiter::CpuRateLimiter::new(
-        async move {
-            let mut all_tasks = stream::FuturesUnordered::new();
+    let main_task = async move {
+        let mut all_tasks = stream::FuturesUnordered::new();
 
-            // The code below processes tasks that have names.
-            #[pin_project::pin_project]
-            struct FutureAdapter<F> {
-                name: String,
-                enable_current_task: bool,
-                #[pin]
-                future: F,
-            }
+        // The code below processes tasks that have names.
+        #[pin_project::pin_project]
+        struct FutureAdapter<F> {
+            name: String,
+            enable_current_task: bool,
+            #[pin]
+            future: F,
+        }
 
-            impl<F: Future> Future for FutureAdapter<F> {
-                type Output = F::Output;
-                fn poll(self: Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
-                    let this = self.project();
-                    if *this.enable_current_task {
-                        unsafe {
-                            bindings::current_task_entered(
-                                u32::try_from(this.name.as_bytes().as_ptr() as usize).unwrap(),
-                                u32::try_from(this.name.as_bytes().len()).unwrap(),
-                            )
-                        }
+        impl<F: Future> Future for FutureAdapter<F> {
+            type Output = F::Output;
+            fn poll(self: Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
+                let this = self.project();
+                if *this.enable_current_task {
+                    unsafe {
+                        bindings::current_task_entered(
+                            u32::try_from(this.name.as_bytes().as_ptr() as usize).unwrap(),
+                            u32::try_from(this.name.as_bytes().len()).unwrap(),
+                        )
                     }
-                    let out = this.future.poll(cx);
-                    if *this.enable_current_task {
-                        unsafe {
-                            bindings::current_task_exit();
-                        }
+                }
+                let out = this.future.poll(cx);
+                if *this.enable_current_task {
+                    unsafe {
+                        bindings::current_task_exit();
                     }
-                    out
                 }
+                out
             }
+        }
 
-            loop {
-                futures_util::select! {
-                    (new_task_name, new_task) = new_task_rx.select_next_some() => {
-                        all_tasks.push(FutureAdapter {
-                            name: new_task_name,
-                            enable_current_task,
-                            future: new_task,
-                        });
-                    },
-                    () = all_tasks.select_next_some() => {},
-                }
+        loop {
+            futures_util::select! {
+                (new_task_name, new_task) = new_task_rx.select_next_some() => {
+                    all_tasks.push(FutureAdapter {
+                        name: new_task_name,
+                        enable_current_task,
+                        future: new_task,
+                    });
+                },
+                () = all_tasks.select_next_some() => {},
             }
-        },
-        cpu_rate_limit,
-    )
+        }
+    }
     .boxed();
 
     // Spawn a constantly-running task that periodically prints the total memory usage of
@@ -200,11 +206,21 @@ pub(crate) fn init<TChain>(
         ))
         .unwrap();
 
+    let max_divided_by_rate_limit_minus_one =
+        (f64::from(u32::max_value()) / f64::from(cpu_rate_limit)) - 1.0;
+    // Note that it is legal for `max_divided_by_rate_limit_minus_one` to be +infinite
+    debug_assert!(
+        !max_divided_by_rate_limit_minus_one.is_nan() && max_divided_by_rate_limit_minus_one >= 0.0
+    );
+
     Client {
         smoldot: smoldot_light::Client::new(platform::Platform::new(new_task_tx)),
         chains: slab::Slab::with_capacity(8),
         periodically_yield,
         main_task,
+        max_divided_by_rate_limit_minus_one,
+        sleep_deprevation_sec: 0.0,
+        prevent_poll_until: crate::timers::Delay::new(Duration::new(0, 0)),
     }
 }
 

@@ -24,14 +24,15 @@ use core::{num::NonZeroU32, pin::Pin, str, sync::atomic, time::Duration};
 use futures_util::{stream, FutureExt as _, Stream as _, StreamExt as _};
 use smoldot_light::HandleRpcError;
 use std::{
+    future,
     sync::{Arc, Mutex},
     task,
+    time::Instant,
 };
 
 pub mod bindings;
 
 mod alloc;
-mod cpu_rate_limiter;
 mod init;
 mod platform;
 mod timers;
@@ -441,13 +442,46 @@ fn advance_execution() {
         woken_up: atomic::AtomicBool::new(false),
     });
 
+    let before_polling = Instant::now();
+
     loop {
+        if future::poll_fn(|cx| {
+            future::Future::poll(Pin::new(&mut client_lock.prevent_poll_until), cx)
+        })
+        .now_or_never()
+        .is_none()
+        {
+            break;
+        }
+
         match client_lock
             .main_task
             .poll_unpin(&mut task::Context::from_waker(&waker.clone().into()))
         {
             task::Poll::Ready(infallible) => match infallible {}, // Unreachable
             task::Poll::Pending => {}
+        }
+
+        let after_polling = Instant::now();
+
+        // Time it took to execute `poll`.
+        let poll_duration = after_polling - before_polling;
+
+        // In order to enforce the rate limiting, we prevent `poll` from executing
+        // for a certain amount of time.
+        // The base equation here is: `(after_poll_sleep + poll_duration) * rate_limit == poll_duration * u32::max_value()`.
+        let after_poll_sleep =
+            poll_duration.as_secs_f64() * client_lock.max_divided_by_rate_limit_minus_one;
+        debug_assert!(after_poll_sleep >= 0.0 && !after_poll_sleep.is_nan());
+        client_lock.sleep_deprevation_sec += after_poll_sleep;
+
+        if client_lock.sleep_deprevation_sec > 0.005 {
+            client_lock.prevent_poll_until = crate::timers::Delay::new_at(
+                after_polling
+                    + Duration::try_from_secs_f64(client_lock.sleep_deprevation_sec)
+                        .unwrap_or(Duration::MAX),
+            );
+            client_lock.sleep_deprevation_sec = 0.0;
         }
 
         // If the task didn't wake itself up, then there is nothing left to execute immediately
