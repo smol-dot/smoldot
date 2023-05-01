@@ -29,9 +29,6 @@ export async function run(wasmModule: any) {
         logCallback: (_level, _target, _message) => {
             // TODO: ?!?!
         },
-        jsonRpcResponsesNonEmptyCallback: (_chainId) => {
-            // TODO: refactor to not pass this config but instead return a Promise to json-rpc-peek
-        },
         wasmModule: wasmModule,
         cpuRateLimit: 1.0, // TODO: make configurable
     };

@@ -19,7 +19,6 @@ import * as buffer from './buffer.js';
 import * as instance from './raw-instance.js';
 import { default as wasmBase64 } from './autogen/wasm.js';
 import { SmoldotWasmInstance } from './bindings.js';
-import { AlreadyDestroyedError } from '../client.js';
 
 export { PlatformBindings, ConnectionError, ConnectionConfig, Connection } from './raw-instance.js';
 
@@ -83,9 +82,8 @@ export function start(configMessage: Config, platformBindings: instance.Platform
     const printError = { printError: true }
 
     // Contains the information of each chain that is currently alive.
-    let chains: Map<number, {
-        jsonRpcResponsesPromises: JsonRpcResponsesPromise[],
-    }> = new Map();
+    // TODO: refactor to a Set, since the object is empty?
+    let chains: Map<number, {}> = new Map();
 
     // Start initialization of the Wasm VM.
     const initPromise = (async (): Promise<[WebAssembly.Module, SmoldotWasmInstance, WebAssembly.Memory, Array<Uint8Array>]> => {
@@ -110,22 +108,9 @@ export function start(configMessage: Config, platformBindings: instance.Platform
                     "https://github.com/smol-dot/smoldot/issues with the following message:\n" +
                     message
                 );
-                for (const chain of Array.from(chains.values())) {
-                    for (const promise of chain.jsonRpcResponsesPromises) {
-                        promise.reject(crashError.error)
-                    }
-                    chain.jsonRpcResponsesPromises = [];
-                }
             },
             logCallback: (level, target, message) => {
                 configMessage.logCallback(level, target, message)
-            },
-            jsonRpcResponsesNonEmptyCallback: (chainId) => {
-                // Notify every single promise found in `jsonRpcResponsesPromises`.
-                const promises = chains.get(chainId)!.jsonRpcResponsesPromises;
-                while (promises.length !== 0) {
-                    promises.shift()!.resolve();
-                }
             },
             wasmModule: { module, memory },
             cpuRateLimit: configMessage.cpuRateLimit,
@@ -217,16 +202,23 @@ export function start(configMessage: Config, platformBindings: instance.Platform
                         const message = buffer.utf8BytesToString(mem, ptr, len);
                         state.instance.exports.json_rpc_responses_pop(chainId);
                         return message;
+
+                    } else {
+                        // If no message is available, wait for one to be.
+                        // TODO: must abort if the client gets terminated or chain removed
+                        // TODO: `waitAsync` isn't supported by Firefox: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Atomics/waitAsync
+                        interface AtomicsExtra {
+                            waitAsync(typedArray: Int32Array, index: number, value: number, timeout?: number): { async: true, value: Promise<"ok" | "timed-out"> } | { async: false, value: "not-equal" | "timed-out" };
+                        }
+                        const waitReturn = (Atomics as unknown as AtomicsExtra).waitAsync(new Int32Array(state.memory.buffer), ptr / 4, 0);
+                        if (waitReturn.async) {
+                            await waitReturn.value
+                        }
                     }
                 } catch (_error) {
                     console.assert(crashError.error);
                     throw crashError.error
                 }
-
-                // If no message is available, wait for one to be.
-                await new Promise((resolve, reject) => {
-                    chains.get(chainId)!.jsonRpcResponsesPromises.push({ resolve: () => resolve(undefined), reject })
-                });
             }
         },
 
@@ -270,9 +262,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
 
                     if (instance.exports.chain_is_ok(chainId) != 0) {
                         console.assert(!chains.has(chainId));
-                        chains.set(chainId, {
-                            jsonRpcResponsesPromises: new Array()
-                        });
+                        chains.set(chainId, {});
                         return { success: true, chainId };
                     } else {
                         const errorMsgLen = instance.exports.chain_error_len(chainId) >>> 0;
@@ -301,9 +291,6 @@ export function start(configMessage: Config, platformBindings: instance.Platform
             // JSON-RPC response corresponding to a chain that is going to be deleted but hasn't been yet.
             // These kind of race conditions are already delt with within smoldot.
             console.assert(chains.has(chainId));
-            for (const { reject } of chains.get(chainId)!.jsonRpcResponsesPromises) {
-                reject(new AlreadyDestroyedError());
-            }
             chains.delete(chainId);
             try {
                 state.instance.exports.remove_chain(chainId);
@@ -335,9 +322,4 @@ export function start(configMessage: Config, platformBindings: instance.Platform
         }
     }
 
-}
-
-interface JsonRpcResponsesPromise {
-    resolve: () => void,
-    reject: (error: Error) => void,
 }

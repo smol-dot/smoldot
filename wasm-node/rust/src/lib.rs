@@ -162,6 +162,7 @@ fn add_chain(
         .insert(init::Chain::Healthy {
             smoldot_chain_id,
             json_rpc_response: None,
+            json_rpc_response_notifier: Arc::new(AtomicI32::new(0)),
             json_rpc_response_info: Box::new(bindings::JsonRpcResponseInfo { ptr: 0, len: 0 }),
             json_rpc_responses_rx: None,
         });
@@ -321,6 +322,7 @@ fn json_rpc_responses_peek(chain_id: u32) -> u32 {
             json_rpc_response,
             json_rpc_responses_rx,
             json_rpc_response_info,
+            json_rpc_response_notifier,
             ..
         } => {
             if json_rpc_response.is_none() {
@@ -328,7 +330,10 @@ fn json_rpc_responses_peek(chain_id: u32) -> u32 {
                     loop {
                         match Pin::new(&mut *json_rpc_responses_rx).poll_next(
                             &mut task::Context::from_waker(
-                                &Arc::new(JsonRpcResponsesNonEmptyWaker { chain_id }).into(),
+                                &Arc::new(JsonRpcResponsesNonEmptyWaker {
+                                    json_rpc_response_notifier: json_rpc_response_notifier.clone(),
+                                })
+                                .into(),
                             ),
                         ) {
                             task::Poll::Ready(Some(response)) if response.is_empty() => {
@@ -350,14 +355,6 @@ fn json_rpc_responses_peek(chain_id: u32) -> u32 {
                 }
             }
 
-            // Note that we might be returning the last item in the queue. In principle, this means
-            // that the next time an entry is added to the queue, `json_rpc_responses_non_empty`
-            // should be called. Due to the way the implementation works, this will not happen
-            // until the user calls `json_rpc_responses_peek`. However, this is not a problem:
-            // it is impossible for the user to observe that the queue is empty, and as such there
-            // is simply not correct implementation of the API that can't work because of this
-            // property.
-
             match &json_rpc_response {
                 Some(rp) => {
                     debug_assert!(!rp.is_empty());
@@ -365,7 +362,8 @@ fn json_rpc_responses_peek(chain_id: u32) -> u32 {
                     json_rpc_response_info.len = rp.as_bytes().len() as u32;
                 }
                 None => {
-                    json_rpc_response_info.ptr = 0;
+                    json_rpc_response_info.ptr =
+                        AtomicI32::as_ptr(&**json_rpc_response_notifier) as usize as u32;
                     json_rpc_response_info.len = 0;
                 }
             }
@@ -386,19 +384,28 @@ fn json_rpc_responses_pop(chain_id: u32) {
         .unwrap()
     {
         init::Chain::Healthy {
-            json_rpc_response, ..
-        } => *json_rpc_response = None,
+            json_rpc_response,
+            json_rpc_response_notifier,
+            ..
+        } => {
+            *json_rpc_response = None;
+            json_rpc_response_notifier.store(0, Ordering::SeqCst);
+        }
         _ => panic!(),
     }
 }
 
 struct JsonRpcResponsesNonEmptyWaker {
-    chain_id: u32,
+    json_rpc_response_notifier: Arc<AtomicI32>,
 }
 
 impl task::Wake for JsonRpcResponsesNonEmptyWaker {
     fn wake(self: Arc<Self>) {
-        unsafe { bindings::json_rpc_responses_non_empty(self.chain_id) }
+        unsafe {
+            self.json_rpc_response_notifier.store(1, Ordering::SeqCst);
+            #[cfg(target_family = "wasm")]
+            core::arch::wasm::memory_atomic_notify(self.json_rpc_response_notifier.as_ptr(), 1);
+        }
     }
 }
 

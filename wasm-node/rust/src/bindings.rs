@@ -118,15 +118,6 @@ extern "C" {
     /// See the documentation of [`buffer_copy`] for context.
     pub fn buffer_size(buffer_index: u32) -> u32;
 
-    /// The queue of JSON-RPC responses of the given chain is no longer empty.
-    ///
-    /// This function is only ever called after [`json_rpc_responses_peek`] has returned a `len`
-    /// of 0. It is always called on the same thread as the one that called
-    /// [`json_rpc_responses_peek`].
-    ///
-    /// This function might be called spuriously, however this behavior must not be relied upon.
-    pub fn json_rpc_responses_non_empty(chain_id: u32);
-
     /// Client is emitting a log entry.
     ///
     /// Each log entry is made of a log level (`1 = Error, 2 = Warn, 3 = Info, 4 = Debug,
@@ -459,16 +450,18 @@ pub extern "C" fn json_rpc_send(text_buffer_index: u32, chain_id: u32) -> u32 {
 /// Obtains information about the first response in the queue of JSON-RPC responses.
 ///
 /// This function returns a pointer within the memory of the WebAssembly virtual machine where is
-/// stored a struct of type [`JsonRpcResponseInfo`]. This pointer remains valid until
-/// [`json_rpc_responses_pop`] or [`remove_chain`] is called with the same `chain_id`.
+/// stored a struct of type [`JsonRpcResponseInfo`]. This pointer and the pointer within remains
+/// valid until [`json_rpc_responses_peek`], [`json_rpc_responses_pop`], or [`remove_chain`] is
+/// called with the same `chain_id`.
 ///
 /// The response or notification is a UTF-8 string found in the memory of the WebAssembly
 /// virtual machine at offset `ptr` and with length `len`, where `ptr` and `len` are found in the
 /// [`JsonRpcResponseInfo`].
 ///
 /// If `len` is equal to 0, this indicates that the queue of JSON-RPC responses is empty.
-/// When a `len` of 0 is returned, [`json_rpc_responses_non_empty`] will later be called to
-/// indicate that it is no longer empty.
+/// When a `len` of 0 is returned, `ptr` instead points to a 4 bytes integer where a value of 0
+/// indicates "queue empty" and a non-zero value indicates "queue not empty". `Atomics.wait` can
+/// be used in order to wait for a response to be available.
 ///
 /// After having read the response or notification, use [`json_rpc_responses_pop`] to remove it
 /// from the queue. You can then call [`json_rpc_responses_peek`] again to read the next response.
@@ -480,7 +473,10 @@ pub extern "C" fn json_rpc_responses_peek(chain_id: u32) -> u32 {
 /// See [`json_rpc_responses_peek`].
 #[repr(C)]
 pub struct JsonRpcResponseInfo {
-    /// Pointer in memory where the JSON-RPC response can be found.
+    /// If `len` is non-zero, pointer in memory where the JSON-RPC response can be found.
+    /// If `len` is zero, 4-aligned pointer in memory to an integer where a value of 0 indicates
+    /// no response and a non-zero value indicates a response. `Atomics.wait` can be used in order
+    /// to wait for a response to be available.
     pub ptr: u32,
     /// Length of the JSON-RPC response in bytes. If 0, indicates that the queue is empty.
     pub len: u32,

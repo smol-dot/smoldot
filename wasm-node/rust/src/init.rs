@@ -21,7 +21,13 @@ use core::time::Duration;
 use futures_util::stream;
 use smoldot::informant::BytesDisplay;
 use smoldot_light::platform::PlatformRef;
-use std::{panic, sync::atomic::Ordering};
+use std::{
+    panic,
+    sync::{
+        atomic::{AtomicI32, Ordering},
+        Arc,
+    },
+};
 
 pub(crate) struct Client<TPlat: smoldot_light::platform::PlatformRef, TChain> {
     pub(crate) smoldot: smoldot_light::Client<TPlat, TChain>,
@@ -38,6 +44,9 @@ pub(crate) enum Chain {
         /// a pointer to the string is referenced to within
         /// [`Chain::Healthy::json_rpc_response_info`].
         json_rpc_response: Option<String>,
+        /// Integer set to 1 if a response is available. Used in order to notify the host.
+        /// Because the address of this value is returned to the host, it must not move.
+        json_rpc_response_notifier: Arc<AtomicI32>,
         /// Information about [`Chain::Healthy::json_rpc_response`]. A pointer to this struct is
         /// sent over the FFI layer to the JavaScript. As such, the pointer must never be
         /// invalidated.

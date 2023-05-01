@@ -50,7 +50,6 @@ export interface Config {
     onPanic: (message: string) => never,
 
     logCallback: (level: number, target: string, message: string) => void,
-    jsonRpcResponsesNonEmptyCallback: (chainId: number) => void,
 }
 
 /**
@@ -270,13 +269,6 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
 
             const buf = config.bufferIndices[bufferIndex]!;
             new Uint8Array(config.memory.buffer).set(buf, targetPtr);
-        },
-
-        // Used by the Rust side to notify that a JSON-RPC response or subscription notification
-        // is available in the queue of JSON-RPC responses.
-        json_rpc_responses_non_empty: (chainId: number) => {
-            if (killedTracked.killed) return;
-            config.jsonRpcResponsesNonEmptyCallback(chainId);
         },
 
         // Used by the Rust side to emit a log entry.
