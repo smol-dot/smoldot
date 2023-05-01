@@ -148,7 +148,19 @@ impl smoldot_light::platform::PlatformRef for Platform {
             future: task,
         };
 
-        self.executor.spawn(task).detach();
+        let (runnable, task) = async_task::spawn(task, |runnable| {
+            super::tasks_queue()
+                .push(runnable)
+                .unwrap_or_else(|_| panic!());
+            super::TASKS_QUEUE_LEN.fetch_add(1, Ordering::SeqCst);
+            #[cfg(target_family = "wasm")]
+            unsafe {
+                core::arch::wasm::memory_atomic_notify((&super::TASKS_QUEUE_LEN).as_ptr(), 1);
+            }
+        });
+
+        runnable.schedule();
+        task.detach();
     }
 
     fn client_name(&self) -> Cow<str> {

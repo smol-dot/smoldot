@@ -335,7 +335,26 @@ pub extern "C" fn init(
         cpu_rate_limit,
         periodically_yield,
     );
+}
+
+/// Advances the execution of the client, performing CPU-heavy tasks.
+///
+/// This function **must** be called regularly, otherwise nothing will happen.
+///
+/// Returns `0` if the client is shutting down, otherwise returns a memory address upon which
+/// `Atomics.waitAsync` with a value of `0` must be called in order to know when to call
+/// `advance_execution` again.
+///
+/// If a non-zero value is returned, it is always aligned over 4 bytes. In other words, the `u32`
+/// is always a multiple of 4.
+#[no_mangle]
+pub extern "C" fn advance_execution() -> u32 {
+    // TODO: do the shutdown thing
     super::advance_execution();
+    let ptr = super::TASKS_QUEUE_LEN.as_ptr() as usize as u32;
+    debug_assert_ne!(ptr, 0);
+    debug_assert_eq!(ptr % 4, 0);
+    ptr
 }
 
 /// Sets whether the smoldot client must periodically yield back control by setting up a timer
@@ -352,7 +371,6 @@ pub extern "C" fn init(
 #[no_mangle]
 pub extern "C" fn set_periodically_yield(periodically_yield: u32) {
     crate::set_periodically_yield(periodically_yield);
-    super::advance_execution();
 }
 
 /// Instructs the client to start shutting down.
@@ -365,7 +383,6 @@ pub extern "C" fn set_periodically_yield(periodically_yield: u32) {
 #[no_mangle]
 pub extern "C" fn start_shutdown() {
     crate::start_shutdown();
-    super::advance_execution();
 }
 
 /// Adds a chain to the client. The client will try to stay connected and synchronize this chain.
@@ -400,14 +417,12 @@ pub extern "C" fn add_chain(
     json_rpc_running: u32,
     potential_relay_chains_buffer_index: u32,
 ) -> u32 {
-    let success_code = super::add_chain(
+    super::add_chain(
         get_buffer(chain_spec_buffer_index),
         get_buffer(database_content_buffer_index),
         json_rpc_running,
         get_buffer(potential_relay_chains_buffer_index),
-    );
-    super::advance_execution();
-    success_code
+    )
 }
 
 /// Removes a chain previously added using [`add_chain`]. Instantly unsubscribes all the JSON-RPC
@@ -418,7 +433,6 @@ pub extern "C" fn add_chain(
 #[no_mangle]
 pub extern "C" fn remove_chain(chain_id: u32) {
     super::remove_chain(chain_id);
-    super::advance_execution();
 }
 
 /// Returns `1` if creating this chain was successful. Otherwise, returns `0`.
@@ -476,9 +490,7 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 ///
 #[no_mangle]
 pub extern "C" fn json_rpc_send(text_buffer_index: u32, chain_id: u32) -> u32 {
-    let success_code = super::json_rpc_send(get_buffer(text_buffer_index), chain_id);
-    super::advance_execution();
-    success_code
+    super::json_rpc_send(get_buffer(text_buffer_index), chain_id)
 }
 
 /// Obtains information about the first response in the queue of JSON-RPC responses.
@@ -522,14 +534,12 @@ pub struct JsonRpcResponseInfo {
 #[no_mangle]
 pub extern "C" fn json_rpc_responses_pop(chain_id: u32) {
     super::json_rpc_responses_pop(chain_id);
-    super::advance_execution();
 }
 
 /// Must be called in response to [`start_timer`] after the given duration has passed.
 #[no_mangle]
 pub extern "C" fn timer_finished(timer_id: u32) {
     crate::timers::timer_finished(timer_id);
-    super::advance_execution();
 }
 
 /// Called by the JavaScript code if the connection switches to the `Open` state. The connection
@@ -562,7 +572,6 @@ pub extern "C" fn connection_open_single_stream(
         initial_writable_bytes,
         write_closable,
     );
-    super::advance_execution();
 }
 
 /// Called by the JavaScript code if the connection switches to the `Open` state. The connection
@@ -588,7 +597,6 @@ pub extern "C" fn connection_open_multi_stream(connection_id: u32, handshake_ty_
         connection_id,
         get_buffer(handshake_ty_buffer_index),
     );
-    super::advance_execution();
 }
 
 /// Notify of a message being received on the stream. The connection associated with that stream
@@ -609,7 +617,6 @@ pub extern "C" fn connection_open_multi_stream(connection_id: u32, handshake_ty_
 #[no_mangle]
 pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, buffer_index: u32) {
     crate::platform::stream_message(connection_id, stream_id, get_buffer(buffer_index));
-    super::advance_execution();
 }
 
 /// Notify that extra bytes can be written onto the stream. The connection associated with that
@@ -632,7 +639,6 @@ pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, buffer_inde
 #[no_mangle]
 pub extern "C" fn stream_writable_bytes(connection_id: u32, stream_id: u32, num_bytes: u32) {
     crate::platform::stream_writable_bytes(connection_id, stream_id, num_bytes);
-    super::advance_execution();
 }
 
 /// Called by the JavaScript code when the given multi-stream connection has a new substream.
@@ -660,7 +666,6 @@ pub extern "C" fn connection_stream_opened(
         outbound,
         initial_writable_bytes,
     );
-    super::advance_execution();
 }
 
 /// Can be called at any point by the JavaScript code if the connection switches to the `Reset`
@@ -680,7 +685,6 @@ pub extern "C" fn connection_stream_opened(
 #[no_mangle]
 pub extern "C" fn connection_reset(connection_id: u32, buffer_index: u32) {
     crate::platform::connection_reset(connection_id, get_buffer(buffer_index));
-    super::advance_execution();
 }
 
 /// Can be called at any point by the JavaScript code if the stream switches to the `Reset`
@@ -699,7 +703,6 @@ pub extern "C" fn connection_reset(connection_id: u32, buffer_index: u32) {
 #[no_mangle]
 pub extern "C" fn stream_reset(connection_id: u32, stream_id: u32) {
     crate::platform::stream_reset(connection_id, stream_id);
-    super::advance_execution();
 }
 
 pub(crate) fn get_buffer(buffer_index: u32) -> Vec<u8> {

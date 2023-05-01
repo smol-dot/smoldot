@@ -576,9 +576,9 @@ checksum = "acbf1af155f9b9ef647e42cdc158db4b64a1b61f743629225fde6f3e0be2a7c7"
 
 [[package]]
 name = "concurrent-queue"
-version = "2.1.0"
+version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c278839b831783b70278b14df4d45e1beb1aad306c07bb796637de9a0e323e8e"
+checksum = "62ec6771ecfa0762d24683ee5a32ad78487a3d3afdc0fb8cae19d2c5deb50b7c"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -2458,6 +2458,9 @@ name = "smoldot-light-wasm"
 version = "1.0.3"
 dependencies = [
  "async-executor",
+ "async-lock",
+ "async-task",
+ "concurrent-queue",
  "event-listener",
  "fnv",
  "futures-util",

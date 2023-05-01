@@ -149,6 +149,24 @@ export function start(configMessage: Config, platformBindings: instance.Platform
             });
             instance.exports.init(configMessage.maxLogLevel, configMessage.enableCurrentTask ? 1 : 0, cpuRateLimit, periodicallyYield ? 1 : 0);
 
+            (async () => {
+                while (true) {
+                    const ptr = instance.exports.advance_execution() >>> 0;
+                    if (ptr === 0)
+                        break;
+
+                    // TODO: `waitAsync` is missing from TS bindings
+                    // TODO: `waitAsync` isn't supported by Firefox: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Atomics/waitAsync
+                    interface AtomicsExtra {
+                        waitAsync(typedArray: Int32Array, index: number, value: number, timeout?: number): { async: true, value: Promise<"ok" | "timed-out"> } | { async: false, value: "not-equal" | "timed-out" };
+                    }
+                    const waitReturn = (Atomics as unknown as AtomicsExtra).waitAsync(new Int32Array(memory.buffer), ptr / 4, 0);
+                    if (waitReturn.async) {
+                        await waitReturn.value
+                    }
+                }
+            })()
+
             state = { initialized: true, module, instance, memory, bufferIndices, unregisterCallback };
             return [module, instance, memory, bufferIndices];
         })

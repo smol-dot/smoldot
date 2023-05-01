@@ -19,8 +19,15 @@
 
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
+#![feature(stdsimd, simd_wasm64)] // TODO: remove after https://github.com/rust-lang/rust/issues/98253
 
-use core::{num::NonZeroU32, pin::Pin, str, time::Duration};
+use core::{
+    num::NonZeroU32,
+    pin::Pin,ptr,
+    str,
+    sync::atomic::{AtomicI32, Ordering},
+    time::Duration,
+};
 use futures_util::{stream, FutureExt as _, Stream as _, StreamExt as _};
 use smoldot_light::HandleRpcError;
 use std::{
@@ -411,25 +418,34 @@ impl task::Wake for JsonRpcResponsesNonEmptyWaker {
     }
 }
 
-fn advance_execution() {
-    let mut client_lock = CLIENT.lock().unwrap();
-    let client_lock = client_lock.as_mut().unwrap();
+static TASKS_QUEUE: async_lock::OnceCell<concurrent_queue::ConcurrentQueue<async_task::Runnable>> =
+    async_lock::OnceCell::new();
+fn tasks_queue() -> &'static concurrent_queue::ConcurrentQueue<async_task::Runnable> {
+    TASKS_QUEUE.get_or_init_blocking(|| concurrent_queue::ConcurrentQueue::unbounded())
+}
 
-    loop {
-        if future::poll_fn(|cx| {
+static TASKS_QUEUE_LEN: AtomicI32 = AtomicI32::new(0);
+
+fn advance_execution() {
+    let tasks_queue = tasks_queue();
+    while let Ok(mut task) = tasks_queue.pop() {
+        TASKS_QUEUE_LEN.fetch_sub(1, Ordering::SeqCst); // TODO: Release?
+
+        // TODO: restore this
+        /*if future::poll_fn(|cx| {
             future::Future::poll(Pin::new(&mut client_lock.prevent_poll_until), cx)
         })
         .now_or_never()
         .is_none()
         {
             break;
-        }
+        } */
 
         let before_polling = Instant::now();
 
         // Advance one background task.
         // If nothing is actually executed, break out of the loop as there is nothing to do.
-        if !client_lock.executor.try_tick() {
+        if !task.run() {
             break;
         }
 
@@ -437,7 +453,8 @@ fn advance_execution() {
         let after_polling = Instant::now();
         let poll_duration = after_polling - before_polling;
 
-        // In order to enforce the rate limiting, we prevent `try_tick` from executing
+        // TODO: restore this
+        /*// In order to enforce the rate limiting, we prevent `try_tick` from executing
         // for a certain amount of time.
         // The base equation here is: `(after_tick_sleep + poll_duration) * rate_limit == poll_duration * u32::max_value()`.
         let after_tick_sleep =
@@ -458,10 +475,6 @@ fn advance_execution() {
         // looping provided that `periodically_yield` is `false`.
         if !client_lock.periodically_yield {
             continue;
-        }
-
-        // If the task woke itself up and `periodically_yield` is `true`, we use
-        // `setTimeout(..., 0)` to actually yield.
-        start_timer_wrap(Duration::new(0, 0), advance_execution);
+        }*/
     }
 }
