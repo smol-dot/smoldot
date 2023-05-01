@@ -113,7 +113,10 @@ impl smoldot_light::platform::PlatformRef for Platform {
                 // Note: this might cause two threads to wake up, but is in practice never going
                 // to happen, and even if it does happen isn't a problem.
                 core::arch::wasm::memory_atomic_notify((&super::TASKS_QUEUE_LEN).as_ptr(), 1);
-                core::arch::wasm::memory_atomic_notify((&super::NETWORKING_TASKS_QUEUE_LEN).as_ptr(), 1);
+                core::arch::wasm::memory_atomic_notify(
+                    (&super::NETWORKING_TASKS_QUEUE_LEN).as_ptr(),
+                    1,
+                );
             }
         });
 
@@ -134,7 +137,7 @@ impl smoldot_light::platform::PlatformRef for Platform {
     }
 
     fn connect(&self, url: &str) -> Self::ConnectFuture {
-        let mut lock = STATE.try_lock().unwrap();
+        let mut lock = STATE.lock().unwrap();
 
         let connection_id = lock.next_connection_id;
         lock.next_connection_id += 1;
@@ -177,7 +180,7 @@ impl smoldot_light::platform::PlatformRef for Platform {
             // Wait until the connection state is no longer `ConnectionInner::NotOpen`.
             let mut lock = loop {
                 let something_happened = {
-                    let mut lock = STATE.try_lock().unwrap();
+                    let mut lock = STATE.lock().unwrap();
                     let connection = lock.connections.get_mut(&connection_id).unwrap();
 
                     if !matches!(connection.inner, ConnectionInner::NotOpen) {
@@ -252,7 +255,7 @@ impl smoldot_light::platform::PlatformRef for Platform {
         Box::pin(async move {
             let (stream_id, direction, initial_writable_bytes) = loop {
                 let something_happened = {
-                    let mut lock = STATE.try_lock().unwrap();
+                    let mut lock = STATE.lock().unwrap();
                     let connection = lock.connections.get_mut(&connection_id).unwrap();
 
                     match &mut connection.inner {
@@ -301,7 +304,7 @@ impl smoldot_light::platform::PlatformRef for Platform {
 
     fn open_out_substream(&self, ConnectionWrapper(connection_id): &mut Self::Connection) {
         match STATE
-            .try_lock()
+            .lock()
             .unwrap()
             .connections
             .get(connection_id)
@@ -336,7 +339,7 @@ impl smoldot_light::platform::PlatformRef for Platform {
                 }
 
                 let listener = {
-                    let mut lock = STATE.try_lock().unwrap();
+                    let mut lock = STATE.lock().unwrap();
                     let stream = lock.streams.get_mut(&(*connection_id, *stream_id)).unwrap();
 
                     if stream.reset {
@@ -440,7 +443,7 @@ impl smoldot_light::platform::PlatformRef for Platform {
     ) {
         assert!(!*write_closed);
 
-        let mut lock = STATE.try_lock().unwrap();
+        let mut lock = STATE.lock().unwrap();
         let stream = lock.streams.get_mut(&(*connection_id, *stream_id)).unwrap();
 
         if stream.reset {
@@ -475,7 +478,7 @@ impl smoldot_light::platform::PlatformRef for Platform {
     ) {
         assert!(!*write_closed);
 
-        let mut lock = STATE.try_lock().unwrap();
+        let mut lock = STATE.lock().unwrap();
         let stream = lock.streams.get_mut(&(*connection_id, *stream_id)).unwrap();
 
         if stream.reset {
@@ -523,7 +526,7 @@ pub(crate) struct StreamWrapper {
 
 impl Drop for StreamWrapper {
     fn drop(&mut self) {
-        let mut lock = STATE.try_lock().unwrap();
+        let mut lock = STATE.lock().unwrap();
         let lock = &mut *lock;
 
         let connection = lock.connections.get_mut(&self.connection_id).unwrap();
@@ -590,7 +593,7 @@ pub(crate) struct ConnectionWrapper(u32);
 
 impl Drop for ConnectionWrapper {
     fn drop(&mut self) {
-        let mut lock = STATE.try_lock().unwrap();
+        let mut lock = STATE.lock().unwrap();
 
         let connection = lock.connections.get_mut(&self.0).unwrap();
         let (remove_connection, reset_connection) = match &mut connection.inner {
@@ -708,7 +711,7 @@ pub(crate) fn connection_open_single_stream(
 ) {
     assert_eq!(handshake_ty, 0);
 
-    let mut lock = STATE.try_lock().unwrap();
+    let mut lock = STATE.lock().unwrap();
     let lock = &mut *lock;
 
     let connection = lock.connections.get_mut(&connection_id).unwrap();
@@ -762,7 +765,7 @@ pub(crate) fn connection_open_multi_stream(connection_id: u32, handshake_ty: Vec
         )(&handshake_ty[..])
         .expect("invalid handshake type provided to connection_open_multi_stream");
 
-    let mut lock = STATE.try_lock().unwrap();
+    let mut lock = STATE.lock().unwrap();
     let connection = lock.connections.get_mut(&connection_id).unwrap();
 
     debug_assert!(matches!(connection.inner, ConnectionInner::NotOpen));
@@ -777,7 +780,7 @@ pub(crate) fn connection_open_multi_stream(connection_id: u32, handshake_ty: Vec
 }
 
 pub(crate) fn stream_writable_bytes(connection_id: u32, stream_id: u32, bytes: u32) {
-    let mut lock = STATE.try_lock().unwrap();
+    let mut lock = STATE.lock().unwrap();
 
     let connection = lock.connections.get_mut(&connection_id).unwrap();
 
@@ -802,7 +805,7 @@ pub(crate) fn stream_writable_bytes(connection_id: u32, stream_id: u32, bytes: u
 }
 
 pub(crate) fn stream_message(connection_id: u32, stream_id: u32, message: Vec<u8>) {
-    let mut lock = STATE.try_lock().unwrap();
+    let mut lock = STATE.lock().unwrap();
 
     let connection = lock.connections.get_mut(&connection_id).unwrap();
 
@@ -858,7 +861,7 @@ pub(crate) fn connection_stream_opened(
     outbound: u32,
     initial_writable_bytes: u32,
 ) {
-    let mut lock = STATE.try_lock().unwrap();
+    let mut lock = STATE.lock().unwrap();
     let lock = &mut *lock;
 
     let connection = lock.connections.get_mut(&connection_id).unwrap();
@@ -899,7 +902,7 @@ pub(crate) fn connection_stream_opened(
 }
 
 pub(crate) fn connection_reset(connection_id: u32, message: Vec<u8>) {
-    let mut lock = STATE.try_lock().unwrap();
+    let mut lock = STATE.lock().unwrap();
     let connection = lock.connections.get_mut(&connection_id).unwrap();
 
     let connection_handles_alive = match &connection.inner {
@@ -936,7 +939,7 @@ pub(crate) fn connection_reset(connection_id: u32, message: Vec<u8>) {
 pub(crate) fn stream_reset(connection_id: u32, stream_id: u32) {
     // Note that, as documented, it is illegal to call this function on single-stream substreams.
     // We can thus assume that the `stream_id` is valid.
-    let mut lock = STATE.try_lock().unwrap();
+    let mut lock = STATE.lock().unwrap();
     let stream = lock
         .streams
         .get_mut(&(connection_id, Some(stream_id)))
