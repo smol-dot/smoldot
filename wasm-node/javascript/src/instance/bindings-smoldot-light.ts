@@ -51,7 +51,6 @@ export interface Config {
 
     logCallback: (level: number, target: string, message: string) => void,
     jsonRpcResponsesNonEmptyCallback: (chainId: number) => void,
-    currentTaskCallback?: (taskName: string | null) => void,
 }
 
 /**
@@ -476,23 +475,6 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
             const connection = connections[connectionId]!;
             connection.closeSend(streamId);  // TODO: docs says the streamId is provided only for multi-stream connections, but here it's always provided
         },
-
-        current_task_entered: (ptr: number, len: number) => {
-            if (killedTracked.killed) return;
-
-            ptr >>>= 0;
-            len >>>= 0;
-
-            const taskName = buffer.utf8BytesToString(new Uint8Array(config.memory.buffer), ptr, len);
-            if (config.currentTaskCallback)
-                config.currentTaskCallback(taskName);
-        },
-
-        current_task_exit: () => {
-            if (killedTracked.killed) return;
-            if (config.currentTaskCallback)
-                config.currentTaskCallback(null);
-        }
     };
 
     return { imports, killAll }

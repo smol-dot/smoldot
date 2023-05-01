@@ -57,7 +57,6 @@ export class QueueFullError extends Error {
 export interface Config {
     logCallback: (level: number, target: string, message: string) => void
     maxLogLevel: number;
-    enableCurrentTask: boolean;
     cpuRateLimit: number,
 }
 
@@ -81,8 +80,6 @@ export function start(configMessage: Config, platformBindings: instance.Platform
 
     const crashError: { error?: CrashError } = {};
 
-    const currentTask: { name: string | null } = { name: null };
-
     const printError = { printError: true }
 
     // Contains the information of each chain that is currently alive.
@@ -98,9 +95,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
             if (!printError.printError)
                 return;
             console.error(
-                "Smoldot has panicked" +
-                (currentTask.name ? (" while executing task `" + currentTask.name + "`") : "") +
-                ". This is a bug in smoldot. Please open an issue at " +
+                "Smoldot has panicked. This is a bug in smoldot. Please open an issue at " +
                 "https://github.com/smol-dot/smoldot/issues with the following message:\n" +
                 message
             );
@@ -121,9 +116,6 @@ export function start(configMessage: Config, platformBindings: instance.Platform
                 promises.shift()!.resolve();
             }
         },
-        currentTaskCallback: (taskName) => {
-            currentTask.name = taskName
-        },
     };
 
     const cpuRateLimit = configMessage.cpuRateLimit;
@@ -139,7 +131,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
                     } catch (_error) { }
                 }
             });
-            instance.exports.init(configMessage.maxLogLevel, configMessage.enableCurrentTask ? 1 : 0, periodicallyYield ? 1 : 0);
+            instance.exports.init(configMessage.maxLogLevel, periodicallyYield ? 1 : 0);
 
             (async () => {
                 // In order to avoid calling `setTimeout` too often, we accumulate sleep up until

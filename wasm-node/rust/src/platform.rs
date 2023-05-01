@@ -39,15 +39,11 @@ pub static TOTAL_BYTES_RECEIVED: AtomicU64 = AtomicU64::new(0);
 pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
-pub(crate) struct Platform {
-    enable_current_task: bool,
-}
+pub(crate) struct Platform;
 
 impl Platform {
-    pub fn new(enable_current_task: bool) -> Self {
-        Self {
-            enable_current_task,
-        }
+    pub fn new() -> Self {
+        Self {}
     }
 }
 
@@ -103,46 +99,9 @@ impl smoldot_light::platform::PlatformRef for Platform {
 
     fn spawn_task(
         &self,
-        task_name: Cow<str>,
+        _task_name: Cow<str>,
         task: pin::Pin<Box<dyn future::Future<Output = ()> + Send>>,
     ) {
-        // The code below processes tasks that have names.
-        #[pin_project::pin_project]
-        struct FutureAdapter<F> {
-            name: String,
-            enable_current_task: bool,
-            #[pin]
-            future: F,
-        }
-
-        impl<F: future::Future> future::Future for FutureAdapter<F> {
-            type Output = F::Output;
-            fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
-                let this = self.project();
-                if *this.enable_current_task {
-                    unsafe {
-                        bindings::current_task_entered(
-                            u32::try_from(this.name.as_bytes().as_ptr() as usize).unwrap(),
-                            u32::try_from(this.name.as_bytes().len()).unwrap(),
-                        )
-                    }
-                }
-                let out = this.future.poll(cx);
-                if *this.enable_current_task {
-                    unsafe {
-                        bindings::current_task_exit();
-                    }
-                }
-                out
-            }
-        }
-
-        let task = FutureAdapter {
-            name: task_name.into_owned(),
-            enable_current_task: self.enable_current_task,
-            future: task,
-        };
-
         let (runnable, task) = async_task::spawn(task, |runnable| {
             super::tasks_queue()
                 .push(runnable)

@@ -23,8 +23,8 @@
 
 use core::{
     num::NonZeroU32,
-    pin::Pin,ptr,
-    str,
+    pin::Pin,
+    ptr, str,
     sync::atomic::{AtomicI32, Ordering},
     time::Duration,
 };
@@ -56,16 +56,8 @@ fn start_timer_wrap(duration: Duration, closure: impl FnOnce() + 'static) {
 
 static CLIENT: Mutex<Option<init::Client<platform::Platform, ()>>> = Mutex::new(None);
 
-fn init(
-    max_log_level: u32,
-    enable_current_task: u32,
-    periodically_yield: u32,
-) {
-    let init_out = init::init(
-        max_log_level,
-        enable_current_task != 0,
-        periodically_yield != 0,
-    );
+fn init(max_log_level: u32, periodically_yield: u32) {
+    let init_out = init::init(max_log_level, periodically_yield != 0);
 
     let mut client_lock = crate::CLIENT.lock().unwrap();
     assert!(client_lock.is_none());

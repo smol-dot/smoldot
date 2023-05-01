@@ -61,7 +61,6 @@ pub(crate) enum Chain {
 
 pub(crate) fn init<TChain>(
     max_log_level: u32,
-    enable_current_task: bool,
     periodically_yield: bool,
 ) -> Client<platform::Platform, TChain> {
     // Try initialize the logging and the panic hook.
@@ -91,7 +90,7 @@ pub(crate) fn init<TChain>(
     assert_ne!(rand::random::<u64>(), 0);
     assert_ne!(rand::random::<u64>(), rand::random::<u64>());
 
-    let platform = platform::Platform::new(enable_current_task);
+    let platform = platform::Platform::new();
 
     // Spawn a constantly-running task that periodically prints the total memory usage of
     // the node.

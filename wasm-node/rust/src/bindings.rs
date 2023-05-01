@@ -282,25 +282,6 @@ extern "C" {
     /// the stream itself must currently be in the `Open` state. See the documentation of
     /// [`connection_new`] for details.
     pub fn stream_send_close(connection_id: u32, stream_id: u32);
-
-    /// Called when the Wasm execution enters the context of a certain task. This is useful for
-    /// debugging purposes.
-    ///
-    /// Only one task can be currently executing at any time on any given thread.
-    ///
-    /// The name of the task is a UTF-8 string found in the memory of the WebAssembly virtual
-    /// machine at offset `ptr` and with length `len`.
-    ///
-    /// This function is called only if `enable_current_task` was non-zero when calling [`init`].
-    pub fn current_task_entered(ptr: u32, len: u32);
-
-    /// Called when the Wasm execution leave the context of a certain task. This is useful for
-    /// debugging purposes.
-    ///
-    /// Only one task can be currently executing at any time on any given thread.
-    ///
-    /// This function is called only if `enable_current_task` was non-zero when calling [`init`].
-    pub fn current_task_exit();
 }
 
 /// Initializes the client.
@@ -312,10 +293,6 @@ extern "C" {
 /// The client will emit log messages by calling the [`log()`] function, provided the log level is
 /// inferior or equal to the value of `max_log_level` passed here.
 ///
-/// If `enbable_current_task` is non-zero, smoldot will call the [`current_task_entered`] and
-/// [`current_task_exit`] functions to report when it enters and leaves tasks. This slightly
-/// slows everything down, but is useful for debugging purposes.
-///
 /// `cpu_rate_limit` can be used to limit the amount of CPU that smoldot will use on average.
 /// `u32::max_value()` represents "one CPU". For example passing `rate_limit / 2` represents
 /// "`50%` of one CPU".
@@ -323,8 +300,8 @@ extern "C" {
 /// `periodically_yield` represents the initial value of the setting described in the
 /// documentation of [`set_periodically_yield`].
 #[no_mangle]
-pub extern "C" fn init(max_log_level: u32, enable_current_task: u32, periodically_yield: u32) {
-    crate::init(max_log_level, enable_current_task, periodically_yield);
+pub extern "C" fn init(max_log_level: u32, periodically_yield: u32) {
+    crate::init(max_log_level, periodically_yield);
 }
 
 /// Advances the execution of the client, performing CPU-heavy tasks.
