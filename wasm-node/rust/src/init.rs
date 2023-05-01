@@ -31,8 +31,6 @@ pub(crate) struct Client<TPlat: smoldot_light::platform::PlatformRef, TChain> {
 
     /// List of all chains that have been added by the user.
     pub(crate) chains: slab::Slab<Chain>,
-
-    pub(crate) periodically_yield: bool,
 }
 
 pub(crate) enum Chain {
@@ -61,7 +59,6 @@ pub(crate) enum Chain {
 
 pub(crate) fn init<TChain>(
     max_log_level: u32,
-    periodically_yield: bool,
 ) -> Client<platform::Platform, TChain> {
     // Try initialize the logging and the panic hook.
     let _ = log::set_boxed_logger(Box::new(Logger)).map(|()| {
@@ -140,7 +137,6 @@ pub(crate) fn init<TChain>(
     Client {
         smoldot: smoldot_light::Client::new(platform),
         chains: slab::Slab::with_capacity(8),
-        periodically_yield,
     }
 }
 

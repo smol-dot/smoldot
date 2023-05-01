@@ -76,7 +76,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
     // - At initialization, it is a Promise containing the Wasm VM is still initializing.
     // - After the Wasm VM has finished initialization, contains the `WebAssembly.Instance` object.
     //
-    let state: { initialized: false, promise: Promise<[WebAssembly.Module, SmoldotWasmInstance, WebAssembly.Memory, Array<Uint8Array>]> } | { initialized: true, module: WebAssembly.Module, instance: SmoldotWasmInstance, memory: WebAssembly.Memory, bufferIndices: Array<Uint8Array>, unregisterCallback: () => void };
+    let state: { initialized: false, promise: Promise<[WebAssembly.Module, SmoldotWasmInstance, WebAssembly.Memory, Array<Uint8Array>]> } | { initialized: true, periodicallyYield: boolean, module: WebAssembly.Module, instance: SmoldotWasmInstance, memory: WebAssembly.Memory, bufferIndices: Array<Uint8Array>, unregisterCallback: () => void };
 
     const crashError: { error?: CrashError } = {};
 
@@ -125,13 +125,10 @@ export function start(configMessage: Config, platformBindings: instance.Platform
             // Smoldot requires an initial call to the `init` function in order to do its internal
             // configuration.
             const [periodicallyYield, unregisterCallback] = platformBindings.registerShouldPeriodicallyYield((newValue) => {
-                if (state.initialized && !crashError.error) {
-                    try {
-                        state.instance.exports.set_periodically_yield(newValue ? 1 : 0)
-                    } catch (_error) { }
-                }
+                if (state.initialized)
+                    state.periodicallyYield = newValue;
             });
-            instance.exports.init(configMessage.maxLogLevel, periodicallyYield ? 1 : 0);
+            instance.exports.init(configMessage.maxLogLevel);
 
             (async () => {
                 // In order to avoid calling `setTimeout` too often, we accumulate sleep up until
@@ -172,7 +169,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
                 }
             })()
 
-            state = { initialized: true, module, instance, memory, bufferIndices, unregisterCallback };
+            state = { initialized: true, periodicallyYield, module, instance, memory, bufferIndices, unregisterCallback };
             return [module, instance, memory, bufferIndices];
         })
     };

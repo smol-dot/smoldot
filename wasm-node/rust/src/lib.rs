@@ -56,16 +56,12 @@ fn start_timer_wrap(duration: Duration, closure: impl FnOnce() + 'static) {
 
 static CLIENT: Mutex<Option<init::Client<platform::Platform, ()>>> = Mutex::new(None);
 
-fn init(max_log_level: u32, periodically_yield: u32) {
-    let init_out = init::init(max_log_level, periodically_yield != 0);
+fn init(max_log_level: u32) {
+    let init_out = init::init(max_log_level);
 
     let mut client_lock = crate::CLIENT.lock().unwrap();
     assert!(client_lock.is_none());
     *client_lock = Some(init_out);
-}
-
-fn set_periodically_yield(periodically_yield: u32) {
-    CLIENT.lock().unwrap().as_mut().unwrap().periodically_yield = periodically_yield != 0;
 }
 
 fn start_shutdown() {

@@ -296,12 +296,9 @@ extern "C" {
 /// `cpu_rate_limit` can be used to limit the amount of CPU that smoldot will use on average.
 /// `u32::max_value()` represents "one CPU". For example passing `rate_limit / 2` represents
 /// "`50%` of one CPU".
-///
-/// `periodically_yield` represents the initial value of the setting described in the
-/// documentation of [`set_periodically_yield`].
 #[no_mangle]
-pub extern "C" fn init(max_log_level: u32, periodically_yield: u32) {
-    crate::init(max_log_level, periodically_yield);
+pub extern "C" fn init(max_log_level: u32) {
+    crate::init(max_log_level);
 }
 
 /// Advances the execution of the client, performing CPU-heavy tasks.
@@ -325,22 +322,6 @@ pub extern "C" fn advance_execution() -> u32 {
     debug_assert_ne!(ptr, 0);
     debug_assert_eq!(ptr % 4, 0);
     ptr
-}
-
-/// Sets whether the smoldot client must periodically yield back control by setting up a timer
-/// using [`start_timer`] with a delay of 0.
-///
-/// A value of 0 means "no", and any other value means "yes".
-///
-/// This setting is important when smoldot is used from within a web page. When the web page is in
-/// the foreground, it should be set to `true` so that the web browser can render the page often
-/// enough to not cause any discomfort. When the web page is in the background, it should be set
-/// to `false` because `setTimeout` gets a minimum delay of 1 second making [`start_timer`]
-/// unreliable.
-/// See also <https://developer.mozilla.org/en-US/docs/Web/API/setTimeout#timeouts_in_inactive_tabs>.
-#[no_mangle]
-pub extern "C" fn set_periodically_yield(periodically_yield: u32) {
-    crate::set_periodically_yield(periodically_yield);
 }
 
 /// Instructs the client to start shutting down.
