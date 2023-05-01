@@ -347,6 +347,9 @@ pub extern "C" fn init(
 ///
 /// If a non-zero value is returned, it is always aligned over 4 bytes. In other words, the `u32`
 /// is always a multiple of 4.
+///
+/// If a non-zero value is returned, it is valid for the current thread only and until
+/// `advance_execution` is called again.
 #[no_mangle]
 pub extern "C" fn advance_execution() -> u32 {
     // TODO: do the shutdown thing
