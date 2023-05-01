@@ -65,7 +65,7 @@ export interface Instance {
     request: (request: string, chainId: number) => void
     nextJsonRpcResponse: (chainId: number) => Promise<string>
     addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean) => Promise<{ success: true, chainId: number } | { success: false, error: string }>
-    createBackgroundRunnable: () => Promise<any>
+    createBackgroundRunnable: () => Promise<object | null>
     removeChain: (chainId: number) => void
     startShutdown: () => void
 }
@@ -268,10 +268,15 @@ export function start(configMessage: Config, platformBindings: instance.Platform
             }
         },
 
-        createBackgroundRunnable: (): Promise<any> => {
+        createBackgroundRunnable: (): Promise<object | null> => {
             return queueOperation((module, _instance, memory, _bufferIndices) => {
                 if (crashError.error)
                     throw crashError.error;
+
+                // TODO: check if it's correct to do this, or if it's the Wasm creation that fails altogether
+                // TODO: link to <https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/SharedArrayBuffer#security_requirements>
+                if (!(memory.buffer instanceof SharedArrayBuffer))
+                    return null;
 
                 // TODO: use more opaque field names?
                 return { module, memory };

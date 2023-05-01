@@ -476,7 +476,7 @@ export function start(options: ClientOptions, platformBindings: PlatformBindings
             chainIds.set(newChain, chainId);
             return newChain;
         },
-        createBackgroundRunnable(): Promise<any> {
+        createBackgroundRunnable(): Promise<object | null> {
             return instance.createBackgroundRunnable();
         },
         terminate: async () => {
