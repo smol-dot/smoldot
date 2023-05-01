@@ -128,13 +128,12 @@ export function start(configMessage: Config, platformBindings: instance.Platform
                 }
             },
             wasmModule: { module, memory },
+            cpuRateLimit: configMessage.cpuRateLimit,
         };
 
         const [i, bufferIndices] = await instance.startInstance(config, platformBindings);
         return [module, i, memory, bufferIndices];
     })();
-
-    const cpuRateLimit = configMessage.cpuRateLimit;
 
     state = {
         initialized: false, promise: initPromise.then(([module, instance, memory, bufferIndices]) => {
@@ -146,44 +145,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
             });
             instance.exports.init(configMessage.maxLogLevel);
 
-            (async () => {
-                // In order to avoid calling `setTimeout` too often, we accumulate sleep up until
-                // a certain threshold.
-                let missingSleep = 0;
-
-                while (true) {
-                    const before = platformBindings.performanceNow();
-
-                    const ptr = instance.exports.advance_execution() >>> 0;
-                    if (ptr === 0)
-                        break;
-
-                    const after = platformBindings.performanceNow();
-                    const elapsed = after - before;
-
-                    // In order to enforce the rate limiting, we stop executing for a certain
-                    // amount of time.
-                    // The base equation here is: `(sleep + elapsed) * rateLimit == elapsed`,
-                    // from which the calculation below is derived.
-                    const sleep = elapsed * (1.0 / cpuRateLimit - 1.0);
-                    missingSleep += sleep;
-
-                    if (missingSleep > 5 || (state.initialized && state.periodicallyYield)) {
-                        await new Promise((resolve) => setTimeout(resolve, missingSleep));
-                        missingSleep = 0;
-                    }
-
-                    // TODO: `waitAsync` is missing from TS bindings
-                    // TODO: `waitAsync` isn't supported by Firefox: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Atomics/waitAsync
-                    interface AtomicsExtra {
-                        waitAsync(typedArray: Int32Array, index: number, value: number, timeout?: number): { async: true, value: Promise<"ok" | "timed-out"> } | { async: false, value: "not-equal" | "timed-out" };
-                    }
-                    const waitReturn = (Atomics as unknown as AtomicsExtra).waitAsync(new Int32Array(memory.buffer), ptr / 4, 0);
-                    if (waitReturn.async) {
-                        await waitReturn.value
-                    }
-                }
-            })()
+            // TODO: use periodicallyYield
 
             state = { initialized: true, periodicallyYield, module, instance, memory, bufferIndices, unregisterCallback };
             return [module, instance, memory, bufferIndices];
