@@ -70,9 +70,6 @@ export function start(options?: ClientOptions): Client {
             }
             return concatenated;
         },
-        registerShouldPeriodicallyYield: (_callback) => {
-            return [true, () => { }]
-        },
         performanceNow: () => {
             return performance.now()
         },

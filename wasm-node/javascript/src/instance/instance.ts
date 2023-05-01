@@ -75,7 +75,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
     // - At initialization, it is a Promise containing the Wasm VM is still initializing.
     // - After the Wasm VM has finished initialization, contains the `WebAssembly.Instance` object.
     //
-    let state: { initialized: false, promise: Promise<[WebAssembly.Module, SmoldotWasmInstance, WebAssembly.Memory, Array<Uint8Array>]> } | { initialized: true, periodicallyYield: boolean, module: WebAssembly.Module, instance: SmoldotWasmInstance, memory: WebAssembly.Memory, bufferIndices: Array<Uint8Array>, unregisterCallback: () => void };
+    let state: { initialized: false, promise: Promise<[WebAssembly.Module, SmoldotWasmInstance, WebAssembly.Memory, Array<Uint8Array>]> } | { initialized: true, module: WebAssembly.Module, instance: SmoldotWasmInstance, memory: WebAssembly.Memory, bufferIndices: Array<Uint8Array> };
 
     const crashError: { error?: CrashError } = {};
 
@@ -124,15 +124,8 @@ export function start(configMessage: Config, platformBindings: instance.Platform
         initialized: false, promise: initPromise.then(([module, instance, memory, bufferIndices]) => {
             // Smoldot requires an initial call to the `init` function in order to do its internal
             // configuration.
-            const [periodicallyYield, unregisterCallback] = platformBindings.registerShouldPeriodicallyYield((newValue) => {
-                if (state.initialized)
-                    state.periodicallyYield = newValue;
-            });
             instance.exports.init(configMessage.maxLogLevel);
-
-            // TODO: use periodicallyYield
-
-            state = { initialized: true, periodicallyYield, module, instance, memory, bufferIndices, unregisterCallback };
+            state = { initialized: true, module, instance, memory, bufferIndices };
             return [module, instance, memory, bufferIndices];
         })
     };
@@ -312,8 +305,6 @@ export function start(configMessage: Config, platformBindings: instance.Platform
                 // exception when the user wants the shutdown to happen.
                 if (crashError.error)
                     return;
-                if (state.initialized)
-                    state.unregisterCallback();
                 try {
                     printError.printError = false
                     instance.exports.start_shutdown()

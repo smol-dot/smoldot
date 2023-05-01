@@ -38,9 +38,6 @@ export async function run(wasmModule: any) {
             // TODO: don't pass this
             throw new Error();
         },
-        registerShouldPeriodicallyYield: (_callback: any): [boolean, () => void] => {
-            return [true, () => { }]
-        },
         performanceNow: () => {
             return performance.now()
         },
