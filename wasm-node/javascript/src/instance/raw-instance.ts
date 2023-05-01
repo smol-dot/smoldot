@@ -133,7 +133,6 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
         while (true) {
             const before = platformBindings.performanceNow();
 
-            // TODO: proper value for execNonNetworking
             const ptr = instance.exports.advance_execution(
                 platformBindings.connect !== null ? 1 : 0,
                 executeNonNetworkingTasks.value ? 1 : 0
@@ -151,7 +150,7 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
             const sleep = elapsed * (1.0 / cpuRateLimit - 1.0);
             missingSleep += sleep;
 
-            if (missingSleep > 5) { // TODO: || (state.initialized && state.periodicallyYield))
+            if (missingSleep > 5) {
                 await new Promise((resolve) => setTimeout(resolve, missingSleep));
                 missingSleep = 0;
             }
