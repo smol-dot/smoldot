@@ -129,10 +129,9 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
         if (cpuRateLimit < 0.0) cpuRateLimit = 0.0;
 
         const executeNonNetworkingTasks = config.executeNonNetworkingTasks;
+        let now = platformBindings.performanceNow();
 
         while (true) {
-            const before = platformBindings.performanceNow();
-
             const ptr = instance.exports.advance_execution(
                 platformBindings.connect !== null ? 1 : 0,
                 executeNonNetworkingTasks.value ? 1 : 0
@@ -140,8 +139,9 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
             if (ptr === 0)
                 break;
 
-            const after = platformBindings.performanceNow();
-            const elapsed = after - before;
+            const afterExec = platformBindings.performanceNow();
+            const elapsed = afterExec - now;
+            now = afterExec;
 
             // In order to enforce the rate limiting, we stop executing for a certain
             // amount of time.
@@ -164,6 +164,12 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
             if (waitReturn.async) {
                 await waitReturn.value
             }
+
+            const afterWait = platformBindings.performanceNow();
+            missingSleep -= (afterWait - now);
+            if (missingSleep < 0)
+                missingSleep = 0;
+            now = afterWait;
         }
     })();
 
