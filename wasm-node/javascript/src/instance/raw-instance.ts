@@ -147,6 +147,12 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
         // a certain threshold.
         let missingSleep = 0;
 
+        // Extract (to make sure the value doesn't change) and sanitize `cpuRateLimit`.
+        let cpuRateLimit = config.cpuRateLimit;
+        if (isNaN(cpuRateLimit)) cpuRateLimit = 1.0;
+        if (cpuRateLimit > 1.0) cpuRateLimit = 1.0;
+        if (cpuRateLimit < 0.0) cpuRateLimit = 0.0;
+
         while (true) {
             const before = platformBindings.performanceNow();
 
@@ -162,7 +168,7 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
             // amount of time.
             // The base equation here is: `(sleep + elapsed) * rateLimit == elapsed`,
             // from which the calculation below is derived.
-            const sleep = elapsed * (1.0 / config.cpuRateLimit - 1.0);
+            const sleep = elapsed * (1.0 / cpuRateLimit - 1.0);
             missingSleep += sleep;
 
             if (missingSleep > 5) { // TODO: || (state.initialized && state.periodicallyYield))
