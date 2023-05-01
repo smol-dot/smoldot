@@ -124,20 +124,12 @@ export function start(configMessage: Config, platformBindings: instance.Platform
         currentTaskCallback: (taskName) => {
             currentTask.name = taskName
         },
-        cpuRateLimit: configMessage.cpuRateLimit,
     };
+
+    const cpuRateLimit = configMessage.cpuRateLimit;
 
     state = {
         initialized: false, promise: instance.startInstance(config, platformBindings).then(([module, instance, memory, bufferIndices]) => {
-            // `config.cpuRateLimit` is a floating point that should be between 0 and 1, while the value
-            // to pass as parameter must be between `0` and `2^32-1`.
-            // The few lines of code below should handle all possible values of `number`, including
-            // infinites and NaN.
-            let cpuRateLimit = Math.round(config.cpuRateLimit * 4294967295);  // `2^32 - 1`
-            if (cpuRateLimit < 0) cpuRateLimit = 0;
-            if (cpuRateLimit > 4294967295) cpuRateLimit = 4294967295;
-            if (!Number.isFinite(cpuRateLimit)) cpuRateLimit = 4294967295; // User might have passed NaN
-
             // Smoldot requires an initial call to the `init` function in order to do its internal
             // configuration.
             const [periodicallyYield, unregisterCallback] = platformBindings.registerShouldPeriodicallyYield((newValue) => {
@@ -147,13 +139,34 @@ export function start(configMessage: Config, platformBindings: instance.Platform
                     } catch (_error) { }
                 }
             });
-            instance.exports.init(configMessage.maxLogLevel, configMessage.enableCurrentTask ? 1 : 0, cpuRateLimit, periodicallyYield ? 1 : 0);
+            instance.exports.init(configMessage.maxLogLevel, configMessage.enableCurrentTask ? 1 : 0, periodicallyYield ? 1 : 0);
 
             (async () => {
+                // In order to avoid calling `setTimeout` too often, we accumulate sleep up until
+                // a certain threshold.
+                let missingSleep = 0;
+
                 while (true) {
+                    const before = platformBindings.performanceNow();
+
                     const ptr = instance.exports.advance_execution() >>> 0;
                     if (ptr === 0)
                         break;
+
+                    const after = platformBindings.performanceNow();
+                    const elapsed = after - before;
+
+                    // In order to enforce the rate limiting, we stop executing for a certain
+                    // amount of time.
+                    // The base equation here is: `(sleep + elapsed) * rateLimit == elapsed`,
+                    // from which the calculation below is derived.
+                    const sleep = elapsed * (1.0 / cpuRateLimit - 1.0);
+                    missingSleep += sleep;
+
+                    if (missingSleep > 5) {
+                        await new Promise((resolve) => setTimeout(resolve, missingSleep));
+                        missingSleep = 0;
+                    }
 
                     // TODO: `waitAsync` is missing from TS bindings
                     // TODO: `waitAsync` isn't supported by Firefox: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Atomics/waitAsync

@@ -323,18 +323,8 @@ extern "C" {
 /// `periodically_yield` represents the initial value of the setting described in the
 /// documentation of [`set_periodically_yield`].
 #[no_mangle]
-pub extern "C" fn init(
-    max_log_level: u32,
-    enable_current_task: u32,
-    cpu_rate_limit: u32,
-    periodically_yield: u32,
-) {
-    crate::init(
-        max_log_level,
-        enable_current_task,
-        cpu_rate_limit,
-        periodically_yield,
-    );
+pub extern "C" fn init(max_log_level: u32, enable_current_task: u32, periodically_yield: u32) {
+    crate::init(max_log_level, enable_current_task, periodically_yield);
 }
 
 /// Advances the execution of the client, performing CPU-heavy tasks.

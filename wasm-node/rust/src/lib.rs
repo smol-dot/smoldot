@@ -59,13 +59,11 @@ static CLIENT: Mutex<Option<init::Client<platform::Platform, ()>>> = Mutex::new(
 fn init(
     max_log_level: u32,
     enable_current_task: u32,
-    cpu_rate_limit: u32,
     periodically_yield: u32,
 ) {
     let init_out = init::init(
         max_log_level,
         enable_current_task != 0,
-        cpu_rate_limit,
         periodically_yield != 0,
     );
 
@@ -430,51 +428,6 @@ fn advance_execution() {
     let tasks_queue = tasks_queue();
     while let Ok(mut task) = tasks_queue.pop() {
         TASKS_QUEUE_LEN.fetch_sub(1, Ordering::SeqCst); // TODO: Release?
-
-        // TODO: restore this
-        /*if future::poll_fn(|cx| {
-            future::Future::poll(Pin::new(&mut client_lock.prevent_poll_until), cx)
-        })
-        .now_or_never()
-        .is_none()
-        {
-            break;
-        } */
-
-        let before_polling = Instant::now();
-
-        // Advance one background task.
-        // If nothing is actually executed, break out of the loop as there is nothing to do.
-        if !task.run() {
-            break;
-        }
-
-        // Time it took to execute `try_tick`.
-        let after_polling = Instant::now();
-        let poll_duration = after_polling - before_polling;
-
-        // TODO: restore this
-        /*// In order to enforce the rate limiting, we prevent `try_tick` from executing
-        // for a certain amount of time.
-        // The base equation here is: `(after_tick_sleep + poll_duration) * rate_limit == poll_duration * u32::max_value()`.
-        let after_tick_sleep =
-            poll_duration.as_secs_f64() * client_lock.max_divided_by_rate_limit_minus_one;
-        debug_assert!(after_tick_sleep >= 0.0 && !after_tick_sleep.is_nan());
-        client_lock.sleep_deprevation_sec += after_tick_sleep;
-
-        if client_lock.sleep_deprevation_sec > 0.005 {
-            client_lock.prevent_poll_until = crate::timers::Delay::new_at(
-                after_polling
-                    + Duration::try_from_secs_f64(client_lock.sleep_deprevation_sec)
-                        .unwrap_or(Duration::MAX),
-            );
-            client_lock.sleep_deprevation_sec = 0.0;
-        }
-
-        // If the task woke itself up (which means that it has more to execute), we continue
-        // looping provided that `periodically_yield` is `false`.
-        if !client_lock.periodically_yield {
-            continue;
-        }*/
+        task.run();
     }
 }

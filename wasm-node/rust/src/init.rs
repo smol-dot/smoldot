@@ -33,18 +33,6 @@ pub(crate) struct Client<TPlat: smoldot_light::platform::PlatformRef, TChain> {
     pub(crate) chains: slab::Slab<Chain>,
 
     pub(crate) periodically_yield: bool,
-
-    /// Executor where background tasks are spawned.
-    pub(crate) executor: Arc<async_executor::Executor<'static>>,
-
-    pub(crate) max_divided_by_rate_limit_minus_one: f64,
-
-    /// Instead of sleeping regularly for short amounts of time, we instead continue running only
-    /// until the time we have to sleep reaches a certain threshold.
-    pub(crate) sleep_deprevation_sec: f64,
-
-    /// Prevent `main_task` from being called before this `Delay` is ready.
-    pub(crate) prevent_poll_until: crate::timers::Delay,
 }
 
 pub(crate) enum Chain {
@@ -74,7 +62,6 @@ pub(crate) enum Chain {
 pub(crate) fn init<TChain>(
     max_log_level: u32,
     enable_current_task: bool,
-    cpu_rate_limit: u32,
     periodically_yield: bool,
 ) -> Client<platform::Platform, TChain> {
     // Try initialize the logging and the panic hook.
@@ -156,21 +143,10 @@ pub(crate) fn init<TChain>(
         }),
     );
 
-    let max_divided_by_rate_limit_minus_one =
-        (f64::from(u32::max_value()) / f64::from(cpu_rate_limit)) - 1.0;
-    // Note that it is legal for `max_divided_by_rate_limit_minus_one` to be +infinite
-    debug_assert!(
-        !max_divided_by_rate_limit_minus_one.is_nan() && max_divided_by_rate_limit_minus_one >= 0.0
-    );
-
     Client {
         smoldot: smoldot_light::Client::new(platform),
         chains: slab::Slab::with_capacity(8),
         periodically_yield,
-        executor,
-        max_divided_by_rate_limit_minus_one,
-        sleep_deprevation_sec: 0.0,
-        prevent_poll_until: crate::timers::Delay::new(Duration::new(0, 0)),
     }
 }
 

@@ -40,7 +40,6 @@ export interface Config {
     logCallback: (level: number, target: string, message: string) => void,
     jsonRpcResponsesNonEmptyCallback: (chainId: number) => void,
     currentTaskCallback?: (taskName: string | null) => void,
-    cpuRateLimit: number,
 }
 
 /**
