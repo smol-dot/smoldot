@@ -178,7 +178,7 @@ fn add_chain(
 
     // We wrap the JSON-RPC responses stream into a proper stream in order to be able to guarantee
     // that `poll_next()` always operates on the same future.
-    let mut json_rpc_responses = json_rpc_responses.map(|json_rpc_responses| {
+    let json_rpc_responses = json_rpc_responses.map(|json_rpc_responses| {
         stream::unfold(json_rpc_responses, |mut json_rpc_responses| async {
             // The stream ends when we remove the chain. Once the chain is removed, the user
             // cannot poll the stream anymore. Therefore it is safe to unwrap the result here.
@@ -187,19 +187,6 @@ fn add_chain(
         })
         .boxed()
     });
-
-    // Poll the receiver once in order for `json_rpc_responses_non_empty` to be called the first
-    // time a response is received.
-    if let Some(json_rpc_responses) = json_rpc_responses.as_mut() {
-        let _polled_result =
-            Pin::new(json_rpc_responses).poll_next(&mut task::Context::from_waker(
-                &Arc::new(JsonRpcResponsesNonEmptyWaker {
-                    chain_id: outer_chain_id_u32,
-                })
-                .into(),
-            ));
-        debug_assert!(_polled_result.is_pending());
-    }
 
     if let init::Chain::Healthy {
         json_rpc_responses_rx,
