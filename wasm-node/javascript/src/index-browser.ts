@@ -64,7 +64,17 @@ export function start(options?: ClientOptions): Client {
             const crypto = globalThis.crypto;
             if (!crypto)
                 throw new Error('randomness not available');
-            crypto.getRandomValues(buffer);
+
+            // Browsers have this completely undocumented behavior (it's not even part of a spec)
+            // that for some reason `getRandomValues` can't be called on arrayviews back by
+            // `SharedArrayBuffer`s and they throw an exception if you try.
+            if (buffer.buffer instanceof ArrayBuffer)
+                crypto.getRandomValues(buffer);
+            else {
+                const tmpArray = new Uint8Array(buffer.length);
+                crypto.getRandomValues(tmpArray);
+                buffer.set(tmpArray);
+            }
         },
         connect: (config) => {
             return connect(
