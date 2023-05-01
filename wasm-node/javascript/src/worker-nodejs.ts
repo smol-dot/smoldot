@@ -21,7 +21,7 @@ import { randomFillSync } from 'node:crypto';
 import * as instance from './instance/raw-instance.js';
 
 // TODO: stronger typing? see "branded types"
-export async function run(wasmModule: any) {
+export async function run(wasmModule: any, cpuRateLimit: number) {
     const config: instance.Config = {
         onWasmPanic: (_message) => {
             // TODO: completetly unclear what to do
@@ -30,7 +30,7 @@ export async function run(wasmModule: any) {
             // TODO: ?!?!
         },
         wasmModule: wasmModule,
-        cpuRateLimit: 1.0, // TODO: make configurable
+        cpuRateLimit,
     };
 
     const platformBindings = {

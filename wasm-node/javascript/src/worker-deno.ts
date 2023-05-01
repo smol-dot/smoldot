@@ -16,6 +16,6 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 // TODO: stronger typing? see "branded types"
-export async function run(_foo: any) {
+export async function run(_wasmModule: any, _cpuRateLimit: number) {
 
 }
