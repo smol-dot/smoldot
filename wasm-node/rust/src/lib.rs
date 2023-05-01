@@ -402,23 +402,54 @@ impl task::Wake for JsonRpcResponsesNonEmptyWaker {
     }
 }
 
-static TASKS_QUEUE: async_lock::OnceCell<concurrent_queue::ConcurrentQueue<async_task::Runnable>> =
-    async_lock::OnceCell::new();
-fn tasks_queue() -> &'static concurrent_queue::ConcurrentQueue<async_task::Runnable> {
-    TASKS_QUEUE.get_or_init_blocking(|| concurrent_queue::ConcurrentQueue::unbounded())
+static NETWORKING_TASKS_QUEUE: async_lock::OnceCell<
+    concurrent_queue::ConcurrentQueue<async_task::Runnable>,
+> = async_lock::OnceCell::new();
+fn networking_tasks_queue() -> &'static concurrent_queue::ConcurrentQueue<async_task::Runnable> {
+    NETWORKING_TASKS_QUEUE.get_or_init_blocking(|| concurrent_queue::ConcurrentQueue::unbounded())
+}
+
+static NON_NETWORKING_TASKS_QUEUE: async_lock::OnceCell<
+    concurrent_queue::ConcurrentQueue<async_task::Runnable>,
+> = async_lock::OnceCell::new();
+fn non_networking_tasks_queue() -> &'static concurrent_queue::ConcurrentQueue<async_task::Runnable>
+{
+    NON_NETWORKING_TASKS_QUEUE
+        .get_or_init_blocking(|| concurrent_queue::ConcurrentQueue::unbounded())
 }
 
 static TASKS_QUEUE_LEN: AtomicI32 = AtomicI32::new(0);
+static NETWORKING_TASKS_QUEUE_LEN: AtomicI32 = AtomicI32::new(0);
+static NON_NETWORKING_TASKS_QUEUE_LEN: AtomicI32 = AtomicI32::new(0);
 
-fn advance_execution(can_networking: bool, exec_non_networking: bool) {
+fn advance_execution(can_networking: bool, exec_non_networking: bool) -> *mut i32 {
     // TODO: actually use `can_networking`
     // TODO: consider work stealing by using something like async-executor and run `executor.tick()` like we currently do run tasks
 
-    if exec_non_networking {
-        let tasks_queue = tasks_queue();
+    let mut at_least_one_networking_task_run = false;
+    if can_networking {
+        let tasks_queue = networking_tasks_queue();
         while let Ok(task) = tasks_queue.pop() {
             TASKS_QUEUE_LEN.fetch_sub(1, Ordering::SeqCst); // TODO: Release?
+            NETWORKING_TASKS_QUEUE_LEN.fetch_sub(1, Ordering::SeqCst); // TODO: Release?
+            at_least_one_networking_task_run = true;
             task.run();
         }
+    }
+
+    if !at_least_one_networking_task_run && exec_non_networking {
+        let tasks_queue = non_networking_tasks_queue();
+        while let Ok(task) = tasks_queue.pop() {
+            TASKS_QUEUE_LEN.fetch_sub(1, Ordering::SeqCst); // TODO: Release?
+            NON_NETWORKING_TASKS_QUEUE_LEN.fetch_sub(1, Ordering::SeqCst); // TODO: Release?
+            task.run();
+        }
+    }
+
+    match (can_networking, exec_non_networking) {
+        (true, true) => TASKS_QUEUE_LEN.as_ptr(),
+        (false, true) => NON_NETWORKING_TASKS_QUEUE_LEN.as_ptr(),
+        (true, false) => NETWORKING_TASKS_QUEUE_LEN.as_ptr(),
+        (false, false) => TASKS_QUEUE_LEN.as_ptr(), // Non-sensical, return a dummy value.
     }
 }

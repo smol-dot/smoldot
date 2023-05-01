@@ -103,13 +103,17 @@ impl smoldot_light::platform::PlatformRef for Platform {
         task: pin::Pin<Box<dyn future::Future<Output = ()> + Send>>,
     ) {
         let (runnable, task) = async_task::spawn(task, |runnable| {
-            super::tasks_queue()
+            super::networking_tasks_queue()
                 .push(runnable)
                 .unwrap_or_else(|_| panic!());
             super::TASKS_QUEUE_LEN.fetch_add(1, Ordering::SeqCst);
+            super::NETWORKING_TASKS_QUEUE_LEN.fetch_add(1, Ordering::SeqCst);
             #[cfg(target_family = "wasm")]
             unsafe {
+                // Note: this might cause two threads to wake up, but is in practice never going
+                // to happen, and even if it does happen isn't a problem.
                 core::arch::wasm::memory_atomic_notify((&super::TASKS_QUEUE_LEN).as_ptr(), 1);
+                core::arch::wasm::memory_atomic_notify((&super::NETWORKING_TASKS_QUEUE_LEN).as_ptr(), 1);
             }
         });
 

@@ -329,8 +329,8 @@ pub extern "C" fn init(max_log_level: u32) {
 #[no_mangle]
 pub extern "C" fn advance_execution(can_networking: u32, exec_non_networking: u32) -> u32 {
     // TODO: do the shutdown thing
-    super::advance_execution(can_networking != 0, exec_non_networking != 0);
-    let ptr = super::TASKS_QUEUE_LEN.as_ptr() as usize as u32;
+    let ptr =
+        super::advance_execution(can_networking != 0, exec_non_networking != 0) as usize as u32;
     debug_assert_ne!(ptr, 0);
     debug_assert_eq!(ptr % 4, 0);
     ptr
