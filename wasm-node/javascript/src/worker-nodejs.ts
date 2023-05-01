@@ -31,6 +31,7 @@ export async function run(wasmModule: any, cpuRateLimit: number) {
         },
         wasmModule: wasmModule,
         cpuRateLimit,
+        executeNonNetworkingTasks: { value: true },
     };
 
     const platformBindings = {

@@ -39,6 +39,7 @@ export interface Config {
     currentTaskCallback?: (taskName: string | null) => void,
     wasmModule: { module: WebAssembly.Module, memory: WebAssembly.Memory },
     cpuRateLimit: number,
+    executeNonNetworkingTasks: { value: boolean },
 }
 
 /**
@@ -140,11 +141,16 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
         if (cpuRateLimit > 1.0) cpuRateLimit = 1.0;
         if (cpuRateLimit < 0.0) cpuRateLimit = 0.0;
 
+        const executeNonNetworkingTasks = config.executeNonNetworkingTasks;
+
         while (true) {
             const before = platformBindings.performanceNow();
 
             // TODO: proper value for execNonNetworking
-            const ptr = instance.exports.advance_execution(platformBindings.connect !== null ? 1 : 0, 1) >>> 0;
+            const ptr = instance.exports.advance_execution(
+                platformBindings.connect !== null ? 1 : 0,
+                executeNonNetworkingTasks.value ? 1 : 0
+            ) >>> 0;
             if (ptr === 0)
                 break;
 

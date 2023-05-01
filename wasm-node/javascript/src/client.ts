@@ -83,7 +83,30 @@ export interface Client {
      */
     addChain(options: AddChainOptions): Promise<Chain>;
 
-    createBackgroundRunnable(): any;
+    /**
+     * Extracts an object that can passed to the `run` function found in the `/worker` module
+     * of this package.
+     *
+     * This object is structurally-copiable, meaning that it can be sent to a WebWorker, worker
+     * thread, or similar.
+     *
+     * The object that is returned internally uses a `SharedArrayBuffer`. When in the context of
+     * a browser, and as documented on the MDN, sending a `SharedArrayBuffer` using `postMessage`
+     * will throw an exception unless the page was served with two specific HTTP headers.
+     * Consequently, before calling this function, you should check the value of
+     * `crossOriginIsolated` (on the `Window`).
+     *
+     * See <https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/SharedArrayBuffer#api_availability>.
+     *
+     * As soon as this function is called, the load on the current thread will considerably
+     * drop as it is expected that the `run` function will start using the CPU-heavy tasks of the
+     * client instead.
+     * In other words, calling `createBackgroundRunnable()` and doing nothing with the output will
+     * make the client stop working properly.
+     * For this reason, when in a browser, you are strongly encouraged to check the value of
+     * `crossOriginIsolated` rather than call `postMessage` and absorb exceptions.
+     */
+    createBackgroundRunnable(): Promise<object>;
 
     /**
      * Terminates the client.
@@ -476,7 +499,7 @@ export function start(options: ClientOptions, platformBindings: PlatformBindings
             chainIds.set(newChain, chainId);
             return newChain;
         },
-        createBackgroundRunnable(): Promise<object | null> {
+        createBackgroundRunnable(): Promise<object> {
             return instance.createBackgroundRunnable();
         },
         terminate: async () => {

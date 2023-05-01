@@ -64,7 +64,7 @@ export interface Instance {
     request: (request: string, chainId: number) => void
     nextJsonRpcResponse: (chainId: number) => Promise<string>
     addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean) => Promise<{ success: true, chainId: number } | { success: false, error: string }>
-    createBackgroundRunnable: () => Promise<object | null>
+    createBackgroundRunnable: () => Promise<object>
     removeChain: (chainId: number) => void
     startShutdown: () => void
 }
@@ -75,7 +75,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
     // - At initialization, it is a Promise containing the Wasm VM is still initializing.
     // - After the Wasm VM has finished initialization, contains the `WebAssembly.Instance` object.
     //
-    let state: { initialized: false, promise: Promise<[WebAssembly.Module, SmoldotWasmInstance, WebAssembly.Memory, Array<Uint8Array>]> } | { initialized: true, module: WebAssembly.Module, instance: SmoldotWasmInstance, memory: WebAssembly.Memory, bufferIndices: Array<Uint8Array> };
+    let state: { initialized: false, promise: Promise<[WebAssembly.Module, SmoldotWasmInstance, WebAssembly.Memory, Array<Uint8Array>]> } | { initialized: true, executeNonNetworkingTasks: { value: boolean }, module: WebAssembly.Module, instance: SmoldotWasmInstance, memory: WebAssembly.Memory, bufferIndices: Array<Uint8Array> };
 
     const crashError: { error?: CrashError } = {};
 
@@ -86,7 +86,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
     let chains: Map<number, {}> = new Map();
 
     // Start initialization of the Wasm VM.
-    const initPromise = (async (): Promise<[WebAssembly.Module, SmoldotWasmInstance, WebAssembly.Memory, Array<Uint8Array>]> => {
+    const initPromise = (async (): Promise<[WebAssembly.Module, SmoldotWasmInstance, WebAssembly.Memory, Array<Uint8Array>, { value: boolean }]> => {
         // The actual Wasm bytecode is base64-decoded then deflate-decoded from a constant found in a
         // different file.
         // This is suboptimal compared to using `instantiateStreaming`, but it is the most
@@ -97,6 +97,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
         // TODO: proper initial/maximum values; it seems that they must exactly match what the wasm contains?
         const memory = new WebAssembly.Memory({ shared: true, initial: 41, maximum: 16384 });
 
+        const executeNonNetworkingTasks = { value: true };
         const config: instance.Config = {
             onWasmPanic: (message) => {
                 // TODO: consider obtaining a backtrace here
@@ -114,18 +115,19 @@ export function start(configMessage: Config, platformBindings: instance.Platform
             },
             wasmModule: { module, memory },
             cpuRateLimit: configMessage.cpuRateLimit,
+            executeNonNetworkingTasks,
         };
 
         const [i, bufferIndices] = await instance.startInstance(config, platformBindings);
-        return [module, i, memory, bufferIndices];
+        return [module, i, memory, bufferIndices, executeNonNetworkingTasks];
     })();
 
     state = {
-        initialized: false, promise: initPromise.then(([module, instance, memory, bufferIndices]) => {
+        initialized: false, promise: initPromise.then(([module, instance, memory, bufferIndices, executeNonNetworkingTasks]) => {
             // Smoldot requires an initial call to the `init` function in order to do its internal
             // configuration.
             instance.exports.init(configMessage.maxLogLevel);
-            state = { initialized: true, module, instance, memory, bufferIndices };
+            state = { initialized: true, module, instance, memory, bufferIndices, executeNonNetworkingTasks };
             return [module, instance, memory, bufferIndices];
         })
     };
@@ -215,15 +217,13 @@ export function start(configMessage: Config, platformBindings: instance.Platform
             }
         },
 
-        createBackgroundRunnable: (): Promise<object | null> => {
+        createBackgroundRunnable: (): Promise<object> => {
             return queueOperation((module, _instance, memory, _bufferIndices) => {
                 if (crashError.error)
                     throw crashError.error;
-
-                // TODO: check if it's correct to do this, or if it's the Wasm creation that fails altogether
-                // TODO: link to <https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/SharedArrayBuffer#security_requirements>
-                if (!(memory.buffer instanceof SharedArrayBuffer))
-                    return null;
+                if (!state.initialized)
+                    throw new Error("Internal error");
+                state.executeNonNetworkingTasks.value = false;
 
                 // TODO: when the memory is grown, the buffer changes; does this also refresh the buffer in the clones of Memory that we sent to the workers? or do you have to allocate a big enough buffer ahead of time?
                 // TODO: use more opaque field names?
