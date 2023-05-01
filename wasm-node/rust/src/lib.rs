@@ -425,20 +425,20 @@ static NON_NETWORKING_TASKS_QUEUE_LEN: AtomicI32 = AtomicI32::new(0);
 fn advance_execution(can_networking: bool, exec_non_networking: bool) -> *mut i32 {
     // TODO: consider work stealing by using something like async-executor and run `executor.tick()` like we currently do run tasks
 
-    let mut at_least_one_networking_task_run = false;
+    let mut networking_task_run = false;
     if can_networking {
         let tasks_queue = networking_tasks_queue();
-        while let Ok(task) = tasks_queue.pop() {
+        if let Ok(task) = tasks_queue.pop() {
             TASKS_QUEUE_LEN.fetch_sub(1, Ordering::SeqCst); // TODO: Release?
             NETWORKING_TASKS_QUEUE_LEN.fetch_sub(1, Ordering::SeqCst); // TODO: Release?
-            at_least_one_networking_task_run = true;
+            networking_task_run = true;
             task.run();
         }
     }
 
-    if !at_least_one_networking_task_run && exec_non_networking {
+    if !networking_task_run && exec_non_networking {
         let tasks_queue = non_networking_tasks_queue();
-        while let Ok(task) = tasks_queue.pop() {
+        if let Ok(task) = tasks_queue.pop() {
             TASKS_QUEUE_LEN.fetch_sub(1, Ordering::SeqCst); // TODO: Release?
             NON_NETWORKING_TASKS_QUEUE_LEN.fetch_sub(1, Ordering::SeqCst); // TODO: Release?
             task.run();
