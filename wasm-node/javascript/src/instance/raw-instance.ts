@@ -91,7 +91,7 @@ export interface PlatformBindings {
     connect(config: ConnectionConfig): Connection;
 }
 
-export async function startInstance(config: Config, platformBindings: PlatformBindings): Promise<[SmoldotWasmInstance, Array<Uint8Array>]> {
+export async function startInstance(config: Config, platformBindings: PlatformBindings): Promise<[SmoldotWasmInstance, Array<Uint8Array>, Promise<void>]> {
     let killAll: () => void;
 
     const bufferIndices = new Array;
@@ -143,7 +143,7 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
     smoldotJsConfig.instance = instance;
 
     // TODO: this execution might start before `init` is called; it's actually okay to do so in practice, but the documentation says it's forbidden
-    (async () => {
+    const executor = (async () => {
         // In order to avoid calling `setTimeout` too often, we accumulate sleep up until
         // a certain threshold.
         let missingSleep = 0;
@@ -180,8 +180,7 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
                 await waitReturn.value
             }
         }
-    })()
+    })();
 
-
-    return [instance, bufferIndices];
+    return [instance, bufferIndices, executor];
 }

@@ -15,7 +15,48 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-// TODO: stronger typing? see "branded types"
-export async function run(_foo: any) {
+import { performance } from 'node:perf_hooks';
+import { randomFillSync } from 'node:crypto';
 
+import * as instance from './instance/raw-instance.js';
+
+// TODO: stronger typing? see "branded types"
+export async function run(wasmModule: any) {
+    const config: instance.Config = {
+        onWasmPanic: (_message) => {
+            // TODO: completetly unclear what to do
+        },
+        logCallback: (_level, _target, _message) => {
+            // TODO: ?!?!
+        },
+        jsonRpcResponsesNonEmptyCallback: (_chainId) => {
+            // TODO: refactor to not pass this config but instead return a Promise to json-rpc-peek
+        },
+        wasmModule: wasmModule,
+        cpuRateLimit: 1.0, // TODO: make configurable
+    };
+
+    const platformBindings = {
+        trustedBase64DecodeAndZlibInflate: (_input: any) => {
+            // TODO: don't pass this
+            throw new Error();
+        },
+        registerShouldPeriodicallyYield: (_callback: any): [boolean, () => void] => {
+            return [true, () => { }]
+        },
+        performanceNow: () => {
+            return performance.now()
+        },
+        getRandomValues: (buffer: Uint8Array) => {
+            if (buffer.length >= 1024 * 1024)
+                throw new Error('getRandomValues buffer too large')
+            randomFillSync(buffer)
+        },
+        connect: () => {
+            throw new Error();
+        }
+    };
+
+    const [_instance, _bufferIndices, executor] = await instance.startInstance(config, platformBindings);
+    await executor;
 }
