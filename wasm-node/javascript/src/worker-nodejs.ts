@@ -46,9 +46,7 @@ export async function run(wasmModule: any, cpuRateLimit: number) {
                 throw new Error('getRandomValues buffer too large')
             randomFillSync(buffer)
         },
-        connect: () => {
-            throw new Error();
-        }
+        connect: null,
     };
 
     const [_instance, _bufferIndices, executor] = await instance.startInstance(config, platformBindings);
