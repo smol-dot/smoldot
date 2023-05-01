@@ -19,13 +19,25 @@
   "types": "dist/mjs/index-browser.d.ts",
   "module": "dist/mjs/index-browser.js",
   "exports": {
-    "node": {
-      "import": "./dist/mjs/index-nodejs.js",
-      "require": "./dist/cjs/index-nodejs.js"
+    ".": {
+      "node": {
+        "import": "./dist/mjs/index-nodejs.js",
+        "require": "./dist/cjs/index-nodejs.js"
+      },
+      "default": {
+        "import": "./dist/mjs/index-browser.js",
+        "require": "./dist/cjs/index-browser.js"
+      }
     },
-    "default": {
-      "import": "./dist/mjs/index-browser.js",
-      "require": "./dist/cjs/index-browser.js"
+    "./worker": {
+      "node": {
+        "import": "./dist/mjs/worker-nodejs.js",
+        "require": "./dist/cjs/worker-nodejs.js"
+      },
+      "default": {
+        "import": "./dist/mjs/worker-browser.js",
+        "require": "./dist/cjs/worker-browser.js"
+      }
     }
   },
   "scripts": {
