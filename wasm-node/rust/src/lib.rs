@@ -434,22 +434,11 @@ fn advance_execution(can_networking: bool, exec_non_networking: bool) -> *mut i3
 
     let mut networking_task_run = false;
     if can_networking {
-        let tasks_queue = networking_tasks_queue();
-        if let Ok(task) = tasks_queue.pop() {
-            TASKS_QUEUE_LEN.fetch_sub(1, Ordering::SeqCst); // TODO: Release?
-            NETWORKING_TASKS_QUEUE_LEN.fetch_sub(1, Ordering::SeqCst); // TODO: Release?
-            networking_task_run = true;
-            task.run();
-        }
+        networking_task_run = advance_execution_net();
     }
 
     if !networking_task_run && exec_non_networking {
-        let tasks_queue = non_networking_tasks_queue();
-        if let Ok(task) = tasks_queue.pop() {
-            TASKS_QUEUE_LEN.fetch_sub(1, Ordering::SeqCst); // TODO: Release?
-            NON_NETWORKING_TASKS_QUEUE_LEN.fetch_sub(1, Ordering::SeqCst); // TODO: Release?
-            task.run();
-        }
+        advance_execution_not_net();
     }
 
     match (can_networking, exec_non_networking) {
@@ -457,5 +446,32 @@ fn advance_execution(can_networking: bool, exec_non_networking: bool) -> *mut i3
         (false, true) => NON_NETWORKING_TASKS_QUEUE_LEN.as_ptr(),
         (true, false) => NETWORKING_TASKS_QUEUE_LEN.as_ptr(),
         (false, false) => TASKS_QUEUE_LEN.as_ptr(), // Non-sensical, return a dummy value.
+    }
+}
+
+// Note: we split this into different functions in order to see in a backtrace whether the task
+// being executed is networking or non-networking.
+// TODO: remove this hack once everything is finished
+
+#[inline(never)]
+fn advance_execution_net() -> bool {
+    let tasks_queue = networking_tasks_queue();
+    if let Ok(task) = tasks_queue.pop() {
+        TASKS_QUEUE_LEN.fetch_sub(1, Ordering::SeqCst); // TODO: Release?
+        NETWORKING_TASKS_QUEUE_LEN.fetch_sub(1, Ordering::SeqCst); // TODO: Release?
+        task.run();
+        true
+    } else {
+        false
+    }
+}
+
+#[inline(never)]
+fn advance_execution_not_net() {
+    let tasks_queue = non_networking_tasks_queue();
+    if let Ok(task) = tasks_queue.pop() {
+        TASKS_QUEUE_LEN.fetch_sub(1, Ordering::SeqCst); // TODO: Release?
+        NON_NETWORKING_TASKS_QUEUE_LEN.fetch_sub(1, Ordering::SeqCst); // TODO: Release?
+        task.run();
     }
 }
