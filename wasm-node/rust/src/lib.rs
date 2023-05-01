@@ -24,17 +24,15 @@
 use core::{
     num::NonZeroU32,
     pin::Pin,
-    ptr, str,
+    str,
     sync::atomic::{AtomicI32, Ordering},
     time::Duration,
 };
-use futures_util::{stream, FutureExt as _, Stream as _, StreamExt as _};
+use futures_util::{stream, Stream as _, StreamExt as _};
 use smoldot_light::HandleRpcError;
 use std::{
-    future,
     sync::{Arc, Mutex},
     task,
-    time::Instant,
 };
 
 pub mod bindings;
@@ -414,7 +412,7 @@ static TASKS_QUEUE_LEN: AtomicI32 = AtomicI32::new(0);
 
 fn advance_execution() {
     let tasks_queue = tasks_queue();
-    while let Ok(mut task) = tasks_queue.pop() {
+    while let Ok(task) = tasks_queue.pop() {
         TASKS_QUEUE_LEN.fetch_sub(1, Ordering::SeqCst); // TODO: Release?
         task.run();
     }

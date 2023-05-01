@@ -21,10 +21,7 @@ use core::time::Duration;
 use futures_util::stream;
 use smoldot::informant::BytesDisplay;
 use smoldot_light::platform::PlatformRef;
-use std::{
-    panic,
-    sync::{atomic::Ordering, Arc},
-};
+use std::{panic, sync::atomic::Ordering};
 
 pub(crate) struct Client<TPlat: smoldot_light::platform::PlatformRef, TChain> {
     pub(crate) smoldot: smoldot_light::Client<TPlat, TChain>,
@@ -57,9 +54,7 @@ pub(crate) enum Chain {
     },
 }
 
-pub(crate) fn init<TChain>(
-    max_log_level: u32,
-) -> Client<platform::Platform, TChain> {
+pub(crate) fn init<TChain>(max_log_level: u32) -> Client<platform::Platform, TChain> {
     // Try initialize the logging and the panic hook.
     let _ = log::set_boxed_logger(Box::new(Logger)).map(|()| {
         log::set_max_level(match max_log_level {
