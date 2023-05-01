@@ -47,19 +47,6 @@ export interface Config {
  */
 export interface PlatformBindings {
     /**
-     * Base64-decode the given buffer then decompress its content using the inflate algorithm
-     * with zlib header.
-     *
-     * The input is considered trusted. In other words, the implementation doesn't have to
-     * resist malicious input.
-     *
-     * This function is asynchronous because implementations might use the compression streams
-     * Web API, which for whatever reason is asynchronous.
-     */
-    // TODO: shouldn't be in raw-instance
-    trustedBase64DecodeAndZlibInflate: (input: string) => Promise<Uint8Array>,
-
-    /**
      * Returns the number of milliseconds since an arbitrary epoch.
      */
     performanceNow: () => number,

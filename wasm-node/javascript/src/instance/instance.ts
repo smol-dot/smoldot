@@ -20,7 +20,7 @@ import * as instance from './raw-instance.js';
 import { default as wasmBase64 } from './autogen/wasm.js';
 import { SmoldotWasmInstance } from './bindings.js';
 
-export { PlatformBindings, ConnectionError, ConnectionConfig, Connection } from './raw-instance.js';
+export { ConnectionError, ConnectionConfig, Connection } from './raw-instance.js';
 
 /**
  * Thrown in case the underlying client encounters an unexpected crash.
@@ -69,7 +69,22 @@ export interface Instance {
     startShutdown: () => void
 }
 
-export function start(configMessage: Config, platformBindings: instance.PlatformBindings): Instance {
+export interface PlatformBindings extends instance.PlatformBindings {
+    /**
+     * Base64-decode the given buffer then decompress its content using the inflate algorithm
+     * with zlib header.
+     *
+     * The input is considered trusted. In other words, the implementation doesn't have to
+     * resist malicious input.
+     *
+     * This function is asynchronous because implementations might use the compression streams
+     * Web API, which for whatever reason is asynchronous.
+     */
+    // TODO: shouldn't be in raw-instance
+    trustedBase64DecodeAndZlibInflate: (input: string) => Promise<Uint8Array>,
+}
+
+export function start(configMessage: Config, platformBindings: PlatformBindings): Instance {
     // This variable represents the state of the instance, and serves two different purposes:
     //
     // - At initialization, it is a Promise containing the Wasm VM is still initializing.

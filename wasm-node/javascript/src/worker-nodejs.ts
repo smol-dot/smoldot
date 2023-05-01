@@ -35,10 +35,6 @@ export async function run(wasmModule: any, cpuRateLimit: number) {
     };
 
     const platformBindings = {
-        trustedBase64DecodeAndZlibInflate: (_input: any) => {
-            // TODO: don't pass this
-            throw new Error();
-        },
         performanceNow: () => {
             return performance.now()
         },
