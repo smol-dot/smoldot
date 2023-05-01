@@ -159,6 +159,9 @@ extern "C" {
     /// The `id` parameter is an identifier for this connection, as chosen by the Rust code. It
     /// must be passed on every interaction with this connection.
     ///
+    /// This function can only be called from within a call to [`advance_execution`] where
+    /// `can_networking` is non-zero.
+    ///
     /// Returns 0 to indicate success, or 1 to indicate that an error happened. If an error is
     /// returned, the `id` doesn't correspond to anything.
     ///
@@ -203,8 +206,8 @@ extern "C" {
 
     /// Abruptly close a connection previously initialized with [`connection_new`].
     ///
-    /// This function is always called on the same thread as the one that has initially created
-    /// the connection.
+    /// This function can only be called from within a call to [`advance_execution`] where
+    /// `can_networking` is non-zero.
     ///
     /// This destroys the identifier passed as parameter. This identifier must never be passed
     /// through the FFI boundary, unless the same identifier is later allocated again with
@@ -222,8 +225,8 @@ extern "C" {
     /// Queues a new outbound substream opening. The [`connection_stream_opened`] function must
     /// later be called when the substream has been successfully opened.
     ///
-    /// This function is always called on the same thread as the one that has initially created
-    /// the connection.
+    /// This function can only be called from within a call to [`advance_execution`] where
+    /// `can_networking` is non-zero.
     ///
     /// This function will only be called for multi-stream connections. The connection must
     /// currently be in the `Open` state. See the documentation of [`connection_new`] for details.
@@ -237,8 +240,8 @@ extern "C" {
     /// Abruptly closes an existing substream of a multi-stream connection. The substream must
     /// currently be in the `Open` state.
     ///
-    /// This function is always called on the same thread as the one that has initially created
-    /// the connection.
+    /// This function can only be called from within a call to [`advance_execution`] where
+    /// `can_networking` is non-zero.
     ///
     /// Must never be called if [`stream_reset`] has been called on that object in the past.
     ///
@@ -249,8 +252,8 @@ extern "C" {
     /// Queues data on the given stream. The data is found in the memory of the WebAssembly
     /// virtual machine, at the given pointer.
     ///
-    /// This function is always called on the same thread as the one that has initially created
-    /// the connection.
+    /// This function can only be called from within a call to [`advance_execution`] where
+    /// `can_networking` is non-zero.
     ///
     /// If `connection_id` is a single-stream connection, then the value of `stream_id` should
     /// be ignored. If `connection_id` is a multi-stream connection, then the value of `stream_id`
@@ -267,8 +270,8 @@ extern "C" {
 
     /// Close the sending side of the given stream of the given connection.
     ///
-    /// This function is always called on the same thread as the one that has initially created
-    /// the connection.
+    /// This function can only be called from within a call to [`advance_execution`] where
+    /// `can_networking` is non-zero.
     ///
     /// Never called for connection types where this isn't possible to implement (i.e. WebSocket
     /// and WebRTC at the moment).
@@ -305,6 +308,15 @@ pub extern "C" fn init(max_log_level: u32) {
 ///
 /// This function **must** be called regularly, otherwise nothing will happen.
 ///
+/// If `can_networking` is non-zero, then the client is allowed to invoke the networking-related
+/// functions provided by the host.
+///
+/// If `exec_non_networking` is non-zero, then this function call will also execute tasks that
+/// don't perform any networking operation. If `exec_non_networking` is zero, it will only execute
+/// tasks that perform networking operations, provided that `can_networking` is non-zero.
+///
+/// Calling `advance_execution(0, 0)` has no effect.
+///
 /// Returns `0` if the client is shutting down, otherwise returns a memory address upon which
 /// `Atomics.waitAsync` with a value of `0` must be called in order to know when to call
 /// `advance_execution` again.
@@ -315,9 +327,9 @@ pub extern "C" fn init(max_log_level: u32) {
 /// If a non-zero value is returned, it is valid for the current thread only and until
 /// `advance_execution` is called again.
 #[no_mangle]
-pub extern "C" fn advance_execution() -> u32 {
+pub extern "C" fn advance_execution(can_networking: u32, exec_non_networking: u32) -> u32 {
     // TODO: do the shutdown thing
-    super::advance_execution();
+    super::advance_execution(can_networking != 0, exec_non_networking != 0);
     let ptr = super::TASKS_QUEUE_LEN.as_ptr() as usize as u32;
     debug_assert_ne!(ptr, 0);
     debug_assert_eq!(ptr % 4, 0);
@@ -488,6 +500,8 @@ pub extern "C" fn json_rpc_responses_pop(chain_id: u32) {
 }
 
 /// Must be called in response to [`start_timer`] after the given duration has passed.
+///
+/// Can be called from any thread. There is no restriction.
 #[no_mangle]
 pub extern "C" fn timer_finished(timer_id: u32) {
     crate::timers::timer_finished(timer_id);
@@ -498,7 +512,7 @@ pub extern "C" fn timer_finished(timer_id: u32) {
 ///
 /// Must be called at most once per connection object.
 ///
-/// Must only be called from the same thread as the one that has initially created the connection.
+/// Can be called from any thread. There is no restriction.
 ///
 /// See also [`connection_new`].
 ///
@@ -530,7 +544,7 @@ pub extern "C" fn connection_open_single_stream(
 ///
 /// Must be called at most once per connection object.
 ///
-/// Must only be called from the same thread as the one that has initially created the connection.
+/// Can be called from any thread. There is no restriction.
 ///
 /// See also [`connection_new`].
 ///
@@ -562,7 +576,7 @@ pub extern "C" fn connection_open_multi_stream(connection_id: u32, handshake_ty_
 /// If `connection_id` is a multi-stream connection, then `stream_id` corresponds to the stream
 /// on which the data was received, as was provided to [`connection_stream_opened`].
 ///
-/// Must only be called from the same thread as the one that has initially created the connection.
+/// Can be called from any thread. There is no restriction.
 ///
 /// See also [`connection_open_single_stream`] and [`connection_open_multi_stream`].
 #[no_mangle]
@@ -586,7 +600,7 @@ pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, buffer_inde
 /// If `connection_id` is a multi-stream connection, then `stream_id` corresponds to the stream
 /// on which the data was received, as was provided to [`connection_stream_opened`].
 ///
-/// Must only be called from the same thread as the one that has initially created the connection.
+/// Can be called from any thread. There is no restriction.
 #[no_mangle]
 pub extern "C" fn stream_writable_bytes(connection_id: u32, stream_id: u32, num_bytes: u32) {
     crate::platform::stream_writable_bytes(connection_id, stream_id, num_bytes);
@@ -603,7 +617,7 @@ pub extern "C" fn stream_writable_bytes(connection_id: u32, stream_id: u32, num_
 /// value other than `0` if the substream has been opened in response to a call to
 /// [`connection_stream_open`].
 ///
-/// Must only be called from the same thread as the one that has initially created the connection.
+/// Can be called from any thread. There is no restriction.
 #[no_mangle]
 pub extern "C" fn connection_stream_opened(
     connection_id: u32,
@@ -630,7 +644,7 @@ pub extern "C" fn connection_stream_opened(
 /// [`buffer_size`] and [`buffer_copy`] in order to obtain the content of this buffer. The buffer
 /// index can be de-assigned and buffer destroyed once this function returns.
 ///
-/// Must only be called from the same thread as the one that has initially created the connection.
+/// Can be called from any thread. There is no restriction.
 ///
 /// See also [`connection_new`].
 #[no_mangle]
@@ -648,7 +662,7 @@ pub extern "C" fn connection_reset(connection_id: u32, buffer_index: u32) {
 ///
 /// It is illegal to call this function on a single-stream connections.
 ///
-/// Must only be called from the same thread as the one that has initially created the connection.
+/// Can be called from any thread. There is no restriction.
 ///
 /// See also [`connection_open_multi_stream`].
 #[no_mangle]

@@ -410,11 +410,15 @@ fn tasks_queue() -> &'static concurrent_queue::ConcurrentQueue<async_task::Runna
 
 static TASKS_QUEUE_LEN: AtomicI32 = AtomicI32::new(0);
 
-fn advance_execution() {
+fn advance_execution(can_networking: bool, exec_non_networking: bool) {
+    // TODO: actually use `can_networking`
     // TODO: consider work stealing by using something like async-executor and run `executor.tick()` like we currently do run tasks
-    let tasks_queue = tasks_queue();
-    while let Ok(task) = tasks_queue.pop() {
-        TASKS_QUEUE_LEN.fetch_sub(1, Ordering::SeqCst); // TODO: Release?
-        task.run();
+
+    if exec_non_networking {
+        let tasks_queue = tasks_queue();
+        while let Ok(task) = tasks_queue.pop() {
+            TASKS_QUEUE_LEN.fetch_sub(1, Ordering::SeqCst); // TODO: Release?
+            task.run();
+        }
     }
 }

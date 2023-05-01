@@ -40,7 +40,7 @@ export interface Config {
      * @see Connection
      * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
      */
-    connect(config: ConnectionConfig): Connection;
+    connect: ((config: ConnectionConfig) => Connection) | null;
 
     /**
      * Closure to call when the Wasm instance calls `panic`.
@@ -349,6 +349,10 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
 
                 const address = buffer.utf8BytesToString(new Uint8Array(config.memory.buffer), addrPtr, addrLen);
 
+                // TODO: this is an internal error that should never happen and is caused by a weird separation between modules
+                if (!config.connect)
+                    throw new Error("Networking unavailable in the current thread");
+
                 const connec = config.connect({
                     address,
                     onOpen: (info) => {
@@ -438,6 +442,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
 
         // Must close and destroy the connection object.
         reset_connection: (connectionId: number) => {
+            console.assert(config.connect);
             if (killedTracked.killed) return;
             const connection = connections[connectionId]!;
             connection.reset();
@@ -446,12 +451,14 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
 
         // Opens a new substream on a multi-stream connection.
         connection_stream_open: (connectionId: number) => {
+            console.assert(config.connect);
             const connection = connections[connectionId]!;
             connection.openOutSubstream()
         },
 
         // Closes a substream on a multi-stream connection.
         connection_stream_reset: (connectionId: number, streamId: number) => {
+            console.assert(config.connect);
             const connection = connections[connectionId]!;
             connection.reset(streamId)
         },
@@ -459,6 +466,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
         // Must queue the data found in the WebAssembly memory at the given pointer. It is assumed
         // that this function is called only when the connection is in an open state.
         stream_send: (connectionId: number, streamId: number, ptr: number, len: number) => {
+            console.assert(config.connect);
             if (killedTracked.killed) return;
 
             ptr >>>= 0;
@@ -470,6 +478,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
         },
 
         stream_send_close: (connectionId: number, streamId: number) => {
+            console.assert(config.connect);
             if (killedTracked.killed) return;
 
             const connection = connections[connectionId]!;

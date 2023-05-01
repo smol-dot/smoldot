@@ -88,7 +88,7 @@ export interface PlatformBindings {
      * @see Connection
      * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
      */
-    connect(config: ConnectionConfig): Connection;
+    connect: ((config: ConnectionConfig) => Connection) | null;
 }
 
 export async function startInstance(config: Config, platformBindings: PlatformBindings): Promise<[SmoldotWasmInstance, Array<Uint8Array>, Promise<void>]> {
@@ -151,7 +151,8 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
         while (true) {
             const before = platformBindings.performanceNow();
 
-            const ptr = instance.exports.advance_execution() >>> 0;
+            // TODO: proper value for execNonNetworking
+            const ptr = instance.exports.advance_execution(platformBindings.connect !== null ? 1 : 0, 1) >>> 0;
             if (ptr === 0)
                 break;
 
