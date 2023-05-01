@@ -17,6 +17,7 @@
 
 import * as buffer from './buffer.js';
 import * as instance from './raw-instance.js';
+import { default as wasmBase64 } from './autogen/wasm.js';
 import { SmoldotWasmInstance } from './bindings.js';
 import { AlreadyDestroyedError } from '../client.js';
 
@@ -70,7 +71,6 @@ export interface Instance {
 }
 
 export function start(configMessage: Config, platformBindings: instance.PlatformBindings): Instance {
-
     // This variable represents the state of the instance, and serves two different purposes:
     //
     // - At initialization, it is a Promise containing the Wasm VM is still initializing.
@@ -88,40 +88,56 @@ export function start(configMessage: Config, platformBindings: instance.Platform
     }> = new Map();
 
     // Start initialization of the Wasm VM.
-    const config: instance.Config = {
-        onWasmPanic: (message) => {
-            // TODO: consider obtaining a backtrace here
-            crashError.error = new CrashError(message);
-            if (!printError.printError)
-                return;
-            console.error(
-                "Smoldot has panicked. This is a bug in smoldot. Please open an issue at " +
-                "https://github.com/smol-dot/smoldot/issues with the following message:\n" +
-                message
-            );
-            for (const chain of Array.from(chains.values())) {
-                for (const promise of chain.jsonRpcResponsesPromises) {
-                    promise.reject(crashError.error)
+    const initPromise = (async (): Promise<[WebAssembly.Module, SmoldotWasmInstance, WebAssembly.Memory, Array<Uint8Array>]> => {
+        // The actual Wasm bytecode is base64-decoded then deflate-decoded from a constant found in a
+        // different file.
+        // This is suboptimal compared to using `instantiateStreaming`, but it is the most
+        // cross-platform cross-bundler approach.
+        const wasmBytecode = await platformBindings.trustedBase64DecodeAndZlibInflate(wasmBase64)
+
+        const module = await WebAssembly.compile(wasmBytecode);
+        // TODO: proper initial/maximum values; it seems that they must exactly match what the wasm contains?
+        const memory = new WebAssembly.Memory({ shared: true, initial: 41, maximum: 16384 });
+
+        const config: instance.Config = {
+            onWasmPanic: (message) => {
+                // TODO: consider obtaining a backtrace here
+                crashError.error = new CrashError(message);
+                if (!printError.printError)
+                    return;
+                console.error(
+                    "Smoldot has panicked. This is a bug in smoldot. Please open an issue at " +
+                    "https://github.com/smol-dot/smoldot/issues with the following message:\n" +
+                    message
+                );
+                for (const chain of Array.from(chains.values())) {
+                    for (const promise of chain.jsonRpcResponsesPromises) {
+                        promise.reject(crashError.error)
+                    }
+                    chain.jsonRpcResponsesPromises = [];
                 }
-                chain.jsonRpcResponsesPromises = [];
-            }
-        },
-        logCallback: (level, target, message) => {
-            configMessage.logCallback(level, target, message)
-        },
-        jsonRpcResponsesNonEmptyCallback: (chainId) => {
-            // Notify every single promise found in `jsonRpcResponsesPromises`.
-            const promises = chains.get(chainId)!.jsonRpcResponsesPromises;
-            while (promises.length !== 0) {
-                promises.shift()!.resolve();
-            }
-        },
-    };
+            },
+            logCallback: (level, target, message) => {
+                configMessage.logCallback(level, target, message)
+            },
+            jsonRpcResponsesNonEmptyCallback: (chainId) => {
+                // Notify every single promise found in `jsonRpcResponsesPromises`.
+                const promises = chains.get(chainId)!.jsonRpcResponsesPromises;
+                while (promises.length !== 0) {
+                    promises.shift()!.resolve();
+                }
+            },
+            wasmModule: { module, memory },
+        };
+
+        const [i, bufferIndices] = await instance.startInstance(config, platformBindings);
+        return [module, i, memory, bufferIndices];
+    })();
 
     const cpuRateLimit = configMessage.cpuRateLimit;
 
     state = {
-        initialized: false, promise: instance.startInstance(config, platformBindings).then(([module, instance, memory, bufferIndices]) => {
+        initialized: false, promise: initPromise.then(([module, instance, memory, bufferIndices]) => {
             // Smoldot requires an initial call to the `init` function in order to do its internal
             // configuration.
             const [periodicallyYield, unregisterCallback] = platformBindings.registerShouldPeriodicallyYield((newValue) => {

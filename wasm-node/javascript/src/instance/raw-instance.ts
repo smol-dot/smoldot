@@ -18,8 +18,6 @@
 import { ConnectionConfig, Connection, Config as SmoldotBindingsConfig, default as smoldotLightBindingsBuilder } from './bindings-smoldot-light.js';
 import { Config as WasiConfig, default as wasiBindingsBuilder } from './bindings-wasi.js';
 
-import { default as wasmBase64 } from './autogen/wasm.js';
-
 import { SmoldotWasmInstance } from './bindings.js';
 
 export { ConnectionConfig, ConnectionError, Connection } from './bindings-smoldot-light.js';
@@ -40,6 +38,7 @@ export interface Config {
     logCallback: (level: number, target: string, message: string) => void,
     jsonRpcResponsesNonEmptyCallback: (chainId: number) => void,
     currentTaskCallback?: (taskName: string | null) => void,
+    wasmModule: { module: WebAssembly.Module, memory: WebAssembly.Memory },
 }
 
 /**
@@ -56,6 +55,7 @@ export interface PlatformBindings {
      * This function is asynchronous because implementations might use the compression streams
      * Web API, which for whatever reason is asynchronous.
      */
+    // TODO: shouldn't be in raw-instance
     trustedBase64DecodeAndZlibInflate: (input: string) => Promise<Uint8Array>,
 
     /**
@@ -90,23 +90,14 @@ export interface PlatformBindings {
     connect(config: ConnectionConfig): Connection;
 }
 
-export async function startInstance(config: Config, platformBindings: PlatformBindings): Promise<[WebAssembly.Module, SmoldotWasmInstance, WebAssembly.Memory, Array<Uint8Array>]> {
-    // The actual Wasm bytecode is base64-decoded then deflate-decoded from a constant found in a
-    // different file.
-    // This is suboptimal compared to using `instantiateStreaming`, but it is the most
-    // cross-platform cross-bundler approach.
-    const wasmBytecode = await platformBindings.trustedBase64DecodeAndZlibInflate(wasmBase64)
-
+export async function startInstance(config: Config, platformBindings: PlatformBindings): Promise<[SmoldotWasmInstance, Array<Uint8Array>]> {
     let killAll: () => void;
 
     const bufferIndices = new Array;
 
-    // TODO: proper initial/maximum values; it seems that they must exactly match what the wasm contains?
-    const memory = new WebAssembly.Memory({ shared: true, initial: 41, maximum: 16384 });
-
     // Used to bind with the smoldot-light bindings. See the `bindings-smoldot-light.js` file.
     const smoldotJsConfig: SmoldotBindingsConfig = {
-        memory,
+        memory: config.wasmModule.memory,
         bufferIndices,
         connect: platformBindings.connect,
         onPanic: (message) => {
@@ -119,7 +110,7 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
 
     // Used to bind with the Wasi bindings. See the `bindings-wasi.js` file.
     const wasiConfig: WasiConfig = {
-        memory,
+        memory: config.wasmModule.memory,
         envVars: [],
         getRandomValues: platformBindings.getRandomValues,
         performanceNow: platformBindings.performanceNow,
@@ -138,16 +129,16 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
     // Start the Wasm virtual machine.
     // The Rust code defines a list of imports that must be fulfilled by the environment. The
     // second parameter provides their implementations.
-    const result = await WebAssembly.instantiate(wasmBytecode, {
+    const result = await WebAssembly.instantiate(config.wasmModule.module, {
         // The functions with the "smoldot" prefix are specific to smoldot.
         "smoldot": smoldotBindings,
         // As the Rust code is compiled for wasi, some more wasi-specific imports exist.
         "wasi_snapshot_preview1": wasiBindingsBuilder(wasiConfig),
         // The memory is imported by the Wasm rather than exported.
-        "env": { "memory": memory, }
+        "env": { "memory": config.wasmModule.memory, }
     });
 
-    const instance = result.instance as SmoldotWasmInstance;
+    const instance = result as SmoldotWasmInstance;
     smoldotJsConfig.instance = instance;
-    return [result.module, instance, memory, bufferIndices];
+    return [instance, bufferIndices];
 }
