@@ -99,24 +99,45 @@ impl smoldot_light::platform::PlatformRef for Platform {
 
     fn spawn_task(
         &self,
-        _task_name: Cow<str>,
+        task_name: Cow<str>,
         task: pin::Pin<Box<dyn future::Future<Output = ()> + Send>>,
     ) {
-        let (runnable, task) = async_task::spawn(task, |runnable| {
-            super::networking_tasks_queue()
-                .push(runnable)
-                .unwrap_or_else(|_| panic!());
-            super::TASKS_QUEUE_LEN.fetch_add(1, Ordering::SeqCst);
-            super::NETWORKING_TASKS_QUEUE_LEN.fetch_add(1, Ordering::SeqCst);
-            #[cfg(target_family = "wasm")]
-            unsafe {
-                // Note: this might cause two threads to wake up, but is in practice never going
-                // to happen, and even if it does happen isn't a problem.
-                core::arch::wasm::memory_atomic_notify((&super::TASKS_QUEUE_LEN).as_ptr(), 1);
-                core::arch::wasm::memory_atomic_notify(
-                    (&super::NETWORKING_TASKS_QUEUE_LEN).as_ptr(),
-                    1,
-                );
+        // FIXME: /!\ this is a huge hack that isn't acceptable in production, to determine whether the task is going to access the networking
+        let is_networking_task = task_name.starts_with("connection-");
+
+        let (runnable, task) = async_task::spawn(task, move |runnable| {
+            if is_networking_task {
+                super::networking_tasks_queue()
+                    .push(runnable)
+                    .unwrap_or_else(|_| panic!());
+                super::TASKS_QUEUE_LEN.fetch_add(1, Ordering::SeqCst);
+                super::NETWORKING_TASKS_QUEUE_LEN.fetch_add(1, Ordering::SeqCst);
+                #[cfg(target_family = "wasm")]
+                unsafe {
+                    // Note: this might cause two threads to wake up, but is in practice never going
+                    // to happen, and even if it does happen isn't a problem.
+                    core::arch::wasm::memory_atomic_notify((&super::TASKS_QUEUE_LEN).as_ptr(), 1);
+                    core::arch::wasm::memory_atomic_notify(
+                        (&super::NETWORKING_TASKS_QUEUE_LEN).as_ptr(),
+                        1,
+                    );
+                }
+            } else {
+                super::non_networking_tasks_queue()
+                    .push(runnable)
+                    .unwrap_or_else(|_| panic!());
+                super::TASKS_QUEUE_LEN.fetch_add(1, Ordering::SeqCst);
+                super::NON_NETWORKING_TASKS_QUEUE_LEN.fetch_add(1, Ordering::SeqCst);
+                #[cfg(target_family = "wasm")]
+                unsafe {
+                    // Note: this might cause two threads to wake up, but is in practice never going
+                    // to happen, and even if it does happen isn't a problem.
+                    core::arch::wasm::memory_atomic_notify((&super::TASKS_QUEUE_LEN).as_ptr(), 1);
+                    core::arch::wasm::memory_atomic_notify(
+                        (&super::NON_NETWORKING_TASKS_QUEUE_LEN).as_ptr(),
+                        1,
+                    );
+                }
             }
         });
 
