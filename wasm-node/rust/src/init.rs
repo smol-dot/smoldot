@@ -91,12 +91,7 @@ pub(crate) fn init<TChain>(
     assert_ne!(rand::random::<u64>(), 0);
     assert_ne!(rand::random::<u64>(), rand::random::<u64>());
 
-    // Since "spawning a task" isn't really something that a browser or Node environment do
-    // efficiently, we instead combine all the asynchronous tasks into one executor.
-    // TODO: we use an Executor instead of LocalExecutor because it is planned to allow multithreading; if this plan is abandoned, switch to SendWrapper<LocalExecutor>
-    let executor = Arc::new(async_executor::Executor::new());
-
-    let platform = platform::Platform::new(executor.clone(), enable_current_task);
+    let platform = platform::Platform::new(enable_current_task);
 
     // Spawn a constantly-running task that periodically prints the total memory usage of
     // the node.
