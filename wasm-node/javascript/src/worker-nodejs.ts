@@ -29,7 +29,7 @@ export async function run(wasmModule: any, cpuRateLimit: number) {
         logCallback: (_level, _target, _message) => {
             // TODO: ?!?!
         },
-        wasmModule: wasmModule,
+        wasmModule,
         cpuRateLimit,
         executeNonNetworkingTasks: { value: true },
     };
