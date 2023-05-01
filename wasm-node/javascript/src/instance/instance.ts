@@ -232,6 +232,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
                 if (!(memory.buffer instanceof SharedArrayBuffer))
                     return null;
 
+                // TODO: when the memory is grown, the buffer changes; does this also refresh the buffer in the clones of Memory that we sent to the workers? or do you have to allocate a big enough buffer ahead of time?
                 // TODO: use more opaque field names?
                 return { module, memory };
             })
