@@ -152,7 +152,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
                     const sleep = elapsed * (1.0 / cpuRateLimit - 1.0);
                     missingSleep += sleep;
 
-                    if (missingSleep > 5) {
+                    if (missingSleep > 5 || (state.initialized && state.periodicallyYield)) {
                         await new Promise((resolve) => setTimeout(resolve, missingSleep));
                         missingSleep = 0;
                     }
