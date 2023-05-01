@@ -15,13 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { parentPort } from "node:worker_threads";
-import { run } from '../dist/mjs/worker.js';
+// TODO: stronger typing? see "branded types"
+export async function run(_foo: any) {
 
-const value = await new Promise((resolve) => {
-    parentPort.once('message', (value) => {
-        resolve(value);
-    });
-});
-
-await run(value);
+}
