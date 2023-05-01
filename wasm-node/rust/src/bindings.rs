@@ -120,13 +120,11 @@ extern "C" {
 
     /// The queue of JSON-RPC responses of the given chain is no longer empty.
     ///
-    /// Use [`json_rpc_responses_peek`] in order to obtain information about the responses in the
-    /// queue.
+    /// This function is only ever called after [`json_rpc_responses_peek`] has returned a `len`
+    /// of 0. It is always called on the same thread as the one that called
+    /// [`json_rpc_responses_peek`].
     ///
-    /// This function might be called even when the queue wasn't empty before, however this
-    /// behavior must not be relied upon. The queue must be emptied by calling
-    /// [`json_rpc_responses_pop`] in order to have the guarantee that this function gets called.
-    // TODO: clarify the threading behavior
+    /// This function might be called spuriously, however this behavior must not be relied upon.
     pub fn json_rpc_responses_non_empty(chain_id: u32);
 
     /// Client is emitting a log entry.
@@ -494,6 +492,8 @@ pub extern "C" fn json_rpc_send(text_buffer_index: u32, chain_id: u32) -> u32 {
 /// [`JsonRpcResponseInfo`].
 ///
 /// If `len` is equal to 0, this indicates that the queue of JSON-RPC responses is empty.
+/// When a `len` of 0 is returned, [`json_rpc_responses_non_empty`] will later be called to
+/// indicate that it is no longer empty.
 ///
 /// After having read the response or notification, use [`json_rpc_responses_pop`] to remove it
 /// from the queue. You can then call [`json_rpc_responses_peek`] again to read the next response.

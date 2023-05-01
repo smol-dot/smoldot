@@ -378,6 +378,8 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     runtime_subscription.async_tree.finalized_async_user_data()
                 {
                     // Finalized parahead is known.
+                    let finalized_parahash =
+                        header::hash_from_scale_encoded_header(finalized_parahead);
                     let _ = send_back.send(super::SubscribeAll {
                         finalized_block_scale_encoded_header: finalized_parahead.clone(),
                         finalized_block_runtime: None,
@@ -400,59 +402,65 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                 let parablock_hash =
                                     header::hash_from_scale_encoded_header(parablock);
 
+                                // TODO: O(n)
                                 if let Some((_, entry)) =
                                     list.iter_mut().find(|(h, _)| *h == parablock_hash)
                                 {
+                                    // Block is already in the list. Don't add it a second time.
                                     if relay_block.is_output_best {
                                         entry.is_new_best = true;
                                     }
-                                } else {
-                                    let parent_hash = runtime_subscription
-                                        .async_tree
-                                        .ancestors(relay_block.id)
-                                        .find_map(|idx| {
-                                            let hash = header::hash_from_scale_encoded_header(
-                                                runtime_subscription
-                                                    .async_tree
-                                                    .block_async_user_data(idx)
-                                                    .unwrap()
-                                                    .as_ref()
-                                                    .unwrap(),
-                                            );
-                                            if hash != parablock_hash {
-                                                Some(hash)
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                        .or_else(|| {
-                                            let finalized_parahash =
-                                                header::hash_from_scale_encoded_header(
-                                                    finalized_parahead,
-                                                );
-                                            if finalized_parahash != parablock_hash {
-                                                Some(finalized_parahash)
-                                            } else {
-                                                None
-                                            }
-                                        });
+                                    continue;
+                                }
 
-                                    // `parent_hash` is `None` if the parablock is
-                                    // the same as the finalized parablock.
-                                    if let Some(parent_hash) = parent_hash {
-                                        debug_assert_eq!(
-                                            list.iter().filter(|(h, _)| *h == parent_hash).count(),
-                                            1
+                                // Find the parent of the parablock. This is done by going through
+                                // the ancestors of the corresponding relay chain block (until and
+                                // including the finalized relay chain block) until we find one
+                                // whose parablock is different from the parablock in question.
+                                // If none is found, the parablock is the same as the finalized
+                                // parablock.
+                                let parent_hash = runtime_subscription
+                                    .async_tree
+                                    .ancestors(relay_block.id)
+                                    .find_map(|idx| {
+                                        let hash = header::hash_from_scale_encoded_header(
+                                            runtime_subscription
+                                                .async_tree
+                                                .block_async_user_data(idx)
+                                                .unwrap()
+                                                .as_ref()
+                                                .unwrap(),
                                         );
-                                        list.push((
-                                            parablock_hash,
-                                            super::BlockNotification {
-                                                is_new_best: relay_block.is_output_best,
-                                                scale_encoded_header: parablock.clone(),
-                                                parent_hash,
-                                            },
-                                        ));
-                                    }
+                                        if hash != parablock_hash {
+                                            Some(hash)
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .or_else(|| {
+                                        if finalized_parahash != parablock_hash {
+                                            Some(finalized_parahash)
+                                        } else {
+                                            None
+                                        }
+                                    });
+
+                                // `parent_hash` is `None` if the parablock is
+                                // the same as the finalized parablock, in which case we
+                                // don't add it to the list.
+                                if let Some(parent_hash) = parent_hash {
+                                    debug_assert!(
+                                        list.iter().filter(|(h, _)| *h == parent_hash).count() == 1
+                                            || parent_hash == finalized_parahash
+                                    );
+                                    list.push((
+                                        parablock_hash,
+                                        super::BlockNotification {
+                                            is_new_best: relay_block.is_output_best,
+                                            scale_encoded_header: parablock.clone(),
+                                            parent_hash,
+                                        },
+                                    ));
                                 }
                             }
 
