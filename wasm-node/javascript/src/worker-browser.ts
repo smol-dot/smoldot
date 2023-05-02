@@ -25,6 +25,7 @@ export async function run(messagePort: MessagePort, cpuRateLimit: number) {
     const config: instance.Config = {
         onWasmPanic: (_message) => {
             // TODO: completetly unclear what to do
+            throw new Error(_message);
         },
         logCallback: (_level, _target, _message) => {
             // TODO: ?!?!

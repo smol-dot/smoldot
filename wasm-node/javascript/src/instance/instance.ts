@@ -111,7 +111,7 @@ export function start(configMessage: Config, platformBindings: PlatformBindings)
 
         const module = await WebAssembly.compile(wasmBytecode);
         // TODO: proper initial/maximum values; it seems that they must exactly match what the wasm contains?
-        const memory = new WebAssembly.Memory({ shared: true, initial: 41, maximum: 16384 });
+        const memory = new WebAssembly.Memory({ shared: true, initial: 12000, maximum: 16384 });
 
         const config: instance.Config = {
             onWasmPanic: (message) => {
