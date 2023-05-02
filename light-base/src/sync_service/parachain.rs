@@ -1031,12 +1031,13 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     HashDisplay(&hash)
                 );
 
+                // If the block isn't found in `async_tree`, assume that it is equal to the
+                // finalized block (that has left the tree already).
                 let node_idx = runtime_subscription
                     .async_tree
                     .input_iter_unordered()
                     .find(|b| *b.user_data == hash)
-                    .unwrap()
-                    .id;
+                    .map(|b| b.id);
                 runtime_subscription
                     .async_tree
                     .input_set_best_block(node_idx);
