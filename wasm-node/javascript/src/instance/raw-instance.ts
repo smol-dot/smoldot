@@ -151,6 +151,12 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
             missingSleep += sleep;
 
             if (missingSleep > 5) {
+                // `setTimeout` has a maximum value, after which it will overflow. 🤦
+                // See <https://developer.mozilla.org/en-US/docs/Web/API/setTimeout#maximum_delay_value>
+                // While adding a cap technically skews the CPU rate limiting algorithm, we don't
+                // really care for such extreme values.
+                if (missingSleep > 2147483646)  // Doc says `> 2147483647`, but I don't really trust their pedanticism so let's be safe
+                    missingSleep = 2147483646;
                 await new Promise((resolve) => setTimeout(resolve, missingSleep));
                 missingSleep = 0;
             }
