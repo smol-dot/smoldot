@@ -58,13 +58,14 @@ export interface Config {
     logCallback: (level: number, target: string, message: string) => void
     maxLogLevel: number;
     cpuRateLimit: number,
+    executeNonNetworkingTasks: boolean,
 }
 
 export interface Instance {
     request: (request: string, chainId: number) => void
     nextJsonRpcResponse: (chainId: number) => Promise<string>
     addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean) => Promise<{ success: true, chainId: number } | { success: false, error: string }>
-    createBackgroundRunnable: () => Promise<object>
+    exportModuleMemory: () => Promise<object>
     removeChain: (chainId: number) => void
     startShutdown: () => void
 }
@@ -90,7 +91,7 @@ export function start(configMessage: Config, platformBindings: PlatformBindings)
     // - At initialization, it is a Promise containing the Wasm VM is still initializing.
     // - After the Wasm VM has finished initialization, contains the `WebAssembly.Instance` object.
     //
-    let state: { initialized: false, promise: Promise<[WebAssembly.Module, SmoldotWasmInstance, WebAssembly.Memory, Array<Uint8Array>]> } | { initialized: true, executeNonNetworkingTasks: { value: boolean }, module: WebAssembly.Module, instance: SmoldotWasmInstance, memory: WebAssembly.Memory, bufferIndices: Array<Uint8Array> };
+    let state: { initialized: false, promise: Promise<[WebAssembly.Module, SmoldotWasmInstance, WebAssembly.Memory, Array<Uint8Array>]> } | { initialized: true, module: WebAssembly.Module, instance: SmoldotWasmInstance, memory: WebAssembly.Memory, bufferIndices: Array<Uint8Array> };
 
     const crashError: { error?: CrashError } = {};
 
@@ -101,7 +102,7 @@ export function start(configMessage: Config, platformBindings: PlatformBindings)
     let chains: Map<number, {}> = new Map();
 
     // Start initialization of the Wasm VM.
-    const initPromise = (async (): Promise<[WebAssembly.Module, SmoldotWasmInstance, WebAssembly.Memory, Array<Uint8Array>, { value: boolean }]> => {
+    const initPromise = (async (): Promise<[WebAssembly.Module, SmoldotWasmInstance, WebAssembly.Memory, Array<Uint8Array>]> => {
         // The actual Wasm bytecode is base64-decoded then deflate-decoded from a constant found in a
         // different file.
         // This is suboptimal compared to using `instantiateStreaming`, but it is the most
@@ -112,7 +113,6 @@ export function start(configMessage: Config, platformBindings: PlatformBindings)
         // TODO: proper initial/maximum values; it seems that they must exactly match what the wasm contains?
         const memory = new WebAssembly.Memory({ shared: true, initial: 41, maximum: 16384 });
 
-        const executeNonNetworkingTasks = { value: true };
         const config: instance.Config = {
             onWasmPanic: (message) => {
                 // TODO: consider obtaining a backtrace here
@@ -130,19 +130,19 @@ export function start(configMessage: Config, platformBindings: PlatformBindings)
             },
             wasmModule: { module, memory },
             cpuRateLimit: configMessage.cpuRateLimit,
-            executeNonNetworkingTasks,
+            executeNonNetworkingTasks: configMessage.executeNonNetworkingTasks,
         };
 
         const [i, bufferIndices] = await instance.startInstance(config, platformBindings);
-        return [module, i, memory, bufferIndices, executeNonNetworkingTasks];
+        return [module, i, memory, bufferIndices];
     })();
 
     state = {
-        initialized: false, promise: initPromise.then(([module, instance, memory, bufferIndices, executeNonNetworkingTasks]) => {
+        initialized: false, promise: initPromise.then(([module, instance, memory, bufferIndices]) => {
             // Smoldot requires an initial call to the `init` function in order to do its internal
             // configuration.
             instance.exports.init(configMessage.maxLogLevel);
-            state = { initialized: true, module, instance, memory, bufferIndices, executeNonNetworkingTasks };
+            state = { initialized: true, module, instance, memory, bufferIndices };
             return [module, instance, memory, bufferIndices];
         })
     };
@@ -232,13 +232,12 @@ export function start(configMessage: Config, platformBindings: PlatformBindings)
             }
         },
 
-        createBackgroundRunnable: (): Promise<object> => {
+        exportModuleMemory: (): Promise<object> => {
             return queueOperation((module, _instance, memory, _bufferIndices) => {
                 if (crashError.error)
                     throw crashError.error;
                 if (!state.initialized)
                     throw new Error("Internal error");
-                state.executeNonNetworkingTasks.value = false;
 
                 // TODO: when the memory is grown, the buffer changes; does this also refresh the buffer in the clones of Memory that we sent to the workers? or do you have to allocate a big enough buffer ahead of time?
                 // TODO: use more opaque field names?

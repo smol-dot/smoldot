@@ -84,31 +84,6 @@ export interface Client {
     addChain(options: AddChainOptions): Promise<Chain>;
 
     /**
-     * Extracts an object that can passed to the `run` function found in the `/worker` module
-     * of this package.
-     *
-     * This object is structurally-copiable, meaning that it can be sent to a WebWorker, worker
-     * thread, or similar.
-     *
-     * The object that is returned internally uses a `SharedArrayBuffer`. When in the context of
-     * a browser, and as documented on the MDN, sending a `SharedArrayBuffer` using `postMessage`
-     * will throw an exception unless the page was served with two specific HTTP headers.
-     * Consequently, before calling this function, you should check the value of
-     * `crossOriginIsolated` (on the `Window`).
-     *
-     * See <https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/SharedArrayBuffer#api_availability>.
-     *
-     * As soon as this function is called, the load on the current thread will considerably
-     * drop as it is expected that the `run` function will start using the CPU-heavy tasks of the
-     * client instead.
-     * In other words, calling `createBackgroundRunnable()` and doing nothing with the output will
-     * make the client stop working properly.
-     * For this reason, when in a browser, you are strongly encouraged to check the value of
-     * `crossOriginIsolated` rather than call `postMessage` and absorb exceptions.
-     */
-    createBackgroundRunnable(): Promise<object>;
-
-    /**
      * Terminates the client.
      *
      * This implicitly calls {@link Chain.remove} on all the chains associated with this client,
@@ -230,6 +205,20 @@ export interface ClientOptions {
      * knows that this message isn't interesting.
      */
     maxLogLevel?: number;
+
+    /**
+     * List of ports connected to workers.
+     *
+     * These ports must be connected to ports that are passed to the `run` function found in
+     * the `/worker` module of this package.
+     *
+     * This setting makes it possible to run the CPU-heavy parts of smoldot in parallel in a
+     * worker.
+     *
+     * Not calling the `run` function, or manually sending messages on the port, or other similar
+     * corner cases will likely lead to exceptions or logic errors.
+     */
+    portsToWorkers?: MessagePort[],
 
     /**
      * Maximum amount of CPU that the client should consume on average.
@@ -428,7 +417,18 @@ export function start(options: ClientOptions, platformBindings: PlatformBindings
         maxLogLevel: options.maxLogLevel || 3,
         logCallback,
         cpuRateLimit: options.cpuRateLimit || 1.0,
+        executeNonNetworkingTasks: options.portsToWorkers ? (options.portsToWorkers.length == 0) : true,
     }, platformBindings);
+
+    if (options.portsToWorkers) {
+        const ports = options.portsToWorkers;
+        instance.exportModuleMemory().then((obj) => {
+            ports.forEach((port) => {
+                // We don't care if the port is closed, it's the API user's fault.
+                try { port.postMessage(obj) } catch(error) {}
+            })
+        })
+    }
 
     return {
         addChain: async (options: AddChainOptions): Promise<Chain> => {
@@ -498,9 +498,6 @@ export function start(options: ClientOptions, platformBindings: PlatformBindings
 
             chainIds.set(newChain, chainId);
             return newChain;
-        },
-        createBackgroundRunnable(): Promise<object> {
-            return instance.createBackgroundRunnable();
         },
         terminate: async () => {
             if (alreadyDestroyedError.value)

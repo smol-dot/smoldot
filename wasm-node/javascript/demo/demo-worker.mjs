@@ -18,10 +18,10 @@
 import { parentPort } from "node:worker_threads";
 import { run } from '../dist/mjs/worker-nodejs.js';
 
-const value = await new Promise((resolve) => {
+const port = await new Promise((resolve) => {
     parentPort.once('message', (value) => {
         resolve(value);
     });
 });
 
-await run(value);
+await run(port);

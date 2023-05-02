@@ -20,18 +20,23 @@ import { randomFillSync } from 'node:crypto';
 
 import * as instance from './instance/raw-instance.js';
 
-// TODO: stronger typing? see "branded types"
-export async function run(wasmModule: any, cpuRateLimit: number) {
+export async function run(messagePort: MessagePort, cpuRateLimit: number) {
+    const wasmModule = await new Promise((resolve) => {
+        messagePort.onmessage = (msg) => resolve(msg.data);
+    }) as { module: WebAssembly.Module, memory: WebAssembly.Memory };
+
     const config: instance.Config = {
         onWasmPanic: (_message) => {
             // TODO: completetly unclear what to do
+            throw new Error(_message);
         },
         logCallback: (_level, _target, _message) => {
             // TODO: ?!?!
+            console.log(_message);
         },
         wasmModule,
         cpuRateLimit,
-        executeNonNetworkingTasks: { value: true },
+        executeNonNetworkingTasks: true,
     };
 
     const platformBindings = {

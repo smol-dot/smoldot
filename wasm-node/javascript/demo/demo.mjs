@@ -51,8 +51,14 @@ for (const file of chainSpecsFiles) {
     };
 }
 
+const { port1, port2 } = new MessageChannel();
+const worker = new Worker("./demo/demo-worker.mjs");
+worker.on('error', (err) => { console.log("Worker error: \n" + err.message + "\n" + err.stack) });
+worker.postMessage(port2, [port2]);
+
 const client = smoldot.start({
     maxLogLevel: 3,  // Can be increased for more verbosity
+    portsToWorkers: [port1],
     forbidTcp: false,
     forbidWs: false,
     forbidNonLocalWs: false,
@@ -72,11 +78,6 @@ const client = smoldot.start({
         );
     }
 });
-
-client.createBackgroundRunnable().then((obj) => {
-    const worker = new Worker("./demo/demo-worker.mjs");
-    worker.postMessage(obj);
-})
 
 // Note that We call `addChain` again with the same chain spec again every time a new WebSocket
 // connection is established, but smoldot will de-duplicate them and only connect to the chain
