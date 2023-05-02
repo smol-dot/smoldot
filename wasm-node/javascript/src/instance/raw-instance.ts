@@ -18,8 +18,6 @@
 import { ConnectionConfig, Connection, Config as SmoldotBindingsConfig, default as smoldotLightBindingsBuilder } from './bindings-smoldot-light.js';
 import { Config as WasiConfig, default as wasiBindingsBuilder } from './bindings-wasi.js';
 
-import { default as wasmBase64 } from './autogen/wasm.js';
-
 import { SmoldotWasmInstance } from './bindings.js';
 
 export { ConnectionConfig, ConnectionError, Connection } from './bindings-smoldot-light.js';
@@ -38,6 +36,7 @@ export interface Config {
      */
     onWasmPanic: (message: string) => void,
     logCallback: (level: number, target: string, message: string) => void,
+    wasmModule: WebAssembly.Module,
     jsonRpcResponsesNonEmptyCallback: (chainId: number) => void,
     currentTaskCallback?: (taskName: string | null) => void,
     cpuRateLimit: number,
@@ -47,18 +46,6 @@ export interface Config {
  * Contains functions that the client will use when it needs to leverage the platform.
  */
 export interface PlatformBindings {
-    /**
-     * Base64-decode the given buffer then decompress its content using the inflate algorithm
-     * with zlib header.
-     *
-     * The input is considered trusted. In other words, the implementation doesn't have to
-     * resist malicious input.
-     *
-     * This function is asynchronous because implementations might use the compression streams
-     * Web API, which for whatever reason is asynchronous.
-     */
-    trustedBase64DecodeAndZlibInflate: (input: string) => Promise<Uint8Array>,
-
     /**
      * Returns the number of milliseconds since an arbitrary epoch.
      */
@@ -92,12 +79,6 @@ export interface PlatformBindings {
 }
 
 export async function startInstance(config: Config, platformBindings: PlatformBindings): Promise<[SmoldotWasmInstance, Array<Uint8Array>]> {
-    // The actual Wasm bytecode is base64-decoded then deflate-decoded from a constant found in a
-    // different file.
-    // This is suboptimal compared to using `instantiateStreaming`, but it is the most
-    // cross-platform cross-bundler approach.
-    const wasmBytecode = await platformBindings.trustedBase64DecodeAndZlibInflate(wasmBase64)
-
     let killAll: () => void;
 
     const bufferIndices = new Array;
@@ -134,14 +115,14 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
     // Start the Wasm virtual machine.
     // The Rust code defines a list of imports that must be fulfilled by the environment. The second
     // parameter provides their implementations.
-    const result = await WebAssembly.instantiate(wasmBytecode, {
+    const result = await WebAssembly.instantiate(config.wasmModule, {
         // The functions with the "smoldot" prefix are specific to smoldot.
         "smoldot": smoldotBindings,
         // As the Rust code is compiled for wasi, some more wasi-specific imports exist.
         "wasi_snapshot_preview1": wasiBindingsBuilder(wasiConfig),
     });
 
-    const instance = result.instance as SmoldotWasmInstance;
+    const instance = result as SmoldotWasmInstance;
     smoldotJsConfig.instance = instance;
     wasiConfig.instance = instance;
     return [instance, bufferIndices];
