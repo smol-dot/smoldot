@@ -40,6 +40,7 @@ export interface Config {
     wasmModule: { module: WebAssembly.Module, memory: WebAssembly.Memory },
     cpuRateLimit: number,
     executeNonNetworkingTasks: boolean,
+    threadTy: { ty: "primary", maxLogLevel: number } | { ty: 'secondary', startPtr: number },
 }
 
 /**
@@ -115,6 +116,11 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
 
     const instance = result as SmoldotWasmInstance;
     smoldotJsConfig.instance = instance;
+
+    if (config.threadTy.ty === "primary")
+        instance.exports.init(config.threadTy.maxLogLevel);
+    else if (config.threadTy.ty === "secondary")
+        (instance.exports["wasi_thread_start"] as (tid: number, start_args: number) => void)(1, config.threadTy.startPtr)  // TODO: correct tid? it seems that TIDs might be removed
 
     // TODO: this execution might start before `init` is called; it's actually okay to do so in practice, but the documentation says it's forbidden
     const executor = (async () => {

@@ -111,6 +111,7 @@ export function start(configMessage: Config, platformBindings: PlatformBindings)
 
         const module = await WebAssembly.compile(wasmBytecode);
         // TODO: proper initial/maximum values; it seems that they must exactly match what the wasm contains?
+        // TODO: see <https://github.com/rust-lang/rust/blob/d3edfd18c790971c77845bfc1a2be4f9281c5416/compiler/rustc_codegen_ssa/src/back/linker.rs#L1193>
         const memory = new WebAssembly.Memory({ shared: true, initial: 12000, maximum: 16384 });
 
         const config: instance.Config = {
@@ -128,6 +129,7 @@ export function start(configMessage: Config, platformBindings: PlatformBindings)
             logCallback: (level, target, message) => {
                 configMessage.logCallback(level, target, message)
             },
+            threadTy: { ty: "primary", maxLogLevel: configMessage.maxLogLevel },
             wasmModule: { module, memory },
             cpuRateLimit: configMessage.cpuRateLimit,
             executeNonNetworkingTasks: configMessage.executeNonNetworkingTasks,
@@ -137,15 +139,7 @@ export function start(configMessage: Config, platformBindings: PlatformBindings)
         return [module, i, memory, bufferIndices];
     })();
 
-    state = {
-        initialized: false, promise: initPromise.then(([module, instance, memory, bufferIndices]) => {
-            // Smoldot requires an initial call to the `init` function in order to do its internal
-            // configuration.
-            instance.exports.init(configMessage.maxLogLevel);
-            state = { initialized: true, module, instance, memory, bufferIndices };
-            return [module, instance, memory, bufferIndices];
-        })
-    };
+    state = { initialized: false, promise: initPromise };
 
     async function queueOperation<T>(operation: (module: WebAssembly.Module, instance: SmoldotWasmInstance, memory: WebAssembly.Memory, bufferIndices: Array<Uint8Array>) => T): Promise<T> {
         // What to do depends on the type of `state`.

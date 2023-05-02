@@ -34,6 +34,7 @@ export async function run(messagePort: MessagePort, cpuRateLimit: number) {
         wasmModule,
         cpuRateLimit,
         executeNonNetworkingTasks: true,
+        threadTy: { ty: "secondary", startPtr: 0 },  // TODO: no, pass correct pointer
     };
 
     const platformBindings = {
