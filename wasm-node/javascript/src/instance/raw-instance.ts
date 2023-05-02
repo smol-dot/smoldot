@@ -36,7 +36,6 @@ export interface Config {
      */
     onWasmPanic: (message: string) => void,
     logCallback: (level: number, target: string, message: string) => void,
-    currentTaskCallback?: (taskName: string | null) => void,
     wasmModule: { module: WebAssembly.Module, memory: WebAssembly.Memory },
     cpuRateLimit: number,
     executeNonNetworkingTasks: boolean,
