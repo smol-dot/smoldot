@@ -816,27 +816,35 @@ where
     /// Updates the state machine to take into account that the best block of the input has been
     /// modified.
     ///
+    /// Pass `None` if the input best block is now the same as the output finalized block.
+    ///
     /// # Panic
     ///
     /// Panics if `new_best_block` isn't a valid node.
     /// Panics if `new_best_block` isn't equal or a descendant of the input finalized block.
     ///
-    pub fn input_set_best_block(&mut self, new_best_block: NodeIndex) {
+    pub fn input_set_best_block(&mut self, new_best_block: Option<NodeIndex>) {
         // Make sure that `new_best_block` is a descendant of the current input finalized block,
         // otherwise the state of the tree will be corrupted.
         // This is checked with an `assert!` rather than a `debug_assert!`, as this constraint
         // is part of the public API of this method.
-        assert!(self.input_finalized_index.map_or(true, |fin_idx| self
-            .non_finalized_blocks
-            .is_ancestor(fin_idx, new_best_block)));
+        assert!(match (self.input_finalized_index, new_best_block) {
+            (Some(f), Some(b)) => self.non_finalized_blocks.is_ancestor(f, b),
+            (Some(_), None) => false,
+            (None, Some(_)) => true,
+            (None, None) => true,
+        });
 
         // If necessary, update the weight of the block.
-        // TODO: this will panic if the new best block is equal to the output finalized block?
-        match &mut self
-            .non_finalized_blocks
-            .get_mut(new_best_block)
-            .unwrap()
-            .input_best_block_weight
+        match new_best_block
+            .map(|new_best_block| {
+                &mut self
+                    .non_finalized_blocks
+                    .get_mut(new_best_block)
+                    .unwrap()
+                    .input_best_block_weight
+            })
+            .unwrap_or(&mut self.finalized_block_weight)
         {
             w if *w == self.input_best_block_next_weight - 1 => {}
             w => {

@@ -1398,14 +1398,19 @@ async fn run_background<TPlat: PlatformRef>(
 
                             match &mut guarded.tree {
                                 GuardedInner::FinalizedBlockRuntimeKnown {
+                                    finalized_block,
                                     tree, ..
                                 } => {
-                                    let idx = tree.input_iter_unordered().find(|block| block.user_data.hash == hash).unwrap().id;
+                                    let idx = if hash == finalized_block.hash {
+                                        None
+                                    } else {
+                                        Some(tree.input_iter_unordered().find(|block| block.user_data.hash == hash).unwrap().id)
+                                    };
                                     tree.input_set_best_block(idx);
                                 }
                                 GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
                                     let idx = tree.input_iter_unordered().find(|block| block.user_data.hash == hash).unwrap().id;
-                                    tree.input_set_best_block(idx);
+                                    tree.input_set_best_block(Some(idx));
                                 }
                             }
 
