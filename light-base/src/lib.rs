@@ -647,7 +647,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
             Entry::Vacant(entry) => {
                 // Key used by the networking. Represents the identity of the node on the
                 // peer-to-peer network.
-                let network_noise_key = connection::NoiseKey::new(&[0; 32]); // TODO: temporary hack due to no TLS for wasi+threads at the moment
+                let network_noise_key = connection::NoiseKey::new(&rand::random());
 
                 // Version of the client when requested through the networking.
                 let network_identify_agent_version = format!(
