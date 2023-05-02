@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix panic when the best block of a chain switches to being equal to the current finalized block. This can occasionally happen for parachains in case of a reorg on the relay chain.
+
 ## 1.0.3 - 2023-04-27
 
 ### Changed
