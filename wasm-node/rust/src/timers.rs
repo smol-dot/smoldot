@@ -63,8 +63,7 @@ impl Delay {
             return Delay { timer_id: None };
         }
 
-        // Because we're in a single-threaded environment, `try_lock()` should always succeed.
-        let mut lock = TIMERS.try_lock().unwrap();
+        let mut lock = TIMERS.lock().unwrap();
 
         let timer_id = lock.timers.insert(Timer {
             is_finished: false,
@@ -101,8 +100,7 @@ impl future::Future for Delay {
             None => return Poll::Ready(()),
         };
 
-        // Because we're in a single-threaded environment, `try_lock()` should always succeed.
-        let mut lock = TIMERS.try_lock().unwrap();
+        let mut lock = TIMERS.lock().unwrap();
         debug_assert!(!lock.timers[timer_id].is_obsolete);
 
         if lock.timers[timer_id].is_finished {
@@ -123,8 +121,7 @@ impl Drop for Delay {
             None => return,
         };
 
-        // Because we're in a single-threaded environment, `try_lock()` should always succeed.
-        let mut lock = TIMERS.try_lock().unwrap();
+        let mut lock = TIMERS.lock().unwrap();
         debug_assert!(!lock.timers[timer_id].is_obsolete);
 
         if lock.timers[timer_id].is_finished {
@@ -201,8 +198,7 @@ impl Ord for QueuedTimer {
 
 /// Marks as ready all the timers in `TIMERS` that are finished.
 fn process_timers() {
-    // Because we're in a single-threaded environment, `try_lock()` should always succeed.
-    let mut lock = TIMERS.try_lock().unwrap();
+    let mut lock = TIMERS.lock().unwrap();
     let now = Instant::now();
 
     // Note that this function can be called spuriously.
