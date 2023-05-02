@@ -692,7 +692,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 // Grandpa warp sync fragment to verify.
                 let sender_peer_id = verify.proof_sender().1 .0.clone(); // TODO: unnecessary cloning most of the time
 
-                let (sync, result) = verify.perform(rand::random());
+                let (sync, result) = verify.perform([0; 32]); // TODO: temporary hack due to no TLS for wasi+threads at the moment
                 self.sync = sync;
 
                 if let Err(err) = result {

@@ -256,7 +256,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     max_addresses_per_peer: NonZeroUsize::new(5).unwrap(),
                     noise_key: config.noise_key,
                     handshake_timeout: Duration::from_secs(8),
-                    randomness_seed: rand::random(),
+                    randomness_seed: [0; 32],  // TODO: temporary hack due to no TLS for wasi+threads at the moment
                 }),
                 slots_assign_backoff: HashMap::with_capacity_and_hasher(32, Default::default()),
                 important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
