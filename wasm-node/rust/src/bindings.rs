@@ -127,12 +127,6 @@ extern "C" {
     /// virtual machine at offset `ptr` and with length `len`.
     pub fn log(level: u32, target_ptr: u32, target_len: u32, message_ptr: u32, message_len: u32);
 
-    /// Called when [`advance_execution`] should be executed again.
-    ///
-    /// This function can be called from within [`advance_execution`], in which case
-    /// [`advance_execution`] should be called again immediately after it returns.
-    pub fn advance_execution_ready();
-
     /// After at least `milliseconds` milliseconds have passed, must call [`timer_finished`] with
     /// the `id` passed as parameter.
     ///
