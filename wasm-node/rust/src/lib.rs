@@ -401,13 +401,19 @@ impl task::Wake for JsonRpcResponsesNonEmptyWaker {
 // TODO: we use an Executor instead of LocalExecutor because it is planned to allow multithreading; if this plan is abandoned, switch to SendWrapper<LocalExecutor>
 static EXECUTOR: async_executor::Executor = async_executor::Executor::new();
 
-/// Optional future that never ends until the client is shutting down.
+/// While [`EXECUTOR`] is global to all threads, [`EXECUTOR_EXECUTE`] is thread specific. If
+/// smoldot eventually gets support for multiple threads, this value would be store in a
+/// thread-local storage. Since it only has one thread, it is instead a global variable.
 static EXECUTOR_EXECUTE: Mutex<ExecutionState> = Mutex::new(ExecutionState::NotStarted);
-
 enum ExecutionState {
+    /// Execution has not started. Everything remains to be initialized. Default state.
     NotStarted,
+    /// Execution has been started in the past and is now waiting to be woken up.
     NotReady,
+    /// Execution has been woken up. Ready to continue running.
     Ready(async_task::Runnable),
+    /// The client is shutting down. Eexcution is either waiting to be woken up, after which it
+    /// will self-destroy, or has already self-destroyed.
     ShuttingDown,
 }
 
