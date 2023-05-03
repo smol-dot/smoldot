@@ -1291,13 +1291,13 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             match version {
                 None => {
                     runtime_call_lock.unlock(virtual_machine);
-                    return Err(RuntimeCallError::ApiNotFound)
-                },
+                    return Err(RuntimeCallError::ApiNotFound);
+                }
                 Some(v) if version_range.contains(&v) => Some(v),
                 Some(v) => {
                     runtime_call_lock.unlock(virtual_machine);
-                    return Err(RuntimeCallError::ApiVersionUnknown { actual_version: v })
-                },
+                    return Err(RuntimeCallError::ApiVersionUnknown { actual_version: v });
+                }
             }
         } else {
             None
