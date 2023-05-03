@@ -204,7 +204,7 @@ pub struct Client<TPlat: platform::PlatformRef, TChain = ()> {
     /// The [`ChainServices`] is within a `MaybeDone`. The variant will be `MaybeDone::Future` if
     /// initialization is still in progress.
     // TODO: use SipHasher
-    chains_by_key: HashMap<ChainKey, RunningChain<TPlat>, fnv::FnvBuildHasher>,
+    chains_by_key: HashMap<ChainKey, RunningChain<TPlat>, util::BuildHasherDefault<fnv::FnvHasher>>,
 }
 
 struct PublicApiChain<TChain> {
@@ -333,12 +333,11 @@ impl JsonRpcResponses {
 
 impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
     /// Initializes the smoldot client.
-    pub fn new(platform: TPlat) -> Self {
-        let expected_chains = 8;
+    pub const fn new(platform: TPlat) -> Self {
         Client {
             platform,
-            public_api_chains: slab::Slab::with_capacity(expected_chains),
-            chains_by_key: HashMap::with_capacity_and_hasher(expected_chains, Default::default()),
+            public_api_chains: slab::Slab::new(),
+            chains_by_key: HashMap::with_hasher(util::BuildHasherDefault::new()),
         }
     }
 
