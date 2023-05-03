@@ -39,6 +39,8 @@ export interface Config {
     wasmModule: WebAssembly.Module,
     jsonRpcResponsesNonEmptyCallback: (chainId: number) => void,
     currentTaskCallback?: (taskName: string | null) => void,
+    maxLogLevel: number;
+    enableCurrentTask: boolean;
     cpuRateLimit: number,
 }
 
@@ -133,7 +135,10 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
     smoldotJsConfig.instance = instance;
     wasiConfig.instance = instance;
 
-    // TODO: this execution might start before `init` is called; it's actually okay to do so in practice, but the documentation says it's forbidden
+    // Smoldot requires an initial call to the `init` function in order to do its internal
+    // configuration.
+    instance.exports.init(config.maxLogLevel, config.enableCurrentTask ? 1 : 0);
+
     (async () => {
         // In order to avoid calling `setTimeout` too often, we accumulate sleep up until
         // a certain threshold.

@@ -129,6 +129,8 @@ export function start(configMessage: Config, platformBindings: instance.Platform
                 currentTask.name = taskName
             },
             cpuRateLimit: configMessage.cpuRateLimit,
+            enableCurrentTask: configMessage.enableCurrentTask,
+            maxLogLevel: configMessage.maxLogLevel,
         };
 
         return await instance.startInstance(config, platformBindings)
@@ -136,9 +138,6 @@ export function start(configMessage: Config, platformBindings: instance.Platform
 
     state = {
         initialized: false, promise: initPromise.then(([instance, bufferIndices]) => {
-            // Smoldot requires an initial call to the `init` function in order to do its internal
-            // configuration.
-            instance.exports.init(configMessage.maxLogLevel, configMessage.enableCurrentTask ? 1 : 0);
             state = { initialized: true, instance, bufferIndices };
             return [instance, bufferIndices];
         })
