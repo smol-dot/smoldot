@@ -134,8 +134,7 @@ extern "C" {
     /// [`advance_execution`] should be called again immediately after it returns.
     pub fn advance_execution_ready();
 
-    /// After at least `milliseconds` milliseconds have passed, must call [`timer_finished`] with
-    /// the `id` passed as parameter.
+    /// After at least `milliseconds` milliseconds have passed, [`timer_finished`] must be called.
     ///
     /// It is not a logic error to call [`timer_finished`] *before* `milliseconds` milliseconds
     /// have passed, and this will likely cause smoldot to restart a new timer for the remainder
@@ -147,7 +146,7 @@ extern "C" {
     /// If `milliseconds` is 0, [`timer_finished`] should be called as soon as possible.
     ///
     /// `milliseconds` never contains a negative number, `NaN` or infinite.
-    pub fn start_timer(id: u32, milliseconds: f64);
+    pub fn start_timer(milliseconds: f64);
 
     /// Must initialize a new connection that tries to connect to the given multiaddress.
     ///
@@ -481,8 +480,8 @@ pub extern "C" fn json_rpc_responses_pop(chain_id: u32) {
 
 /// Must be called in response to [`start_timer`] after the given duration has passed.
 #[no_mangle]
-pub extern "C" fn timer_finished(timer_id: u32) {
-    crate::timers::timer_finished(timer_id);
+pub extern "C" fn timer_finished() {
+    crate::timers::timer_finished();
 }
 
 /// Called by the JavaScript code if the connection switches to the `Open` state. The connection

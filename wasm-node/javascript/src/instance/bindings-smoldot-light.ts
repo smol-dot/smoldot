@@ -308,7 +308,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
         },
 
         // Must call `timer_finished` after the given number of milliseconds has elapsed.
-        start_timer: (id: number, ms: number) => {
+        start_timer: (ms: number) => {
             if (killedTracked.killed) return;
 
             const instance = config.instance!;
@@ -327,14 +327,14 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                 setImmediate(() => {
                     if (killedTracked.killed) return;
                     try {
-                        instance.exports.timer_finished(id);
+                        instance.exports.timer_finished();
                     } catch (_error) { }
                 })
             } else {
                 setTimeout(() => {
                     if (killedTracked.killed) return;
                     try {
-                        instance.exports.timer_finished(id);
+                        instance.exports.timer_finished();
                     } catch (_error) { }
                 }, ms)
             }
