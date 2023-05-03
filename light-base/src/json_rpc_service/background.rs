@@ -1379,14 +1379,21 @@ enum RuntimeCallError {
     /// Error while finding the storage root hash of the requested block.
     #[display(fmt = "Failed to obtain block state trie root: {_0}")]
     FindStorageRootHashError(StateTrieRootHashError),
+    #[display(fmt = "{_0}")]
     Call(runtime_service::RuntimeCallError),
+    #[display(fmt = "{_0}")]
     StartError(host::StartErr),
+    #[display(fmt = "{_0}")]
     RuntimeError(runtime_host::ErrorDetail),
+    #[display(fmt = "Getting all the next key isn't supported")]
     NextKeyForbidden,
+    #[display(fmt = "Getting all the keys of a certain prefix isn't supported")]
     PrefixKeysForbidden,
     /// Required runtime API isn't supported by the runtime.
+    #[display(fmt = "Required runtime API isn't supported by the runtime")]
     ApiNotFound,
     /// Version requirement of runtime API isn't supported.
+    #[display(fmt = "Version {actual_version} of the runtime API not supported")]
     ApiVersionUnknown {
         /// Version that the runtime supports.
         actual_version: u32,
