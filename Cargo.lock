@@ -2533,6 +2533,7 @@ dependencies = [
 name = "smoldot-light-wasm"
 version = "1.0.3"
 dependencies = [
+ "async-executor",
  "async-lock",
  "async-task",
  "concurrent-queue",

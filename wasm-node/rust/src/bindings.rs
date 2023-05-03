@@ -127,6 +127,12 @@ extern "C" {
     /// virtual machine at offset `ptr` and with length `len`.
     pub fn log(level: u32, target_ptr: u32, target_len: u32, message_ptr: u32, message_len: u32);
 
+    /// Called when [`advance_execution`] should be executed again.
+    ///
+    /// This function can be called from within [`advance_execution`], in which case
+    /// [`advance_execution`] should be called again immediately after it returns.
+    pub fn advance_execution_ready();
+
     /// After at least `milliseconds` milliseconds have passed, must call [`timer_finished`] with
     /// the `id` passed as parameter.
     ///
@@ -286,10 +292,6 @@ extern "C" {
 ///
 /// The client will emit log messages by calling the [`log()`] function, provided the log level is
 /// inferior or equal to the value of `max_log_level` passed here.
-///
-/// `cpu_rate_limit` can be used to limit the amount of CPU that smoldot will use on average.
-/// `u32::max_value()` represents "one CPU". For example passing `rate_limit / 2` represents
-/// "`50%` of one CPU".
 #[no_mangle]
 pub extern "C" fn init(max_log_level: u32) {
     crate::init(max_log_level);

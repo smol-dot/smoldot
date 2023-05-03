@@ -12,6 +12,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+async-executor = { version = "1.5.1", default-features = false }
 async-lock = { version = "2.7.0", default-features = false }
 async-task = { version = "4.4.0", default-features = false }
 concurrent-queue = { version = "2.2.0", default-features = false }  # TODO: figure out situation regarding yielding?

@@ -63,7 +63,14 @@ pub(crate) enum Chain {
     },
 }
 
+<<<<<<< HEAD
 pub(crate) fn init<TChain>(max_log_level: u32) -> Client<platform::Platform, TChain> {
+=======
+pub(crate) fn init<TChain>(
+    max_log_level: u32,
+    enable_current_task: bool,
+) -> Client<platform::Platform, TChain> {
+>>>>>>> main
     // Try initialize the logging and the panic hook.
     let _ = log::set_boxed_logger(Box::new(Logger)).map(|()| {
         log::set_max_level(match max_log_level {

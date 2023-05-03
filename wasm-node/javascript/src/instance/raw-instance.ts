@@ -69,6 +69,8 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
     let killAll: () => void;
 
     const bufferIndices = new Array;
+    // Callback called when `advance_execution_ready` is called by the Rust code, if any.
+    const advanceExecutionPromise: { value: null | (() => void) } = { value: null };
 
     // Used to bind with the smoldot-light bindings. See the `bindings-smoldot-light.js` file.
     const smoldotJsConfig: SmoldotBindingsConfig = {
