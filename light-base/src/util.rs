@@ -51,7 +51,7 @@ pub fn truncated_str<'a>(
 }
 
 /// Exactly the same as `BuildHasherDefault` from the standard library, except without the missing
-/// `new` const function that somehow requires needs a new language construct or something.
+/// `new` `const` function that somehow requires needs a new language construct or something.
 // TODO remove after https://github.com/rust-lang/rust/issues/87864
 pub struct BuildHasherDefault<H>(marker::PhantomData<fn() -> H>);
 
