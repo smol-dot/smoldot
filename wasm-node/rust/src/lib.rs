@@ -422,8 +422,27 @@ fn advance_execution() -> u32 {
         let mut executor_execute_guard = EXECUTOR_EXECUTE.lock().unwrap();
         match *executor_execute_guard {
             ExecutionState::NotStarted => {
-                let (runnable, task) =
-                    async_task::spawn(EXECUTOR.run(future::pending::<()>()), |runnable| {
+                // Spawn a task that repeatedly executes one task then yields.
+                // This makes sure that we return to the JS engine after every task.
+                let (runnable, task) = {
+                    let run = async move {
+                        loop {
+                            EXECUTOR.tick().await;
+                            let mut has_yielded = false;
+                            future::poll_fn(|cx| {
+                                if has_yielded {
+                                    task::Poll::Ready(())
+                                } else {
+                                    cx.waker().wake_by_ref();
+                                    has_yielded = true;
+                                    task::Poll::Pending
+                                }
+                            })
+                            .await;
+                        }
+                    };
+
+                    async_task::spawn(run, |runnable| {
                         let mut lock = EXECUTOR_EXECUTE.lock().unwrap();
                         if !matches!(*lock, ExecutionState::NotReady) {
                             return;
@@ -432,7 +451,8 @@ fn advance_execution() -> u32 {
                         unsafe {
                             bindings::advance_execution_ready();
                         }
-                    });
+                    })
+                };
 
                 task.detach();
                 *executor_execute_guard = ExecutionState::NotReady;
