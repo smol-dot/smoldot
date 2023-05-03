@@ -21,6 +21,7 @@ use core::time::Duration;
 use futures_util::stream;
 use smoldot::informant::BytesDisplay;
 use smoldot_light::platform::PlatformRef;
+<<<<<<< HEAD
 use std::{
     panic,
     sync::{
@@ -28,12 +29,29 @@ use std::{
         Arc,
     },
 };
+=======
+use std::{panic, sync::atomic::Ordering};
+>>>>>>> main
 
 pub(crate) struct Client<TPlat: smoldot_light::platform::PlatformRef, TChain> {
     pub(crate) smoldot: smoldot_light::Client<TPlat, TChain>,
 
     /// List of all chains that have been added by the user.
     pub(crate) chains: slab::Slab<Chain>,
+<<<<<<< HEAD
+=======
+
+    pub(crate) periodically_yield: bool,
+
+    pub(crate) max_divided_by_rate_limit_minus_one: f64,
+
+    /// Instead of sleeping regularly for short amounts of time, we instead continue running only
+    /// until the time we have to sleep reaches a certain threshold.
+    pub(crate) sleep_deprevation_sec: f64,
+
+    /// Prevent `main_task` from being called before this `Delay` is ready.
+    pub(crate) prevent_poll_until: crate::timers::Delay,
+>>>>>>> main
 }
 
 pub(crate) enum Chain {
@@ -91,7 +109,11 @@ pub(crate) fn init<TChain>(max_log_level: u32) -> Client<platform::Platform, TCh
     assert_ne!(rand::random::<u64>(), 0);
     assert_ne!(rand::random::<u64>(), rand::random::<u64>());
 
+<<<<<<< HEAD
     let platform = platform::Platform::new();
+=======
+    let platform = platform::Platform::new(enable_current_task);
+>>>>>>> main
 
     // Spawn a constantly-running task that periodically prints the total memory usage of
     // the node.
@@ -141,6 +163,13 @@ pub(crate) fn init<TChain>(max_log_level: u32) -> Client<platform::Platform, TCh
     Client {
         smoldot: smoldot_light::Client::new(platform),
         chains: slab::Slab::with_capacity(8),
+<<<<<<< HEAD
+=======
+        periodically_yield,
+        max_divided_by_rate_limit_minus_one,
+        sleep_deprevation_sec: 0.0,
+        prevent_poll_until: crate::timers::Delay::new(Duration::new(0, 0)),
+>>>>>>> main
     }
 }
 

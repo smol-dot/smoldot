@@ -21,6 +21,7 @@ import { Client, ClientOptions, start as innerStart } from './client.js'
 import { Connection, ConnectionError, ConnectionConfig } from './instance/instance.js';
 import { classicDecode, multibaseBase64Decode } from './base64.js'
 import { inflate } from 'pako';
+import { default as wasmBase64 } from './instance/autogen/wasm.js';
 
 export {
     AddChainError,
@@ -46,10 +47,13 @@ export {
 export function start(options?: ClientOptions): Client {
     options = options || {}
 
-    return innerStart(options, {
-        trustedBase64DecodeAndZlibInflate: (input) => {
-            return Promise.resolve(inflate(classicDecode(input)))
-        },
+    // The actual Wasm bytecode is base64-decoded then deflate-decoded from a constant found in a
+    // different file.
+    // This is suboptimal compared to using `instantiateStreaming`, but it is the most
+    // cross-platform cross-bundler approach.
+    const wasmModule = WebAssembly.compile(inflate(classicDecode(wasmBase64)));
+
+    return innerStart(options, wasmModule, {
         performanceNow: () => {
             return performance.now()
         },

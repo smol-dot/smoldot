@@ -409,12 +409,23 @@ impl task::Wake for JsonRpcResponsesNonEmptyWaker {
     }
 }
 
+<<<<<<< HEAD
 static NETWORKING_TASKS_QUEUE: async_lock::OnceCell<
     concurrent_queue::ConcurrentQueue<async_task::Runnable>,
 > = async_lock::OnceCell::new();
 fn networking_tasks_queue() -> &'static concurrent_queue::ConcurrentQueue<async_task::Runnable> {
     NETWORKING_TASKS_QUEUE.get_or_init_blocking(|| concurrent_queue::ConcurrentQueue::unbounded())
 }
+=======
+/// Since "spawning a task" isn't really something that a browser or Node environment do
+/// efficiently, we instead combine all the asynchronous tasks into one executor.
+// TODO: we use an Executor instead of LocalExecutor because it is planned to allow multithreading; if this plan is abandoned, switch to SendWrapper<LocalExecutor>
+static EXECUTOR: async_executor::Executor = async_executor::Executor::new();
+
+fn advance_execution() {
+    let mut client_lock = CLIENT.lock().unwrap();
+    let client_lock = client_lock.as_mut().unwrap();
+>>>>>>> main
 
 static NON_NETWORKING_TASKS_QUEUE: async_lock::OnceCell<
     concurrent_queue::ConcurrentQueue<async_task::Runnable>,
@@ -429,8 +440,16 @@ static TASKS_QUEUE_LEN: AtomicI32 = AtomicI32::new(0);
 static NETWORKING_TASKS_QUEUE_LEN: AtomicI32 = AtomicI32::new(0);
 static NON_NETWORKING_TASKS_QUEUE_LEN: AtomicI32 = AtomicI32::new(0);
 
+<<<<<<< HEAD
 fn advance_execution(can_networking: bool, exec_non_networking: bool) -> *mut i32 {
     // TODO: consider work stealing by using something like async-executor and run `executor.tick()` like we currently do run tasks
+=======
+        // Advance one background task.
+        // If nothing is actually executed, break out of the loop as there is nothing to do.
+        if !EXECUTOR.try_tick() {
+            break;
+        }
+>>>>>>> main
 
     let mut networking_task_run = false;
     if can_networking {

@@ -17,10 +17,9 @@
 
 import * as buffer from './buffer.js';
 import * as instance from './raw-instance.js';
-import { default as wasmBase64 } from './autogen/wasm.js';
 import { SmoldotWasmInstance } from './bindings.js';
 
-export { ConnectionError, ConnectionConfig, Connection } from './raw-instance.js';
+export { PlatformBindings, ConnectionError, ConnectionConfig, Connection } from './raw-instance.js';
 
 /**
  * Thrown in case the underlying client encounters an unexpected crash.
@@ -55,6 +54,7 @@ export class QueueFullError extends Error {
  * Contains the configuration of the instance.
  */
 export interface Config {
+    wasmModule: Promise<WebAssembly.Module>,
     logCallback: (level: number, target: string, message: string) => void
     maxLogLevel: number;
     cpuRateLimit: number,
@@ -70,22 +70,8 @@ export interface Instance {
     startShutdown: () => void
 }
 
-export interface PlatformBindings extends instance.PlatformBindings {
-    /**
-     * Base64-decode the given buffer then decompress its content using the inflate algorithm
-     * with zlib header.
-     *
-     * The input is considered trusted. In other words, the implementation doesn't have to
-     * resist malicious input.
-     *
-     * This function is asynchronous because implementations might use the compression streams
-     * Web API, which for whatever reason is asynchronous.
-     */
-    // TODO: shouldn't be in raw-instance
-    trustedBase64DecodeAndZlibInflate: (input: string) => Promise<Uint8Array>,
-}
+export function start(configMessage: Config, platformBindings: instance.PlatformBindings): Instance {
 
-export function start(configMessage: Config, platformBindings: PlatformBindings): Instance {
     // This variable represents the state of the instance, and serves two different purposes:
     //
     // - At initialization, it is a Promise containing the Wasm VM is still initializing.
@@ -101,15 +87,8 @@ export function start(configMessage: Config, platformBindings: PlatformBindings)
     // TODO: refactor to a Set, since the object is empty?
     let chains: Map<number, {}> = new Map();
 
-    // Start initialization of the Wasm VM.
     const initPromise = (async (): Promise<[WebAssembly.Module, SmoldotWasmInstance, WebAssembly.Memory, Array<Uint8Array>]> => {
-        // The actual Wasm bytecode is base64-decoded then deflate-decoded from a constant found in a
-        // different file.
-        // This is suboptimal compared to using `instantiateStreaming`, but it is the most
-        // cross-platform cross-bundler approach.
-        const wasmBytecode = await platformBindings.trustedBase64DecodeAndZlibInflate(wasmBase64)
-
-        const module = await WebAssembly.compile(wasmBytecode);
+        const module = await configMessage.wasmModule;
         // TODO: proper initial/maximum values; it seems that they must exactly match what the wasm contains?
         // TODO: see <https://github.com/rust-lang/rust/blob/d3edfd18c790971c77845bfc1a2be4f9281c5416/compiler/rustc_codegen_ssa/src/back/linker.rs#L1193>
         const memory = new WebAssembly.Memory({ shared: true, initial: 12000, maximum: 16384 });

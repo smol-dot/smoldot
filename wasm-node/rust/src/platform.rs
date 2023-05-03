@@ -39,11 +39,23 @@ pub static TOTAL_BYTES_RECEIVED: AtomicU64 = AtomicU64::new(0);
 pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
+<<<<<<< HEAD
 pub(crate) struct Platform;
 
 impl Platform {
     pub fn new() -> Self {
         Self {}
+=======
+pub(crate) struct Platform {
+    enable_current_task: bool,
+}
+
+impl Platform {
+    pub fn new(enable_current_task: bool) -> Self {
+        Self {
+            enable_current_task,
+        }
+>>>>>>> main
     }
 }
 
@@ -141,8 +153,12 @@ impl smoldot_light::platform::PlatformRef for Platform {
             }
         });
 
+<<<<<<< HEAD
         runnable.schedule();
         task.detach();
+=======
+        super::EXECUTOR.spawn(task).detach();
+>>>>>>> main
     }
 
     fn client_name(&self) -> Cow<str> {

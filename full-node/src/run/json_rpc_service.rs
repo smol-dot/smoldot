@@ -15,15 +15,14 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use futures_channel::oneshot;
-use futures_util::{future, FutureExt as _};
+use smol::future;
 use smoldot::json_rpc::{self, methods, websocket_server};
-use std::{io, net::SocketAddr};
+use std::{future::Future, io, net::SocketAddr, pin::Pin};
 
 /// Configuration for a [`JsonRpcService`].
 pub struct Config<'a> {
     /// Closure that spawns background tasks.
-    pub tasks_executor: &'a mut dyn FnMut(future::BoxFuture<'static, ()>),
+    pub tasks_executor: &'a mut dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>),
 
     /// Where to bind the WebSocket server.
     pub bind_address: SocketAddr,
@@ -31,8 +30,14 @@ pub struct Config<'a> {
 
 /// Running JSON-RPC service. Holds a server open for as long as it is alive.
 pub struct JsonRpcService {
-    /// As long as this value is alive, the background server continues running.
-    _server_keep_alive: oneshot::Sender<()>,
+    /// This events listener is notified when the service is dropped.
+    service_dropped: event_listener::Event,
+}
+
+impl Drop for JsonRpcService {
+    fn drop(&mut self) {
+        self.service_dropped.notify(usize::max_value());
+    }
 }
 
 impl JsonRpcService {
@@ -58,15 +63,16 @@ impl JsonRpcService {
             }
         };
 
-        let (_server_keep_alive, client_still_alive) = oneshot::channel();
+        let service_dropped = event_listener::Event::new();
+        let on_service_dropped = service_dropped.listen();
 
         let background = JsonRpcBackground {
             server,
-            client_still_alive: client_still_alive.fuse(),
+            on_service_dropped,
         };
 
-        (config.tasks_executor)(async move { background.run().await }.boxed());
-        Ok(JsonRpcService { _server_keep_alive })
+        (config.tasks_executor)(Box::pin(async move { background.run().await }));
+        Ok(JsonRpcService { service_dropped })
     }
 }
 
@@ -87,17 +93,17 @@ struct JsonRpcBackground {
     /// State machine of the WebSocket server. Holds the TCP socket.
     server: websocket_server::WsServer<SocketAddr>,
 
-    /// As long as this channel is pending, the frontend of the JSON-RPC server is still alive.
-    client_still_alive: future::Fuse<oneshot::Receiver<()>>,
+    /// Event notified when the frontend is dropped.
+    on_service_dropped: event_listener::EventListener,
 }
 
 impl JsonRpcBackground {
     async fn run(mut self) {
         loop {
-            let event = futures_util::select! {
-                _ = &mut self.client_still_alive => return,
-                event = self.server.next_event().fuse() => event,
-            };
+            let Some(event) = future::or(
+                async { (&mut self.on_service_dropped).await; None },
+                async { Some(self.server.next_event().await) }
+            ).await else { return };
 
             let (connection_id, message) = match event {
                 websocket_server::Event::ConnectionOpen { address, .. } => {
