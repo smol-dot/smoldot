@@ -42,7 +42,7 @@ pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
 pub(crate) struct Platform {}
 
 impl Platform {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {}
     }
 }

@@ -54,7 +54,7 @@ pub(crate) enum Chain {
     },
 }
 
-pub(crate) fn init<TChain>(max_log_level: u32) -> Client<platform::Platform, TChain> {
+pub(crate) fn init(max_log_level: u32) {
     // Try initialize the logging and the panic hook.
     let _ = log::set_boxed_logger(Box::new(Logger)).map(|()| {
         log::set_max_level(match max_log_level {
@@ -82,11 +82,10 @@ pub(crate) fn init<TChain>(max_log_level: u32) -> Client<platform::Platform, TCh
     assert_ne!(rand::random::<u64>(), 0);
     assert_ne!(rand::random::<u64>(), rand::random::<u64>());
 
-    let platform = platform::Platform::new();
-
     // Spawn a constantly-running task that periodically prints the total memory usage of
     // the node.
-    platform.spawn_task(
+    // TODO: creating a new Platform here is hacky
+    platform::Platform::new().spawn_task(
         "memory-printer".into(),
         Box::pin(async move {
             let mut previous_read_bytes = 0;
@@ -128,11 +127,6 @@ pub(crate) fn init<TChain>(max_log_level: u32) -> Client<platform::Platform, TCh
             }
         }),
     );
-
-    Client {
-        smoldot: smoldot_light::Client::new(platform),
-        chains: slab::Slab::with_capacity(8),
-    }
 }
 
 /// Stops execution, providing a string explaining what happened.
