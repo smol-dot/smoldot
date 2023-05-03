@@ -4,7 +4,7 @@
 
 ### Added
 
-- Support v2 of the `Metadata` runtime API.
+- Support v2 of the `Metadata` runtime API. ([#514](https://github.com/smol-dot/smoldot/pull/514))
 
 ### Changed
 
