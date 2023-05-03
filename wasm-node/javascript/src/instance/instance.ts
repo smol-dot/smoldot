@@ -92,40 +92,48 @@ export function start(configMessage: Config, platformBindings: instance.Platform
 
         // Start initialization of the Wasm VM.
         const config: instance.Config = {
-            onWasmPanic: (message) => {
-                // TODO: consider obtaining a backtrace here
-                crashError.error = new CrashError(message);
-                if (!printError.printError)
-                    return;
-                console.error(
-                    "Smoldot has panicked" +
-                    (currentTask.name ? (" while executing task `" + currentTask.name + "`") : "") +
-                    ". This is a bug in smoldot. Please open an issue at " +
-                    "https://github.com/smol-dot/smoldot/issues with the following message:\n" +
-                    message
-                );
-                for (const chain of Array.from(chains.values())) {
-                    for (const promise of chain.jsonRpcResponsesPromises) {
-                        promise.reject(crashError.error)
+            eventCallback: (event) => {
+                switch (event.ty) {
+                    case "wasm-panic": {
+                        // TODO: consider obtaining a backtrace here
+                        crashError.error = new CrashError(event.message);
+                        if (!printError.printError)
+                            return;
+                        console.error(
+                            "Smoldot has panicked" +
+                            (currentTask.name ? (" while executing task `" + currentTask.name + "`") : "") +
+                            ". This is a bug in smoldot. Please open an issue at " +
+                            "https://github.com/smol-dot/smoldot/issues with the following message:\n" +
+                            event.message
+                        );
+                        for (const chain of Array.from(chains.values())) {
+                            for (const promise of chain.jsonRpcResponsesPromises) {
+                                promise.reject(crashError.error)
+                            }
+                            chain.jsonRpcResponsesPromises = [];
+                        }
+                        break
                     }
-                    chain.jsonRpcResponsesPromises = [];
+                    case "log": {
+                        configMessage.logCallback(event.level, event.target, event.message)
+                        break;
+                    }
+                    case "json-rpc-responses-non-empty": {
+                        // Notify every single promise found in `jsonRpcResponsesPromises`.
+                        const promises = chains.get(event.chainId)!.jsonRpcResponsesPromises;
+                        while (promises.length !== 0) {
+                            promises.shift()!.resolve();
+                        }
+                        break;
+                    }
+                    case "current-task": {
+                        currentTask.name = event.taskName;
+                        break;
+                    }
                 }
             },
             platformBindings,
-            logCallback: (level, target, message) => {
-                configMessage.logCallback(level, target, message)
-            },
             wasmModule: module,
-            jsonRpcResponsesNonEmptyCallback: (chainId) => {
-                // Notify every single promise found in `jsonRpcResponsesPromises`.
-                const promises = chains.get(chainId)!.jsonRpcResponsesPromises;
-                while (promises.length !== 0) {
-                    promises.shift()!.resolve();
-                }
-            },
-            currentTaskCallback: (taskName) => {
-                currentTask.name = taskName
-            },
             cpuRateLimit: configMessage.cpuRateLimit,
             maxLogLevel: configMessage.maxLogLevel,
         };

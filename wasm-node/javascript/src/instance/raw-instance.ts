@@ -24,26 +24,18 @@ import { SmoldotWasmInstance } from './bindings.js';
 export { ConnectionConfig, ConnectionError, Connection } from './bindings-smoldot-light.js';
 
 export interface Config {
-    /**
-     * Closure to call when the Wasm instance panics.
-     *
-     * This callback will always be invoked from within a binding called the Wasm instance.
-     *
-     * After this callback has been called, it is forbidden to invoke any function from the Wasm
-     * VM.
-     *
-     * If this callback is called while invoking a function from the Wasm VM, this function will
-     * throw a dummy exception.
-     */
-    onWasmPanic: (message: string) => void,
-    logCallback: (level: number, target: string, message: string) => void,
+    eventCallback: (event: Event) => void,
     platformBindings: PlatformBindings,
     wasmModule: WebAssembly.Module,
-    jsonRpcResponsesNonEmptyCallback: (chainId: number) => void,
-    currentTaskCallback?: (taskName: string | null) => void,
     maxLogLevel: number;
     cpuRateLimit: number,
 }
+
+type Event =
+    { ty: "log", level: number, target: string, message: string } |
+    { ty: "json-rpc-responses-non-empty", chainId: number } |
+    { ty: "current-task", taskName: string | null } |
+    { ty: "wasm-panic", message: string };
 
 /**
  * Contains functions that the client will use when it needs to leverage the platform.
@@ -102,13 +94,19 @@ export async function startInstance(config: Config): Promise<Instance> {
         connect: config.platformBindings.connect,
         onPanic: (message) => {
             killAll();
-            config.onWasmPanic(message);
+            config.eventCallback({ ty: "wasm-panic", message });
             throw new Error();
         },
         advanceExecutionReadyCallback: () => {
             if (advanceExecutionPromise.value)
                 advanceExecutionPromise.value();
             advanceExecutionPromise.value = null;
+        },
+        jsonRpcResponsesNonEmptyCallback: (chainId) => {
+            config.eventCallback({ ty: "json-rpc-responses-non-empty", chainId });
+        },
+        logCallback: (level, target, message) => {
+            config.eventCallback({ ty: "log", level, message, target });
         },
         ...config
     };
@@ -120,7 +118,7 @@ export async function startInstance(config: Config): Promise<Instance> {
         performanceNow: config.platformBindings.performanceNow,
         onProcExit: (retCode) => {
             killAll();
-            config.onWasmPanic(`proc_exit called: ${retCode}`)
+            config.eventCallback({ ty: "wasm-panic", message: `proc_exit called: ${retCode}` });
             throw new Error();
         }
     };
