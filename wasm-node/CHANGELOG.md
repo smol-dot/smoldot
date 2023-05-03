@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The size of the read buffer of TCP connections on Deno has been increased from 1kiB to 32kiB. This should improve the performance by reducing the number of function calls. ([#501](https://github.com/smol-dot/smoldot/pull/501))
+
 ### Fixed
 
 - Fix panic when the best block of a chain switches to being equal to the current finalized block. This can occasionally happen for parachains in case of a reorg on the relay chain. ([#497](https://github.com/smol-dot/smoldot/pull/497))

@@ -249,7 +249,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
                 config.onMessage(readBuffer.slice(0, outcome));
                 return read(readBuffer)
             }
-                ; read(new Uint8Array(1024));
+                ; read(new Uint8Array(32768));
 
             return established;
         });
