@@ -15,12 +15,13 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use super::Inner;
-
-use core::{future::Future, pin, time::Duration};
-use futures_channel::mpsc;
-use futures_timer::Delay;
-use futures_util::{future, AsyncRead, AsyncWrite, FutureExt as _, StreamExt as _};
+use core::{future::Future, pin};
+use futures_util::{FutureExt as _, StreamExt as _};
+use smol::{
+    channel,
+    future::{self, FutureExt as _},
+    io::{AsyncRead, AsyncWrite},
+};
 use smoldot::{
     libp2p::{
         async_std_connection::with_buffers,
@@ -33,114 +34,44 @@ use std::{
     io,
     net::{IpAddr, SocketAddr},
     pin::Pin,
-    sync::Arc,
     time::Instant,
 };
+
+pub(super) trait AsyncReadWrite: AsyncRead + AsyncWrite {}
+impl<T> AsyncReadWrite for T where T: AsyncRead + AsyncWrite {}
 
 /// Asynchronous task managing a specific connection, including the dialing process.
 pub(super) async fn opening_connection_task(
     start_connect: service::StartConnect<Instant>,
-    inner: Arc<Inner>,
-    connection_to_coordinator: mpsc::Sender<(
-        service::ConnectionId,
-        service::ConnectionToCoordinator,
-    )>,
-) {
+) -> Result<impl AsyncReadWrite + Unpin, ()> {
     // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d`) into
     // a `Future<dyn Output = Result<TcpStream, ...>>`.
     let socket = match multiaddr_to_socket(&start_connect.multiaddr) {
         Ok(socket) => socket,
         Err(_) => {
             log::debug!("not-tcp; address={}", start_connect.multiaddr);
-
-            let mut guarded = inner.guarded.lock().await;
-            guarded.num_pending_out_attempts -= 1;
-            guarded.network.pending_outcome_err(start_connect.id, true);
-            for chain_index in 0..guarded.network.num_chains() {
-                guarded.unassign_slot_and_ban(chain_index, start_connect.expected_peer_id.clone());
-            }
-            inner.wake_up_main_background_task.notify(1);
-            return;
+            return Err(());
         }
     };
 
     // Finishing ongoing connection process.
-    let socket = {
-        let now = Instant::now();
-        let mut timeout = Delay::new(if start_connect.timeout >= now {
-            start_connect.timeout - now
-        } else {
-            // `timeout - now` would panic
-            Duration::new(0, 0)
+    let socket = async move { socket.await.map_err(|_| ()) }
+        .or(async move {
+            smol::Timer::at(start_connect.timeout).await;
+            Err(())
         })
-        .fuse();
-        let mut socket = pin::pin!(socket.fuse());
-        futures_util::select! {
-            _ = timeout => {
-                let mut guarded = inner.guarded.lock().await;
-                guarded.num_pending_out_attempts -= 1;
-                guarded.network.pending_outcome_err(start_connect.id, false);
-                for chain_index in 0..guarded.network.num_chains() {
-                    guarded.unassign_slot_and_ban(chain_index, start_connect.expected_peer_id.clone());
-                }
-                inner.wake_up_main_background_task.notify(1);
-                return;
-            }
-            result = socket => {
-                match result {
-                    Ok(s) => s,
-                    Err(_) => {
-                        let mut guarded = inner.guarded.lock().await;
-                        guarded.num_pending_out_attempts -= 1;
-                        guarded.network.pending_outcome_err(start_connect.id, true);
-                        for chain_index in 0..guarded.network.num_chains() {
-                            guarded.unassign_slot_and_ban(chain_index, start_connect.expected_peer_id.clone());
-                        }
-                        inner.wake_up_main_background_task.notify(1);
-                        return;
-                    }
-                }
-            }
-        }
-    };
+        .await?;
 
-    // Inform the underlying network state machine that this dialing attempt
-    // has succeeded.
-    let mut guarded = inner.guarded.lock().await;
-    guarded.num_pending_out_attempts -= 1;
-    let (connection_id, connection_task) = guarded.network.pending_outcome_ok_single_stream(
-        start_connect.id,
-        service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
-    );
-    inner.wake_up_main_background_task.notify(1);
-
-    let (tx, rx) = mpsc::channel(16); // TODO: ?!
-    guarded.active_connections.insert(connection_id, tx);
-
-    // Now run the connection.
-    drop(guarded);
-    established_connection_task(
-        socket,
-        inner,
-        connection_id,
-        connection_task,
-        rx,
-        connection_to_coordinator,
-    )
-    .await;
+    Ok(socket)
 }
 
 /// Asynchronous task managing a specific connection.
 pub(super) async fn established_connection_task(
-    socket: impl AsyncRead + AsyncWrite + Unpin,
-    inner: Arc<Inner>,
+    socket: impl AsyncReadWrite + Unpin,
     connection_id: service::ConnectionId,
     mut connection_task: service::SingleStreamConnectionTask<Instant>,
-    coordinator_to_connection: mpsc::Receiver<service::CoordinatorToConnection<Instant>>,
-    mut connection_to_coordinator: mpsc::Sender<(
-        service::ConnectionId,
-        service::ConnectionToCoordinator,
-    )>,
+    coordinator_to_connection: channel::Receiver<service::CoordinatorToConnection<Instant>>,
+    connection_to_coordinator: channel::Sender<super::ToBackground>,
 ) {
     // The socket is wrapped around a `WithBuffers` object containing a read buffer and a write
     // buffer. These are the buffers whose pointer is passed to `read(2)` and `write(2)` when
@@ -154,8 +85,14 @@ pub(super) async fn established_connection_task(
 
     loop {
         // Inject in the connection task the messages coming from the coordinator, if any.
-        while let Some(Some(message)) = coordinator_to_connection.next().now_or_never() {
-            connection_task.inject_coordinator_message(message);
+        while let Some(message) = coordinator_to_connection.next().now_or_never() {
+            match message {
+                Some(message) => connection_task.inject_coordinator_message(message),
+                None => {
+                    // The coordinator is dead. Shut down the task.
+                    return;
+                }
+            }
         }
 
         let wake_up_after = if let Some(socket) = socket_container.as_mut() {
@@ -225,19 +162,7 @@ pub(super) async fn established_connection_task(
         // this function.
         let (mut task_update, message) = connection_task.pull_message_to_coordinator();
 
-        // If `task_update` is `None`, the connection task is going to die as soon as the
-        // message reaches the coordinator. Before returning, we need to do a bit of clean up
-        // by removing the task from the list of active connections.
-        // This is done before the message is sent to the coordinator, in order to be sure
-        // that the connection id is still attributed to the current task, and not to a new
-        // connection that the coordinator has assigned after receiving the message.
-        if task_update.is_none() {
-            let mut guarded = inner.guarded.lock().await;
-            let _was_in = guarded.active_connections.remove(&connection_id);
-            debug_assert!(_was_in.is_some());
-        }
-
-        if let Some(message) = message {
+        if message.is_some() || task_update.is_none() {
             // Sending this message might take a long time (in case the coordinator is busy),
             // but this is intentional and serves as a back-pressure mechanism.
             // However, it is important to continue processing the messages coming from the
@@ -247,22 +172,34 @@ pub(super) async fn established_connection_task(
             // an element. Due to the way channels work, once a channel is ready it will
             // always remain ready until we push an element. While waiting, we process
             // incoming messages.
-            loop {
-                futures_util::select! {
-                    _ = future::poll_fn(|cx| connection_to_coordinator.poll_ready(cx)).fuse() => break,
-                    message = coordinator_to_connection.next() => {
-                        if let Some(message) = message {
-                            if let Some(task_update) = &mut task_update {
-                                task_update.inject_coordinator_message(message);
+            let result = {
+                let mut send_future =
+                    connection_to_coordinator.send(super::ToBackground::FromConnectionTask {
+                        connection_id,
+                        opaque_message: message,
+                        connection_now_dead: task_update.is_none(),
+                    });
+
+                loop {
+                    match future::or(async { either::Left((&mut send_future).await) }, async {
+                        either::Right(coordinator_to_connection.next().await)
+                    })
+                    .await
+                    {
+                        either::Left(result) => break result,
+                        either::Right(message) => {
+                            if let Some(message) = message {
+                                if let Some(task_update) = &mut task_update {
+                                    task_update.inject_coordinator_message(message);
+                                }
+                            } else {
+                                return;
                             }
-                        } else {
-                            return;
                         }
                     }
                 }
-            }
-            let result = connection_to_coordinator.try_send((connection_id, message));
-            inner.wake_up_main_background_task.notify(1);
+            };
+
             if result.is_err() {
                 return;
             }
@@ -280,22 +217,21 @@ pub(super) async fn established_connection_task(
         let poll_after = if let Some(wake_up) = wake_up_after {
             let now = Instant::now();
             if wake_up > now {
-                let dur = wake_up - now;
-                future::Either::Left(futures_timer::Delay::new(dur))
+                futures_util::future::Either::Left(smol::Timer::at(wake_up))
             } else {
                 // "Wake up" immediately.
                 continue;
             }
         } else {
-            future::Either::Right(future::pending())
+            futures_util::future::Either::Right(future::pending())
         }
         .fuse();
 
         // Future that is woken up when new data is ready on the socket.
         let connection_ready = pin::pin!(if let Some(socket) = socket_container.as_mut() {
-            future::Either::Left(Pin::new(socket).process())
+            futures_util::future::Either::Left(Pin::new(socket).process())
         } else {
-            future::Either::Right(future::pending())
+            futures_util::future::Either::Right(future::pending())
         });
 
         // Future that is woken up when a new message is coming from the coordinator.
@@ -303,8 +239,8 @@ pub(super) async fn established_connection_task(
 
         // Wait until either some data is ready on the socket, or the connection state machine
         // has requested to be polled again, or a message is coming from the coordinator.
-        future::select(
-            future::select(connection_ready, message_from_coordinator),
+        futures_util::future::select(
+            futures_util::future::select(connection_ready, message_from_coordinator),
             poll_after,
         )
         .await;
@@ -315,7 +251,7 @@ pub(super) async fn established_connection_task(
 /// protocols aren't supported.
 fn multiaddr_to_socket(
     addr: &Multiaddr,
-) -> Result<impl Future<Output = Result<impl AsyncRead + AsyncWrite + Unpin, io::Error>>, ()> {
+) -> Result<impl Future<Output = Result<impl AsyncReadWrite, io::Error>>, ()> {
     let mut iter = addr.iter().fuse();
     let proto1 = iter.next().ok_or(())?;
     let proto2 = iter.next().ok_or(())?;
@@ -366,10 +302,8 @@ fn multiaddr_to_socket(
 
     Ok(async move {
         let tcp_socket = match addr {
-            either::Left(socket_addr) => async_std::net::TcpStream::connect(socket_addr).await,
-            either::Right((dns, port)) => {
-                async_std::net::TcpStream::connect((&dns[..], port)).await
-            }
+            either::Left(socket_addr) => smol::net::TcpStream::connect(socket_addr).await,
+            either::Right((dns, port)) => smol::net::TcpStream::connect((&dns[..], port)).await,
         };
 
         if let Ok(tcp_socket) = &tcp_socket {
@@ -391,9 +325,9 @@ fn multiaddr_to_socket(
                     url: "/",
                 })
                 .await
-                .map(future::Either::Right)
+                .map(futures_util::future::Either::Right)
             }
-            (Ok(tcp_socket), None) => Ok(future::Either::Left(tcp_socket)),
+            (Ok(tcp_socket), None) => Ok(futures_util::future::Either::Left(tcp_socket)),
             (Err(err), _) => Err(err),
         }
     })

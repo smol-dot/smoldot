@@ -1127,7 +1127,7 @@ where
 /// One of [`ChainNetwork::pending_outcome_ok_single_stream`],
 /// [`ChainNetwork::pending_outcome_ok_multi_stream`], or [`ChainNetwork::pending_outcome_err`]
 /// must later be called in order to inform of the outcome of the connection.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[must_use]
 pub struct StartConnect<TNow> {
     /// Identifier of this connection request. Must be passed back later.
