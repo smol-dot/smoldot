@@ -411,6 +411,11 @@ impl task::Wake for JsonRpcResponsesNonEmptyWaker {
     }
 }
 
+/// Since "spawning a task" isn't really something that a browser or Node environment do
+/// efficiently, we instead combine all the asynchronous tasks into one executor.
+// TODO: we use an Executor instead of LocalExecutor because it is planned to allow multithreading; if this plan is abandoned, switch to SendWrapper<LocalExecutor>
+static EXECUTOR: async_executor::Executor = async_executor::Executor::new();
+
 fn advance_execution() {
     let mut client_lock = CLIENT.lock().unwrap();
     let client_lock = client_lock.as_mut().unwrap();
@@ -429,7 +434,7 @@ fn advance_execution() {
 
         // Advance one background task.
         // If nothing is actually executed, break out of the loop as there is nothing to do.
-        if !client_lock.executor.try_tick() {
+        if !EXECUTOR.try_tick() {
             break;
         }
 
