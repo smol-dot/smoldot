@@ -36,6 +36,7 @@ export interface Config {
      */
     onWasmPanic: (message: string) => void,
     logCallback: (level: number, target: string, message: string) => void,
+    platformBindings: PlatformBindings,
     wasmModule: WebAssembly.Module,
     jsonRpcResponsesNonEmptyCallback: (chainId: number) => void,
     currentTaskCallback?: (taskName: string | null) => void,
@@ -79,7 +80,7 @@ export interface PlatformBindings {
     connect(config: ConnectionConfig): Connection;
 }
 
-export async function startInstance(config: Config, platformBindings: PlatformBindings): Promise<[SmoldotWasmInstance, Array<Uint8Array>]> {
+export async function startInstance(config: Config): Promise<[SmoldotWasmInstance, Array<Uint8Array>]> {
     let killAll: () => void;
 
     const bufferIndices = new Array;
@@ -89,7 +90,7 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
     // Used to bind with the smoldot-light bindings. See the `bindings-smoldot-light.js` file.
     const smoldotJsConfig: SmoldotBindingsConfig = {
         bufferIndices,
-        connect: platformBindings.connect,
+        connect: config.platformBindings.connect,
         onPanic: (message) => {
             killAll();
             config.onWasmPanic(message);
@@ -106,8 +107,8 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
     // Used to bind with the Wasi bindings. See the `bindings-wasi.js` file.
     const wasiConfig: WasiConfig = {
         envVars: [],
-        getRandomValues: platformBindings.getRandomValues,
-        performanceNow: platformBindings.performanceNow,
+        getRandomValues: config.platformBindings.getRandomValues,
+        performanceNow: config.platformBindings.performanceNow,
         onProcExit: (retCode) => {
             killAll();
             config.onWasmPanic(`proc_exit called: ${retCode}`)
@@ -150,12 +151,12 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
         if (cpuRateLimit < 0.0) cpuRateLimit = 0.0;
 
         const periodicallyYield = { value: false };
-        const [periodicallyYieldInit, unregisterCallback] = platformBindings.registerShouldPeriodicallyYield((newValue) => {
+        const [periodicallyYieldInit, unregisterCallback] = config.platformBindings.registerShouldPeriodicallyYield((newValue) => {
             periodicallyYield.value = newValue;
         });
         periodicallyYield.value = periodicallyYieldInit;
 
-        let now = platformBindings.performanceNow();
+        let now = config.platformBindings.performanceNow();
 
         while (true) {
             const whenReadyAgain = new Promise((resolve) => advanceExecutionPromise.value = resolve as () => void);
@@ -166,7 +167,7 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
                 break;
             }
 
-            const afterExec = platformBindings.performanceNow();
+            const afterExec = config.platformBindings.performanceNow();
             const elapsed = afterExec - now;
             now = afterExec;
 
@@ -190,7 +191,7 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
 
             await whenReadyAgain;
 
-            const afterWait = platformBindings.performanceNow();
+            const afterWait = config.platformBindings.performanceNow();
             missingSleep -= (afterWait - now);
             if (missingSleep < 0)
                 missingSleep = 0;

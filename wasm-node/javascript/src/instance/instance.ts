@@ -113,6 +113,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
                     chain.jsonRpcResponsesPromises = [];
                 }
             },
+            platformBindings,
             logCallback: (level, target, message) => {
                 configMessage.logCallback(level, target, message)
             },
@@ -131,7 +132,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
             maxLogLevel: configMessage.maxLogLevel,
         };
 
-        return await instance.startInstance(config, platformBindings)
+        return await instance.startInstance(config)
     })();
 
     state = {
