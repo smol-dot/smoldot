@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fix panic when the best block of a chain switches to being equal to the current finalized block. This can occasionally happen for parachains in case of a reorg on the relay chain. ([#497](https://github.com/smol-dot/smoldot/pull/497))
+- Fix panic when failing to find the desired runtime API in a runtime.
 
 ## 1.0.3 - 2023-04-27
 
