@@ -20,14 +20,12 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 
-use core::{num::NonZeroU32, pin::Pin, str, time::Duration};
-use futures_util::{stream, FutureExt as _, Stream as _, StreamExt as _};
+use core::{future, mem, num::NonZeroU32, pin::Pin, str, time::Duration};
+use futures_util::{stream, Stream as _, StreamExt as _};
 use smoldot_light::HandleRpcError;
 use std::{
-    future,
     sync::{Arc, Mutex},
     task,
-    time::Instant,
 };
 
 pub mod bindings;
@@ -49,30 +47,17 @@ fn start_timer_wrap(duration: Duration, closure: impl FnOnce() + 'static) {
 
 static CLIENT: Mutex<Option<init::Client<platform::Platform, ()>>> = Mutex::new(None);
 
-fn init(
-    max_log_level: u32,
-    enable_current_task: u32,
-    cpu_rate_limit: u32,
-    periodically_yield: u32,
-) {
-    let init_out = init::init(
-        max_log_level,
-        enable_current_task != 0,
-        cpu_rate_limit,
-        periodically_yield != 0,
-    );
+fn init(max_log_level: u32, enable_current_task: u32) {
+    let init_out = init::init(max_log_level, enable_current_task != 0);
 
     let mut client_lock = crate::CLIENT.lock().unwrap();
     assert!(client_lock.is_none());
     *client_lock = Some(init_out);
 }
 
-fn set_periodically_yield(periodically_yield: u32) {
-    CLIENT.lock().unwrap().as_mut().unwrap().periodically_yield = periodically_yield != 0;
-}
-
 fn start_shutdown() {
     // TODO: do this in a clean way
+    *EXECUTOR_EXECUTE.lock().unwrap() = ExecutionState::ShuttingDown;
     std::process::exit(0)
 }
 
@@ -416,57 +401,73 @@ impl task::Wake for JsonRpcResponsesNonEmptyWaker {
 // TODO: we use an Executor instead of LocalExecutor because it is planned to allow multithreading; if this plan is abandoned, switch to SendWrapper<LocalExecutor>
 static EXECUTOR: async_executor::Executor = async_executor::Executor::new();
 
-fn advance_execution() {
-    let mut client_lock = CLIENT.lock().unwrap();
-    let client_lock = client_lock.as_mut().unwrap();
+/// While [`EXECUTOR`] is global to all threads, [`EXECUTOR_EXECUTE`] is thread specific. If
+/// smoldot eventually gets support for multiple threads, this value would be store in a
+/// thread-local storage. Since it only has one thread, it is instead a global variable.
+static EXECUTOR_EXECUTE: Mutex<ExecutionState> = Mutex::new(ExecutionState::NotStarted);
+enum ExecutionState {
+    /// Execution has not started. Everything remains to be initialized. Default state.
+    NotStarted,
+    /// Execution has been started in the past and is now waiting to be woken up.
+    NotReady,
+    /// Execution has been woken up. Ready to continue running.
+    Ready(async_task::Runnable),
+    /// The client is shutting down. Execution is either waiting to be woken up, after which it
+    /// will self-destroy, or has already self-destroyed.
+    ShuttingDown,
+}
 
-    loop {
-        if future::poll_fn(|cx| {
-            future::Future::poll(Pin::new(&mut client_lock.prevent_poll_until), cx)
-        })
-        .now_or_never()
-        .is_none()
-        {
-            break;
+fn advance_execution() -> u32 {
+    let runnable = {
+        let mut executor_execute_guard = EXECUTOR_EXECUTE.lock().unwrap();
+        match *executor_execute_guard {
+            ExecutionState::NotStarted => {
+                // Spawn a task that repeatedly executes one task then yields.
+                // This makes sure that we return to the JS engine after every task.
+                let (runnable, task) = {
+                    let run = async move {
+                        loop {
+                            EXECUTOR.tick().await;
+                            let mut has_yielded = false;
+                            future::poll_fn(|cx| {
+                                if has_yielded {
+                                    task::Poll::Ready(())
+                                } else {
+                                    cx.waker().wake_by_ref();
+                                    has_yielded = true;
+                                    task::Poll::Pending
+                                }
+                            })
+                            .await;
+                        }
+                    };
+
+                    async_task::spawn(run, |runnable| {
+                        let mut lock = EXECUTOR_EXECUTE.lock().unwrap();
+                        if !matches!(*lock, ExecutionState::NotReady) {
+                            return;
+                        }
+                        *lock = ExecutionState::Ready(runnable);
+                        unsafe {
+                            bindings::advance_execution_ready();
+                        }
+                    })
+                };
+
+                task.detach();
+                *executor_execute_guard = ExecutionState::NotReady;
+                runnable
+            }
+            ExecutionState::NotReady => return 1,
+            ExecutionState::ShuttingDown => return 0,
+            ExecutionState::Ready(_) => {
+                let ExecutionState::Ready(runnable) = mem::replace(&mut *executor_execute_guard, ExecutionState::NotReady)
+                    else { unreachable!() };
+                runnable
+            }
         }
+    };
 
-        let before_polling = Instant::now();
-
-        // Advance one background task.
-        // If nothing is actually executed, break out of the loop as there is nothing to do.
-        if !EXECUTOR.try_tick() {
-            break;
-        }
-
-        // Time it took to execute `try_tick`.
-        let after_polling = Instant::now();
-        let poll_duration = after_polling - before_polling;
-
-        // In order to enforce the rate limiting, we prevent `try_tick` from executing
-        // for a certain amount of time.
-        // The base equation here is: `(after_tick_sleep + poll_duration) * rate_limit == poll_duration * u32::max_value()`.
-        let after_tick_sleep =
-            poll_duration.as_secs_f64() * client_lock.max_divided_by_rate_limit_minus_one;
-        debug_assert!(after_tick_sleep >= 0.0 && !after_tick_sleep.is_nan());
-        client_lock.sleep_deprevation_sec += after_tick_sleep;
-
-        if client_lock.sleep_deprevation_sec > 0.005 {
-            client_lock.prevent_poll_until = crate::timers::Delay::new_at(
-                after_polling
-                    + Duration::try_from_secs_f64(client_lock.sleep_deprevation_sec)
-                        .unwrap_or(Duration::MAX),
-            );
-            client_lock.sleep_deprevation_sec = 0.0;
-        }
-
-        // If the task woke itself up (which means that it has more to execute), we continue
-        // looping provided that `periodically_yield` is `false`.
-        if !client_lock.periodically_yield {
-            continue;
-        }
-
-        // If the task woke itself up and `periodically_yield` is `true`, we use
-        // `setTimeout(..., 0)` to actually yield.
-        start_timer_wrap(Duration::new(0, 0), advance_execution);
-    }
+    runnable.run();
+    1
 }

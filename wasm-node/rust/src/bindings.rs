@@ -128,6 +128,12 @@ extern "C" {
     /// virtual machine at offset `ptr` and with length `len`.
     pub fn log(level: u32, target_ptr: u32, target_len: u32, message_ptr: u32, message_len: u32);
 
+    /// Called when [`advance_execution`] should be executed again.
+    ///
+    /// This function can be called from within [`advance_execution`], in which case
+    /// [`advance_execution`] should be called again immediately after it returns.
+    pub fn advance_execution_ready();
+
     /// After at least `milliseconds` milliseconds have passed, must call [`timer_finished`] with
     /// the `id` passed as parameter.
     ///
@@ -292,44 +298,22 @@ extern "C" {
 /// If `enbable_current_task` is non-zero, smoldot will call the [`current_task_entered`] and
 /// [`current_task_exit`] functions to report when it enters and leaves tasks. This slightly
 /// slows everything down, but is useful for debugging purposes.
-///
-/// `cpu_rate_limit` can be used to limit the amount of CPU that smoldot will use on average.
-/// `u32::max_value()` represents "one CPU". For example passing `rate_limit / 2` represents
-/// "`50%` of one CPU".
-///
-/// `periodically_yield` represents the initial value of the setting described in the
-/// documentation of [`set_periodically_yield`].
 #[no_mangle]
-pub extern "C" fn init(
-    max_log_level: u32,
-    enable_current_task: u32,
-    cpu_rate_limit: u32,
-    periodically_yield: u32,
-) {
-    crate::init(
-        max_log_level,
-        enable_current_task,
-        cpu_rate_limit,
-        periodically_yield,
-    );
-    super::advance_execution();
+pub extern "C" fn init(max_log_level: u32, enable_current_task: u32) {
+    crate::init(max_log_level, enable_current_task);
 }
 
-/// Sets whether the smoldot client must periodically yield back control by setting up a timer
-/// using [`start_timer`] with a delay of 0.
+/// Advances the execution of the client, performing CPU-heavy tasks.
 ///
-/// A value of 0 means "no", and any other value means "yes".
+/// This function **must** be called regularly, otherwise nothing will happen.
 ///
-/// This setting is important when smoldot is used from within a web page. When the web page is in
-/// the foreground, it should be set to `true` so that the web browser can render the page often
-/// enough to not cause any discomfort. When the web page is in the background, it should be set
-/// to `false` because `setTimeout` gets a minimum delay of 1 second making [`start_timer`]
-/// unreliable.
-/// See also <https://developer.mozilla.org/en-US/docs/Web/API/setTimeout#timeouts_in_inactive_tabs>.
+/// After this function is called or during a call to this function, [`advance_execution_ready`]
+/// might be called, indicating that [`advance_execution`] should be called again.
+///
+/// Returns `0` if the client is shutting down, otherwise returns a non-zero value.
 #[no_mangle]
-pub extern "C" fn set_periodically_yield(periodically_yield: u32) {
-    crate::set_periodically_yield(periodically_yield);
-    super::advance_execution();
+pub extern "C" fn advance_execution() -> u32 {
+    super::advance_execution()
 }
 
 /// Instructs the client to start shutting down.
@@ -342,7 +326,6 @@ pub extern "C" fn set_periodically_yield(periodically_yield: u32) {
 #[no_mangle]
 pub extern "C" fn start_shutdown() {
     crate::start_shutdown();
-    super::advance_execution();
 }
 
 /// Adds a chain to the client. The client will try to stay connected and synchronize this chain.
@@ -377,14 +360,12 @@ pub extern "C" fn add_chain(
     json_rpc_running: u32,
     potential_relay_chains_buffer_index: u32,
 ) -> u32 {
-    let success_code = super::add_chain(
+    super::add_chain(
         get_buffer(chain_spec_buffer_index),
         get_buffer(database_content_buffer_index),
         json_rpc_running,
         get_buffer(potential_relay_chains_buffer_index),
-    );
-    super::advance_execution();
-    success_code
+    )
 }
 
 /// Removes a chain previously added using [`add_chain`]. Instantly unsubscribes all the JSON-RPC
@@ -395,7 +376,6 @@ pub extern "C" fn add_chain(
 #[no_mangle]
 pub extern "C" fn remove_chain(chain_id: u32) {
     super::remove_chain(chain_id);
-    super::advance_execution();
 }
 
 /// Returns `1` if creating this chain was successful. Otherwise, returns `0`.
@@ -453,9 +433,7 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 ///
 #[no_mangle]
 pub extern "C" fn json_rpc_send(text_buffer_index: u32, chain_id: u32) -> u32 {
-    let success_code = super::json_rpc_send(get_buffer(text_buffer_index), chain_id);
-    super::advance_execution();
-    success_code
+    super::json_rpc_send(get_buffer(text_buffer_index), chain_id)
 }
 
 /// Obtains information about the first response in the queue of JSON-RPC responses.
@@ -499,14 +477,12 @@ pub struct JsonRpcResponseInfo {
 #[no_mangle]
 pub extern "C" fn json_rpc_responses_pop(chain_id: u32) {
     super::json_rpc_responses_pop(chain_id);
-    super::advance_execution();
 }
 
 /// Must be called in response to [`start_timer`] after the given duration has passed.
 #[no_mangle]
 pub extern "C" fn timer_finished(timer_id: u32) {
     crate::timers::timer_finished(timer_id);
-    super::advance_execution();
 }
 
 /// Called by the JavaScript code if the connection switches to the `Open` state. The connection
@@ -537,7 +513,6 @@ pub extern "C" fn connection_open_single_stream(
         initial_writable_bytes,
         write_closable,
     );
-    super::advance_execution();
 }
 
 /// Called by the JavaScript code if the connection switches to the `Open` state. The connection
@@ -561,7 +536,6 @@ pub extern "C" fn connection_open_multi_stream(connection_id: u32, handshake_ty_
         connection_id,
         get_buffer(handshake_ty_buffer_index),
     );
-    super::advance_execution();
 }
 
 /// Notify of a message being received on the stream. The connection associated with that stream
@@ -580,7 +554,6 @@ pub extern "C" fn connection_open_multi_stream(connection_id: u32, handshake_ty_
 #[no_mangle]
 pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, buffer_index: u32) {
     crate::platform::stream_message(connection_id, stream_id, get_buffer(buffer_index));
-    super::advance_execution();
 }
 
 /// Notify that extra bytes can be written onto the stream. The connection associated with that
@@ -601,7 +574,6 @@ pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, buffer_inde
 #[no_mangle]
 pub extern "C" fn stream_writable_bytes(connection_id: u32, stream_id: u32, num_bytes: u32) {
     crate::platform::stream_writable_bytes(connection_id, stream_id, num_bytes);
-    super::advance_execution();
 }
 
 /// Called by the JavaScript code when the given multi-stream connection has a new substream.
@@ -627,7 +599,6 @@ pub extern "C" fn connection_stream_opened(
         outbound,
         initial_writable_bytes,
     );
-    super::advance_execution();
 }
 
 /// Can be called at any point by the JavaScript code if the connection switches to the `Reset`
@@ -645,7 +616,6 @@ pub extern "C" fn connection_stream_opened(
 #[no_mangle]
 pub extern "C" fn connection_reset(connection_id: u32, buffer_index: u32) {
     crate::platform::connection_reset(connection_id, get_buffer(buffer_index));
-    super::advance_execution();
 }
 
 /// Can be called at any point by the JavaScript code if the stream switches to the `Reset`
@@ -662,7 +632,6 @@ pub extern "C" fn connection_reset(connection_id: u32, buffer_index: u32) {
 #[no_mangle]
 pub extern "C" fn stream_reset(connection_id: u32, stream_id: u32) {
     crate::platform::stream_reset(connection_id, stream_id);
-    super::advance_execution();
 }
 
 pub(crate) fn get_buffer(buffer_index: u32) -> Vec<u8> {

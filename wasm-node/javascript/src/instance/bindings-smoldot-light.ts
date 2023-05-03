@@ -50,6 +50,7 @@ export interface Config {
 
     logCallback: (level: number, target: string, message: string) => void,
     jsonRpcResponsesNonEmptyCallback: (chainId: number) => void,
+    advanceExecutionReadyCallback: () => void,
     currentTaskCallback?: (taskName: string | null) => void,
 }
 
@@ -273,6 +274,10 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
 
             const buf = config.bufferIndices[bufferIndex]!;
             new Uint8Array(instance.exports.memory.buffer).set(buf, targetPtr);
+        },
+
+        advance_execution_ready: () => {
+            config.advanceExecutionReadyCallback();
         },
 
         // Used by the Rust side to notify that a JSON-RPC response or subscription notification
