@@ -403,10 +403,6 @@ export function start(options: ClientOptions, wasmModule: Promise<WebAssembly.Mo
         // 0 = Logging disabled, 1 = Error, 2 = Warn, 3 = Info, 4 = Debug, 5 = Trace
         maxLogLevel: options.maxLogLevel || 3,
         logCallback,
-        // `enableCurrentTask` adds a small performance hit, but adds some additional information to
-        // crash reports. Whether this should be enabled is very opiniated and not that important. At
-        // the moment, we enable it all the time, except if the user has logging disabled altogether.
-        enableCurrentTask: options.maxLogLevel ? options.maxLogLevel >= 1 : true,
         cpuRateLimit: options.cpuRateLimit || 1.0,
     }, platformBindings);
 

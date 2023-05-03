@@ -39,15 +39,11 @@ pub static TOTAL_BYTES_RECEIVED: AtomicU64 = AtomicU64::new(0);
 pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
-pub(crate) struct Platform {
-    enable_current_task: bool,
-}
+pub(crate) struct Platform {}
 
 impl Platform {
-    pub fn new(enable_current_task: bool) -> Self {
-        Self {
-            enable_current_task,
-        }
+    pub fn new() -> Self {
+        Self {}
     }
 }
 
@@ -110,7 +106,6 @@ impl smoldot_light::platform::PlatformRef for Platform {
         #[pin_project::pin_project]
         struct FutureAdapter<F> {
             name: String,
-            enable_current_task: bool,
             #[pin]
             future: F,
         }
@@ -119,19 +114,15 @@ impl smoldot_light::platform::PlatformRef for Platform {
             type Output = F::Output;
             fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
                 let this = self.project();
-                if *this.enable_current_task {
-                    unsafe {
-                        bindings::current_task_entered(
-                            u32::try_from(this.name.as_bytes().as_ptr() as usize).unwrap(),
-                            u32::try_from(this.name.as_bytes().len()).unwrap(),
-                        )
-                    }
+                unsafe {
+                    bindings::current_task_entered(
+                        u32::try_from(this.name.as_bytes().as_ptr() as usize).unwrap(),
+                        u32::try_from(this.name.as_bytes().len()).unwrap(),
+                    )
                 }
                 let out = this.future.poll(cx);
-                if *this.enable_current_task {
-                    unsafe {
-                        bindings::current_task_exit();
-                    }
+                unsafe {
+                    bindings::current_task_exit();
                 }
                 out
             }
@@ -139,7 +130,6 @@ impl smoldot_light::platform::PlatformRef for Platform {
 
         let task = FutureAdapter {
             name: task_name.into_owned(),
-            enable_current_task: self.enable_current_task,
             future: task,
         };
 
