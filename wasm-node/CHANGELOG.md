@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Support v2 of the `Metadata` runtime API. ([#514](https://github.com/smol-dot/smoldot/pull/514))
+
 ### Changed
 
 - The size of the read buffer of TCP connections on Deno has been increased from 1kiB to 32kiB. This should improve the performance by reducing the number of function calls. ([#501](https://github.com/smol-dot/smoldot/pull/501))
