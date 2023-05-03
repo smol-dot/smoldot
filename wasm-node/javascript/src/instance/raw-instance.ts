@@ -40,7 +40,6 @@ export interface Config {
     jsonRpcResponsesNonEmptyCallback: (chainId: number) => void,
     currentTaskCallback?: (taskName: string | null) => void,
     maxLogLevel: number;
-    enableCurrentTask: boolean;
     cpuRateLimit: number,
 }
 
@@ -137,7 +136,7 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
 
     // Smoldot requires an initial call to the `init` function in order to do its internal
     // configuration.
-    instance.exports.init(config.maxLogLevel, config.enableCurrentTask ? 1 : 0);
+    instance.exports.init(config.maxLogLevel);
 
     (async () => {
         // In order to avoid calling `setTimeout` too often, we accumulate sleep up until

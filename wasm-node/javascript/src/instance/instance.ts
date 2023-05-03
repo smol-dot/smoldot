@@ -58,7 +58,6 @@ export interface Config {
     wasmModule: Promise<WebAssembly.Module>,
     logCallback: (level: number, target: string, message: string) => void
     maxLogLevel: number;
-    enableCurrentTask: boolean;
     cpuRateLimit: number,
 }
 
@@ -129,7 +128,6 @@ export function start(configMessage: Config, platformBindings: instance.Platform
                 currentTask.name = taskName
             },
             cpuRateLimit: configMessage.cpuRateLimit,
-            enableCurrentTask: configMessage.enableCurrentTask,
             maxLogLevel: configMessage.maxLogLevel,
         };
 
