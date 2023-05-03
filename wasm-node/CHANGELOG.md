@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.4 - 2023-05-03
+
 ### Added
 
 - Support v2 of the `Metadata` runtime API. ([#514](https://github.com/smol-dot/smoldot/pull/514))
