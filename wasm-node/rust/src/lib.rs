@@ -20,7 +20,7 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 
-use core::{future, mem, num::NonZeroU32, pin::Pin, str, time::Duration};
+use core::{future, mem, num::NonZeroU32, pin::Pin, str};
 use futures_util::{stream, Stream as _, StreamExt as _};
 use smoldot_light::HandleRpcError;
 use std::{
@@ -34,16 +34,6 @@ mod alloc;
 mod init;
 mod platform;
 mod timers;
-
-/// Uses the environment to invoke `closure` after at least `duration` has elapsed.
-fn start_timer_wrap(duration: Duration, closure: impl FnOnce() + 'static) {
-    let callback: Box<Box<dyn FnOnce() + 'static>> = Box::new(Box::new(closure));
-    let timer_id = u32::try_from(Box::into_raw(callback) as usize).unwrap();
-    // Note that ideally `duration` should be rounded up in order to make sure that it is not
-    // truncated, but the precision of an `f64` is so high and the precision of the operating
-    // system generally so low that this is not worth dealing with.
-    unsafe { bindings::start_timer(timer_id, duration.as_secs_f64() * 1000.0) }
-}
 
 static CLIENT: Mutex<Option<init::Client<platform::Platform, ()>>> = Mutex::new(None);
 

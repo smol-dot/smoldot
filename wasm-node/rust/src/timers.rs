@@ -22,6 +22,8 @@
 //! is only used in order to wake up when the earliest timer finishes, then restarted for the next
 //! timer.
 
+use crate::bindings;
+
 use core::{
     cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd},
     future,
@@ -31,13 +33,8 @@ use core::{
 };
 use std::{collections::BinaryHeap, sync::Mutex, time::Instant};
 
-pub(crate) fn timer_finished(timer_id: u32) {
-    let callback = {
-        let ptr = timer_id as *mut Box<dyn FnOnce() + 'static>;
-        unsafe { Box::from_raw(ptr) }
-    };
-
-    callback();
+pub(crate) fn timer_finished() {
+    process_timers();
 }
 
 /// `Future` that automatically wakes up after a certain amount of time has elapsed.
@@ -81,9 +78,9 @@ impl Delay {
         // If the timer that has just been inserted is the one that ends the soonest, then
         // actually start the callback that will process timers.
         // Ideally we would instead cancel or update the deadline of the previous call to
-        // `start_timer_wrap`, but this isn't possible.
+        // `start_timer`, but this isn't possible.
         if lock.timers_queue.peek().unwrap().timer_id == timer_id {
-            super::start_timer_wrap(when - now, process_timers);
+            start_timer(when - now);
         }
 
         Delay {
@@ -245,10 +242,18 @@ fn process_timers() {
     };
 
     if let Some(next_wakeup) = next_wakeup {
-        super::start_timer_wrap(lock.time_zero + next_wakeup - now, process_timers);
+        start_timer(lock.time_zero + next_wakeup - now);
     } else {
         // Clean up memory a bit. Hopefully this doesn't impact performances too much.
         lock.timers_queue.shrink_to_fit();
         lock.timers.shrink_to_fit();
     }
+}
+
+/// Instructs the environment to call [`process_timers`] after the given duration.
+fn start_timer(duration: Duration) {
+    // Note that ideally `duration` should be rounded up in order to make sure that it is not
+    // truncated, but the precision of an `f64` is so high and the precision of the operating
+    // system generally so low that this is not worth dealing with.
+    unsafe { bindings::start_timer(duration.as_secs_f64() * 1000.0) }
 }
