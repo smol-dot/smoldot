@@ -412,7 +412,7 @@ enum ExecutionState {
     NotReady,
     /// Execution has been woken up. Ready to continue running.
     Ready(async_task::Runnable),
-    /// The client is shutting down. Eexcution is either waiting to be woken up, after which it
+    /// The client is shutting down. Execution is either waiting to be woken up, after which it
     /// will self-destroy, or has already self-destroyed.
     ShuttingDown,
 }
