@@ -17,6 +17,7 @@
 
 import { Client, ClientOptions, start as innerStart } from './client.js'
 import { Connection, ConnectionError, ConnectionConfig } from './instance/instance.js';
+import { default as wasmBase64 } from './instance/autogen/wasm.js';
 
 export {
     AddChainError,
@@ -42,34 +43,13 @@ export {
 export function start(options?: ClientOptions): Client {
     options = options || {};
 
-    return innerStart(options || {}, {
-        trustedBase64DecodeAndZlibInflate: async (input) => {
-            const buffer = trustedBase64Decode(input);
+    // The actual Wasm bytecode is base64-decoded then deflate-decoded from a constant found in a
+    // different file.
+    // This is suboptimal compared to using `instantiateStreaming`, but it is the most
+    // cross-platform cross-bundler approach.
+    const wasmModule = zlibInflate(trustedBase64Decode(wasmBase64)).then(((bytecode) => WebAssembly.compile(bytecode)));
 
-            // This code has been copy-pasted from the official streams draft specification.
-            // At the moment, it is found here: https://wicg.github.io/compression/#example-deflate-compress
-            const ds = new DecompressionStream('deflate');
-            const writer = ds.writable.getWriter();
-            writer.write(buffer);
-            writer.close();
-            const output = [];
-            const reader = ds.readable.getReader();
-            let totalSize = 0;
-            while (true) {
-                const { value, done } = await reader.read();
-                if (done)
-                    break;
-                output.push(value);
-                totalSize += value.byteLength;
-            }
-            const concatenated = new Uint8Array(totalSize);
-            let offset = 0;
-            for (const array of output) {
-                concatenated.set(array, offset);
-                offset += array.byteLength;
-            }
-            return concatenated;
-        },
+    return innerStart(options || {}, wasmModule, {
         registerShouldPeriodicallyYield: (_callback) => {
             return [true, () => { }]
         },
@@ -86,6 +66,35 @@ export function start(options?: ClientOptions): Client {
             return connect(config, options?.forbidTcp || false, options?.forbidWs || false, options?.forbidNonLocalWs || false, options?.forbidWss || false)
         }
     })
+}
+
+/**
+ * Applies the zlib inflate algorithm on the buffer.
+ */
+async function zlibInflate(buffer: Uint8Array): Promise<Uint8Array> {
+    // This code has been copy-pasted from the official streams draft specification.
+    // At the moment, it is found here: https://wicg.github.io/compression/#example-deflate-compress
+    const ds = new DecompressionStream('deflate');
+    const writer = ds.writable.getWriter();
+    writer.write(buffer);
+    writer.close();
+    const output = [];
+    const reader = ds.readable.getReader();
+    let totalSize = 0;
+    while (true) {
+        const { value, done } = await reader.read();
+        if (done)
+            break;
+        output.push(value);
+        totalSize += value.byteLength;
+    }
+    const concatenated = new Uint8Array(totalSize);
+    let offset = 0;
+    for (const array of output) {
+        concatenated.set(array, offset);
+        offset += array.byteLength;
+    }
+    return concatenated;
 }
 
 /**

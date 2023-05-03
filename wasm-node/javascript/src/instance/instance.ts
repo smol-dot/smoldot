@@ -17,11 +17,10 @@
 
 import * as buffer from './buffer.js';
 import * as instance from './raw-instance.js';
-import { default as wasmBase64 } from './autogen/wasm.js';
 import { SmoldotWasmInstance } from './bindings.js';
 import { AlreadyDestroyedError } from '../client.js';
 
-export { ConnectionError, ConnectionConfig, Connection } from './raw-instance.js';
+export { PlatformBindings, ConnectionError, ConnectionConfig, Connection } from './raw-instance.js';
 
 /**
  * Thrown in case the underlying client encounters an unexpected crash.
@@ -56,6 +55,7 @@ export class QueueFullError extends Error {
  * Contains the configuration of the instance.
  */
 export interface Config {
+    wasmModule: Promise<WebAssembly.Module>,
     logCallback: (level: number, target: string, message: string) => void
     maxLogLevel: number;
     enableCurrentTask: boolean;
@@ -70,22 +70,7 @@ export interface Instance {
     startShutdown: () => void
 }
 
-export interface PlatformBindings extends instance.PlatformBindings {
-    /**
-     * Base64-decode the given buffer then decompress its content using the inflate algorithm
-     * with zlib header.
-     *
-     * The input is considered trusted. In other words, the implementation doesn't have to
-     * resist malicious input.
-     *
-     * This function is asynchronous because implementations might use the compression streams
-     * Web API, which for whatever reason is asynchronous.
-     */
-    // TODO: shouldn't be in raw-instance
-    trustedBase64DecodeAndZlibInflate: (input: string) => Promise<Uint8Array>,
-}
-
-export function start(configMessage: Config, platformBindings: PlatformBindings): Instance {
+export function start(configMessage: Config, platformBindings: instance.PlatformBindings): Instance {
 
     // This variable represents the state of the instance, and serves two different purposes:
     //
@@ -106,13 +91,7 @@ export function start(configMessage: Config, platformBindings: PlatformBindings)
     }> = new Map();
 
     const initPromise = (async (): Promise<[SmoldotWasmInstance, Array<Uint8Array>]> => {
-        // The actual Wasm bytecode is base64-decoded then deflate-decoded from a constant found in a
-        // different file.
-        // This is suboptimal compared to using `instantiateStreaming`, but it is the most
-        // cross-platform cross-bundler approach.
-        const wasmBytecode = await platformBindings.trustedBase64DecodeAndZlibInflate(wasmBase64)
-
-        const module = await WebAssembly.compile(wasmBytecode);
+        const module = await configMessage.wasmModule;
 
         // Start initialization of the Wasm VM.
         const config: instance.Config = {
