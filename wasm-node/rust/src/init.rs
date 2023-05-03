@@ -21,10 +21,7 @@ use core::time::Duration;
 use futures_util::stream;
 use smoldot::informant::BytesDisplay;
 use smoldot_light::platform::PlatformRef;
-use std::{
-    panic,
-    sync::{atomic::Ordering, Arc},
-};
+use std::{panic, sync::atomic::Ordering};
 
 pub(crate) struct Client<TPlat: smoldot_light::platform::PlatformRef, TChain> {
     pub(crate) smoldot: smoldot_light::Client<TPlat, TChain>,
@@ -33,9 +30,6 @@ pub(crate) struct Client<TPlat: smoldot_light::platform::PlatformRef, TChain> {
     pub(crate) chains: slab::Slab<Chain>,
 
     pub(crate) periodically_yield: bool,
-
-    /// Executor where background tasks are spawned.
-    pub(crate) executor: Arc<async_executor::Executor<'static>>,
 
     pub(crate) max_divided_by_rate_limit_minus_one: f64,
 
@@ -104,12 +98,7 @@ pub(crate) fn init<TChain>(
     assert_ne!(rand::random::<u64>(), 0);
     assert_ne!(rand::random::<u64>(), rand::random::<u64>());
 
-    // Since "spawning a task" isn't really something that a browser or Node environment do
-    // efficiently, we instead combine all the asynchronous tasks into one executor.
-    // TODO: we use an Executor instead of LocalExecutor because it is planned to allow multithreading; if this plan is abandoned, switch to SendWrapper<LocalExecutor>
-    let executor = Arc::new(async_executor::Executor::new());
-
-    let platform = platform::Platform::new(executor.clone(), enable_current_task);
+    let platform = platform::Platform::new(enable_current_task);
 
     // Spawn a constantly-running task that periodically prints the total memory usage of
     // the node.
@@ -167,7 +156,6 @@ pub(crate) fn init<TChain>(
         smoldot: smoldot_light::Client::new(platform),
         chains: slab::Slab::with_capacity(8),
         periodically_yield,
-        executor,
         max_divided_by_rate_limit_minus_one,
         sleep_deprevation_sec: 0.0,
         prevent_poll_until: crate::timers::Delay::new(Duration::new(0, 0)),

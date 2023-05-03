@@ -26,7 +26,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Mutex,
     },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -40,17 +40,12 @@ pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 pub(crate) struct Platform {
-    executor: Arc<async_executor::Executor<'static>>,
     enable_current_task: bool,
 }
 
 impl Platform {
-    pub fn new(
-        executor: Arc<async_executor::Executor<'static>>,
-        enable_current_task: bool,
-    ) -> Self {
+    pub fn new(enable_current_task: bool) -> Self {
         Self {
-            executor,
             enable_current_task,
         }
     }
@@ -148,7 +143,7 @@ impl smoldot_light::platform::PlatformRef for Platform {
             future: task,
         };
 
-        self.executor.spawn(task).detach();
+        super::EXECUTOR.spawn(task).detach();
     }
 
     fn client_name(&self) -> Cow<str> {
