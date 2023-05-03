@@ -15,9 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import * as buffer from './buffer.js';
 import * as instance from './raw-instance.js';
-import { SmoldotWasmInstance } from './bindings.js';
 import { AlreadyDestroyedError } from '../client.js';
 
 export { PlatformBindings, ConnectionError, ConnectionConfig, Connection } from './raw-instance.js';
@@ -76,7 +74,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
     // - At initialization, it is a Promise containing the Wasm VM is still initializing.
     // - After the Wasm VM has finished initialization, contains the `WebAssembly.Instance` object.
     //
-    let state: { initialized: false, promise: Promise<[SmoldotWasmInstance, Array<Uint8Array>]> } | { initialized: true, instance: SmoldotWasmInstance, bufferIndices: Array<Uint8Array> };
+    let state: { initialized: false, promise: Promise<instance.Instance> } | { initialized: true, instance: instance.Instance };
 
     const crashError: { error?: CrashError } = {};
 
@@ -89,7 +87,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
         jsonRpcResponsesPromises: JsonRpcResponsesPromise[],
     }> = new Map();
 
-    const initPromise = (async (): Promise<[SmoldotWasmInstance, Array<Uint8Array>]> => {
+    const initPromise = (async (): Promise<instance.Instance> => {
         const module = await configMessage.wasmModule;
 
         // Start initialization of the Wasm VM.
@@ -136,23 +134,23 @@ export function start(configMessage: Config, platformBindings: instance.Platform
     })();
 
     state = {
-        initialized: false, promise: initPromise.then(([instance, bufferIndices]) => {
-            state = { initialized: true, instance, bufferIndices };
-            return [instance, bufferIndices];
+        initialized: false, promise: initPromise.then((instance) => {
+            state = { initialized: true, instance };
+            return instance;
         })
     };
 
-    async function queueOperation<T>(operation: (instance: SmoldotWasmInstance, bufferIndices: Array<Uint8Array>) => T): Promise<T> {
+    async function queueOperation<T>(operation: (instance: instance.Instance) => T): Promise<T> {
         // What to do depends on the type of `state`.
         // See the documentation of the `state` variable for information.
         if (!state.initialized) {
             // A message has been received while the Wasm VM is still initializing. Queue it for when
             // initialization is over.
-            return state.promise.then(([instance, bufferIndices]) => operation(instance, bufferIndices))
+            return state.promise.then((instance) => operation(instance))
 
         } else {
             // Everything is already initialized. Process the message synchronously.
-            return operation(state.instance, state.bufferIndices)
+            return operation(state.instance)
         }
     }
 
@@ -168,8 +166,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
 
             let retVal;
             try {
-                state.bufferIndices[0] = new TextEncoder().encode(request)
-                retVal = state.instance.exports.json_rpc_send(0, chainId) >>> 0;
+                retVal = state.instance.request(request, chainId);
             } catch (_error) {
                 console.assert(crashError.error);
                 throw crashError.error
@@ -196,18 +193,9 @@ export function start(configMessage: Config, platformBindings: instance.Platform
 
                 // Try to pop a message from the queue.
                 try {
-                    const mem = new Uint8Array(state.instance.exports.memory.buffer);
-                    const responseInfo = state.instance.exports.json_rpc_responses_peek(chainId) >>> 0;
-                    const ptr = buffer.readUInt32LE(mem, responseInfo) >>> 0;
-                    const len = buffer.readUInt32LE(mem, responseInfo + 4) >>> 0;
-
-                    // `len === 0` means "queue is empty" according to the API.
-                    // In that situation, queue the resolve/reject.
-                    if (len !== 0) {
-                        const message = buffer.utf8BytesToString(mem, ptr, len);
-                        state.instance.exports.json_rpc_responses_pop(chainId);
+                    const message = state.instance.peekJsonRpcResponse(chainId);
+                    if (message)
                         return message;
-                    }
                 } catch (_error) {
                     console.assert(crashError.error);
                     throw crashError.error
@@ -221,41 +209,21 @@ export function start(configMessage: Config, platformBindings: instance.Platform
         },
 
         addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean): Promise<{ success: true, chainId: number } | { success: false, error: string }> => {
-            return queueOperation((instance, bufferIndices) => {
+            return queueOperation((instance) => {
                 if (crashError.error)
                     throw crashError.error;
 
                 try {
-                    // `add_chain` unconditionally allocates a chain id. If an error occurs, however, this chain
-                    // id will refer to an *erroneous* chain. `chain_is_ok` is used below to determine whether it
-                    // has succeeeded or not.
-                    // Note that `add_chain` properly de-allocates buffers even if it failed.
-                    bufferIndices[0] = new TextEncoder().encode(chainSpec)
-                    bufferIndices[1] = new TextEncoder().encode(databaseContent)
-                    const potentialRelayChainsEncoded = new Uint8Array(potentialRelayChains.length * 4)
-                    for (let idx = 0; idx < potentialRelayChains.length; ++idx) {
-                        buffer.writeUInt32LE(potentialRelayChainsEncoded, idx * 4, potentialRelayChains[idx]!);
-                    }
-                    bufferIndices[2] = potentialRelayChainsEncoded
-                    const chainId = instance.exports.add_chain(0, 1, disableJsonRpc ? 0 : 1, 2);
-
-                    delete bufferIndices[0]
-                    delete bufferIndices[1]
-                    delete bufferIndices[2]
-
-                    if (instance.exports.chain_is_ok(chainId) != 0) {
-                        console.assert(!chains.has(chainId));
-                        chains.set(chainId, {
+                    const result = instance.addChain(chainSpec, databaseContent, potentialRelayChains, disableJsonRpc);
+                    if (result.success) {
+                        console.assert(!chains.has(result.chainId));
+                        chains.set(result.chainId, {
                             jsonRpcResponsesPromises: new Array()
                         });
-                        return { success: true, chainId };
-                    } else {
-                        const errorMsgLen = instance.exports.chain_error_len(chainId) >>> 0;
-                        const errorMsgPtr = instance.exports.chain_error_ptr(chainId) >>> 0;
-                        const errorMsg = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), errorMsgPtr, errorMsgLen);
-                        instance.exports.remove_chain(chainId);
-                        return { success: false, error: errorMsg };
                     }
+
+                    return result;
+
                 } catch (_error) {
                     console.assert(crashError.error);
                     throw crashError.error
@@ -281,7 +249,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
             }
             chains.delete(chainId);
             try {
-                state.instance.exports.remove_chain(chainId);
+                state.instance.removeChain(chainId);
             } catch (_error) {
                 console.assert(crashError.error);
                 throw crashError.error
@@ -301,7 +269,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
                     return;
                 try {
                     printError.printError = false
-                    instance.exports.start_shutdown()
+                    instance.startShutdown()
                 } catch (_error) {
                 }
             })

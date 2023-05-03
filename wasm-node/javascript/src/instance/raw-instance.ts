@@ -18,6 +18,7 @@
 import { ConnectionConfig, Connection, Config as SmoldotBindingsConfig, default as smoldotLightBindingsBuilder } from './bindings-smoldot-light.js';
 import { Config as WasiConfig, default as wasiBindingsBuilder } from './bindings-wasi.js';
 
+import * as buffer from './buffer.js';
 import { SmoldotWasmInstance } from './bindings.js';
 
 export { ConnectionConfig, ConnectionError, Connection } from './bindings-smoldot-light.js';
@@ -80,7 +81,15 @@ export interface PlatformBindings {
     connect(config: ConnectionConfig): Connection;
 }
 
-export async function startInstance(config: Config): Promise<[SmoldotWasmInstance, Array<Uint8Array>]> {
+export interface Instance {
+    request: (request: string, chainId: number) => number,
+    peekJsonRpcResponse: (chainId: number) => string | null,
+    addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean) => { success: true, chainId: number } | { success: false, error: string },
+    removeChain: (chainId: number) => void,
+    startShutdown: () => void,
+}
+
+export async function startInstance(config: Config): Promise<Instance> {
     let killAll: () => void;
 
     const bufferIndices = new Array;
@@ -199,5 +208,63 @@ export async function startInstance(config: Config): Promise<[SmoldotWasmInstanc
         }
     })();
 
-    return [instance, bufferIndices];
+    return {
+        request: (request: string, chainId: number) => {
+            bufferIndices[0] = new TextEncoder().encode(request);
+            return instance.exports.json_rpc_send(0, chainId) >>> 0;
+        },
+
+        peekJsonRpcResponse: (chainId: number): string | null => {
+            const mem = new Uint8Array(instance.exports.memory.buffer);
+            const responseInfo = instance.exports.json_rpc_responses_peek(chainId) >>> 0;
+            const ptr = buffer.readUInt32LE(mem, responseInfo) >>> 0;
+            const len = buffer.readUInt32LE(mem, responseInfo + 4) >>> 0;
+
+            // `len === 0` means "queue is empty" according to the API.
+            // In that situation, queue the resolve/reject.
+            if (len !== 0) {
+                const message = buffer.utf8BytesToString(mem, ptr, len);
+                instance.exports.json_rpc_responses_pop(chainId);
+                return message;
+            } else {
+                return null
+            }
+        },
+
+        addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean): { success: true, chainId: number } | { success: false, error: string } => {
+            // `add_chain` unconditionally allocates a chain id. If an error occurs, however, this chain
+            // id will refer to an *erroneous* chain. `chain_is_ok` is used below to determine whether it
+            // has succeeeded or not.
+            bufferIndices[0] = new TextEncoder().encode(chainSpec)
+            bufferIndices[1] = new TextEncoder().encode(databaseContent)
+            const potentialRelayChainsEncoded = new Uint8Array(potentialRelayChains.length * 4)
+            for (let idx = 0; idx < potentialRelayChains.length; ++idx) {
+                buffer.writeUInt32LE(potentialRelayChainsEncoded, idx * 4, potentialRelayChains[idx]!);
+            }
+            bufferIndices[2] = potentialRelayChainsEncoded
+            const chainId = instance.exports.add_chain(0, 1, disableJsonRpc ? 0 : 1, 2);
+
+            delete bufferIndices[0]
+            delete bufferIndices[1]
+            delete bufferIndices[2]
+
+            if (instance.exports.chain_is_ok(chainId) != 0) {
+                return { success: true, chainId };
+            } else {
+                const errorMsgLen = instance.exports.chain_error_len(chainId) >>> 0;
+                const errorMsgPtr = instance.exports.chain_error_ptr(chainId) >>> 0;
+                const errorMsg = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), errorMsgPtr, errorMsgLen);
+                instance.exports.remove_chain(chainId);
+                return { success: false, error: errorMsg };
+            }
+        },
+
+        removeChain: (chainId: number): void => {
+            instance.exports.remove_chain(chainId);
+        },
+
+        startShutdown: (): void => {
+            instance.exports.start_shutdown();
+        }
+    };
 }
