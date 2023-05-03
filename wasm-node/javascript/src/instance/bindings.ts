@@ -23,8 +23,8 @@
  */
 export interface SmoldotWasmExports extends WebAssembly.Exports {
     memory: WebAssembly.Memory,
-    init: (maxLogLevel: number, enableCurrentTask: number, cpuRateLimit: number, periodicallyYield: number) => void,
-    set_periodically_yield: (periodicallyYield: number) => void,
+    init: (maxLogLevel: number, enableCurrentTask: number) => void,
+    advance_execution: () => number,
     start_shutdown: () => void,
     add_chain: (chainSpecBufferIndex: number, databaseContentBufferIndex: number, jsonRpcRunning: number, potentialRelayChainsBufferIndex: number) => number;
     remove_chain: (chainId: number) => void,

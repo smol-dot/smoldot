@@ -2534,6 +2534,7 @@ name = "smoldot-light-wasm"
 version = "1.0.3"
 dependencies = [
  "async-executor",
+ "async-task",
  "event-listener",
  "fnv",
  "futures-util",

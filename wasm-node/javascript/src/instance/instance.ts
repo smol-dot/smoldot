@@ -77,7 +77,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
     // - At initialization, it is a Promise containing the Wasm VM is still initializing.
     // - After the Wasm VM has finished initialization, contains the `WebAssembly.Instance` object.
     //
-    let state: { initialized: false, promise: Promise<[SmoldotWasmInstance, Array<Uint8Array>]> } | { initialized: true, instance: SmoldotWasmInstance, bufferIndices: Array<Uint8Array>, unregisterCallback: () => void };
+    let state: { initialized: false, promise: Promise<[SmoldotWasmInstance, Array<Uint8Array>]> } | { initialized: true, instance: SmoldotWasmInstance, bufferIndices: Array<Uint8Array> };
 
     const crashError: { error?: CrashError } = {};
 
@@ -136,27 +136,10 @@ export function start(configMessage: Config, platformBindings: instance.Platform
 
     state = {
         initialized: false, promise: initPromise.then(([instance, bufferIndices]) => {
-            // `config.cpuRateLimit` is a floating point that should be between 0 and 1, while the value
-            // to pass as parameter must be between `0` and `2^32-1`.
-            // The few lines of code below should handle all possible values of `number`, including
-            // infinites and NaN.
-            let cpuRateLimit = Math.round(configMessage.cpuRateLimit * 4294967295);  // `2^32 - 1`
-            if (cpuRateLimit < 0) cpuRateLimit = 0;
-            if (cpuRateLimit > 4294967295) cpuRateLimit = 4294967295;
-            if (!Number.isFinite(cpuRateLimit)) cpuRateLimit = 4294967295; // User might have passed NaN
-
             // Smoldot requires an initial call to the `init` function in order to do its internal
             // configuration.
-            const [periodicallyYield, unregisterCallback] = platformBindings.registerShouldPeriodicallyYield((newValue) => {
-                if (state.initialized && !crashError.error) {
-                    try {
-                        state.instance.exports.set_periodically_yield(newValue ? 1 : 0)
-                    } catch (_error) { }
-                }
-            });
-            instance.exports.init(configMessage.maxLogLevel, configMessage.enableCurrentTask ? 1 : 0, cpuRateLimit, periodicallyYield ? 1 : 0);
-
-            state = { initialized: true, instance, bufferIndices, unregisterCallback };
+            instance.exports.init(configMessage.maxLogLevel, configMessage.enableCurrentTask ? 1 : 0);
+            state = { initialized: true, instance, bufferIndices };
             return [instance, bufferIndices];
         })
     };
@@ -318,8 +301,6 @@ export function start(configMessage: Config, platformBindings: instance.Platform
                 // exception when the user wants the shutdown to happen.
                 if (crashError.error)
                     return;
-                if (state.initialized)
-                    state.unregisterCallback();
                 try {
                     printError.printError = false
                     instance.exports.start_shutdown()
