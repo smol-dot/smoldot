@@ -235,16 +235,16 @@ export interface Config {
 /**
  * Contains functions that the client will use when it needs to leverage the platform.
  */
-export interface PlatformBindings<C> extends instance.PlatformBindings {
+export interface PlatformBindings<A> extends instance.PlatformBindings {
     /**
      * Tries to open a new connection using the given configuration.
      *
      * @see Connection
      * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
      */
-    connect(config: ConnectionConfig<C>): Connection;
+    connect(config: ConnectionConfig<A>): Connection;
 
-    parseMultiaddr(address: string): { success: true, address: C } | { success: false, error: string };
+    parseMultiaddr(address: string): { success: true, address: A } | { success: false, error: string };
 }
 
 export interface Instance {
@@ -255,7 +255,7 @@ export interface Instance {
     startShutdown: () => void
 }
 
-export function start<C>(configMessage: Config, platformBindings: PlatformBindings<C>): Instance {
+export function start<A>(configMessage: Config, platformBindings: PlatformBindings<A>): Instance {
 
     // This variable represents the state of the instance, and serves two different purposes:
     //
@@ -281,7 +281,7 @@ export function start<C>(configMessage: Config, platformBindings: PlatformBindin
         const module = await configMessage.wasmModule;
 
         // Start initialization of the Wasm VM.
-        const config: instance.Config<C> = {
+        const config: instance.Config<A> = {
             eventCallback: (event) => {
                 switch (event.ty) {
                     case "wasm-panic": {

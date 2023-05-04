@@ -23,7 +23,7 @@
 import * as buffer from './buffer.js';
 import type { SmoldotWasmInstance } from './bindings.js';
 
-export interface Config {
+export interface Config<A> {
     instance?: SmoldotWasmInstance,
 
     /**
@@ -32,6 +32,8 @@ export interface Config {
      * When `buffer_size` or `buffer_index` are called, the buffer is found here.
      */
     bufferIndices: Array<Uint8Array>,
+
+    parseMultiaddr(address: string): { success: true, address: A } | { success: false, error: string };
 
     /**
      * Closure to call when the Wasm instance calls `panic`.
@@ -45,7 +47,7 @@ export interface Config {
     advanceExecutionReadyCallback: () => void,
     currentTaskCallback?: (taskName: string | null) => void,
 
-    newConnection: (connectionId: number, address: string) => { success: true } | { success: false, error: string, isBadAddress: boolean },
+    newConnection: (connectionId: number, address: A) => void,
     connectionReset: (connectionId: number) => void,
     connectionStreamOpened: (connectionId: number) => void,
     connectionStreamReset: (connectionId: number, streamId: number) => void,
@@ -53,7 +55,7 @@ export interface Config {
     streamSendClosed: (connectionId: number, streamId?: number) => void,
 }
 
-export default function (config: Config): { imports: WebAssembly.ModuleImports, killAll: () => void } {
+export default function <A>(config: Config<A>): { imports: WebAssembly.ModuleImports, killAll: () => void } {
     // Object containing a boolean indicating whether the `killAll` function has been invoked by
     // the user.
     const killedTracked = { killed: false };
@@ -163,15 +165,15 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
             errorBufferIndexPtr >>>= 0;
 
             const address = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), addrPtr, addrLen);
-
-            const result = config.newConnection(connectionId, address);
+            const result = config.parseMultiaddr(address);
             if (result.success) {
+                config.newConnection(connectionId, result.address)
                 return 0
             } else {
                 const mem = new Uint8Array(instance.exports.memory.buffer);
                 config.bufferIndices[0] = new TextEncoder().encode(result.error)
                 buffer.writeUInt32LE(mem, errorBufferIndexPtr, 0);
-                buffer.writeUInt8(mem, errorBufferIndexPtr + 4, result.isBadAddress ? 1 : 0);
+                buffer.writeUInt8(mem, errorBufferIndexPtr + 4, 1);  // TODO: remove isBadAddress param since it's always true
                 return 1;
             }
 
@@ -179,14 +181,15 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                 throw new Error("internal error: connection already allocated");
             }
 
-            try {
+            const address = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), addrPtr, addrLen);
+            const parseResult = config.parseMultiaddr(address);
+
+            if (parseResult.success) {
                 if (killedTracked.killed)
                     throw new Error("killAll invoked");
 
-                const address = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), addrPtr, addrLen);
-
                 const connec = config.connect({
-                    address,
+                    address: parseResult.address,
                     onOpen: (info) => {
                         if (killedTracked.killed) return;
                         try {
@@ -257,17 +260,11 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                 connections[connectionId] = connec;
                 return 0;
 
-            } catch (error) {
-                const isBadAddress = error instanceof ConnectionError;
-                let errorStr = "Unknown error";
-                if (error instanceof Error) {
-                    errorStr = error.toString();
-                }
-
+            } else {
                 const mem = new Uint8Array(instance.exports.memory.buffer);
-                config.bufferIndices[0] = new TextEncoder().encode(errorStr)
+                config.bufferIndices[0] = new TextEncoder().encode(parseResult.error)
                 buffer.writeUInt32LE(mem, errorBufferIndexPtr, 0);
-                buffer.writeUInt8(mem, errorBufferIndexPtr + 4, isBadAddress ? 1 : 0);
+                buffer.writeUInt8(mem, errorBufferIndexPtr + 4, 1); // TODO: remove isBadAddress param since it's always true
                 return 1;
             }*/
         },

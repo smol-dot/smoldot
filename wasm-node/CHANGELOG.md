@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.0.4 - 2023-05-03
+
+### Added
+
+- Support v2 of the `Metadata` runtime API. ([#514](https://github.com/smol-dot/smoldot/pull/514))
+
 ### Changed
 
 - The size of the read buffer of TCP connections on Deno has been increased from 1kiB to 32kiB. This should improve the performance by reducing the number of function calls. ([#501](https://github.com/smol-dot/smoldot/pull/501))
@@ -9,6 +15,7 @@
 ### Fixed
 
 - Fix panic when the best block of a chain switches to being equal to the current finalized block. This can occasionally happen for parachains in case of a reorg on the relay chain. ([#497](https://github.com/smol-dot/smoldot/pull/497))
+- Fix panic when failing to find the desired runtime API in a runtime. ([#512](https://github.com/smol-dot/smoldot/pull/512))
 
 ## 1.0.3 - 2023-04-27
 

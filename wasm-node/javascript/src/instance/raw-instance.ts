@@ -21,21 +21,21 @@ import { Config as WasiConfig, default as wasiBindingsBuilder } from './bindings
 import * as buffer from './buffer.js';
 import { SmoldotWasmInstance } from './bindings.js';
 
-export interface Config<C> {
-    eventCallback: (event: Event<C>) => void,
-    parseMultiaddr: (address: string) => { success: true, address: C } | { success: false, error: string },
+export interface Config<A> {
+    eventCallback: (event: Event<A>) => void,
+    parseMultiaddr: (address: string) => { success: true, address: A } | { success: false, error: string },
     platformBindings: PlatformBindings,
     wasmModule: WebAssembly.Module,
     maxLogLevel: number;
     cpuRateLimit: number,
 }
 
-type Event<C> =
+type Event<A> =
     { ty: "log", level: number, target: string, message: string } |
     { ty: "json-rpc-responses-non-empty", chainId: number } |
     { ty: "current-task", taskName: string | null } |
     { ty: "wasm-panic", message: string } |
-    { ty: "new-connection", connectionId: number, address: C } |
+    { ty: "new-connection", connectionId: number, address: A } |
     { ty: "connection-reset", connectionId: number } |
     { ty: "connection-stream-open", connectionId: number } |
     { ty: "connection-stream-reset", connectionId: number, streamId: number } |
@@ -78,7 +78,7 @@ export interface Instance {
     startShutdown: () => void,
 }
 
-export async function startInstance<C>(config: Config<C>): Promise<Instance> {
+export async function startInstance<A>(config: Config<A>): Promise<Instance> {
     let killAll: () => void;
 
     const bufferIndices = new Array;
@@ -86,7 +86,7 @@ export async function startInstance<C>(config: Config<C>): Promise<Instance> {
     const advanceExecutionPromise: { value: null | (() => void) } = { value: null };
 
     // Used to bind with the smoldot-light bindings. See the `bindings-smoldot-light.js` file.
-    const smoldotJsConfig: SmoldotBindingsConfig = {
+    const smoldotJsConfig: SmoldotBindingsConfig<A> = {
         bufferIndices,
         onPanic: (message) => {
             killAll();
@@ -104,12 +104,8 @@ export async function startInstance<C>(config: Config<C>): Promise<Instance> {
         logCallback: (level, target, message) => {
             config.eventCallback({ ty: "log", level, message, target });
         },
-        newConnection: (connectionId: number, address: string) => {
-            const parsed = config.parseMultiaddr(address);
-            if (!parsed.success)
-                return { success: false, error: parsed.error, isBadAddress: true }  // TODO:  since this is always true could be removed
-            config.eventCallback({ ty: "new-connection", connectionId, address: parsed.address });
-            return { success: true }
+        newConnection: (connectionId: number, address: A) => {
+            config.eventCallback({ ty: "new-connection", connectionId, address });
         },
         connectionReset: (connectionId: number) => {
             config.eventCallback({ ty: "connection-reset", connectionId });

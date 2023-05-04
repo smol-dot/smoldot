@@ -35,14 +35,13 @@ mod init;
 mod platform;
 mod timers;
 
-static CLIENT: Mutex<Option<init::Client<platform::Platform, ()>>> = Mutex::new(None);
+static CLIENT: Mutex<init::Client<platform::Platform, ()>> = Mutex::new(init::Client {
+    smoldot: smoldot_light::Client::new(platform::Platform::new()),
+    chains: slab::Slab::new(),
+});
 
 fn init(max_log_level: u32) {
-    let init_out = init::init(max_log_level);
-
-    let mut client_lock = crate::CLIENT.lock().unwrap();
-    assert!(client_lock.is_none());
-    *client_lock = Some(init_out);
+    init::init(max_log_level);
 }
 
 fn start_shutdown() {
@@ -64,11 +63,7 @@ fn add_chain(
     // OOM errors. The threshold is completely empirical and should probably be updated
     // regularly to account for changes in the implementation.
     if alloc::total_alloc_bytes() >= usize::max_value() - 400 * 1024 * 1024 {
-        let chain_id = client_lock
-            .as_mut()
-            .unwrap()
-            .chains
-            .insert(init::Chain::Erroneous {
+        let chain_id = client_lock.chains.insert(init::Chain::Erroneous {
             error:
                 "Wasm node is running low on memory and will prevent any new chain from being added"
                     .into(),
@@ -86,11 +81,7 @@ fn add_chain(
             .filter_map(|c| {
                 if let Some(init::Chain::Healthy {
                     smoldot_chain_id, ..
-                }) = client_lock
-                    .as_ref()
-                    .unwrap()
-                    .chains
-                    .get(usize::try_from(c).ok()?)
+                }) = client_lock.chains.get(usize::try_from(c).ok()?)
                 {
                     Some(*smoldot_chain_id)
                 } else {
@@ -105,8 +96,6 @@ fn add_chain(
         chain_id: smoldot_chain_id,
         json_rpc_responses,
     } = match client_lock
-        .as_mut()
-        .unwrap()
         .smoldot
         .add_chain(smoldot_light::AddChainConfig {
             user_data: (),
@@ -127,28 +116,21 @@ fn add_chain(
         }) {
         Ok(c) => c,
         Err(error) => {
-            let chain_id = client_lock
-                .as_mut()
-                .unwrap()
-                .chains
-                .insert(init::Chain::Erroneous {
-                    error: error.to_string(),
-                });
+            let chain_id = client_lock.chains.insert(init::Chain::Erroneous {
+                error: error.to_string(),
+            });
 
             return u32::try_from(chain_id).unwrap();
         }
     };
 
-    let outer_chain_id = client_lock
-        .as_mut()
-        .unwrap()
-        .chains
-        .insert(init::Chain::Healthy {
-            smoldot_chain_id,
-            json_rpc_response: None,
-            json_rpc_response_info: Box::new(bindings::JsonRpcResponseInfo { ptr: 0, len: 0 }),
-            json_rpc_responses_rx: None,
-        });
+    let outer_chain_id = client_lock.chains.insert(init::Chain::Healthy {
+        smoldot_chain_id,
+        json_rpc_response: None,
+        json_rpc_response_info: Box::new(bindings::JsonRpcResponseInfo { ptr: 0, len: 0 }),
+        json_rpc_responses_rx: None,
+    });
+
     let outer_chain_id_u32 = u32::try_from(outer_chain_id).unwrap();
 
     // We wrap the JSON-RPC responses stream into a proper stream in order to be able to guarantee
@@ -166,12 +148,7 @@ fn add_chain(
     if let init::Chain::Healthy {
         json_rpc_responses_rx,
         ..
-    } = client_lock
-        .as_mut()
-        .unwrap()
-        .chains
-        .get_mut(outer_chain_id)
-        .unwrap()
+    } = client_lock.chains.get_mut(outer_chain_id).unwrap()
     {
         *json_rpc_responses_rx = json_rpc_responses;
     }
@@ -183,8 +160,6 @@ fn remove_chain(chain_id: u32) {
     let mut client_lock = CLIENT.lock().unwrap();
 
     match client_lock
-        .as_mut()
-        .unwrap()
         .chains
         .remove(usize::try_from(chain_id).unwrap())
     {
@@ -204,11 +179,7 @@ fn remove_chain(chain_id: u32) {
                 );
             }
 
-            let () = client_lock
-                .as_mut()
-                .unwrap()
-                .smoldot
-                .remove_chain(smoldot_chain_id);
+            let () = client_lock.smoldot.remove_chain(smoldot_chain_id);
         }
         init::Chain::Erroneous { .. } => {}
     }
@@ -218,8 +189,6 @@ fn chain_is_ok(chain_id: u32) -> u32 {
     let client_lock = CLIENT.lock().unwrap();
     if matches!(
         client_lock
-            .as_ref()
-            .unwrap()
             .chains
             .get(usize::try_from(chain_id).unwrap())
             .unwrap(),
@@ -234,8 +203,6 @@ fn chain_is_ok(chain_id: u32) -> u32 {
 fn chain_error_len(chain_id: u32) -> u32 {
     let client_lock = CLIENT.lock().unwrap();
     match client_lock
-        .as_ref()
-        .unwrap()
         .chains
         .get(usize::try_from(chain_id).unwrap())
         .unwrap()
@@ -248,8 +215,6 @@ fn chain_error_len(chain_id: u32) -> u32 {
 fn chain_error_ptr(chain_id: u32) -> u32 {
     let client_lock = CLIENT.lock().unwrap();
     match client_lock
-        .as_ref()
-        .unwrap()
         .chains
         .get(usize::try_from(chain_id).unwrap())
         .unwrap()
@@ -268,8 +233,6 @@ fn json_rpc_send(json_rpc_request: Vec<u8>, chain_id: u32) -> u32 {
 
     let mut client_lock = CLIENT.lock().unwrap();
     let client_chain_id = match client_lock
-        .as_ref()
-        .unwrap()
         .chains
         .get(usize::try_from(chain_id).unwrap())
         .unwrap()
@@ -281,8 +244,6 @@ fn json_rpc_send(json_rpc_request: Vec<u8>, chain_id: u32) -> u32 {
     };
 
     match client_lock
-        .as_mut()
-        .unwrap()
         .smoldot
         .json_rpc_request(json_rpc_request, client_chain_id)
     {
@@ -295,8 +256,6 @@ fn json_rpc_send(json_rpc_request: Vec<u8>, chain_id: u32) -> u32 {
 fn json_rpc_responses_peek(chain_id: u32) -> u32 {
     let mut client_lock = CLIENT.lock().unwrap();
     match client_lock
-        .as_mut()
-        .unwrap()
         .chains
         .get_mut(usize::try_from(chain_id).unwrap())
         .unwrap()
@@ -363,8 +322,6 @@ fn json_rpc_responses_peek(chain_id: u32) -> u32 {
 fn json_rpc_responses_pop(chain_id: u32) {
     let mut client_lock = CLIENT.lock().unwrap();
     match client_lock
-        .as_mut()
-        .unwrap()
         .chains
         .get_mut(usize::try_from(chain_id).unwrap())
         .unwrap()

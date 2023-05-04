@@ -1214,7 +1214,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             .runtime_call(
                 &block_hash,
                 "Metadata",
-                1..=1,
+                1..=2,
                 "Metadata_metadata",
                 iter::empty::<Vec<u8>>(),
                 3,
