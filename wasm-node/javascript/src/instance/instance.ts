@@ -414,7 +414,7 @@ export function start<A>(configMessage: Config, platformBindings: PlatformBindin
             }
         };
 
-        return await instance.startInstance(config, eventCallback)
+        return await instance.startLocalInstance(config, eventCallback)
     })();
 
     state = {

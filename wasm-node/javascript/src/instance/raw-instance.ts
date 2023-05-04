@@ -18,7 +18,7 @@
 import * as buffer from './buffer.js';
 
 /**
- * Configuration for {@link startInstance}.
+ * Configuration for {@link startLocalInstance}.
  */
 export interface Config<A> {
     /**
@@ -97,7 +97,7 @@ export interface Instance {
  * This instance is low-level in the sense that invalid input can lead to crashes and that input
  * isn't sanitized. In other words, you know what you're doing.
  */
-export async function startInstance<A>(config: Config<A>, eventCallback: (event: Event<A>) => void): Promise<Instance> {
+export async function startLocalInstance<A>(config: Config<A>, eventCallback: (event: Event<A>) => void): Promise<Instance> {
     const state: {
         // Null before initialization and after a panic.
         instance: SmoldotWasmInstance | null
