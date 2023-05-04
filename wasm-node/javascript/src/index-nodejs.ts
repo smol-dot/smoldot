@@ -20,7 +20,7 @@
 // with both at the same time.
 
 import { Client, ClientOptions, start as innerStart } from './client.js'
-import { Connection, ConnectionError, ConnectionConfig } from './instance/instance.js';
+import { Connection, ConnectionConfig } from './instance/instance.js';
 import { default as wasmBase64 } from './instance/autogen/wasm.js';
 
 import { WebSocket } from 'ws';
@@ -60,7 +60,7 @@ export function start(options?: ClientOptions): Client {
     // cross-platform cross-bundler approach.
     const wasmModule = WebAssembly.compile(inflate(Buffer.from(wasmBase64, 'base64')));
 
-    return innerStart(options || {}, wasmModule, {
+    return innerStart<ParsedAddress>(options || {}, wasmModule, {
         registerShouldPeriodicallyYield: (_callback) => {
             return [true, () => { }]
         },
@@ -72,11 +72,45 @@ export function start(options?: ClientOptions): Client {
                 throw new Error('getRandomValues buffer too large')
             randomFillSync(buffer)
         },
+        parseMultiaddr: (address) => {
+            const wsParsed = address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)\/(ws|wss|tls\/ws)$/);
+            const tcpParsed = address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)$/);
+
+            if (wsParsed != null) {
+                const proto = (wsParsed[4] == 'ws') ? 'ws' : 'wss';
+                if (
+                    (proto == 'ws' && options?.forbidWs) ||
+                    (proto == 'ws' && wsParsed[2] != 'localhost' && wsParsed[2] != '127.0.0.1' && options?.forbidNonLocalWs) ||
+                    (proto == 'wss' && options?.forbidWss)
+                ) {
+                    return { success: false, error: 'TCP connections not available' }
+                }
+
+                const url = (wsParsed[1] == 'ip6') ?
+                    (proto + "://[" + wsParsed[2] + "]:" + wsParsed[3]) :
+                    (proto + "://" + wsParsed[2] + ":" + wsParsed[3]);
+
+                return { success: true, address: { ty: "websocket", url } }
+            } else if (tcpParsed != null) {
+                if (options?.forbidTcp) {
+                    return { success: false, error: 'TCP connections not available' }
+                }
+
+                return { success: true, address: { ty: "tcp", hostname: tcpParsed[2]!, port: parseInt(tcpParsed[3]!) } }
+
+            } else {
+                return { success: false, error: 'Unrecognized multiaddr format' }
+            }
+        },
         connect: (config) => {
-            return connect(config, options?.forbidTcp || false, options?.forbidWs || false, options?.forbidNonLocalWs || false, options?.forbidWss || false)
+            return connect(config)
         }
     })
 }
+
+type ParsedAddress =
+    { ty: "tcp", hostname: string, port: number } |
+    { ty: "websocket", url: string }
 
 /**
  * Tries to open a new connection using the given configuration.
@@ -84,27 +118,9 @@ export function start(options?: ClientOptions): Client {
  * @see Connection
  * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
  */
-function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean, forbidNonLocalWs: boolean, forbidWss: boolean): Connection {
-    // Attempt to parse the multiaddress.
-    // TODO: remove support for `/wss` in a long time (https://github.com/paritytech/smoldot/issues/1940)
-    const wsParsed = config.address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)\/(ws|wss|tls\/ws)$/);
-    const tcpParsed = config.address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)$/);
-
-    if (wsParsed != null) {
-        const proto = (wsParsed[4] == 'ws') ? 'ws' : 'wss';
-        if (
-            (proto == 'ws' && forbidWs) ||
-            (proto == 'ws' && wsParsed[2] != 'localhost' && wsParsed[2] != '127.0.0.1' && forbidNonLocalWs) ||
-            (proto == 'wss' && forbidWss)
-        ) {
-            throw new ConnectionError('Connection type not allowed');
-        }
-
-        const url = (wsParsed[1] == 'ip6') ?
-            (proto + "://[" + wsParsed[2] + "]:" + wsParsed[3]) :
-            (proto + "://" + wsParsed[2] + ":" + wsParsed[3]);
-
-        const socket = new WebSocket(url);
+function connect(config: ConnectionConfig<ParsedAddress>): Connection {
+    if (config.address.ty === "websocket") {
+        const socket = new WebSocket(config.address.url);
         socket.binaryType = 'arraybuffer';
 
         const bufferedAmountCheck = { quenedUnreportedBytes: 0, nextTimeout: 10 };
@@ -176,15 +192,10 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             openOutSubstream: () => { throw new Error('Wrong connection type') }
         };
 
-    } else if (tcpParsed != null) {
-        // `net` module will be missing when we're not in NodeJS.
-        if (forbidTcp) {
-            throw new ConnectionError('TCP connections not available');
-        }
-
+    } else {
         const socket = nodeCreateConnection({
-            host: tcpParsed[2],
-            port: parseInt(tcpParsed[3]!, 10),
+            host: config.address.hostname,
+            port: config.address.port,
         });
 
         // Number of bytes queued using `socket.write` and where `write` has returned false.
@@ -241,8 +252,5 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             },
             openOutSubstream: () => { throw new Error('Wrong connection type') }
         };
-
-    } else {
-        throw new ConnectionError('Unrecognized multiaddr format');
     }
 }
