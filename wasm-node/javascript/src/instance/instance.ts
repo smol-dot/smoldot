@@ -245,6 +245,19 @@ export interface PlatformBindings<A> extends instance.PlatformBindings {
     connect(config: ConnectionConfig<A>): Connection;
 
     parseMultiaddr(address: string): { success: true, address: A } | { success: false, error: string };
+
+    /**
+     * The "should periodically yield" setting indicates whether the execution should periodically
+     * yield back control by using `setTimeout(..., 0)`.
+     *
+     * On platforms such as browsers where `setTimeout(..., 0)` takes way more than 0 milliseconds,
+     * this setting should be set to `false`.
+     *
+     * This function registers a callback that is called when the setting should be updated with
+     * a new value. It returns the initial value of the setting and a function used to unregister
+     * the callback.
+     */
+    registerShouldPeriodicallyYield: (callback: (newValue: boolean) => void) => [boolean, () => void],
 }
 
 export interface Instance {
@@ -277,11 +290,17 @@ export function start<A>(configMessage: Config, platformBindings: PlatformBindin
         jsonRpcResponsesPromises: JsonRpcResponsesPromise[],
     }> = new Map();
 
+    const [periodicallyYieldInit, unregisterCallback] = platformBindings.registerShouldPeriodicallyYield((newValue) => {
+        if (state.initialized)
+            state.instance.setPeriodicallyYield(newValue);
+    });
+
     const initPromise = (async (): Promise<instance.Instance> => {
         const module = await configMessage.wasmModule;
 
         // Start initialization of the Wasm VM.
         const config: instance.Config<A> = {
+            periodicallyYield: periodicallyYieldInit,
             eventCallback: (event) => {
                 switch (event.ty) {
                     case "wasm-panic": {
@@ -520,6 +539,7 @@ export function start<A>(configMessage: Config, platformBindings: PlatformBindin
         },
 
         startShutdown: () => {
+            unregisterCallback();
             return queueOperation((instance) => {
                 // `startShutdown` is a bit special in its handling of crashes.
                 // Shutting down will lead to `onWasmPanic` being called at some point, possibly during
