@@ -65,23 +65,29 @@ export interface Instance {
 }
 
 export async function startInstance<A>(config: Config<A>): Promise<Instance> {
-    let killAll: () => void;
-
-    const instanceStorage: { instance: SmoldotWasmInstance | null } = { instance: null };
-    const bufferIndices = new Array;
-    // Callback called when `advance_execution_ready` is called by the Rust code, if any.
-    const advanceExecutionPromise: { value: null | (() => void) } = { value: null };
-    const yieldThresholdMs = { value: config.periodicallyYield ? 5 : 2000 };
-    // Buffers holding temporary data being written by the Rust code to respectively stdout and
-    // stderr.
-    let stdoutBuffer = "";
-    let stderrBuffer = "";
+    const state: {
+        // Null before initialization and after a panic.
+        instance: SmoldotWasmInstance | null
+        bufferIndices: Uint8Array[],
+        advanceExecutionPromise: null | (() => void),
+        yieldThresholdMs: number,
+        stdoutBuffer: string,
+        stderrBuffer: string,
+    } = {
+        instance: null,
+        bufferIndices: new Array(),
+        advanceExecutionPromise: null,
+        yieldThresholdMs: config.periodicallyYield ? 5 : 2000,
+        stdoutBuffer: "",
+        stderrBuffer: "",
+    };
 
     const smoldotJsBindings = {
         // Must exit with an error. A human-readable message can be found in the WebAssembly
         // memory in the given buffer.
         panic: (ptr: number, len: number) => {
-            const instance = instanceStorage.instance!;
+            const instance = state.instance!;
+            state.instance = null;
 
             ptr >>>= 0;
             len >>>= 0;
@@ -92,37 +98,37 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
         },
 
         buffer_size: (bufferIndex: number) => {
-            const buf = bufferIndices[bufferIndex]!;
+            const buf = state.bufferIndices[bufferIndex]!;
             return buf.byteLength;
         },
 
         buffer_copy: (bufferIndex: number, targetPtr: number) => {
-            const instance = instanceStorage.instance!;
+            const instance = state.instance!;
             targetPtr = targetPtr >>> 0;
 
-            const buf = bufferIndices[bufferIndex]!;
+            const buf = state.bufferIndices[bufferIndex]!;
             new Uint8Array(instance.exports.memory.buffer).set(buf, targetPtr);
         },
 
         advance_execution_ready: () => {
-            if (advanceExecutionPromise.value)
-                advanceExecutionPromise.value();
-            advanceExecutionPromise.value = null;
+            if (state.advanceExecutionPromise)
+                state.advanceExecutionPromise();
+            state.advanceExecutionPromise = null;
         },
 
         // Used by the Rust side to notify that a JSON-RPC response or subscription notification
         // is available in the queue of JSON-RPC responses.
         json_rpc_responses_non_empty: (chainId: number) => {
-            if (killedTracked.killed) return;
+            if (!state.instance) return;
             config.eventCallback({ ty: "json-rpc-responses-non-empty", chainId });
         },
 
         // Used by the Rust side to emit a log entry.
         // See also the `max_log_level` parameter in the configuration.
         log: (level: number, targetPtr: number, targetLen: number, messagePtr: number, messageLen: number) => {
-            if (killedTracked.killed) return;
+            if (!state.instance) return;
 
-            const instance = instanceStorage.instance!;
+            const instance = state.instance!;
 
             targetPtr >>>= 0;
             targetLen >>>= 0;
@@ -137,7 +143,7 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
 
         // Must call `timer_finished` after the given number of milliseconds has elapsed.
         start_timer: (ms: number) => {
-            const instance = instanceStorage.instance!;
+            const instance = state.instance!;
 
             // In both NodeJS and browsers, if `setTimeout` is called with a value larger than
             // 2147483647, the delay is for some reason instead set to 1.
@@ -151,14 +157,14 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
             // with `1`) and wants you to use `setImmediate` instead.
             if (ms < 1 && typeof setImmediate === "function") {
                 setImmediate(() => {
-                    if (killedTracked.killed) return;
+                    if (!state.instance) return;
                     try {
                         instance.exports.timer_finished();
                     } catch (_error) { }
                 })
             } else {
                 setTimeout(() => {
-                    if (killedTracked.killed) return;
+                    if (!state.instance) return;
                     try {
                         instance.exports.timer_finished();
                     } catch (_error) { }
@@ -169,7 +175,7 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
         // Must create a new connection object. This implementation stores the created object in
         // `connections`.
         connection_new: (connectionId: number, addrPtr: number, addrLen: number, errorBufferIndexPtr: number) => {
-            const instance = instanceStorage.instance!;
+            const instance = state.instance!;
 
             addrPtr >>>= 0;
             addrLen >>>= 0;
@@ -182,7 +188,7 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
                 return 0
             } else {
                 const mem = new Uint8Array(instance.exports.memory.buffer);
-                bufferIndices[0] = new TextEncoder().encode(result.error)
+                state.bufferIndices[0] = new TextEncoder().encode(result.error)
                 buffer.writeUInt32LE(mem, errorBufferIndexPtr, 0);
                 buffer.writeUInt8(mem, errorBufferIndexPtr + 4, 1);  // TODO: remove isBadAddress param since it's always true
                 return 1;
@@ -207,7 +213,7 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
         // Must queue the data found in the WebAssembly memory at the given pointer. It is assumed
         // that this function is called only when the connection is in an open state.
         stream_send: (connectionId: number, streamId: number, ptr: number, len: number) => {
-            const instance = instanceStorage.instance!;
+            const instance = state.instance!;
 
             ptr >>>= 0;
             len >>>= 0;
@@ -223,19 +229,17 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
         },
 
         current_task_entered: (ptr: number, len: number) => {
-            if (killedTracked.killed) return;
-
-            const instance = instanceStorage.instance!;
+            if (!state.instance) return;
 
             ptr >>>= 0;
             len >>>= 0;
 
-            const taskName = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), ptr, len);
+            const taskName = buffer.utf8BytesToString(new Uint8Array(state.instance.exports.memory.buffer), ptr, len);
             config.eventCallback({ ty: "current-task", taskName });
         },
 
         current_task_exit: () => {
-            if (killedTracked.killed) return;
+            if (!state.instance) return;
             config.eventCallback({ ty: "current-task", taskName: null });
         }
     };
@@ -244,7 +248,7 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
         // Need to fill the buffer described by `ptr` and `len` with random data.
         // This data will be used in order to generate secrets. Do not use a dummy implementation!
         random_get: (ptr: number, len: number) => {
-            const instance = instanceStorage.instance!;
+            const instance = state.instance!;
 
             ptr >>>= 0;
             len >>>= 0;
@@ -263,7 +267,7 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
             // See <https://github.com/rust-lang/rust/blob/master/library/std/src/sys/wasi/time.rs>
             // and <docs.rs/wasi/> for help.
 
-            const instance = instanceStorage.instance!;
+            const instance = state.instance!;
             const mem = new Uint8Array(instance.exports.memory.buffer);
             outPtr >>>= 0;
 
@@ -297,7 +301,7 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
 
         // Writing to a file descriptor is used in order to write to stdout/stderr.
         fd_write: (fd: number, addr: number, num: number, outPtr: number) => {
-            const instance = instanceStorage.instance!;
+            const instance = state.instance!;
 
             outPtr >>>= 0;
 
@@ -342,11 +346,11 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
             // Append the newly-written data to either `stdout_buffer` or `stderr_buffer`, and
             // print their content if necessary.
             if (fd == 1) {
-                stdoutBuffer += toWrite;
-                stdoutBuffer = flushBuffer(stdoutBuffer);
+                state.stdoutBuffer += toWrite;
+                state.stdoutBuffer = flushBuffer(state.stdoutBuffer);
             } else if (fd == 2) {
-                stderrBuffer += toWrite;
-                stderrBuffer = flushBuffer(stderrBuffer);
+                state.stderrBuffer += toWrite;
+                state.stderrBuffer = flushBuffer(state.stderrBuffer);
             }
 
             // Need to write in `out_ptr` how much data was "written".
@@ -361,7 +365,7 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
 
         // Used by Rust in catastrophic situations, such as a double panic.
         proc_exit: (retCode: number) => {
-            killAll();
+            state.instance = null;
             config.eventCallback({ ty: "wasm-panic", message: `proc_exit called: ${retCode}` });
             throw new Error();
         },
@@ -369,7 +373,7 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
         // Return the number of environment variables and the total size of all environment
         // variables. This is called in order to initialize buffers before `environ_get`.
         environ_sizes_get: (argcOut: number, argvBufSizeOut: number) => {
-            const instance = instanceStorage.instance!;
+            const instance = state.instance!;
 
             argcOut >>>= 0;
             argvBufSizeOut >>>= 0;
@@ -389,7 +393,7 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
         // the environment variables.
         // The sizes of the buffers were determined by calling `environ_sizes_get`.
         environ_get: (argv: number, argvBuf: number) => {
-            const instance = instanceStorage.instance!;
+            const instance = state.instance!;
 
             argv >>>= 0;
             argvBuf >>>= 0;
@@ -425,12 +429,11 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
         "wasi_snapshot_preview1": wasiBindings,
     });
 
-    const instance = result as SmoldotWasmInstance;
-    instanceStorage.instance = instance;
+    state.instance = result as SmoldotWasmInstance;
 
     // Smoldot requires an initial call to the `init` function in order to do its internal
     // configuration.
-    instance.exports.init(config.maxLogLevel);
+    state.instance.exports.init(config.maxLogLevel);
 
     (async () => {
         // In order to avoid calling `setTimeout` too often, we accumulate sleep up until
@@ -446,9 +449,11 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
         let now = config.performanceNow();
 
         while (true) {
-            const whenReadyAgain = new Promise((resolve) => advanceExecutionPromise.value = resolve as () => void);
+            const whenReadyAgain = new Promise((resolve) => state.advanceExecutionPromise = resolve as () => void);
 
-            const outcome = instance.exports.advance_execution();
+            if (!state.instance)
+                break;
+            const outcome = state.instance.exports.advance_execution();
             if (outcome === 0) {
                 break;
             }
@@ -464,7 +469,7 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
             const sleep = elapsed * (1.0 / cpuRateLimit - 1.0);
             missingSleep += sleep;
 
-            if (missingSleep > yieldThresholdMs.value) {
+            if (missingSleep > state.yieldThresholdMs) {
                 // `setTimeout` has a maximum value, after which it will overflow. 🤦
                 // See <https://developer.mozilla.org/en-US/docs/Web/API/setTimeout#maximum_delay_value>
                 // While adding a cap technically skews the CPU rate limiting algorithm, we don't
@@ -487,13 +492,18 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
 
     return {
         request: (request: string, chainId: number) => {
-            bufferIndices[0] = new TextEncoder().encode(request);
-            return instance.exports.json_rpc_send(0, chainId) >>> 0;
+            if (!state.instance)
+                return 2;  // TODO: return a different error code? should be documented
+            state.bufferIndices[0] = new TextEncoder().encode(request);
+            return state.instance.exports.json_rpc_send(0, chainId) >>> 0;
         },
 
         peekJsonRpcResponse: (chainId: number): string | null => {
-            const mem = new Uint8Array(instance.exports.memory.buffer);
-            const responseInfo = instance.exports.json_rpc_responses_peek(chainId) >>> 0;
+            if (!state.instance)
+                return null;
+
+            const mem = new Uint8Array(state.instance.exports.memory.buffer);
+            const responseInfo = state.instance.exports.json_rpc_responses_peek(chainId) >>> 0;
             const ptr = buffer.readUInt32LE(mem, responseInfo) >>> 0;
             const len = buffer.readUInt32LE(mem, responseInfo + 4) >>> 0;
 
@@ -501,7 +511,7 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
             // In that situation, queue the resolve/reject.
             if (len !== 0) {
                 const message = buffer.utf8BytesToString(mem, ptr, len);
-                instance.exports.json_rpc_responses_pop(chainId);
+                state.instance.exports.json_rpc_responses_pop(chainId);
                 return message;
             } else {
                 return null
@@ -509,45 +519,54 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
         },
 
         addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean): { success: true, chainId: number } | { success: false, error: string } => {
+            if (!state.instance)
+                return { success: false, error: "Smoldot has crashed" };
+
             // `add_chain` unconditionally allocates a chain id. If an error occurs, however, this chain
             // id will refer to an *erroneous* chain. `chain_is_ok` is used below to determine whether it
             // has succeeeded or not.
-            bufferIndices[0] = new TextEncoder().encode(chainSpec)
-            bufferIndices[1] = new TextEncoder().encode(databaseContent)
+            state.bufferIndices[0] = new TextEncoder().encode(chainSpec)
+            state.bufferIndices[1] = new TextEncoder().encode(databaseContent)
             const potentialRelayChainsEncoded = new Uint8Array(potentialRelayChains.length * 4)
             for (let idx = 0; idx < potentialRelayChains.length; ++idx) {
                 buffer.writeUInt32LE(potentialRelayChainsEncoded, idx * 4, potentialRelayChains[idx]!);
             }
-            bufferIndices[2] = potentialRelayChainsEncoded
-            const chainId = instance.exports.add_chain(0, 1, disableJsonRpc ? 0 : 1, 2);
+            state.bufferIndices[2] = potentialRelayChainsEncoded
+            const chainId = state.instance.exports.add_chain(0, 1, disableJsonRpc ? 0 : 1, 2);
 
-            delete bufferIndices[0]
-            delete bufferIndices[1]
-            delete bufferIndices[2]
+            delete state.bufferIndices[0]
+            delete state.bufferIndices[1]
+            delete state.bufferIndices[2]
 
-            if (instance.exports.chain_is_ok(chainId) != 0) {
+            if (state.instance.exports.chain_is_ok(chainId) != 0) {
                 return { success: true, chainId };
             } else {
-                const errorMsgLen = instance.exports.chain_error_len(chainId) >>> 0;
-                const errorMsgPtr = instance.exports.chain_error_ptr(chainId) >>> 0;
-                const errorMsg = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), errorMsgPtr, errorMsgLen);
-                instance.exports.remove_chain(chainId);
+                const errorMsgLen = state.instance.exports.chain_error_len(chainId) >>> 0;
+                const errorMsgPtr = state.instance.exports.chain_error_ptr(chainId) >>> 0;
+                const errorMsg = buffer.utf8BytesToString(new Uint8Array(state.instance.exports.memory.buffer), errorMsgPtr, errorMsgLen);
+                state.instance.exports.remove_chain(chainId);
                 return { success: false, error: errorMsg };
             }
         },
 
         removeChain: (chainId: number): void => {
-            instance.exports.remove_chain(chainId);
+            if (!state.instance)
+                return;
+            state.instance.exports.remove_chain(chainId);
         },
 
         startShutdown: (): void => {
-            instance.exports.start_shutdown();
+            if (!state.instance)
+                return;
+            state.instance.exports.start_shutdown();
         },
 
         connectionOpened: (connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number, writeClosable: boolean } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateMultihash: Uint8Array, remoteTlsCertificateMultihash: Uint8Array }) => {
+            if (!state.instance)
+                return;
             switch (info.type) {
                 case 'single-stream': {
-                    instance.exports.connection_open_single_stream(connectionId, 0, info.initialWritableBytes, info.writeClosable ? 1 : 0);
+                    state.instance.exports.connection_open_single_stream(connectionId, 0, info.initialWritableBytes, info.writeClosable ? 1 : 0);
                     break
                 }
                 case 'multi-stream': {
@@ -555,22 +574,26 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
                     buffer.writeUInt8(handshakeTy, 0, 0);
                     handshakeTy.set(info.localTlsCertificateMultihash, 1)
                     handshakeTy.set(info.remoteTlsCertificateMultihash, 1 + info.localTlsCertificateMultihash.length)
-                    bufferIndices[0] = handshakeTy;
-                    instance.exports.connection_open_multi_stream(connectionId, 0);
-                    delete bufferIndices[0]
+                    state.bufferIndices[0] = handshakeTy;
+                    state.instance.exports.connection_open_multi_stream(connectionId, 0);
+                    delete state.bufferIndices[0]
                     break
                 }
             }
         },
 
         connectionReset: (connectionId: number, message: string) => {
-            bufferIndices[0] = new TextEncoder().encode(message);
-            instance.exports.connection_reset(connectionId, 0);
-            delete bufferIndices[0]
+            if (!state.instance)
+                return;
+            state.bufferIndices[0] = new TextEncoder().encode(message);
+            state.instance.exports.connection_reset(connectionId, 0);
+            delete state.bufferIndices[0]
         },
 
         streamWritableBytes: (connectionId: number, numExtra: number, streamId?: number) => {
-            instance.exports.stream_writable_bytes(
+            if (!state.instance)
+                return;
+            state.instance.exports.stream_writable_bytes(
                 connectionId,
                 streamId || 0,
                 numExtra,
@@ -578,13 +601,17 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
         },
 
         streamMessage: (connectionId: number, message: Uint8Array, streamId?: number) => {
-            bufferIndices[0] = message;
-            instance.exports.stream_message(connectionId, streamId || 0, 0);
-            delete bufferIndices[0]
+            if (!state.instance)
+                return;
+            state.bufferIndices[0] = message;
+            state.instance.exports.stream_message(connectionId, streamId || 0, 0);
+            delete state.bufferIndices[0]
         },
 
         streamOpened: (connectionId: number, streamId: number, direction: 'inbound' | 'outbound', initialWritableBytes: number) => {
-            instance.exports.connection_stream_opened(
+            if (!state.instance)
+                return;
+            state.instance.exports.connection_stream_opened(
                 connectionId,
                 streamId,
                 direction === 'outbound' ? 1 : 0,
@@ -593,14 +620,16 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
         },
 
         streamReset: (connectionId: number, streamId: number) => {
-            instance.exports.stream_reset(connectionId, streamId);
+            if (!state.instance)
+                return;
+            state.instance.exports.stream_reset(connectionId, streamId);
         },
 
         setPeriodicallyYield: (y: boolean) => {
             if (y) {
-                yieldThresholdMs.value = 5;
+                state.yieldThresholdMs = 5;
             } else {
-                yieldThresholdMs.value = 2000;
+                state.yieldThresholdMs = 2000;
             }
         },
     };
