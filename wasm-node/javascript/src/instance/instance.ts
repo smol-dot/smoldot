@@ -317,6 +317,8 @@ export function start<A>(configMessage: Config, platformBindings: PlatformBindin
                     case "wasm-panic": {
                         // TODO: consider obtaining a backtrace here
                         crashError.error = new CrashError(event.message);
+                        connections.forEach((connec) => connec.reset());
+                        connections.clear();
                         if (!printError.printError)
                             return;
                         console.error(
