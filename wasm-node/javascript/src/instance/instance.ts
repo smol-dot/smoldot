@@ -299,112 +299,6 @@ export function start<A>(configMessage: Config, platformBindings: PlatformBindin
         // Start initialization of the Wasm VM.
         const config: instance.Config<A> = {
             envVars: [],
-            eventCallback: (event) => {
-                switch (event.ty) {
-                    case "wasm-panic": {
-                        // TODO: consider obtaining a backtrace here
-                        crashError.error = new CrashError(event.message);
-                        connections.forEach((connec) => connec.reset());
-                        connections.clear();
-                        if (!printError.printError)
-                            return;
-                        console.error(
-                            "Smoldot has panicked" +
-                            (currentTask.name ? (" while executing task `" + currentTask.name + "`") : "") +
-                            ". This is a bug in smoldot. Please open an issue at " +
-                            "https://github.com/smol-dot/smoldot/issues with the following message:\n" +
-                            event.message
-                        );
-                        for (const chain of Array.from(chains.values())) {
-                            for (const promise of chain.jsonRpcResponsesPromises) {
-                                promise.reject(crashError.error)
-                            }
-                            chain.jsonRpcResponsesPromises = [];
-                        }
-                        break
-                    }
-                    case "log": {
-                        configMessage.logCallback(event.level, event.target, event.message)
-                        break;
-                    }
-                    case "json-rpc-responses-non-empty": {
-                        // Notify every single promise found in `jsonRpcResponsesPromises`.
-                        const promises = chains.get(event.chainId)!.jsonRpcResponsesPromises;
-                        while (promises.length !== 0) {
-                            promises.shift()!.resolve();
-                        }
-                        break;
-                    }
-                    case "current-task": {
-                        currentTask.name = event.taskName;
-                        break;
-                    }
-                    case "new-connection": {
-                        const connectionId = event.connectionId;
-                        connections.set(connectionId, platformBindings.connect({
-                            address: event.address,
-                            onConnectionReset(message) {
-                                if (!state.initialized)
-                                    throw new Error();
-                                connections.delete(connectionId);
-                                state.instance.connectionReset(connectionId, message);
-                            },
-                            onMessage(message, streamId) {
-                                if (!state.initialized)
-                                    throw new Error();
-                                state.instance.streamMessage(connectionId, message, streamId);
-                            },
-                            onStreamOpened(streamId, direction, initialWritableBytes) {
-                                if (!state.initialized)
-                                    throw new Error();
-                                state.instance.streamOpened(connectionId, streamId, direction, initialWritableBytes);
-                            },
-                            onOpen(info) {
-                                if (!state.initialized)
-                                    throw new Error();
-                                state.instance.connectionOpened(connectionId, info);
-                            },
-                            onWritableBytes(numExtra, streamId) {
-                                if (!state.initialized)
-                                    throw new Error();
-                                state.instance.streamWritableBytes(connectionId, numExtra, streamId);
-                            },
-                            onStreamReset(streamId) {
-                                if (!state.initialized)
-                                    throw new Error();
-                                state.instance.streamReset(connectionId, streamId);
-                            },
-                        }));
-                        break;
-                    }
-                    case "connection-reset": {
-                        const connection = connections.get(event.connectionId)!;
-                        connection.reset();
-                        connections.delete(event.connectionId);
-                        break;
-                    }
-                    case "connection-stream-open": {
-                        const connection = connections.get(event.connectionId)!;
-                        connection.openOutSubstream();
-                        break;
-                    }
-                    case "connection-stream-reset": {
-                        const connection = connections.get(event.connectionId)!;
-                        connection.reset(event.streamId);
-                        break;
-                    }
-                    case "stream-send": {
-                        const connection = connections.get(event.connectionId)!;
-                        connection.send(event.data, event.streamId);
-                        break;
-                    }
-                    case "stream-send-close": {
-                        const connection = connections.get(event.connectionId)!;
-                        connection.closeSend(event.streamId);
-                        break;
-                    }
-                }
-            },
             parseMultiaddr: platformBindings.parseMultiaddr,
             getRandomValues: platformBindings.getRandomValues,
             performanceNow: platformBindings.performanceNow,
@@ -413,7 +307,114 @@ export function start<A>(configMessage: Config, platformBindings: PlatformBindin
             maxLogLevel: configMessage.maxLogLevel,
         };
 
-        return await instance.startInstance(config)
+        const eventCallback = (event: instance.Event<A>) => {
+            switch (event.ty) {
+                case "wasm-panic": {
+                    // TODO: consider obtaining a backtrace here
+                    crashError.error = new CrashError(event.message);
+                    connections.forEach((connec) => connec.reset());
+                    connections.clear();
+                    if (!printError.printError)
+                        return;
+                    console.error(
+                        "Smoldot has panicked" +
+                        (currentTask.name ? (" while executing task `" + currentTask.name + "`") : "") +
+                        ". This is a bug in smoldot. Please open an issue at " +
+                        "https://github.com/smol-dot/smoldot/issues with the following message:\n" +
+                        event.message
+                    );
+                    for (const chain of Array.from(chains.values())) {
+                        for (const promise of chain.jsonRpcResponsesPromises) {
+                            promise.reject(crashError.error)
+                        }
+                        chain.jsonRpcResponsesPromises = [];
+                    }
+                    break
+                }
+                case "log": {
+                    configMessage.logCallback(event.level, event.target, event.message)
+                    break;
+                }
+                case "json-rpc-responses-non-empty": {
+                    // Notify every single promise found in `jsonRpcResponsesPromises`.
+                    const promises = chains.get(event.chainId)!.jsonRpcResponsesPromises;
+                    while (promises.length !== 0) {
+                        promises.shift()!.resolve();
+                    }
+                    break;
+                }
+                case "current-task": {
+                    currentTask.name = event.taskName;
+                    break;
+                }
+                case "new-connection": {
+                    const connectionId = event.connectionId;
+                    connections.set(connectionId, platformBindings.connect({
+                        address: event.address,
+                        onConnectionReset(message) {
+                            if (!state.initialized)
+                                throw new Error();
+                            connections.delete(connectionId);
+                            state.instance.connectionReset(connectionId, message);
+                        },
+                        onMessage(message, streamId) {
+                            if (!state.initialized)
+                                throw new Error();
+                            state.instance.streamMessage(connectionId, message, streamId);
+                        },
+                        onStreamOpened(streamId, direction, initialWritableBytes) {
+                            if (!state.initialized)
+                                throw new Error();
+                            state.instance.streamOpened(connectionId, streamId, direction, initialWritableBytes);
+                        },
+                        onOpen(info) {
+                            if (!state.initialized)
+                                throw new Error();
+                            state.instance.connectionOpened(connectionId, info);
+                        },
+                        onWritableBytes(numExtra, streamId) {
+                            if (!state.initialized)
+                                throw new Error();
+                            state.instance.streamWritableBytes(connectionId, numExtra, streamId);
+                        },
+                        onStreamReset(streamId) {
+                            if (!state.initialized)
+                                throw new Error();
+                            state.instance.streamReset(connectionId, streamId);
+                        },
+                    }));
+                    break;
+                }
+                case "connection-reset": {
+                    const connection = connections.get(event.connectionId)!;
+                    connection.reset();
+                    connections.delete(event.connectionId);
+                    break;
+                }
+                case "connection-stream-open": {
+                    const connection = connections.get(event.connectionId)!;
+                    connection.openOutSubstream();
+                    break;
+                }
+                case "connection-stream-reset": {
+                    const connection = connections.get(event.connectionId)!;
+                    connection.reset(event.streamId);
+                    break;
+                }
+                case "stream-send": {
+                    const connection = connections.get(event.connectionId)!;
+                    connection.send(event.data, event.streamId);
+                    break;
+                }
+                case "stream-send-close": {
+                    const connection = connections.get(event.connectionId)!;
+                    connection.closeSend(event.streamId);
+                    break;
+                }
+            }
+        };
+
+        return await instance.startInstance(config, eventCallback)
     })();
 
     state = {
