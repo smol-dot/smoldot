@@ -18,17 +18,9 @@
 import * as buffer from './buffer.js';
 
 /**
- * Configuration for {@link startInstance}.
+ * Configuration for {@link startLocalInstance}.
  */
 export interface Config<A> {
-    /**
-     * Called whenever something happens in the instance.
-     *
-     * This callback can be called at any point, or while a function of the `Instance` is being
-     * called.
-     */
-    eventCallback: (event: Event<A>) => void,
-
     /**
      * Parses the given multiaddress.
      */
@@ -67,7 +59,9 @@ export interface Config<A> {
     getRandomValues: (buffer: Uint8Array) => void,
 }
 
-type Event<A> =
+export type Event<A> =
+    { ty: "add-chain-result", success: true, chainId: number } |
+    { ty: "add-chain-result", success: false, error: string } |
     { ty: "log", level: number, target: string, message: string } |
     { ty: "json-rpc-responses-non-empty", chainId: number } |
     { ty: "current-task", taskName: string | null } |
@@ -82,7 +76,7 @@ type Event<A> =
 export interface Instance {
     request: (request: string, chainId: number) => number,
     peekJsonRpcResponse: (chainId: number) => string | null,
-    addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean) => { success: true, chainId: number } | { success: false, error: string },
+    addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean) => void,
     removeChain: (chainId: number) => void,
     startShutdown: () => void,
     connectionOpened: (connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number, writeClosable: boolean } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateMultihash: Uint8Array, remoteTlsCertificateMultihash: Uint8Array }) => void,
@@ -105,7 +99,7 @@ export interface Instance {
  * This instance is low-level in the sense that invalid input can lead to crashes and that input
  * isn't sanitized. In other words, you know what you're doing.
  */
-export async function startInstance<A>(config: Config<A>): Promise<Instance> {
+export async function startLocalInstance<A>(config: Config<A>, eventCallback: (event: Event<A>) => void): Promise<Instance> {
     const state: {
         // Null before initialization and after a panic.
         instance: SmoldotWasmInstance | null
@@ -132,7 +126,7 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
             len >>>= 0;
 
             const message = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), ptr, len);
-            config.eventCallback({ ty: "wasm-panic", message });
+            eventCallback({ ty: "wasm-panic", message });
             throw new Error();
         },
 
@@ -158,7 +152,7 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
         // Used by the Rust side to notify that a JSON-RPC response or subscription notification
         // is available in the queue of JSON-RPC responses.
         json_rpc_responses_non_empty: (chainId: number) => {
-            config.eventCallback({ ty: "json-rpc-responses-non-empty", chainId });
+            eventCallback({ ty: "json-rpc-responses-non-empty", chainId });
         },
 
         // Used by the Rust side to emit a log entry.
@@ -174,7 +168,7 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
             const mem = new Uint8Array(instance.exports.memory.buffer);
             let target = buffer.utf8BytesToString(mem, targetPtr, targetLen);
             let message = buffer.utf8BytesToString(mem, messagePtr, messageLen);
-            config.eventCallback({ ty: "log", level, message, target });
+            eventCallback({ ty: "log", level, message, target });
         },
 
         // Must call `timer_finished` after the given number of milliseconds has elapsed.
@@ -220,7 +214,7 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
             const address = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), addrPtr, addrLen);
             const result = config.parseMultiaddr(address);
             if (result.success) {
-                config.eventCallback({ ty: "new-connection", connectionId, address: result.address });
+                eventCallback({ ty: "new-connection", connectionId, address: result.address });
                 return 0
             } else {
                 const mem = new Uint8Array(instance.exports.memory.buffer);
@@ -233,17 +227,17 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
 
         // Must close and destroy the connection object.
         reset_connection: (connectionId: number) => {
-            config.eventCallback({ ty: "connection-reset", connectionId });
+            eventCallback({ ty: "connection-reset", connectionId });
         },
 
         // Opens a new substream on a multi-stream connection.
         connection_stream_open: (connectionId: number) => {
-            config.eventCallback({ ty: "connection-stream-open", connectionId });
+            eventCallback({ ty: "connection-stream-open", connectionId });
         },
 
         // Closes a substream on a multi-stream connection.
         connection_stream_reset: (connectionId: number, streamId: number) => {
-            config.eventCallback({ ty: "connection-stream-reset", connectionId, streamId });
+            eventCallback({ ty: "connection-stream-reset", connectionId, streamId });
         },
 
         // Must queue the data found in the WebAssembly memory at the given pointer. It is assumed
@@ -256,12 +250,12 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
 
             const data = new Uint8Array(instance.exports.memory.buffer).slice(ptr, ptr + len);
             // TODO: docs says the streamId is provided only for multi-stream connections, but here it's always provided
-            config.eventCallback({ ty: "stream-send", connectionId, streamId, data });
+            eventCallback({ ty: "stream-send", connectionId, streamId, data });
         },
 
         stream_send_close: (connectionId: number, streamId: number) => {
             // TODO: docs says the streamId is provided only for multi-stream connections, but here it's always provided
-            config.eventCallback({ ty: "stream-send-close", connectionId, streamId });
+            eventCallback({ ty: "stream-send-close", connectionId, streamId });
         },
 
         current_task_entered: (ptr: number, len: number) => {
@@ -269,11 +263,11 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
             len >>>= 0;
 
             const taskName = buffer.utf8BytesToString(new Uint8Array(state.instance!.exports.memory.buffer), ptr, len);
-            config.eventCallback({ ty: "current-task", taskName });
+            eventCallback({ ty: "current-task", taskName });
         },
 
         current_task_exit: () => {
-            config.eventCallback({ ty: "current-task", taskName: null });
+            eventCallback({ ty: "current-task", taskName: null });
         }
     };
 
@@ -399,7 +393,7 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
         // Used by Rust in catastrophic situations, such as a double panic.
         proc_exit: (retCode: number) => {
             state.instance = null;
-            config.eventCallback({ ty: "wasm-panic", message: `proc_exit called: ${retCode}` });
+            eventCallback({ ty: "wasm-panic", message: `proc_exit called: ${retCode}` });
             throw new Error();
         },
 
@@ -556,9 +550,11 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
             }
         },
 
-        addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean): { success: true, chainId: number } | { success: false, error: string } => {
-            if (!state.instance)
-                return { success: false, error: "Smoldot has crashed" };
+        addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean) => {
+            if (!state.instance) {
+                eventCallback({ ty: "add-chain-result", success: false, error: "Smoldot has crashed" });
+                return;
+            }
 
             // `add_chain` unconditionally allocates a chain id. If an error occurs, however, this chain
             // id will refer to an *erroneous* chain. `chain_is_ok` is used below to determine whether it
@@ -577,13 +573,13 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
             delete state.bufferIndices[2]
 
             if (state.instance.exports.chain_is_ok(chainId) != 0) {
-                return { success: true, chainId };
+                eventCallback({ ty: "add-chain-result", success: true, chainId });
             } else {
                 const errorMsgLen = state.instance.exports.chain_error_len(chainId) >>> 0;
                 const errorMsgPtr = state.instance.exports.chain_error_ptr(chainId) >>> 0;
                 const errorMsg = buffer.utf8BytesToString(new Uint8Array(state.instance.exports.memory.buffer), errorMsgPtr, errorMsgLen);
                 state.instance.exports.remove_chain(chainId);
-                return { success: false, error: errorMsg };
+                eventCallback({ ty: "add-chain-result", success: false, error: errorMsg });
             }
         },
 
