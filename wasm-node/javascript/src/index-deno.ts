@@ -50,9 +50,6 @@ export function start(options?: ClientOptions): Client {
     const wasmModule = zlibInflate(trustedBase64Decode(wasmBase64)).then(((bytecode) => WebAssembly.compile(bytecode)));
 
     return innerStart<ParsedAddress>(options || {}, wasmModule, {
-        registerShouldPeriodicallyYield: (_callback) => {
-            return [true, () => { }]
-        },
         performanceNow: () => {
             return performance.now()
         },

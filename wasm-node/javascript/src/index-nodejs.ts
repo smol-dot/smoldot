@@ -61,9 +61,6 @@ export function start(options?: ClientOptions): Client {
     const wasmModule = WebAssembly.compile(inflate(Buffer.from(wasmBase64, 'base64')));
 
     return innerStart<ParsedAddress>(options || {}, wasmModule, {
-        registerShouldPeriodicallyYield: (_callback) => {
-            return [true, () => { }]
-        },
         performanceNow: () => {
             return performance.now()
         },

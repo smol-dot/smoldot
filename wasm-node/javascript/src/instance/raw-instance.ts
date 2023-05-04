@@ -52,17 +52,6 @@ export interface Config<A> {
     cpuRateLimit: number,
 
     /**
-     * If `true`, the execution should yield back execution to the JS engine more frequently than
-     * if `false`. Because the yielding is performed using `setTimeout`, this is actually a way
-     * to indicate whether `setTimeout` behaves as expected. If `setTimeout` has a minimum
-     * threshold, then `false` should actually be passed in order to prevent the execution from
-     * being disrupted.
-     *
-     * The value can be changed later with `Instance.setPeriodicallyYield`.
-     */
-    periodicallyYield: boolean,
-
-    /**
      * Environment variables that the instance can pull.
      */
     envVars: string[],
@@ -102,7 +91,6 @@ export interface Instance {
     streamMessage: (connectionId: number, message: Uint8Array, streamId?: number) => void,
     streamOpened: (connectionId: number, streamId: number, direction: 'inbound' | 'outbound', initialWritableBytes: number) => void,
     streamReset: (connectionId: number, streamId: number) => void,
-    setPeriodicallyYield: (y: boolean) => void,
 }
 
 /**
@@ -123,14 +111,12 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
         instance: SmoldotWasmInstance | null
         bufferIndices: Uint8Array[],
         advanceExecutionPromise: null | (() => void),
-        yieldThresholdMs: number,
         stdoutBuffer: string,
         stderrBuffer: string,
     } = {
         instance: null,
         bufferIndices: new Array(),
         advanceExecutionPromise: null,
-        yieldThresholdMs: config.periodicallyYield ? 5 : 2000,
         stdoutBuffer: "",
         stderrBuffer: "",
     };
@@ -512,7 +498,7 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
             const sleep = elapsed * (1.0 / cpuRateLimit - 1.0);
             missingSleep += sleep;
 
-            if (missingSleep > state.yieldThresholdMs) {
+            if (missingSleep > 5) {
                 // `setTimeout` has a maximum value, after which it will overflow. 🤦
                 // See <https://developer.mozilla.org/en-US/docs/Web/API/setTimeout#maximum_delay_value>
                 // While adding a cap technically skews the CPU rate limiting algorithm, we don't
@@ -520,15 +506,24 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
                 if (missingSleep > 2147483646)  // Doc says `> 2147483647`, but I don't really trust their pedanticism so let's be safe
                     missingSleep = 2147483646;
                 await new Promise((resolve) => setTimeout(resolve, missingSleep));
-                missingSleep = 0;
             }
 
             await whenReadyAgain;
 
             const afterWait = config.performanceNow();
+
+            // `afterWait - now` is equal to how long we've waited for the `setTimeout` callback to
+            // trigger. While in principle `afterWait - now` should be roughly equal to
+            // `missingSleep`, in reality `setTimeout` can take much longer than the parameter
+            // provided. See <https://developer.mozilla.org/en-US/docs/Web/API/setTimeout#timeouts_in_inactive_tabs>.
+            // For this reason, `missingSleep` can become negative here. This is intended.
+            // However, we don't want to accumulate too much sleep. There should be a maximum
+            // amount of time during which the CPU executes without yielding. For this reason, we
+            // add a minimum bound for `missingSleep`.
             missingSleep -= (afterWait - now);
-            if (missingSleep < 0)
-                missingSleep = 0;
+            if (missingSleep < -10000)
+                missingSleep = -10000;
+
             now = afterWait;
         }
     })();
@@ -666,14 +661,6 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
             if (!state.instance)
                 return;
             state.instance.exports.stream_reset(connectionId, streamId);
-        },
-
-        setPeriodicallyYield: (y: boolean) => {
-            if (y) {
-                state.yieldThresholdMs = 5;
-            } else {
-                state.yieldThresholdMs = 2000;
-            }
         },
     };
 }
