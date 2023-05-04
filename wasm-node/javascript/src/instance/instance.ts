@@ -260,12 +260,6 @@ export function start<A>(configMessage: Config, platformBindings: PlatformBindin
         jsonRpcResponsesPromises: JsonRpcResponsesPromise[],
     }> = new Map();
 
-    // Extract (to make sure the value doesn't change) and sanitize `cpuRateLimit`.
-    let cpuRateLimit = configMessage.cpuRateLimit;
-    if (isNaN(cpuRateLimit)) cpuRateLimit = 1.0;
-    if (cpuRateLimit > 1.0) cpuRateLimit = 1.0;
-    if (cpuRateLimit < 0.0) cpuRateLimit = 0.0;
-
     const initPromise = (async (): Promise<instance.Instance> => {
         const module = await configMessage.wasmModule;
 
@@ -276,7 +270,7 @@ export function start<A>(configMessage: Config, platformBindings: PlatformBindin
             getRandomValues: platformBindings.getRandomValues,
             performanceNow: platformBindings.performanceNow,
             wasmModule: module,
-            cpuRateLimit,
+            cpuRateLimit: configMessage.cpuRateLimit,
             maxLogLevel: configMessage.maxLogLevel,
         };
 

@@ -48,13 +48,19 @@ export function start<A>(options: ClientOptions, wasmModule: Promise<WebAssembly
     // All the functions of the public API check if this contains a value.
     const alreadyDestroyedError: { value: null | AlreadyDestroyedError } = { value: null };
 
+    // Extract (to make sure the value doesn't change) and sanitize `cpuRateLimit`.
+    let cpuRateLimit = options.cpuRateLimit || 1.0;
+    if (isNaN(cpuRateLimit)) cpuRateLimit = 1.0;
+    if (cpuRateLimit > 1.0) cpuRateLimit = 1.0;
+    if (cpuRateLimit < 0.0) cpuRateLimit = 0.0;
+
     const instance = startInstance({
         wasmModule,
         // Maximum level of log entries sent by the client.
         // 0 = Logging disabled, 1 = Error, 2 = Warn, 3 = Info, 4 = Debug, 5 = Trace
         maxLogLevel: options.maxLogLevel || 3,
         logCallback,
-        cpuRateLimit: options.cpuRateLimit || 1.0,
+        cpuRateLimit,
     }, platformBindings);
 
     return {
