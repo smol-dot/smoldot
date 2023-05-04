@@ -93,6 +93,14 @@ pub enum Event<TSubUd> {
         protocol_name: String,
     },
 
+    /// An inbound substream that is waiting for a call to [`SingleStream::accept_inbound`],
+    /// [`SingleStream::reject_inbound`], [`MultiStream::accept_inbound`], or
+    /// [`MultiStream::reject_inbound`] has been abruptly closed.
+    InboundNegotiatedCancel {
+        /// Identifier of the substream.
+        id: SubstreamId,
+    },
+
     /// An inbound substream that was previously accepted using [`SingleStream::accept_inbound`]
     /// or [`MultiStream::accept_inbound`] was closed by the remote or has generated an error.
     InboundAcceptedCancel {
