@@ -310,6 +310,7 @@ export function start<A>(configMessage: Config, platformBindings: PlatformBindin
 
         // Start initialization of the Wasm VM.
         const config: instance.Config<A> = {
+            envVars: [],
             periodicallyYield: periodicallyYieldInit,
             eventCallback: (event) => {
                 switch (event.ty) {

@@ -15,11 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { Config as SmoldotBindingsConfig, default as smoldotLightBindingsBuilder } from './bindings-smoldot-light.js';
-import { Config as WasiConfig, default as wasiBindingsBuilder } from './bindings-wasi.js';
-
 import * as buffer from './buffer.js';
-import { SmoldotWasmInstance } from './bindings.js';
 
 export interface Config<A> {
     eventCallback: (event: Event<A>) => void,
@@ -28,6 +24,7 @@ export interface Config<A> {
     maxLogLevel: number;
     cpuRateLimit: number,
     periodicallyYield: boolean,
+    envVars: string[],
 
     /**
      * Returns the number of milliseconds since an arbitrary epoch.
@@ -70,81 +67,366 @@ export interface Instance {
 export async function startInstance<A>(config: Config<A>): Promise<Instance> {
     let killAll: () => void;
 
+    const instanceStorage: { instance: SmoldotWasmInstance | null } = { instance: null };
     const bufferIndices = new Array;
     // Callback called when `advance_execution_ready` is called by the Rust code, if any.
     const advanceExecutionPromise: { value: null | (() => void) } = { value: null };
     const yieldThresholdMs = { value: config.periodicallyYield ? 5 : 2000 };
+    // Buffers holding temporary data being written by the Rust code to respectively stdout and
+    // stderr.
+    let stdoutBuffer = "";
+    let stderrBuffer = "";
 
-    // Used to bind with the smoldot-light bindings. See the `bindings-smoldot-light.js` file.
-    const smoldotJsConfig: SmoldotBindingsConfig<A> = {
-        bufferIndices,
-        onPanic: (message) => {
-            killAll();
+    const smoldotJsBindings = {
+        // Must exit with an error. A human-readable message can be found in the WebAssembly
+        // memory in the given buffer.
+        panic: (ptr: number, len: number) => {
+            const instance = instanceStorage.instance!;
+
+            ptr >>>= 0;
+            len >>>= 0;
+
+            const message = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), ptr, len);
             config.eventCallback({ ty: "wasm-panic", message });
             throw new Error();
         },
-        advanceExecutionReadyCallback: () => {
+
+        buffer_size: (bufferIndex: number) => {
+            const buf = bufferIndices[bufferIndex]!;
+            return buf.byteLength;
+        },
+
+        buffer_copy: (bufferIndex: number, targetPtr: number) => {
+            const instance = instanceStorage.instance!;
+            targetPtr = targetPtr >>> 0;
+
+            const buf = bufferIndices[bufferIndex]!;
+            new Uint8Array(instance.exports.memory.buffer).set(buf, targetPtr);
+        },
+
+        advance_execution_ready: () => {
             if (advanceExecutionPromise.value)
                 advanceExecutionPromise.value();
             advanceExecutionPromise.value = null;
         },
-        jsonRpcResponsesNonEmptyCallback: (chainId) => {
+
+        // Used by the Rust side to notify that a JSON-RPC response or subscription notification
+        // is available in the queue of JSON-RPC responses.
+        json_rpc_responses_non_empty: (chainId: number) => {
+            if (killedTracked.killed) return;
             config.eventCallback({ ty: "json-rpc-responses-non-empty", chainId });
         },
-        logCallback: (level, target, message) => {
+
+        // Used by the Rust side to emit a log entry.
+        // See also the `max_log_level` parameter in the configuration.
+        log: (level: number, targetPtr: number, targetLen: number, messagePtr: number, messageLen: number) => {
+            if (killedTracked.killed) return;
+
+            const instance = instanceStorage.instance!;
+
+            targetPtr >>>= 0;
+            targetLen >>>= 0;
+            messagePtr >>>= 0;
+            messageLen >>>= 0;
+
+            const mem = new Uint8Array(instance.exports.memory.buffer);
+            let target = buffer.utf8BytesToString(mem, targetPtr, targetLen);
+            let message = buffer.utf8BytesToString(mem, messagePtr, messageLen);
             config.eventCallback({ ty: "log", level, message, target });
         },
-        newConnection: (connectionId: number, address: A) => {
-            config.eventCallback({ ty: "new-connection", connectionId, address });
+
+        // Must call `timer_finished` after the given number of milliseconds has elapsed.
+        start_timer: (ms: number) => {
+            const instance = instanceStorage.instance!;
+
+            // In both NodeJS and browsers, if `setTimeout` is called with a value larger than
+            // 2147483647, the delay is for some reason instead set to 1.
+            // As mentioned in the documentation of `start_timer`, it is acceptable to end the
+            // timer before the given number of milliseconds has passed.
+            if (ms > 2147483647)
+                ms = 2147483647;
+
+            // In browsers, `setTimeout` works as expected when `ms` equals 0. However, NodeJS
+            // requires a minimum of 1 millisecond (if `0` is passed, it is automatically replaced
+            // with `1`) and wants you to use `setImmediate` instead.
+            if (ms < 1 && typeof setImmediate === "function") {
+                setImmediate(() => {
+                    if (killedTracked.killed) return;
+                    try {
+                        instance.exports.timer_finished();
+                    } catch (_error) { }
+                })
+            } else {
+                setTimeout(() => {
+                    if (killedTracked.killed) return;
+                    try {
+                        instance.exports.timer_finished();
+                    } catch (_error) { }
+                }, ms)
+            }
         },
-        connectionReset: (connectionId: number) => {
+
+        // Must create a new connection object. This implementation stores the created object in
+        // `connections`.
+        connection_new: (connectionId: number, addrPtr: number, addrLen: number, errorBufferIndexPtr: number) => {
+            const instance = instanceStorage.instance!;
+
+            addrPtr >>>= 0;
+            addrLen >>>= 0;
+            errorBufferIndexPtr >>>= 0;
+
+            const address = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), addrPtr, addrLen);
+            const result = config.parseMultiaddr(address);
+            if (result.success) {
+                config.eventCallback({ ty: "new-connection", connectionId, address: result.address });
+                return 0
+            } else {
+                const mem = new Uint8Array(instance.exports.memory.buffer);
+                bufferIndices[0] = new TextEncoder().encode(result.error)
+                buffer.writeUInt32LE(mem, errorBufferIndexPtr, 0);
+                buffer.writeUInt8(mem, errorBufferIndexPtr + 4, 1);  // TODO: remove isBadAddress param since it's always true
+                return 1;
+            }
+        },
+
+        // Must close and destroy the connection object.
+        reset_connection: (connectionId: number) => {
             config.eventCallback({ ty: "connection-reset", connectionId });
         },
-        connectionStreamOpen: (connectionId: number) => {
+
+        // Opens a new substream on a multi-stream connection.
+        connection_stream_open: (connectionId: number) => {
             config.eventCallback({ ty: "connection-stream-open", connectionId });
         },
-        connectionStreamReset: (connectionId: number, streamId: number) => {
+
+        // Closes a substream on a multi-stream connection.
+        connection_stream_reset: (connectionId: number, streamId: number) => {
             config.eventCallback({ ty: "connection-stream-reset", connectionId, streamId });
         },
-        streamSend: (connectionId: number, data: Uint8Array, streamId?: number) => {
+
+        // Must queue the data found in the WebAssembly memory at the given pointer. It is assumed
+        // that this function is called only when the connection is in an open state.
+        stream_send: (connectionId: number, streamId: number, ptr: number, len: number) => {
+            const instance = instanceStorage.instance!;
+
+            ptr >>>= 0;
+            len >>>= 0;
+
+            const data = new Uint8Array(instance.exports.memory.buffer).slice(ptr, ptr + len);
+            // TODO: docs says the streamId is provided only for multi-stream connections, but here it's always provided
             config.eventCallback({ ty: "stream-send", connectionId, streamId, data });
         },
-        streamSendClosed: (connectionId: number, streamId?: number) => {
+
+        stream_send_close: (connectionId: number, streamId: number) => {
+            // TODO: docs says the streamId is provided only for multi-stream connections, but here it's always provided
             config.eventCallback({ ty: "stream-send-close", connectionId, streamId });
         },
-        ...config
-    };
 
-    // Used to bind with the Wasi bindings. See the `bindings-wasi.js` file.
-    const wasiConfig: WasiConfig = {
-        envVars: [],
-        getRandomValues: config.getRandomValues,
-        performanceNow: config.performanceNow,
-        onProcExit: (retCode) => {
-            killAll();
-            config.eventCallback({ ty: "wasm-panic", message: `proc_exit called: ${retCode}` });
-            throw new Error();
+        current_task_entered: (ptr: number, len: number) => {
+            if (killedTracked.killed) return;
+
+            const instance = instanceStorage.instance!;
+
+            ptr >>>= 0;
+            len >>>= 0;
+
+            const taskName = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), ptr, len);
+            config.eventCallback({ ty: "current-task", taskName });
+        },
+
+        current_task_exit: () => {
+            if (killedTracked.killed) return;
+            config.eventCallback({ ty: "current-task", taskName: null });
         }
     };
 
-    const { imports: smoldotBindings, killAll: smoldotBindingsKillAll } =
-        smoldotLightBindingsBuilder(smoldotJsConfig);
+    const wasiBindings = {
+        // Need to fill the buffer described by `ptr` and `len` with random data.
+        // This data will be used in order to generate secrets. Do not use a dummy implementation!
+        random_get: (ptr: number, len: number) => {
+            const instance = instanceStorage.instance!;
 
-    killAll = smoldotBindingsKillAll;
+            ptr >>>= 0;
+            len >>>= 0;
+
+            const baseBuffer = new Uint8Array(instance.exports.memory.buffer)
+                .subarray(ptr, ptr + len);
+            for (let iter = 0; iter < len; iter += 65536) {
+                // `baseBuffer.subarray` automatically saturates at the end of the buffer
+                config.getRandomValues(baseBuffer.subarray(iter, iter + 65536))
+            }
+
+            return 0;
+        },
+
+        clock_time_get: (clockId: number, _precision: bigint, outPtr: number): number => {
+            // See <https://github.com/rust-lang/rust/blob/master/library/std/src/sys/wasi/time.rs>
+            // and <docs.rs/wasi/> for help.
+
+            const instance = instanceStorage.instance!;
+            const mem = new Uint8Array(instance.exports.memory.buffer);
+            outPtr >>>= 0;
+
+            // We ignore the precision, as it can't be implemented anyway.
+
+            switch (clockId) {
+                case 0: {
+                    // Realtime clock.
+                    const now = BigInt(Math.floor(Date.now())) * BigInt(1_000_000);
+                    buffer.writeUInt64LE(mem, outPtr, now)
+
+                    // Success.
+                    return 0;
+                }
+                case 1: {
+                    // Monotonic clock.
+                    const nowMs = config.performanceNow();
+                    const nowMsInt = Math.floor(nowMs);
+                    const now = BigInt(nowMsInt) * BigInt(1_000_000) +
+                        BigInt(Math.floor(((nowMs - nowMsInt) * 1_000_000)));
+                    buffer.writeUInt64LE(mem, outPtr, now)
+
+                    // Success.
+                    return 0;
+                }
+                default:
+                    // Return an `EINVAL` error.
+                    return 28
+            }
+        },
+
+        // Writing to a file descriptor is used in order to write to stdout/stderr.
+        fd_write: (fd: number, addr: number, num: number, outPtr: number) => {
+            const instance = instanceStorage.instance!;
+
+            outPtr >>>= 0;
+
+            // Only stdout and stderr are open for writing.
+            if (fd != 1 && fd != 2) {
+                return 8;
+            }
+
+            const mem = new Uint8Array(instance.exports.memory.buffer);
+
+            // `fd_write` passes a buffer containing itself a list of pointers and lengths to the
+            // actual buffers. See writev(2).
+            let toWrite = "";
+            let totalLength = 0;
+            for (let i = 0; i < num; i++) {
+                const buf = buffer.readUInt32LE(mem, addr + 4 * i * 2);
+                const bufLen = buffer.readUInt32LE(mem, addr + 4 * (i * 2 + 1));
+                toWrite += buffer.utf8BytesToString(mem, buf, bufLen);
+                totalLength += bufLen;
+            }
+
+            const flushBuffer = (string: string) => {
+                // As documented in the documentation of `println!`, lines are always split by a
+                // single `\n` in Rust.
+                while (true) {
+                    const index = string.indexOf('\n');
+                    if (index != -1) {
+                        // Note that it is questionnable to use `console.log` from within a
+                        // library. However this simply reflects the usage of `println!` in the
+                        // Rust code. In other words, it is `println!` that shouldn't be used in
+                        // the first place. The harm of not showing text printed with `println!`
+                        // at all is greater than the harm possibly caused by accidentally leaving
+                        // a `println!` in the code.
+                        console.log(string.substring(0, index));
+                        string = string.substring(index + 1);
+                    } else {
+                        return string;
+                    }
+                }
+            };
+
+            // Append the newly-written data to either `stdout_buffer` or `stderr_buffer`, and
+            // print their content if necessary.
+            if (fd == 1) {
+                stdoutBuffer += toWrite;
+                stdoutBuffer = flushBuffer(stdoutBuffer);
+            } else if (fd == 2) {
+                stderrBuffer += toWrite;
+                stderrBuffer = flushBuffer(stderrBuffer);
+            }
+
+            // Need to write in `out_ptr` how much data was "written".
+            buffer.writeUInt32LE(mem, outPtr, totalLength);
+            return 0;
+        },
+
+        // It's unclear how to properly implement yielding, but a no-op works fine as well.
+        sched_yield: () => {
+            return 0;
+        },
+
+        // Used by Rust in catastrophic situations, such as a double panic.
+        proc_exit: (retCode: number) => {
+            killAll();
+            config.eventCallback({ ty: "wasm-panic", message: `proc_exit called: ${retCode}` });
+            throw new Error();
+        },
+
+        // Return the number of environment variables and the total size of all environment
+        // variables. This is called in order to initialize buffers before `environ_get`.
+        environ_sizes_get: (argcOut: number, argvBufSizeOut: number) => {
+            const instance = instanceStorage.instance!;
+
+            argcOut >>>= 0;
+            argvBufSizeOut >>>= 0;
+
+            let totalLen = 0;
+            config.envVars.forEach(e => totalLen += new TextEncoder().encode(e).length + 1); // +1 for trailing \0
+
+            const mem = new Uint8Array(instance.exports.memory.buffer);
+            buffer.writeUInt32LE(mem, argcOut, config.envVars.length);
+            buffer.writeUInt32LE(mem, argvBufSizeOut, totalLen);
+            return 0;
+        },
+
+        // Write the environment variables to the given pointers.
+        // `argv` is a pointer to a buffer that must be overwritten with a list of pointers to
+        // environment variables, and `argvBuf` is a pointer to a buffer where to actually store
+        // the environment variables.
+        // The sizes of the buffers were determined by calling `environ_sizes_get`.
+        environ_get: (argv: number, argvBuf: number) => {
+            const instance = instanceStorage.instance!;
+
+            argv >>>= 0;
+            argvBuf >>>= 0;
+
+            const mem = new Uint8Array(instance.exports.memory.buffer);
+
+            let argvPos = 0;
+            let argvBufPos = 0;
+
+            config.envVars.forEach(envVar => {
+                const encoded = new TextEncoder().encode(envVar);
+
+                buffer.writeUInt32LE(mem, argv + argvPos, argvBuf + argvBufPos);
+                argvPos += 4;
+
+                mem.set(encoded, argvBuf + argvBufPos);
+                argvBufPos += encoded.length;
+                buffer.writeUInt8(mem, argvBuf + argvBufPos, 0);
+                argvBufPos += 1;
+            });
+
+            return 0;
+        },
+    };
 
     // Start the Wasm virtual machine.
     // The Rust code defines a list of imports that must be fulfilled by the environment. The second
     // parameter provides their implementations.
     const result = await WebAssembly.instantiate(config.wasmModule, {
         // The functions with the "smoldot" prefix are specific to smoldot.
-        "smoldot": smoldotBindings,
+        "smoldot": smoldotJsBindings,
         // As the Rust code is compiled for wasi, some more wasi-specific imports exist.
-        "wasi_snapshot_preview1": wasiBindingsBuilder(wasiConfig),
+        "wasi_snapshot_preview1": wasiBindings,
     });
 
     const instance = result as SmoldotWasmInstance;
-    smoldotJsConfig.instance = instance;
-    wasiConfig.instance = instance;
+    instanceStorage.instance = instance;
 
     // Smoldot requires an initial call to the `init` function in order to do its internal
     // configuration.
@@ -322,4 +604,37 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
             }
         },
     };
+}
+
+/**
+ * Interface that the Wasm module exports. Contains the functions that are exported by the Rust
+ * code.
+ *
+ * Must match the bindings found in the Rust code.
+ */
+export interface SmoldotWasmExports extends WebAssembly.Exports {
+    memory: WebAssembly.Memory,
+    init: (maxLogLevel: number) => void,
+    advance_execution: () => number,
+    start_shutdown: () => void,
+    add_chain: (chainSpecBufferIndex: number, databaseContentBufferIndex: number, jsonRpcRunning: number, potentialRelayChainsBufferIndex: number) => number;
+    remove_chain: (chainId: number) => void,
+    chain_is_ok: (chainId: number) => number,
+    chain_error_len: (chainId: number) => number,
+    chain_error_ptr: (chainId: number) => number,
+    json_rpc_send: (textBufferIndex: number, chainId: number) => number,
+    json_rpc_responses_peek: (chainId: number) => number,
+    json_rpc_responses_pop: (chainId: number) => void,
+    timer_finished: () => void,
+    connection_open_single_stream: (connectionId: number, handshakeTy: number, initialWritableBytes: number, writeClosable: number) => void,
+    connection_open_multi_stream: (connectionId: number, handshakeTyBufferIndex: number) => void,
+    stream_writable_bytes: (connectionId: number, streamId: number, numBytes: number) => void,
+    stream_message: (connectionId: number, streamId: number, bufferIndex: number) => void,
+    connection_stream_opened: (connectionId: number, streamId: number, outbound: number, initialWritableBytes: number) => void,
+    connection_reset: (connectionId: number, bufferIndex: number) => void,
+    stream_reset: (connectionId: number, streamId: number) => void,
+}
+
+export interface SmoldotWasmInstance extends WebAssembly.Instance {
+    readonly exports: SmoldotWasmExports;
 }
