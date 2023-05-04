@@ -19,7 +19,8 @@
 // bindings. JavaScript being JavaScript, some libraries (such as `websocket`) have issues working
 // with both at the same time.
 
-import { Client, ClientOptions, start as innerStart } from './client.js'
+import { Client, ClientOptions } from './public-types.js'
+import { start as innerStart } from './client.js'
 import { Connection, ConnectionConfig } from './instance/instance.js';
 import { default as wasmBase64 } from './instance/autogen/wasm.js';
 
@@ -42,7 +43,7 @@ export {
     QueueFullError,
     JsonRpcDisabledError,
     LogCallback
-} from './client.js';
+} from './public-types.js';
 
 /**
  * Initializes a new client. This is a pre-requisite to connecting to a blockchain.
