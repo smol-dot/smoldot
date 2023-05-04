@@ -119,15 +119,12 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
         // Used by the Rust side to notify that a JSON-RPC response or subscription notification
         // is available in the queue of JSON-RPC responses.
         json_rpc_responses_non_empty: (chainId: number) => {
-            if (!state.instance) return;
             config.eventCallback({ ty: "json-rpc-responses-non-empty", chainId });
         },
 
         // Used by the Rust side to emit a log entry.
         // See also the `max_log_level` parameter in the configuration.
         log: (level: number, targetPtr: number, targetLen: number, messagePtr: number, messageLen: number) => {
-            if (!state.instance) return;
-
             const instance = state.instance!;
 
             targetPtr >>>= 0;
@@ -229,17 +226,14 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
         },
 
         current_task_entered: (ptr: number, len: number) => {
-            if (!state.instance) return;
-
             ptr >>>= 0;
             len >>>= 0;
 
-            const taskName = buffer.utf8BytesToString(new Uint8Array(state.instance.exports.memory.buffer), ptr, len);
+            const taskName = buffer.utf8BytesToString(new Uint8Array(state.instance!.exports.memory.buffer), ptr, len);
             config.eventCallback({ ty: "current-task", taskName });
         },
 
         current_task_exit: () => {
-            if (!state.instance) return;
             config.eventCallback({ ty: "current-task", taskName: null });
         }
     };
