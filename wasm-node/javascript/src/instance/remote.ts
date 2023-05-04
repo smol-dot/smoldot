@@ -177,13 +177,20 @@ export async function startInstanceClient<A>(portToServer: MessagePort, eventCal
     };
 }
 
-export async function startInstanceServer<A>(config: instance.Config<A>, portToClient: MessagePort) {
+/**
+ * Returns a `Promise` that resolves when the instance shuts down. Since the function is also
+ * an asynchronous function, the actual return type is `Promise<Promise<void>>`. That is, the
+ * outer `Promise` yields once the instance starts, and the inner `Promise` yields once the
+ * instance shuts down.
+ */
+export async function startInstanceServer<A>(config: instance.Config<A>, portToClient: MessagePort): Promise<Promise<void>> {
     // TODO: detect port closing?
 
     const state: {
         instance: instance.Instance | null,
         connections: Map<number, Set<number>>,
         acceptedJsonRpcResponses: Map<number, number>,
+        onShutdown?: (() => void),
     } = {
         instance: null,
         connections: new Map(),
@@ -202,6 +209,8 @@ export async function startInstanceServer<A>(config: instance.Config<A>, portToC
                 state.instance = null;
                 state.connections.clear();
                 state.acceptedJsonRpcResponses.clear();
+                if (state.onShutdown)
+                    state.onShutdown();
                 break;
             }
             case "json-rpc-responses-non-empty": {
@@ -267,6 +276,8 @@ export async function startInstanceServer<A>(config: instance.Config<A>, portToC
                 break;
             }
             case "shutdown": {
+                if (state.onShutdown)
+                    state.onShutdown();
                 state.instance.startShutdown();
                 break;
             }
@@ -325,6 +336,11 @@ export async function startInstanceServer<A>(config: instance.Config<A>, portToC
             }
         }
     };
+
+    // The instance might already have crashed. Handle this situation.
+    if (!state.instance)
+        return Promise.resolve();
+    return new Promise((resolve) => state.onShutdown = resolve);
 }
 
 type ServerToClient<A> = Exclude<instance.Event<A>, { ty: "json-rpc-responses-non-empty", chainId: number }> |
