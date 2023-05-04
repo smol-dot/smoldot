@@ -20,7 +20,7 @@ import * as instance from './raw-instance.js';
 import { SmoldotWasmInstance } from './bindings.js';
 import { AlreadyDestroyedError } from '../client.js';
 
-export { PlatformBindings, ConnectionError, ConnectionConfig, Connection } from './raw-instance.js';
+export { PlatformBindings, ConnectionConfig, Connection } from './raw-instance.js';
 
 /**
  * Thrown in case the underlying client encounters an unexpected crash.
@@ -69,7 +69,7 @@ export interface Instance {
     startShutdown: () => void
 }
 
-export function start(configMessage: Config, platformBindings: instance.PlatformBindings): Instance {
+export function start<A>(configMessage: Config, platformBindings: instance.PlatformBindings<A>): Instance {
 
     // This variable represents the state of the instance, and serves two different purposes:
     //

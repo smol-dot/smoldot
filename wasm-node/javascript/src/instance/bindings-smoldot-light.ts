@@ -23,7 +23,7 @@
 import * as buffer from './buffer.js';
 import type { SmoldotWasmInstance } from './bindings.js';
 
-export interface Config {
+export interface Config<A> {
     instance?: SmoldotWasmInstance,
 
     /**
@@ -33,13 +33,14 @@ export interface Config {
      */
     bufferIndices: Array<Uint8Array>,
 
+    parseMultiaddr(address: string): { success: true, address: A } | { success: false, error: string };
+
     /**
      * Tries to open a new connection using the given configuration.
      *
      * @see Connection
-     * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
      */
-    connect(config: ConnectionConfig): Connection;
+    connect(config: ConnectionConfig<A>): Connection;
 
     /**
      * Closure to call when the Wasm instance calls `panic`.
@@ -145,14 +146,11 @@ export interface Connection {
  *
  * @see connect
  */
-export interface ConnectionConfig {
+export interface ConnectionConfig<A> {
     /**
-     * Multiaddress in string format that describes which node to try to connect to.
-     *
-     * Note that this address shouldn't be trusted. The value in this field might have been chosen
-     * by a potentially malicious peer.
+     * Output of a previous multiaddress parsing.
      */
-    address: string,
+    address: A,
 
     /**
      * Callback called when the connection transitions from the `Opening` to the `Open` state.
@@ -221,18 +219,7 @@ export interface ConnectionConfig {
     onMessage: (message: Uint8Array, streamId?: number) => void;
 }
 
-/**
- * Emitted by `connect` if the multiaddress couldn't be parsed or contains an invalid protocol.
- *
- * @see connect
- */
-export class ConnectionError extends Error {
-    constructor(message: string) {
-        super(message);
-    }
-}
-
-export default function (config: Config): { imports: WebAssembly.ModuleImports, killAll: () => void } {
+export default function<A>(config: Config<A>): { imports: WebAssembly.ModuleImports, killAll: () => void } {
     // Used below to store the list of all connections.
     // The indices within this array are chosen by the Rust code.
     let connections: Record<number, Connection> = {};
@@ -353,14 +340,15 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                 throw new Error("internal error: connection already allocated");
             }
 
-            try {
+            const address = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), addrPtr, addrLen);
+            const parseResult = config.parseMultiaddr(address);
+
+            if (parseResult.success) {
                 if (killedTracked.killed)
                     throw new Error("killAll invoked");
 
-                const address = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), addrPtr, addrLen);
-
                 const connec = config.connect({
-                    address,
+                    address: parseResult.address,
                     onOpen: (info) => {
                         if (killedTracked.killed) return;
                         try {
@@ -431,17 +419,11 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                 connections[connectionId] = connec;
                 return 0;
 
-            } catch (error) {
-                const isBadAddress = error instanceof ConnectionError;
-                let errorStr = "Unknown error";
-                if (error instanceof Error) {
-                    errorStr = error.toString();
-                }
-
+            } else {
                 const mem = new Uint8Array(instance.exports.memory.buffer);
-                config.bufferIndices[0] = new TextEncoder().encode(errorStr)
+                config.bufferIndices[0] = new TextEncoder().encode(parseResult.error)
                 buffer.writeUInt32LE(mem, errorBufferIndexPtr, 0);
-                buffer.writeUInt8(mem, errorBufferIndexPtr + 4, isBadAddress ? 1 : 0);
+                buffer.writeUInt8(mem, errorBufferIndexPtr + 4, 1); // TODO: remove isBadAddress param since it's always true
                 return 1;
             }
         },

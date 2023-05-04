@@ -20,7 +20,7 @@ import { Config as WasiConfig, default as wasiBindingsBuilder } from './bindings
 
 import { SmoldotWasmInstance } from './bindings.js';
 
-export { ConnectionConfig, ConnectionError, Connection } from './bindings-smoldot-light.js';
+export { ConnectionConfig, Connection } from './bindings-smoldot-light.js';
 
 export interface Config {
     /**
@@ -46,7 +46,7 @@ export interface Config {
 /**
  * Contains functions that the client will use when it needs to leverage the platform.
  */
-export interface PlatformBindings {
+export interface PlatformBindings<A> {
     /**
      * Returns the number of milliseconds since an arbitrary epoch.
      */
@@ -71,15 +71,23 @@ export interface PlatformBindings {
     registerShouldPeriodicallyYield: (callback: (newValue: boolean) => void) => [boolean, () => void],
 
     /**
+     * Parses a multiaddress in string format and, on success, returns an opaque object indicating
+     * the address. This object will later be passed back when connecting.
+     *
+     * Note that this address shouldn't be trusted. The value in this field might have been chosen
+     * by a potentially malicious peer.
+     */
+    parseMultiaddr(address: string): { success: true, address: A } | { success: false, error: string };
+
+    /**
      * Tries to open a new connection using the given configuration.
      *
      * @see Connection
-     * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
      */
-    connect(config: ConnectionConfig): Connection;
+    connect(config: ConnectionConfig<A>): Connection;
 }
 
-export async function startInstance(config: Config, platformBindings: PlatformBindings): Promise<[SmoldotWasmInstance, Array<Uint8Array>]> {
+export async function startInstance<A>(config: Config, platformBindings: PlatformBindings<A>): Promise<[SmoldotWasmInstance, Array<Uint8Array>]> {
     let killAll: () => void;
 
     const bufferIndices = new Array;
@@ -87,8 +95,9 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
     const advanceExecutionPromise: { value: null | (() => void) } = { value: null };
 
     // Used to bind with the smoldot-light bindings. See the `bindings-smoldot-light.js` file.
-    const smoldotJsConfig: SmoldotBindingsConfig = {
+    const smoldotJsConfig: SmoldotBindingsConfig<A> = {
         bufferIndices,
+        parseMultiaddr: platformBindings.parseMultiaddr,
         connect: platformBindings.connect,
         onPanic: (message) => {
             killAll();

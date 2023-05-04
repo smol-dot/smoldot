@@ -18,7 +18,7 @@
 /// <reference lib="dom" />
 
 import { Client, ClientOptions, start as innerStart } from './client.js'
-import { Connection, ConnectionError, ConnectionConfig } from './instance/instance.js';
+import { Connection, ConnectionConfig } from './instance/instance.js';
 import { classicDecode, multibaseBase64Decode } from './base64.js'
 import { inflate } from 'pako';
 import { default as wasmBase64 } from './instance/autogen/wasm.js';
@@ -53,7 +53,7 @@ export function start(options?: ClientOptions): Client {
     // cross-platform cross-bundler approach.
     const wasmModule = WebAssembly.compile(inflate(classicDecode(wasmBase64)));
 
-    return innerStart(options, wasmModule, {
+    return innerStart<ParsedAddress>(options, wasmModule, {
         registerShouldPeriodicallyYield: (callback) => {
             if (typeof document === 'undefined')   // We might be in a web worker.
                 return [false, () => { }];
@@ -80,17 +80,53 @@ export function start(options?: ClientOptions): Client {
                 buffer.set(tmpArray);
             }
         },
+        parseMultiaddr: (address) => {
+            // Attempt to parse the multiaddress.
+            // TODO: remove support for `/wss` in a long time (https://github.com/paritytech/smoldot/issues/1940)
+            const wsParsed = address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)\/(ws|wss|tls\/ws)$/);
+            const webRTCParsed = address.match(/^\/(ip4|ip6)\/(.*?)\/udp\/(.*?)\/webrtc-direct\/certhash\/(.*?)$/);
+        
+            if (wsParsed != null) {
+                const proto = (wsParsed[4] == 'ws') ? 'ws' : 'wss';
+                if (
+                    (proto == 'ws' && options?.forbidWs) ||
+                    (proto == 'ws' && wsParsed[2] != 'localhost' && wsParsed[2] != '127.0.0.1' && options?.forbidNonLocalWs) ||
+                    (proto == 'wss' && options?.forbidWss)
+                ) {
+                    return { success: false, error: 'Connection type not allowed' }
+                }
+        
+                const url = (wsParsed[1] == 'ip6') ?
+                    (proto + "://[" + wsParsed[2] + "]:" + wsParsed[3]) :
+                    (proto + "://" + wsParsed[2] + ":" + wsParsed[3]);
+
+                return { success: true, address: { ty: "websocket", url } }
+
+            } else if (webRTCParsed != null) {
+                const targetPort = webRTCParsed[3]!;
+                if (options?.forbidWebRtc || targetPort === '0') {
+                    return { success: false, error: 'Connection type not allowed' }
+                }
+        
+                const ipVersion = webRTCParsed[1] == 'ip4' ? '4' : '6';
+                const targetIp = webRTCParsed[2]!;
+                const remoteCertMultibase = webRTCParsed[4]!;
+
+                return { success: true, address: { ty: "webrtc", targetPort, ipVersion, targetIp, remoteCertMultibase } }
+
+            } else {
+                return { success: false, error: 'Unrecognized multiaddr format' }
+            }
+        },
         connect: (config) => {
-            return connect(
-                config,
-                options?.forbidWs || false,
-                options?.forbidNonLocalWs || false,
-                options?.forbidWss || false,
-                options?.forbidWebRtc || false
-            )
+            return connect(config)
         }
     })
 }
+
+type ParsedAddress =
+    { ty: "websocket", url: string } |
+    { ty: "webrtc", targetPort: string, ipVersion: string, targetIp: string, remoteCertMultibase: string }
 
 /**
  * Tries to open a new connection using the given configuration.
@@ -98,28 +134,9 @@ export function start(options?: ClientOptions): Client {
  * @see Connection
  * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
  */
-function connect(config: ConnectionConfig, forbidWs: boolean, forbidNonLocalWs: boolean, forbidWss: boolean, forbidWebRTC: boolean): Connection {
-    // Attempt to parse the multiaddress.
-    // TODO: remove support for `/wss` in a long time (https://github.com/paritytech/smoldot/issues/1940)
-    const wsParsed = config.address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)\/(ws|wss|tls\/ws)$/);
-
-    const webRTCParsed = config.address.match(/^\/(ip4|ip6)\/(.*?)\/udp\/(.*?)\/webrtc-direct\/certhash\/(.*?)$/);
-
-    if (wsParsed != null) {
-        const proto = (wsParsed[4] == 'ws') ? 'ws' : 'wss';
-        if (
-            (proto == 'ws' && forbidWs) ||
-            (proto == 'ws' && wsParsed[2] != 'localhost' && wsParsed[2] != '127.0.0.1' && forbidNonLocalWs) ||
-            (proto == 'wss' && forbidWss)
-        ) {
-            throw new ConnectionError('Connection type not allowed');
-        }
-
-        const url = (wsParsed[1] == 'ip6') ?
-            (proto + "://[" + wsParsed[2] + "]:" + wsParsed[3]) :
-            (proto + "://" + wsParsed[2] + ":" + wsParsed[3]);
-
-        const connection = new WebSocket(url);
+function connect(config: ConnectionConfig<ParsedAddress>): Connection {
+    if (config.address.ty === "websocket") {
+        const connection = new WebSocket(config.address.url);
         connection.binaryType = 'arraybuffer';
 
         const bufferedAmountCheck = { quenedUnreportedBytes: 0, nextTimeout: 10 };
@@ -180,15 +197,9 @@ function connect(config: ConnectionConfig, forbidWs: boolean, forbidNonLocalWs: 
             closeSend: (): void => { throw new Error('Wrong connection type') },
             openOutSubstream: () => { throw new Error('Wrong connection type') }
         };
-    } else if (webRTCParsed != null) {
-        const targetPort = webRTCParsed[3];
-        if (forbidWebRTC || targetPort === '0') {
-            throw new ConnectionError('Connection type not allowed');
-        }
-
-        const ipVersion = webRTCParsed[1] == 'ip4' ? '4' : '6';
-        const targetIp = webRTCParsed[2];
-        const remoteCertMultibase = webRTCParsed[4]!;
+    } else {
+        const { targetPort, ipVersion, targetIp, remoteCertMultibase } =
+            config.address;
 
         // The payload of `/certhash` is the hash of the self-generated certificate that the
         // server presents.
@@ -550,8 +561,6 @@ function connect(config: ConnectionConfig, forbidWs: boolean, forbidNonLocalWs: 
                 }
             }
         };
-    } else {
-        throw new ConnectionError('Unrecognized multiaddr format');
     }
 }
 
