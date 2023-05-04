@@ -17,7 +17,8 @@
 
 /// <reference lib="dom" />
 
-import { Client, ClientOptions, start as innerStart } from './client.js'
+import { Client, ClientOptions } from './public-types.js'
+import { start as innerStart } from './client.js'
 import { Connection, ConnectionConfig } from './instance/instance.js';
 import { classicDecode, multibaseBase64Decode } from './base64.js'
 import { inflate } from 'pako';
@@ -35,7 +36,7 @@ export {
     MalformedJsonRpcError,
     QueueFullError,
     LogCallback
-} from './client.js';
+} from './public-types.js';
 
 /**
  * Initializes a new client. This is a pre-requisite to connecting to a blockchain.

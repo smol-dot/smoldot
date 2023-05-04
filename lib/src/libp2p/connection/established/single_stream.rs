@@ -659,6 +659,9 @@ where
                 id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
                 protocol_name,
             },
+            substream::Event::InboundNegotiatedCancel => Event::InboundNegotiatedCancel {
+                id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
+            },
             substream::Event::RequestIn { request } => Event::RequestIn {
                 id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
                 request,

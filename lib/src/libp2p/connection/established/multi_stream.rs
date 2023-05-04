@@ -577,6 +577,10 @@ where
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
                 protocol_name,
             },
+            substream::Event::InboundNegotiatedCancel => Event::InboundAcceptedCancel {
+                id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
+                user_data: substream_user_data.take().unwrap(),
+            },
             substream::Event::RequestIn { request } => Event::RequestIn {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
                 request,

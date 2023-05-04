@@ -93,6 +93,16 @@ enum MultiStreamConnectionTaskInner<TNow, TSubId> {
         /// entry is added to this list. If the coordinator accepts or refuses a substream in this
         /// list, the acceptance/refusal is dismissed.
         notifications_in_open_cancel_acknowledgments: VecDeque<established::SubstreamId>,
+
+        /// After a `NotificationsInOpenCancel` is emitted by the connection, an
+        /// entry is added to this list. If the coordinator accepts or refuses a substream in this
+        /// list, the acceptance/refusal is dismissed.
+        // TODO: this works only because SubstreamIds aren't reused
+        inbound_negotiated_cancel_acknowledgments:
+            hashbrown::HashSet<established::SubstreamId, fnv::FnvBuildHasher>,
+
+        /// Messages about inbound accept cancellations to send back.
+        inbound_accept_cancel_events: VecDeque<established::SubstreamId>,
     },
 
     /// Connection has finished its shutdown. A [`ConnectionToCoordinatorInner::ShutdownFinished`]
@@ -205,6 +215,8 @@ where
                 outbound_substreams_map,
                 handshake_finished_message_to_send,
                 notifications_in_open_cancel_acknowledgments,
+                inbound_negotiated_cancel_acknowledgments,
+                inbound_accept_cancel_events,
                 ..
             } => {
                 if let Some(remote_peer_id) = handshake_finished_message_to_send.take() {
@@ -212,6 +224,17 @@ where
                         Some(self),
                         Some(ConnectionToCoordinator {
                             inner: ConnectionToCoordinatorInner::HandshakeFinished(remote_peer_id),
+                        }),
+                    );
+                }
+
+                if let Some(substream_id) = inbound_accept_cancel_events.pop_front() {
+                    return (
+                        Some(self),
+                        Some(ConnectionToCoordinator {
+                            inner: ConnectionToCoordinatorInner::InboundAcceptedCancel {
+                                _id: substream_id,
+                            },
                         }),
                     );
                 }
@@ -231,6 +254,10 @@ where
                     }
                     Some(established::Event::InboundNegotiated { id, protocol_name }) => {
                         Some(ConnectionToCoordinatorInner::InboundNegotiated { id, protocol_name })
+                    }
+                    Some(established::Event::InboundNegotiatedCancel { id, .. }) => {
+                        inbound_negotiated_cancel_acknowledgments.insert(id);
+                        None
                     }
                     Some(established::Event::InboundAcceptedCancel { id, .. }) => {
                         Some(ConnectionToCoordinatorInner::InboundAcceptedCancel { _id: id })
@@ -362,7 +389,12 @@ where
                     substream_id,
                     inbound_ty,
                 },
-                MultiStreamConnectionTaskInner::Established { established, .. },
+                MultiStreamConnectionTaskInner::Established {
+                    established,
+                    inbound_negotiated_cancel_acknowledgments,
+                    inbound_accept_cancel_events,
+                    ..
+                },
             ) => {
                 let (inbound_ty, protocol_index) = match inbound_ty {
                     InboundTy::Notifications {
@@ -382,15 +414,27 @@ where
                     InboundTy::Ping => (established::InboundTy::Ping, 0),
                 };
 
-                // TODO: /!\ will panic if substream is obsolete, instead just ignore the response
-                established.accept_inbound(substream_id, inbound_ty, either::Right(protocol_index));
+                if !inbound_negotiated_cancel_acknowledgments.remove(&substream_id) {
+                    established.accept_inbound(
+                        substream_id,
+                        inbound_ty,
+                        either::Right(protocol_index),
+                    );
+                } else {
+                    inbound_accept_cancel_events.push_back(substream_id)
+                }
             }
             (
                 CoordinatorToConnectionInner::RejectInbound { substream_id },
-                MultiStreamConnectionTaskInner::Established { established, .. },
+                MultiStreamConnectionTaskInner::Established {
+                    established,
+                    inbound_negotiated_cancel_acknowledgments,
+                    ..
+                },
             ) => {
-                // TODO: /!\ will panic if substream is obsolete, instead just ignore the response
-                established.reject_inbound(substream_id);
+                if !inbound_negotiated_cancel_acknowledgments.remove(&substream_id) {
+                    established.reject_inbound(substream_id);
+                }
             }
             (
                 CoordinatorToConnectionInner::StartRequest {
@@ -985,6 +1029,9 @@ where
                             notifications_in_open_cancel_acknowledgments: VecDeque::with_capacity(
                                 4,
                             ),
+                            inbound_negotiated_cancel_acknowledgments:
+                                hashbrown::HashSet::with_capacity_and_hasher(2, Default::default()),
+                            inbound_accept_cancel_events: VecDeque::with_capacity(2),
                         };
 
                         if handshake_substream_still_open {

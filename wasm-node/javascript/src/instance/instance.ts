@@ -16,36 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import * as instance from './raw-instance.js';
-import { AlreadyDestroyedError } from '../client.js';
-
-/**
- * Thrown in case the underlying client encounters an unexpected crash.
- *
- * This is always an internal bug in smoldot and is never supposed to happen.
- */
-export class CrashError extends Error {
-    constructor(message: string) {
-        super(message);
-    }
-}
-
-/**
- * Thrown in case a malformed JSON-RPC request is sent.
- */
-export class MalformedJsonRpcError extends Error {
-    constructor() {
-        super("JSON-RPC request is malformed");
-    }
-}
-
-/**
- * Thrown in case the buffer of JSON-RPC requests is full and cannot accept any more request.
- */
-export class QueueFullError extends Error {
-    constructor() {
-        super("JSON-RPC requests queue is full");
-    }
-}
+import { AlreadyDestroyedError, CrashError, MalformedJsonRpcError, QueueFullError } from '../public-types.js';
 
 /**
  * Connection to a remote node.
