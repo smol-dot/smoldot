@@ -22,10 +22,9 @@
 import { Client, ClientOptions } from './public-types.js'
 import { start as innerStart } from './client.js'
 import { Connection, ConnectionConfig } from './instance/instance.js';
-import { default as wasmBase64 } from './instance/autogen/wasm.js';
+import { compileModule } from './module-nodejs.js'
 
 import { WebSocket } from 'ws';
-import { inflate } from 'pako';
 
 import { performance } from 'node:perf_hooks';
 import { createConnection as nodeCreateConnection } from 'node:net';
@@ -55,13 +54,7 @@ export {
 export function start(options?: ClientOptions): Client {
     options = options || {};
 
-    // The actual Wasm bytecode is base64-decoded then deflate-decoded from a constant found in a
-    // different file.
-    // This is suboptimal compared to using `instantiateStreaming`, but it is the most
-    // cross-platform cross-bundler approach.
-    const wasmModule = WebAssembly.compile(inflate(Buffer.from(wasmBase64, 'base64')));
-
-    return innerStart<ParsedAddress>(options || {}, wasmModule, {
+    return innerStart<ParsedAddress>(options || {}, compileModule(), {
         performanceNow: () => {
             return performance.now()
         },
