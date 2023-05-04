@@ -282,6 +282,8 @@ export function start<A>(configMessage: Config, platformBindings: PlatformBindin
 
     const connections: Map<number, Connection> = new Map();
 
+    const addChainResults: Array<(outcome: { success: true, chainId: number } | { success: false, error: string }) => void> = new Array();
+
     // Contains the information of each chain that is currently alive.
     let chains: Map<number, {
         jsonRpcResponsesPromises: JsonRpcResponsesPromise[],
@@ -333,6 +335,10 @@ export function start<A>(configMessage: Config, platformBindings: PlatformBindin
                 }
                 case "log": {
                     configMessage.logCallback(event.level, event.target, event.message)
+                    break;
+                }
+                case "add-chain-result": {
+                    (addChainResults.shift()!)(event);
                     break;
                 }
                 case "json-rpc-responses-non-empty": {
@@ -493,12 +499,14 @@ export function start<A>(configMessage: Config, platformBindings: PlatformBindin
         },
 
         addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean): Promise<{ success: true, chainId: number } | { success: false, error: string }> => {
-            return queueOperation((instance) => {
+            return queueOperation(async (instance) => {
                 if (crashError.error)
                     throw crashError.error;
 
                 try {
-                    const result = instance.addChain(chainSpec, databaseContent, potentialRelayChains, disableJsonRpc);
+                    const promise = new Promise<{ success: true, chainId: number } | { success: false, error: string }>((resolve) => addChainResults.push(resolve));
+                    instance.addChain(chainSpec, databaseContent, potentialRelayChains, disableJsonRpc);
+                    const result = await promise;
                     if (result.success) {
                         console.assert(!chains.has(result.chainId));
                         chains.set(result.chainId, {
@@ -512,7 +520,7 @@ export function start<A>(configMessage: Config, platformBindings: PlatformBindin
                     console.assert(crashError.error);
                     throw crashError.error
                 }
-            })
+            }).then((p) => p)
         },
 
         removeChain: (chainId: number) => {

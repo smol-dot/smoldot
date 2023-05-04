@@ -60,6 +60,8 @@ export interface Config<A> {
 }
 
 export type Event<A> =
+    { ty: "add-chain-result", success: true, chainId: number } |
+    { ty: "add-chain-result", success: false, error: string } |
     { ty: "log", level: number, target: string, message: string } |
     { ty: "json-rpc-responses-non-empty", chainId: number } |
     { ty: "current-task", taskName: string | null } |
@@ -74,7 +76,7 @@ export type Event<A> =
 export interface Instance {
     request: (request: string, chainId: number) => number,
     peekJsonRpcResponse: (chainId: number) => string | null,
-    addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean) => { success: true, chainId: number } | { success: false, error: string },
+    addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean) => void,
     removeChain: (chainId: number) => void,
     startShutdown: () => void,
     connectionOpened: (connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number, writeClosable: boolean } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateMultihash: Uint8Array, remoteTlsCertificateMultihash: Uint8Array }) => void,
@@ -548,9 +550,11 @@ export async function startLocalInstance<A>(config: Config<A>, eventCallback: (e
             }
         },
 
-        addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean): { success: true, chainId: number } | { success: false, error: string } => {
-            if (!state.instance)
-                return { success: false, error: "Smoldot has crashed" };
+        addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean) => {
+            if (!state.instance) {
+                eventCallback({ ty: "add-chain-result", success: false, error: "Smoldot has crashed" });
+                return;
+            }
 
             // `add_chain` unconditionally allocates a chain id. If an error occurs, however, this chain
             // id will refer to an *erroneous* chain. `chain_is_ok` is used below to determine whether it
@@ -569,13 +573,13 @@ export async function startLocalInstance<A>(config: Config<A>, eventCallback: (e
             delete state.bufferIndices[2]
 
             if (state.instance.exports.chain_is_ok(chainId) != 0) {
-                return { success: true, chainId };
+                eventCallback({ ty: "add-chain-result", success: true, chainId });
             } else {
                 const errorMsgLen = state.instance.exports.chain_error_len(chainId) >>> 0;
                 const errorMsgPtr = state.instance.exports.chain_error_ptr(chainId) >>> 0;
                 const errorMsg = buffer.utf8BytesToString(new Uint8Array(state.instance.exports.memory.buffer), errorMsgPtr, errorMsgLen);
                 state.instance.exports.remove_chain(chainId);
-                return { success: false, error: errorMsg };
+                eventCallback({ ty: "add-chain-result", success: false, error: errorMsg });
             }
         },
 
