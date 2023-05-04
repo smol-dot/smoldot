@@ -483,15 +483,11 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
     state.instance.exports.init(config.maxLogLevel);
 
     (async () => {
+        const cpuRateLimit = config.cpuRateLimit;
+
         // In order to avoid calling `setTimeout` too often, we accumulate sleep up until
         // a certain threshold.
         let missingSleep = 0;
-
-        // Extract (to make sure the value doesn't change) and sanitize `cpuRateLimit`.
-        let cpuRateLimit = config.cpuRateLimit;
-        if (isNaN(cpuRateLimit)) cpuRateLimit = 1.0;
-        if (cpuRateLimit > 1.0) cpuRateLimit = 1.0;
-        if (cpuRateLimit < 0.0) cpuRateLimit = 0.0;
 
         let now = config.performanceNow();
 
