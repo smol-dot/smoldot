@@ -370,7 +370,7 @@ export interface AddChainOptions {
 // This function is similar to the `start` function found in `index.ts`, except with an extra
 // parameter containing the platform-specific bindings.
 // Contrary to the one within `index.js`, this function is not supposed to be directly used.
-export function start(options: ClientOptions, wasmModule: Promise<WebAssembly.Module>, platformBindings: PlatformBindings): Client {
+export function start<C>(options: ClientOptions, wasmModule: Promise<WebAssembly.Module>, platformBindings: PlatformBindings<C>): Client {
     const logCallback = options.logCallback || ((level, target, message) => {
         // The first parameter of the methods of `console` has some printf-like substitution
         // capabilities. We don't really need to use this, but not using it means that the logs might

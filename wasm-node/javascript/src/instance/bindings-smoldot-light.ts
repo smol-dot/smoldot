@@ -34,14 +34,6 @@ export interface Config {
     bufferIndices: Array<Uint8Array>,
 
     /**
-     * Tries to open a new connection using the given configuration.
-     *
-     * @see Connection
-     * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
-     */
-    connect(config: ConnectionConfig): Connection;
-
-    /**
      * Closure to call when the Wasm instance calls `panic`.
      *
      * This callback will always be invoked from within a binding called the Wasm instance.
@@ -52,202 +44,23 @@ export interface Config {
     jsonRpcResponsesNonEmptyCallback: (chainId: number) => void,
     advanceExecutionReadyCallback: () => void,
     currentTaskCallback?: (taskName: string | null) => void,
-}
 
-/**
- * Connection to a remote node.
- *
- * At any time, a connection can be in one of the three following states:
- *
- * - `Opening` (initial state)
- * - `Open`
- * - `Reset`
- *
- * When in the `Opening` or `Open` state, the connection can transition to the `Reset` state
- * if the remote closes the connection or refuses the connection altogether. When that
- * happens, `config.onReset` is called. Once in the `Reset` state, the connection cannot
- * transition back to another state.
- *
- * Initially in the `Opening` state, the connection can transition to the `Open` state if the
- * remote accepts the connection. When that happens, `config.onOpen` is called.
- *
- * When in the `Open` state, the connection can receive messages. When a message is received,
- * `config.onMessage` is called.
- *
- * @see connect
- */
-export interface Connection {
-    /**
-     * Transitions the connection or one of its substreams to the `Reset` state.
-     *
-     * If the connection is of type "single-stream", the whole connection must be shut down.
-     * If the connection is of type "multi-stream", a `streamId` can be provided, in which case
-     * only the given substream is shut down.
-     *
-     * The `config.onReset` or `config.onStreamReset` callbacks are **not** called.
-     *
-     * The transition is performed in the background.
-     * If the whole connection is to be shut down, none of the callbacks passed to the `Config`
-     * must be called again. If only a substream is shut down, the `onStreamReset` and `onMessage`
-     * callbacks must not be called again with that substream.
-     */
-    reset(streamId?: number): void;
-
-    /**
-     * Queues data to be sent on the given connection.
-     *
-     * The connection and stream must currently be in the `Open` state.
-     *
-     * The number of bytes must never exceed the number of "writable bytes" of the stream.
-     * `onWritableBytes` can be used in order to notify that more writable bytes are available.
-     *
-     * The `streamId` must be provided if and only if the connection is of type "multi-stream".
-     * It indicates which substream to send the data on.
-     *
-     * Must not be called after `closeSend` has been called.
-     */
-    send(data: Uint8Array, streamId?: number): void;
-
-    /**
-     * Closes the writing side of the given stream of the given connection.
-     *
-     * Never called for connection types where this isn't possible to implement (i.e. WebSocket
-     * and WebRTC at the moment).
-     *
-     * The connection and stream must currently be in the `Open` state.
-     *
-     * Implicitly sets the "writable bytes" of the stream to zero.
-     *
-     * The `streamId` must be provided if and only if the connection is of type "multi-stream".
-     * It indicates which substream to send the data on.
-     *
-     * Must only be called once per stream.
-     */
-    closeSend(streamId?: number): void;
-
-    /**
-     * Start opening an additional outbound substream on the given connection.
-     *
-     * The state of the connection must be `Open`. This function must only be called for
-     * connections of type "multi-stream".
-     *
-     * The `onStreamOpened` callback must later be called with an outbound direction.
-     * 
-     * Note that no mechanism exists in this API to handle the situation where a substream fails
-     * to open, as this is not supposed to happen. If you need to handle such a situation, either
-     * try again opening a substream again or reset the entire connection.
-     */
-    openOutSubstream(): void;
-}
-
-/**
- * Configuration for a connection.
- *
- * @see connect
- */
-export interface ConnectionConfig {
-    /**
-     * Multiaddress in string format that describes which node to try to connect to.
-     *
-     * Note that this address shouldn't be trusted. The value in this field might have been chosen
-     * by a potentially malicious peer.
-     */
-    address: string,
-
-    /**
-     * Callback called when the connection transitions from the `Opening` to the `Open` state.
-     *
-     * Must only be called once per connection.
-     */
-    onOpen: (info:
-        {
-            type: 'single-stream', handshake: 'multistream-select-noise-yamux',
-            initialWritableBytes: number, writeClosable: boolean
-        } |
-        {
-            type: 'multi-stream', handshake: 'webrtc',
-            localTlsCertificateMultihash: Uint8Array,
-            remoteTlsCertificateMultihash: Uint8Array,
-        }
-    ) => void;
-
-    /**
-     * Callback called when the connection transitions to the `Reset` state.
-     *
-     * It it **not** called if `Connection.reset` is manually called by the API user.
-     */
-    onConnectionReset: (message: string) => void;
-
-    /**
-     * Callback called when a new substream has been opened.
-     *
-     * This function must only be called for connections of type "multi-stream".
-     */
-    onStreamOpened: (streamId: number, direction: 'inbound' | 'outbound', initialWritableBytes: number) => void;
-
-    /**
-     * Callback called when a stream transitions to the `Reset` state.
-     *
-     * It it **not** called if `Connection.resetStream` is manually called by the API user.
-     *
-     * This function must only be called for connections of type "multi-stream".
-     */
-    onStreamReset: (streamId: number) => void;
-
-    /**
-     * Callback called when some data sent using {@link Connection.send} has effectively been
-     * written on the stream, meaning that some buffer space is now free.
-     *
-     * Can only happen while the connection is in the `Open` state.
-     *
-     * This callback must not be called after `closeSend` has been called.
-     *
-     * The `streamId` parameter must be provided if and only if the connection is of type
-     * "multi-stream".
-     *
-     * Only a number of bytes equal to the size of the data provided to {@link Connection.send}
-     * must be reported. In other words, the `initialWritableBytes` must never be exceeded.
-     */
-    onWritableBytes: (numExtra: number, streamId?: number) => void;
-
-    /**
-     * Callback called when a message sent by the remote has been received.
-     *
-     * Can only happen while the connection is in the `Open` state.
-     *
-     * The `streamId` parameter must be provided if and only if the connection is of type
-     * "multi-stream".
-     */
-    onMessage: (message: Uint8Array, streamId?: number) => void;
-}
-
-/**
- * Emitted by `connect` if the multiaddress couldn't be parsed or contains an invalid protocol.
- *
- * @see connect
- */
-export class ConnectionError extends Error {
-    constructor(message: string) {
-        super(message);
-    }
+    newConnection: (connectionId: number, address: string) => { success: true } | { success: false, error: string, isBadAddress: boolean },
+    connectionReset: (connectionId: number) => void,
+    connectionStreamOpened: (connectionId: number) => void,
+    connectionStreamReset: (connectionId: number, streamId: number) => void,
+    streamSent: (connectionId: number, data: Uint8Array, streamId?: number) => void,
+    streamSendClosed: (connectionId: number, streamId?: number) => void,
 }
 
 export default function (config: Config): { imports: WebAssembly.ModuleImports, killAll: () => void } {
-    // Used below to store the list of all connections.
-    // The indices within this array are chosen by the Rust code.
-    let connections: Record<number, Connection> = {};
-
     // Object containing a boolean indicating whether the `killAll` function has been invoked by
     // the user.
     const killedTracked = { killed: false };
 
     const killAll = () => {
         killedTracked.killed = true;
-        // TODO: kill timers as well?
-        for (const connection in connections) {
-            connections[connection]!.reset()
-            delete connections[connection]
-        }
+        // TODO: kill timers?
     };
 
     const imports = {
@@ -349,7 +162,20 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
             addrLen >>>= 0;
             errorBufferIndexPtr >>>= 0;
 
-            if (!!connections[connectionId]) {
+            const address = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), addrPtr, addrLen);
+
+            const result = config.newConnection(connectionId, address);
+            if (result.success) {
+                return 0
+            } else {
+                const mem = new Uint8Array(instance.exports.memory.buffer);
+                config.bufferIndices[0] = new TextEncoder().encode(result.error)
+                buffer.writeUInt32LE(mem, errorBufferIndexPtr, 0);
+                buffer.writeUInt8(mem, errorBufferIndexPtr + 4, result.isBadAddress ? 1 : 0);
+                return 1;
+            }
+
+            /*if (!!connections[connectionId]) {
                 throw new Error("internal error: connection already allocated");
             }
 
@@ -443,27 +269,22 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                 buffer.writeUInt32LE(mem, errorBufferIndexPtr, 0);
                 buffer.writeUInt8(mem, errorBufferIndexPtr + 4, isBadAddress ? 1 : 0);
                 return 1;
-            }
+            }*/
         },
 
         // Must close and destroy the connection object.
         reset_connection: (connectionId: number) => {
-            if (killedTracked.killed) return;
-            const connection = connections[connectionId]!;
-            connection.reset();
-            delete connections[connectionId];
+            config.connectionReset(connectionId);
         },
 
         // Opens a new substream on a multi-stream connection.
         connection_stream_open: (connectionId: number) => {
-            const connection = connections[connectionId]!;
-            connection.openOutSubstream()
+            config.connectionStreamOpened(connectionId);
         },
 
         // Closes a substream on a multi-stream connection.
         connection_stream_reset: (connectionId: number, streamId: number) => {
-            const connection = connections[connectionId]!;
-            connection.reset(streamId)
+            config.connectionStreamReset(connectionId, streamId);
         },
 
         // Must queue the data found in the WebAssembly memory at the given pointer. It is assumed
@@ -477,15 +298,11 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
             len >>>= 0;
 
             const data = new Uint8Array(instance.exports.memory.buffer).slice(ptr, ptr + len);
-            const connection = connections[connectionId]!;
-            connection.send(data, streamId);  // TODO: docs says the streamId is provided only for multi-stream connections, but here it's always provided
+            config.streamSent(connectionId, data, streamId); // TODO: docs says the streamId is provided only for multi-stream connections, but here it's always provided
         },
 
         stream_send_close: (connectionId: number, streamId: number) => {
-            if (killedTracked.killed) return;
-
-            const connection = connections[connectionId]!;
-            connection.closeSend(streamId);  // TODO: docs says the streamId is provided only for multi-stream connections, but here it's always provided
+            config.streamSendClosed(connectionId, streamId); // TODO: docs says the streamId is provided only for multi-stream connections, but here it's always provided
         },
 
         current_task_entered: (ptr: number, len: number) => {

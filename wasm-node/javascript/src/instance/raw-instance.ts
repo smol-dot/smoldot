@@ -15,27 +15,32 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { ConnectionConfig, Connection, Config as SmoldotBindingsConfig, default as smoldotLightBindingsBuilder } from './bindings-smoldot-light.js';
+import { Config as SmoldotBindingsConfig, default as smoldotLightBindingsBuilder } from './bindings-smoldot-light.js';
 import { Config as WasiConfig, default as wasiBindingsBuilder } from './bindings-wasi.js';
 
 import * as buffer from './buffer.js';
 import { SmoldotWasmInstance } from './bindings.js';
 
-export { ConnectionConfig, ConnectionError, Connection } from './bindings-smoldot-light.js';
-
-export interface Config {
-    eventCallback: (event: Event) => void,
+export interface Config<C> {
+    eventCallback: (event: Event<C>) => void,
+    parseMultiaddr: (address: string) => { success: true, address: C } | { success: false, error: string },
     platformBindings: PlatformBindings,
     wasmModule: WebAssembly.Module,
     maxLogLevel: number;
     cpuRateLimit: number,
 }
 
-type Event =
+type Event<C> =
     { ty: "log", level: number, target: string, message: string } |
     { ty: "json-rpc-responses-non-empty", chainId: number } |
     { ty: "current-task", taskName: string | null } |
-    { ty: "wasm-panic", message: string };
+    { ty: "wasm-panic", message: string } |
+    { ty: "new-connection", connectionId: number, address: C } |
+    { ty: "connection-reset", connectionId: number } |
+    { ty: "connection-stream-open", connectionId: number } |
+    { ty: "connection-stream-reset", connectionId: number, streamId: number } |
+    { ty: "stream-send", connectionId: number, streamId?: number, data: Uint8Array } |
+    { ty: "stream-send-close", connectionId: number, streamId?: number };
 
 /**
  * Contains functions that the client will use when it needs to leverage the platform.
@@ -63,14 +68,6 @@ export interface PlatformBindings {
      * the callback.
      */
     registerShouldPeriodicallyYield: (callback: (newValue: boolean) => void) => [boolean, () => void],
-
-    /**
-     * Tries to open a new connection using the given configuration.
-     *
-     * @see Connection
-     * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
-     */
-    connect(config: ConnectionConfig): Connection;
 }
 
 export interface Instance {
@@ -81,7 +78,7 @@ export interface Instance {
     startShutdown: () => void,
 }
 
-export async function startInstance(config: Config): Promise<Instance> {
+export async function startInstance<C>(config: Config<C>): Promise<Instance> {
     let killAll: () => void;
 
     const bufferIndices = new Array;
@@ -91,7 +88,6 @@ export async function startInstance(config: Config): Promise<Instance> {
     // Used to bind with the smoldot-light bindings. See the `bindings-smoldot-light.js` file.
     const smoldotJsConfig: SmoldotBindingsConfig = {
         bufferIndices,
-        connect: config.platformBindings.connect,
         onPanic: (message) => {
             killAll();
             config.eventCallback({ ty: "wasm-panic", message });
@@ -107,6 +103,28 @@ export async function startInstance(config: Config): Promise<Instance> {
         },
         logCallback: (level, target, message) => {
             config.eventCallback({ ty: "log", level, message, target });
+        },
+        newConnection: (connectionId: number, address: string) => {
+            const parsed = config.parseMultiaddr(address);
+            if (!parsed.success)
+                return { success: false, error: parsed.error, isBadAddress: true }  // TODO:  since this is always true could be removed
+            config.eventCallback({ ty: "new-connection", connectionId, address: parsed.address });
+            return { success: true }
+        },
+        connectionReset: (connectionId: number) => {
+            config.eventCallback({ ty: "connection-reset", connectionId });
+        },
+        connectionStreamOpened: (connectionId: number) => {
+            config.eventCallback({ ty: "connection-stream-open", connectionId });
+        },
+        connectionStreamReset: (connectionId: number, streamId: number) => {
+            config.eventCallback({ ty: "connection-stream-reset", connectionId, streamId });
+        },
+        streamSent: (connectionId: number, data: Uint8Array, streamId?: number) => {
+            config.eventCallback({ ty: "stream-send", connectionId, streamId, data });
+        },
+        streamSendClosed: (connectionId: number, streamId?: number) => {
+            config.eventCallback({ ty: "stream-send-close", connectionId, streamId });
         },
         ...config
     };

@@ -80,6 +80,9 @@ export function start(options?: ClientOptions): Client {
                 buffer.set(tmpArray);
             }
         },
+        parseMultiaddr: (address) => {
+            return { success: true, address };
+        },
         connect: (config) => {
             return connect(
                 config,
@@ -98,7 +101,7 @@ export function start(options?: ClientOptions): Client {
  * @see Connection
  * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
  */
-function connect(config: ConnectionConfig, forbidWs: boolean, forbidNonLocalWs: boolean, forbidWss: boolean, forbidWebRTC: boolean): Connection {
+function connect(config: ConnectionConfig<string>, forbidWs: boolean, forbidNonLocalWs: boolean, forbidWss: boolean, forbidWebRTC: boolean): Connection {
     // Attempt to parse the multiaddress.
     // TODO: remove support for `/wss` in a long time (https://github.com/paritytech/smoldot/issues/1940)
     const wsParsed = config.address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)\/(ws|wss|tls\/ws)$/);
