@@ -228,20 +228,24 @@ export function start<A>(options: ClientOptions, wasmModule: Promise<WebAssembly
         }
     });
 
-    // For each chain object returned by `addChain`, the associated internal chain id.
-    //
-    // Immediately cleared when `remove()` is called on a chain.
-    const chainIds: WeakMap<Chain, number> = new WeakMap();
-
-    // If `Client.terminate()̀  is called, this error is set to a value.
-    // All the functions of the public API check if this contains a value.
-    const alreadyDestroyedError: { value: null | AlreadyDestroyedError } = { value: null };
-
     // Extract (to make sure the value doesn't change) and sanitize `cpuRateLimit`.
     let cpuRateLimit = options.cpuRateLimit || 1.0;
     if (isNaN(cpuRateLimit)) cpuRateLimit = 1.0;
     if (cpuRateLimit > 1.0) cpuRateLimit = 1.0;
     if (cpuRateLimit < 0.0) cpuRateLimit = 0.0;
+
+    // This object holds the state of everything.
+    const state: {
+        // For each chain object returned by `addChain`, the associated internal chain id.
+        // Immediately cleared when `remove()` is called on a chain.
+        chainIds: WeakMap<Chain, number>,
+        // If `Client.terminate()̀  is called, this error is set to a value.
+        // All the functions of the public API check if this contains a value.
+        alreadyDestroyedError: null | AlreadyDestroyedError,
+    } = {
+        chainIds: new WeakMap(),
+        alreadyDestroyedError: null,
+    };
 
     const instance = startInstance({
         wasmModule,
@@ -254,8 +258,8 @@ export function start<A>(options: ClientOptions, wasmModule: Promise<WebAssembly
 
     return {
         addChain: async (options: AddChainOptions): Promise<Chain> => {
-            if (alreadyDestroyedError.value)
-                throw alreadyDestroyedError.value;
+            if (state.alreadyDestroyedError)
+                throw state.alreadyDestroyedError;
 
             // Passing a JSON object for the chain spec is an easy mistake, so we provide a more
             // readable error.
@@ -267,7 +271,7 @@ export function start<A>(options: ClientOptions, wasmModule: Promise<WebAssembly
                 for (const chain of options.potentialRelayChains) {
                     // The content of `options.potentialRelayChains` are supposed to be chains earlier
                     // returned by `addChain`.
-                    const id = chainIds.get(chain);
+                    const id = state.chainIds.get(chain);
                     if (id === undefined) // It is possible for `id` to be missing if it has earlier been removed.
                         continue;
                     potentialRelayChainsIds.push(id);
@@ -286,8 +290,8 @@ export function start<A>(options: ClientOptions, wasmModule: Promise<WebAssembly
             // Resolve the promise that `addChain` returned to the user.
             const newChain: Chain = {
                 sendJsonRpc: (request) => {
-                    if (alreadyDestroyedError.value)
-                        throw alreadyDestroyedError.value;
+                    if (state.alreadyDestroyedError)
+                        throw state.alreadyDestroyedError;
                     if (wasDestroyed.destroyed)
                         throw new AlreadyDestroyedError();
                     if (options.disableJsonRpc)
@@ -298,8 +302,8 @@ export function start<A>(options: ClientOptions, wasmModule: Promise<WebAssembly
                     instance.request(request, chainId);
                 },
                 nextJsonRpcResponse: () => {
-                    if (alreadyDestroyedError.value)
-                        return Promise.reject(alreadyDestroyedError.value);
+                    if (state.alreadyDestroyedError)
+                        return Promise.reject(state.alreadyDestroyedError);
                     if (wasDestroyed.destroyed)
                         return Promise.reject(new AlreadyDestroyedError());
                     if (options.disableJsonRpc)
@@ -307,24 +311,24 @@ export function start<A>(options: ClientOptions, wasmModule: Promise<WebAssembly
                     return instance.nextJsonRpcResponse(chainId);
                 },
                 remove: () => {
-                    if (alreadyDestroyedError.value)
-                        throw alreadyDestroyedError.value;
+                    if (state.alreadyDestroyedError)
+                        throw state.alreadyDestroyedError;
                     if (wasDestroyed.destroyed)
                         throw new AlreadyDestroyedError();
                     wasDestroyed.destroyed = true;
-                    console.assert(chainIds.has(newChain));
-                    chainIds.delete(newChain);
+                    console.assert(state.chainIds.has(newChain));
+                    state.chainIds.delete(newChain);
                     instance.removeChain(chainId);
                 },
             };
 
-            chainIds.set(newChain, chainId);
+            state.chainIds.set(newChain, chainId);
             return newChain;
         },
         terminate: async () => {
-            if (alreadyDestroyedError.value)
-                throw alreadyDestroyedError.value
-            alreadyDestroyedError.value = new AlreadyDestroyedError();
+            if (state.alreadyDestroyedError)
+                throw state.alreadyDestroyedError
+            state.alreadyDestroyedError = new AlreadyDestroyedError();
             instance.startShutdown()
         }
     }
