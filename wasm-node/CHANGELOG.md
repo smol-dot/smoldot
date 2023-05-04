@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- When in the browser, smoldot no longer uses `document.visibilityState` to determine whether to reduce the number of calls to `setTimeout`. Instead, the execution dynamically adjusts based on the time `setTimeout` actually takes compared to how much was passed as parameter. ([#518](https://github.com/smol-dot/smoldot/pull/518))
+
 ### Fixed
 
 - Fix panic when a remote opens a substream then immediately resets it before smoldot has been able to determine asynchronously whether to accept it or not. ([#521](https://github.com/smol-dot/smoldot/pull/521))
