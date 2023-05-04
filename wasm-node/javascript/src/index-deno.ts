@@ -156,7 +156,7 @@ function trustedBase64Decode(base64: string): Uint8Array {
  */
 function connect(config: ConnectionConfig<ParsedAddress>): Connection {
     if (config.address.ty === "websocket") {
-        const socket = new WebSocket(config.address.ty);
+        const socket = new WebSocket(config.address.url);
         socket.binaryType = 'arraybuffer';
 
         const bufferedAmountCheck = { quenedUnreportedBytes: 0, nextTimeout: 10 };
