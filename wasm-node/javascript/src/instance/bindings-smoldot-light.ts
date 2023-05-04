@@ -49,9 +49,9 @@ export interface Config<A> {
 
     newConnection: (connectionId: number, address: A) => void,
     connectionReset: (connectionId: number) => void,
-    connectionStreamOpened: (connectionId: number) => void,
+    connectionStreamOpen: (connectionId: number) => void,
     connectionStreamReset: (connectionId: number, streamId: number) => void,
-    streamSent: (connectionId: number, data: Uint8Array, streamId?: number) => void,
+    streamSend: (connectionId: number, data: Uint8Array, streamId?: number) => void,
     streamSendClosed: (connectionId: number, streamId?: number) => void,
 }
 
@@ -176,97 +176,6 @@ export default function <A>(config: Config<A>): { imports: WebAssembly.ModuleImp
                 buffer.writeUInt8(mem, errorBufferIndexPtr + 4, 1);  // TODO: remove isBadAddress param since it's always true
                 return 1;
             }
-
-            /*if (!!connections[connectionId]) {
-                throw new Error("internal error: connection already allocated");
-            }
-
-            const address = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), addrPtr, addrLen);
-            const parseResult = config.parseMultiaddr(address);
-
-            if (parseResult.success) {
-                if (killedTracked.killed)
-                    throw new Error("killAll invoked");
-
-                const connec = config.connect({
-                    address: parseResult.address,
-                    onOpen: (info) => {
-                        if (killedTracked.killed) return;
-                        try {
-                            switch (info.type) {
-                                case 'single-stream': {
-                                    instance.exports.connection_open_single_stream(connectionId, 0, info.initialWritableBytes, info.writeClosable ? 1 : 0);
-                                    break
-                                }
-                                case 'multi-stream': {
-                                    const handshakeTy = new Uint8Array(1 + info.localTlsCertificateMultihash.length + info.remoteTlsCertificateMultihash.length);
-                                    buffer.writeUInt8(handshakeTy, 0, 0);
-                                    handshakeTy.set(info.localTlsCertificateMultihash, 1)
-                                    handshakeTy.set(info.remoteTlsCertificateMultihash, 1 + info.localTlsCertificateMultihash.length)
-                                    config.bufferIndices[0] = handshakeTy;
-                                    instance.exports.connection_open_multi_stream(connectionId, 0);
-                                    delete config.bufferIndices[0]
-                                    break
-                                }
-                            }
-                        } catch (_error) { }
-                    },
-                    onConnectionReset: (message: string) => {
-                        if (killedTracked.killed) return;
-                        try {
-                            config.bufferIndices[0] = new TextEncoder().encode(message);
-                            instance.exports.connection_reset(connectionId, 0);
-                            delete config.bufferIndices[0]
-                        } catch (_error) { }
-                    },
-                    onWritableBytes: (numExtra, streamId) => {
-                        if (killedTracked.killed) return;
-                        try {
-                            instance.exports.stream_writable_bytes(
-                                connectionId,
-                                streamId || 0,
-                                numExtra,
-                            );
-                        } catch (_error) { }
-                    },
-                    onMessage: (message: Uint8Array, streamId?: number) => {
-                        if (killedTracked.killed) return;
-                        try {
-                            config.bufferIndices[0] = message;
-                            instance.exports.stream_message(connectionId, streamId || 0, 0);
-                            delete config.bufferIndices[0]
-                        } catch (_error) { }
-                    },
-                    onStreamOpened: (streamId: number, direction: 'inbound' | 'outbound', initialWritableBytes) => {
-                        if (killedTracked.killed) return;
-                        try {
-                            instance.exports.connection_stream_opened(
-                                connectionId,
-                                streamId,
-                                direction === 'outbound' ? 1 : 0,
-                                initialWritableBytes
-                            );
-                        } catch (_error) { }
-                    },
-                    onStreamReset: (streamId: number) => {
-                        if (killedTracked.killed) return;
-                        try {
-                            instance.exports.stream_reset(connectionId, streamId);
-                        } catch (_error) { }
-                    }
-
-                });
-
-                connections[connectionId] = connec;
-                return 0;
-
-            } else {
-                const mem = new Uint8Array(instance.exports.memory.buffer);
-                config.bufferIndices[0] = new TextEncoder().encode(parseResult.error)
-                buffer.writeUInt32LE(mem, errorBufferIndexPtr, 0);
-                buffer.writeUInt8(mem, errorBufferIndexPtr + 4, 1); // TODO: remove isBadAddress param since it's always true
-                return 1;
-            }*/
         },
 
         // Must close and destroy the connection object.
@@ -276,7 +185,7 @@ export default function <A>(config: Config<A>): { imports: WebAssembly.ModuleImp
 
         // Opens a new substream on a multi-stream connection.
         connection_stream_open: (connectionId: number) => {
-            config.connectionStreamOpened(connectionId);
+            config.connectionStreamOpen(connectionId);
         },
 
         // Closes a substream on a multi-stream connection.
@@ -295,7 +204,7 @@ export default function <A>(config: Config<A>): { imports: WebAssembly.ModuleImp
             len >>>= 0;
 
             const data = new Uint8Array(instance.exports.memory.buffer).slice(ptr, ptr + len);
-            config.streamSent(connectionId, data, streamId); // TODO: docs says the streamId is provided only for multi-stream connections, but here it's always provided
+            config.streamSend(connectionId, data, streamId); // TODO: docs says the streamId is provided only for multi-stream connections, but here it's always provided
         },
 
         stream_send_close: (connectionId: number, streamId: number) => {

@@ -321,27 +321,67 @@ export function start<A>(configMessage: Config, platformBindings: PlatformBindin
                         break;
                     }
                     case "new-connection": {
-                        connections.set(event.connectionId, platformBindings.connect({
+                        const connectionId = event.connectionId;
+                        connections.set(connectionId, platformBindings.connect({
                             address: event.address,
                             onConnectionReset(message) {
-                                
+                                if (!state.initialized)
+                                    throw new Error();
+                                connections.delete(connectionId);
+                                state.instance.connectionReset(connectionId, message);
                             },
                             onMessage(message, streamId) {
-                                
+                                if (!state.initialized)
+                                    throw new Error();
+                                state.instance.streamMessage(connectionId, message, streamId);
                             },
                             onStreamOpened(streamId, direction, initialWritableBytes) {
-                                
+                                if (!state.initialized)
+                                    throw new Error();
+                                state.instance.streamOpened(connectionId, streamId, direction, initialWritableBytes);
                             },
                             onOpen(info) {
-                                
+                                if (!state.initialized)
+                                    throw new Error();
+                                state.instance.connectionOpened(connectionId, info);
                             },
                             onWritableBytes(numExtra, streamId) {
-                                
+                                if (!state.initialized)
+                                    throw new Error();
+                                state.instance.streamWritableBytes(connectionId, numExtra, streamId);
                             },
                             onStreamReset(streamId) {
-                                
+                                if (!state.initialized)
+                                    throw new Error();
+                                state.instance.streamReset(connectionId, streamId);
                             },
                         }));
+                        break;
+                    }
+                    case "connection-reset": {
+                        const connection = connections.get(event.connectionId)!;
+                        connection.reset();
+                        connections.delete(event.connectionId);
+                        break;
+                    }
+                    case "connection-stream-open": {
+                        const connection = connections.get(event.connectionId)!;
+                        connection.openOutSubstream();
+                        break;
+                    }
+                    case "connection-stream-reset": {
+                        const connection = connections.get(event.connectionId)!;
+                        connection.reset(event.streamId);
+                        break;
+                    }
+                    case "stream-send": {
+                        const connection = connections.get(event.connectionId)!;
+                        connection.send(event.data, event.streamId);
+                        break;
+                    }
+                    case "stream-send-close": {
+                        const connection = connections.get(event.connectionId)!;
+                        connection.closeSend(event.streamId);
                         break;
                     }
                 }

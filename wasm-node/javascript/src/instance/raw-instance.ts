@@ -76,6 +76,12 @@ export interface Instance {
     addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean) => { success: true, chainId: number } | { success: false, error: string },
     removeChain: (chainId: number) => void,
     startShutdown: () => void,
+    connectionOpened: (connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number, writeClosable: boolean } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateMultihash: Uint8Array, remoteTlsCertificateMultihash: Uint8Array }) => void,
+    connectionReset: (connectionId: number, message: string) => void,
+    streamWritableBytes: (connectionId: number, numExtra: number, streamId?: number) => void,
+    streamMessage: (connectionId: number, message: Uint8Array, streamId?: number) => void,
+    streamOpened: (connectionId: number, streamId: number, direction: 'inbound' | 'outbound', initialWritableBytes: number) => void,
+    streamReset: (connectionId: number, streamId: number) => void,
 }
 
 export async function startInstance<A>(config: Config<A>): Promise<Instance> {
@@ -110,13 +116,13 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
         connectionReset: (connectionId: number) => {
             config.eventCallback({ ty: "connection-reset", connectionId });
         },
-        connectionStreamOpened: (connectionId: number) => {
+        connectionStreamOpen: (connectionId: number) => {
             config.eventCallback({ ty: "connection-stream-open", connectionId });
         },
         connectionStreamReset: (connectionId: number, streamId: number) => {
             config.eventCallback({ ty: "connection-stream-reset", connectionId, streamId });
         },
-        streamSent: (connectionId: number, data: Uint8Array, streamId?: number) => {
+        streamSend: (connectionId: number, data: Uint8Array, streamId?: number) => {
             config.eventCallback({ ty: "stream-send", connectionId, streamId, data });
         },
         streamSendClosed: (connectionId: number, streamId?: number) => {
@@ -277,6 +283,58 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
 
         startShutdown: (): void => {
             instance.exports.start_shutdown();
+        },
+
+        connectionOpened: (connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number, writeClosable: boolean } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateMultihash: Uint8Array, remoteTlsCertificateMultihash: Uint8Array }) => {
+            switch (info.type) {
+                case 'single-stream': {
+                    instance.exports.connection_open_single_stream(connectionId, 0, info.initialWritableBytes, info.writeClosable ? 1 : 0);
+                    break
+                }
+                case 'multi-stream': {
+                    const handshakeTy = new Uint8Array(1 + info.localTlsCertificateMultihash.length + info.remoteTlsCertificateMultihash.length);
+                    buffer.writeUInt8(handshakeTy, 0, 0);
+                    handshakeTy.set(info.localTlsCertificateMultihash, 1)
+                    handshakeTy.set(info.remoteTlsCertificateMultihash, 1 + info.localTlsCertificateMultihash.length)
+                    bufferIndices[0] = handshakeTy;
+                    instance.exports.connection_open_multi_stream(connectionId, 0);
+                    delete bufferIndices[0]
+                    break
+                }
+            }
+        },
+
+        connectionReset: (connectionId: number, message: string) => {
+            bufferIndices[0] = new TextEncoder().encode(message);
+            instance.exports.connection_reset(connectionId, 0);
+            delete bufferIndices[0]
+        },
+
+        streamWritableBytes: (connectionId: number, numExtra: number, streamId?: number) => {
+            instance.exports.stream_writable_bytes(
+                connectionId,
+                streamId || 0,
+                numExtra,
+            );
+        },
+
+        streamMessage: (connectionId: number, message: Uint8Array, streamId?: number) => {
+            bufferIndices[0] = message;
+            instance.exports.stream_message(connectionId, streamId || 0, 0);
+            delete bufferIndices[0]
+        },
+
+        streamOpened: (connectionId: number, streamId: number, direction: 'inbound' | 'outbound', initialWritableBytes: number) => {
+            instance.exports.connection_stream_opened(
+                connectionId,
+                streamId,
+                direction === 'outbound' ? 1 : 0,
+                initialWritableBytes
+            );
+        },
+
+        streamReset: (connectionId: number, streamId: number) => {
+            instance.exports.stream_reset(connectionId, streamId);
         }
     };
 }
