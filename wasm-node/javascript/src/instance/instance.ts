@@ -15,12 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import * as buffer from './buffer.js';
 import * as instance from './raw-instance.js';
-import { SmoldotWasmInstance } from './bindings.js';
 import { AlreadyDestroyedError } from '../client.js';
-
-export { PlatformBindings, ConnectionConfig, Connection } from './raw-instance.js';
 
 /**
  * Thrown in case the underlying client encounters an unexpected crash.
@@ -52,6 +48,181 @@ export class QueueFullError extends Error {
 }
 
 /**
+ * Connection to a remote node.
+ *
+ * At any time, a connection can be in one of the three following states:
+ *
+ * - `Opening` (initial state)
+ * - `Open`
+ * - `Reset`
+ *
+ * When in the `Opening` or `Open` state, the connection can transition to the `Reset` state
+ * if the remote closes the connection or refuses the connection altogether. When that
+ * happens, `config.onReset` is called. Once in the `Reset` state, the connection cannot
+ * transition back to another state.
+ *
+ * Initially in the `Opening` state, the connection can transition to the `Open` state if the
+ * remote accepts the connection. When that happens, `config.onOpen` is called.
+ *
+ * When in the `Open` state, the connection can receive messages. When a message is received,
+ * `config.onMessage` is called.
+ *
+ * @see connect
+ */
+export interface Connection {
+    /**
+     * Transitions the connection or one of its substreams to the `Reset` state.
+     *
+     * If the connection is of type "single-stream", the whole connection must be shut down.
+     * If the connection is of type "multi-stream", a `streamId` can be provided, in which case
+     * only the given substream is shut down.
+     *
+     * The `config.onReset` or `config.onStreamReset` callbacks are **not** called.
+     *
+     * The transition is performed in the background.
+     * If the whole connection is to be shut down, none of the callbacks passed to the `Config`
+     * must be called again. If only a substream is shut down, the `onStreamReset` and `onMessage`
+     * callbacks must not be called again with that substream.
+     */
+    reset(streamId?: number): void;
+
+    /**
+     * Queues data to be sent on the given connection.
+     *
+     * The connection and stream must currently be in the `Open` state.
+     *
+     * The number of bytes must never exceed the number of "writable bytes" of the stream.
+     * `onWritableBytes` can be used in order to notify that more writable bytes are available.
+     *
+     * The `streamId` must be provided if and only if the connection is of type "multi-stream".
+     * It indicates which substream to send the data on.
+     *
+     * Must not be called after `closeSend` has been called.
+     */
+    send(data: Uint8Array, streamId?: number): void;
+
+    /**
+     * Closes the writing side of the given stream of the given connection.
+     *
+     * Never called for connection types where this isn't possible to implement (i.e. WebSocket
+     * and WebRTC at the moment).
+     *
+     * The connection and stream must currently be in the `Open` state.
+     *
+     * Implicitly sets the "writable bytes" of the stream to zero.
+     *
+     * The `streamId` must be provided if and only if the connection is of type "multi-stream".
+     * It indicates which substream to send the data on.
+     *
+     * Must only be called once per stream.
+     */
+    closeSend(streamId?: number): void;
+
+    /**
+     * Start opening an additional outbound substream on the given connection.
+     *
+     * The state of the connection must be `Open`. This function must only be called for
+     * connections of type "multi-stream".
+     *
+     * The `onStreamOpened` callback must later be called with an outbound direction.
+     * 
+     * Note that no mechanism exists in this API to handle the situation where a substream fails
+     * to open, as this is not supposed to happen. If you need to handle such a situation, either
+     * try again opening a substream again or reset the entire connection.
+     */
+    openOutSubstream(): void;
+}
+
+/**
+ * Configuration for a connection.
+ *
+ * @see connect
+ */
+export interface ConnectionConfig<C> {
+    /**
+     * Parsed multiaddress, as returned by the `parseMultiaddr` function.
+     */
+    address: C,
+
+    /**
+     * Callback called when the connection transitions from the `Opening` to the `Open` state.
+     *
+     * Must only be called once per connection.
+     */
+    onOpen: (info:
+        {
+            type: 'single-stream', handshake: 'multistream-select-noise-yamux',
+            initialWritableBytes: number, writeClosable: boolean
+        } |
+        {
+            type: 'multi-stream', handshake: 'webrtc',
+            localTlsCertificateMultihash: Uint8Array,
+            remoteTlsCertificateMultihash: Uint8Array,
+        }
+    ) => void;
+
+    /**
+     * Callback called when the connection transitions to the `Reset` state.
+     *
+     * It it **not** called if `Connection.reset` is manually called by the API user.
+     */
+    onConnectionReset: (message: string) => void;
+
+    /**
+     * Callback called when a new substream has been opened.
+     *
+     * This function must only be called for connections of type "multi-stream".
+     */
+    onStreamOpened: (streamId: number, direction: 'inbound' | 'outbound', initialWritableBytes: number) => void;
+
+    /**
+     * Callback called when a stream transitions to the `Reset` state.
+     *
+     * It it **not** called if `Connection.resetStream` is manually called by the API user.
+     *
+     * This function must only be called for connections of type "multi-stream".
+     */
+    onStreamReset: (streamId: number) => void;
+
+    /**
+     * Callback called when some data sent using {@link Connection.send} has effectively been
+     * written on the stream, meaning that some buffer space is now free.
+     *
+     * Can only happen while the connection is in the `Open` state.
+     *
+     * This callback must not be called after `closeSend` has been called.
+     *
+     * The `streamId` parameter must be provided if and only if the connection is of type
+     * "multi-stream".
+     *
+     * Only a number of bytes equal to the size of the data provided to {@link Connection.send}
+     * must be reported. In other words, the `initialWritableBytes` must never be exceeded.
+     */
+    onWritableBytes: (numExtra: number, streamId?: number) => void;
+
+    /**
+     * Callback called when a message sent by the remote has been received.
+     *
+     * Can only happen while the connection is in the `Open` state.
+     *
+     * The `streamId` parameter must be provided if and only if the connection is of type
+     * "multi-stream".
+     */
+    onMessage: (message: Uint8Array, streamId?: number) => void;
+}
+
+/**
+ * Emitted by `connect` if the multiaddress couldn't be parsed or contains an invalid protocol.
+ *
+ * @see connect
+ */
+export class ConnectionError extends Error {
+    constructor(message: string) {
+        super(message);
+    }
+}
+
+/**
  * Contains the configuration of the instance.
  */
 export interface Config {
@@ -59,6 +230,44 @@ export interface Config {
     logCallback: (level: number, target: string, message: string) => void
     maxLogLevel: number;
     cpuRateLimit: number,
+}
+
+/**
+ * Contains functions that the client will use when it needs to leverage the platform.
+ */
+export interface PlatformBindings<A> {
+    /**
+     * Tries to open a new connection using the given configuration.
+     *
+     * @see Connection
+     * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
+     */
+    connect(config: ConnectionConfig<A>): Connection;
+
+    /**
+     * Returns the number of milliseconds since an arbitrary epoch.
+     */
+    performanceNow: () => number,
+
+    /**
+     * Fills the given buffer with randomly-generated bytes.
+     */
+    getRandomValues: (buffer: Uint8Array) => void,
+
+    parseMultiaddr(address: string): { success: true, address: A } | { success: false, error: string };
+
+    /**
+     * The "should periodically yield" setting indicates whether the execution should periodically
+     * yield back control by using `setTimeout(..., 0)`.
+     *
+     * On platforms such as browsers where `setTimeout(..., 0)` takes way more than 0 milliseconds,
+     * this setting should be set to `false`.
+     *
+     * This function registers a callback that is called when the setting should be updated with
+     * a new value. It returns the initial value of the setting and a function used to unregister
+     * the callback.
+     */
+    registerShouldPeriodicallyYield: (callback: (newValue: boolean) => void) => [boolean, () => void],
 }
 
 export interface Instance {
@@ -69,14 +278,14 @@ export interface Instance {
     startShutdown: () => void
 }
 
-export function start<A>(configMessage: Config, platformBindings: instance.PlatformBindings<A>): Instance {
+export function start<A>(configMessage: Config, platformBindings: PlatformBindings<A>): Instance {
 
     // This variable represents the state of the instance, and serves two different purposes:
     //
     // - At initialization, it is a Promise containing the Wasm VM is still initializing.
     // - After the Wasm VM has finished initialization, contains the `WebAssembly.Instance` object.
     //
-    let state: { initialized: false, promise: Promise<[SmoldotWasmInstance, Array<Uint8Array>]> } | { initialized: true, instance: SmoldotWasmInstance, bufferIndices: Array<Uint8Array> };
+    let state: { initialized: false, promise: Promise<instance.Instance> } | { initialized: true, instance: instance.Instance };
 
     const crashError: { error?: CrashError } = {};
 
@@ -84,74 +293,166 @@ export function start<A>(configMessage: Config, platformBindings: instance.Platf
 
     const printError = { printError: true }
 
+    const connections: Map<number, Connection> = new Map();
+
     // Contains the information of each chain that is currently alive.
     let chains: Map<number, {
         jsonRpcResponsesPromises: JsonRpcResponsesPromise[],
     }> = new Map();
 
-    const initPromise = (async (): Promise<[SmoldotWasmInstance, Array<Uint8Array>]> => {
+    const [periodicallyYieldInit, unregisterCallback] = platformBindings.registerShouldPeriodicallyYield((newValue) => {
+        if (state.initialized)
+            state.instance.setPeriodicallyYield(newValue);
+    });
+
+    // Extract (to make sure the value doesn't change) and sanitize `cpuRateLimit`.
+    let cpuRateLimit = configMessage.cpuRateLimit;
+    if (isNaN(cpuRateLimit)) cpuRateLimit = 1.0;
+    if (cpuRateLimit > 1.0) cpuRateLimit = 1.0;
+    if (cpuRateLimit < 0.0) cpuRateLimit = 0.0;
+
+    const initPromise = (async (): Promise<instance.Instance> => {
         const module = await configMessage.wasmModule;
 
         // Start initialization of the Wasm VM.
-        const config: instance.Config = {
-            onWasmPanic: (message) => {
-                // TODO: consider obtaining a backtrace here
-                crashError.error = new CrashError(message);
-                if (!printError.printError)
-                    return;
-                console.error(
-                    "Smoldot has panicked" +
-                    (currentTask.name ? (" while executing task `" + currentTask.name + "`") : "") +
-                    ". This is a bug in smoldot. Please open an issue at " +
-                    "https://github.com/smol-dot/smoldot/issues with the following message:\n" +
-                    message
-                );
-                for (const chain of Array.from(chains.values())) {
-                    for (const promise of chain.jsonRpcResponsesPromises) {
-                        promise.reject(crashError.error)
+        const config: instance.Config<A> = {
+            envVars: [],
+            periodicallyYield: periodicallyYieldInit,
+            eventCallback: (event) => {
+                switch (event.ty) {
+                    case "wasm-panic": {
+                        // TODO: consider obtaining a backtrace here
+                        crashError.error = new CrashError(event.message);
+                        connections.forEach((connec) => connec.reset());
+                        connections.clear();
+                        if (!printError.printError)
+                            return;
+                        console.error(
+                            "Smoldot has panicked" +
+                            (currentTask.name ? (" while executing task `" + currentTask.name + "`") : "") +
+                            ". This is a bug in smoldot. Please open an issue at " +
+                            "https://github.com/smol-dot/smoldot/issues with the following message:\n" +
+                            event.message
+                        );
+                        for (const chain of Array.from(chains.values())) {
+                            for (const promise of chain.jsonRpcResponsesPromises) {
+                                promise.reject(crashError.error)
+                            }
+                            chain.jsonRpcResponsesPromises = [];
+                        }
+                        break
                     }
-                    chain.jsonRpcResponsesPromises = [];
+                    case "log": {
+                        configMessage.logCallback(event.level, event.target, event.message)
+                        break;
+                    }
+                    case "json-rpc-responses-non-empty": {
+                        // Notify every single promise found in `jsonRpcResponsesPromises`.
+                        const promises = chains.get(event.chainId)!.jsonRpcResponsesPromises;
+                        while (promises.length !== 0) {
+                            promises.shift()!.resolve();
+                        }
+                        break;
+                    }
+                    case "current-task": {
+                        currentTask.name = event.taskName;
+                        break;
+                    }
+                    case "new-connection": {
+                        const connectionId = event.connectionId;
+                        connections.set(connectionId, platformBindings.connect({
+                            address: event.address,
+                            onConnectionReset(message) {
+                                if (!state.initialized)
+                                    throw new Error();
+                                connections.delete(connectionId);
+                                state.instance.connectionReset(connectionId, message);
+                            },
+                            onMessage(message, streamId) {
+                                if (!state.initialized)
+                                    throw new Error();
+                                state.instance.streamMessage(connectionId, message, streamId);
+                            },
+                            onStreamOpened(streamId, direction, initialWritableBytes) {
+                                if (!state.initialized)
+                                    throw new Error();
+                                state.instance.streamOpened(connectionId, streamId, direction, initialWritableBytes);
+                            },
+                            onOpen(info) {
+                                if (!state.initialized)
+                                    throw new Error();
+                                state.instance.connectionOpened(connectionId, info);
+                            },
+                            onWritableBytes(numExtra, streamId) {
+                                if (!state.initialized)
+                                    throw new Error();
+                                state.instance.streamWritableBytes(connectionId, numExtra, streamId);
+                            },
+                            onStreamReset(streamId) {
+                                if (!state.initialized)
+                                    throw new Error();
+                                state.instance.streamReset(connectionId, streamId);
+                            },
+                        }));
+                        break;
+                    }
+                    case "connection-reset": {
+                        const connection = connections.get(event.connectionId)!;
+                        connection.reset();
+                        connections.delete(event.connectionId);
+                        break;
+                    }
+                    case "connection-stream-open": {
+                        const connection = connections.get(event.connectionId)!;
+                        connection.openOutSubstream();
+                        break;
+                    }
+                    case "connection-stream-reset": {
+                        const connection = connections.get(event.connectionId)!;
+                        connection.reset(event.streamId);
+                        break;
+                    }
+                    case "stream-send": {
+                        const connection = connections.get(event.connectionId)!;
+                        connection.send(event.data, event.streamId);
+                        break;
+                    }
+                    case "stream-send-close": {
+                        const connection = connections.get(event.connectionId)!;
+                        connection.closeSend(event.streamId);
+                        break;
+                    }
                 }
             },
-            logCallback: (level, target, message) => {
-                configMessage.logCallback(level, target, message)
-            },
+            parseMultiaddr: platformBindings.parseMultiaddr,
+            getRandomValues: platformBindings.getRandomValues,
+            performanceNow: platformBindings.performanceNow,
             wasmModule: module,
-            jsonRpcResponsesNonEmptyCallback: (chainId) => {
-                // Notify every single promise found in `jsonRpcResponsesPromises`.
-                const promises = chains.get(chainId)!.jsonRpcResponsesPromises;
-                while (promises.length !== 0) {
-                    promises.shift()!.resolve();
-                }
-            },
-            currentTaskCallback: (taskName) => {
-                currentTask.name = taskName
-            },
-            cpuRateLimit: configMessage.cpuRateLimit,
+            cpuRateLimit,
             maxLogLevel: configMessage.maxLogLevel,
         };
 
-        return await instance.startInstance(config, platformBindings)
+        return await instance.startInstance(config)
     })();
 
     state = {
-        initialized: false, promise: initPromise.then(([instance, bufferIndices]) => {
-            state = { initialized: true, instance, bufferIndices };
-            return [instance, bufferIndices];
+        initialized: false, promise: initPromise.then((instance) => {
+            state = { initialized: true, instance };
+            return instance;
         })
     };
 
-    async function queueOperation<T>(operation: (instance: SmoldotWasmInstance, bufferIndices: Array<Uint8Array>) => T): Promise<T> {
+    async function queueOperation<T>(operation: (instance: instance.Instance) => T): Promise<T> {
         // What to do depends on the type of `state`.
         // See the documentation of the `state` variable for information.
         if (!state.initialized) {
             // A message has been received while the Wasm VM is still initializing. Queue it for when
             // initialization is over.
-            return state.promise.then(([instance, bufferIndices]) => operation(instance, bufferIndices))
+            return state.promise.then((instance) => operation(instance))
 
         } else {
             // Everything is already initialized. Process the message synchronously.
-            return operation(state.instance, state.bufferIndices)
+            return operation(state.instance)
         }
     }
 
@@ -167,8 +468,7 @@ export function start<A>(configMessage: Config, platformBindings: instance.Platf
 
             let retVal;
             try {
-                state.bufferIndices[0] = new TextEncoder().encode(request)
-                retVal = state.instance.exports.json_rpc_send(0, chainId) >>> 0;
+                retVal = state.instance.request(request, chainId);
             } catch (_error) {
                 console.assert(crashError.error);
                 throw crashError.error
@@ -195,18 +495,9 @@ export function start<A>(configMessage: Config, platformBindings: instance.Platf
 
                 // Try to pop a message from the queue.
                 try {
-                    const mem = new Uint8Array(state.instance.exports.memory.buffer);
-                    const responseInfo = state.instance.exports.json_rpc_responses_peek(chainId) >>> 0;
-                    const ptr = buffer.readUInt32LE(mem, responseInfo) >>> 0;
-                    const len = buffer.readUInt32LE(mem, responseInfo + 4) >>> 0;
-
-                    // `len === 0` means "queue is empty" according to the API.
-                    // In that situation, queue the resolve/reject.
-                    if (len !== 0) {
-                        const message = buffer.utf8BytesToString(mem, ptr, len);
-                        state.instance.exports.json_rpc_responses_pop(chainId);
+                    const message = state.instance.peekJsonRpcResponse(chainId);
+                    if (message)
                         return message;
-                    }
                 } catch (_error) {
                     console.assert(crashError.error);
                     throw crashError.error
@@ -220,41 +511,21 @@ export function start<A>(configMessage: Config, platformBindings: instance.Platf
         },
 
         addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean): Promise<{ success: true, chainId: number } | { success: false, error: string }> => {
-            return queueOperation((instance, bufferIndices) => {
+            return queueOperation((instance) => {
                 if (crashError.error)
                     throw crashError.error;
 
                 try {
-                    // `add_chain` unconditionally allocates a chain id. If an error occurs, however, this chain
-                    // id will refer to an *erroneous* chain. `chain_is_ok` is used below to determine whether it
-                    // has succeeeded or not.
-                    // Note that `add_chain` properly de-allocates buffers even if it failed.
-                    bufferIndices[0] = new TextEncoder().encode(chainSpec)
-                    bufferIndices[1] = new TextEncoder().encode(databaseContent)
-                    const potentialRelayChainsEncoded = new Uint8Array(potentialRelayChains.length * 4)
-                    for (let idx = 0; idx < potentialRelayChains.length; ++idx) {
-                        buffer.writeUInt32LE(potentialRelayChainsEncoded, idx * 4, potentialRelayChains[idx]!);
-                    }
-                    bufferIndices[2] = potentialRelayChainsEncoded
-                    const chainId = instance.exports.add_chain(0, 1, disableJsonRpc ? 0 : 1, 2);
-
-                    delete bufferIndices[0]
-                    delete bufferIndices[1]
-                    delete bufferIndices[2]
-
-                    if (instance.exports.chain_is_ok(chainId) != 0) {
-                        console.assert(!chains.has(chainId));
-                        chains.set(chainId, {
+                    const result = instance.addChain(chainSpec, databaseContent, potentialRelayChains, disableJsonRpc);
+                    if (result.success) {
+                        console.assert(!chains.has(result.chainId));
+                        chains.set(result.chainId, {
                             jsonRpcResponsesPromises: new Array()
                         });
-                        return { success: true, chainId };
-                    } else {
-                        const errorMsgLen = instance.exports.chain_error_len(chainId) >>> 0;
-                        const errorMsgPtr = instance.exports.chain_error_ptr(chainId) >>> 0;
-                        const errorMsg = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), errorMsgPtr, errorMsgLen);
-                        instance.exports.remove_chain(chainId);
-                        return { success: false, error: errorMsg };
                     }
+
+                    return result;
+
                 } catch (_error) {
                     console.assert(crashError.error);
                     throw crashError.error
@@ -280,7 +551,7 @@ export function start<A>(configMessage: Config, platformBindings: instance.Platf
             }
             chains.delete(chainId);
             try {
-                state.instance.exports.remove_chain(chainId);
+                state.instance.removeChain(chainId);
             } catch (_error) {
                 console.assert(crashError.error);
                 throw crashError.error
@@ -288,6 +559,7 @@ export function start<A>(configMessage: Config, platformBindings: instance.Platf
         },
 
         startShutdown: () => {
+            unregisterCallback();
             return queueOperation((instance) => {
                 // `startShutdown` is a bit special in its handling of crashes.
                 // Shutting down will lead to `onWasmPanic` being called at some point, possibly during
@@ -300,7 +572,7 @@ export function start<A>(configMessage: Config, platformBindings: instance.Platf
                     return;
                 try {
                     printError.printError = false
-                    instance.exports.start_shutdown()
+                    instance.startShutdown()
                 } catch (_error) {
                 }
             })
