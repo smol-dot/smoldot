@@ -17,13 +17,54 @@
 
 import * as buffer from './buffer.js';
 
+/**
+ * Configuration for {@link startInstance}.
+ */
 export interface Config<A> {
+    /**
+     * Called whenever something happens in the instance.
+     *
+     * This callback can be called at any point, or while a function of the `Instance` is being
+     * called.
+     */
     eventCallback: (event: Event<A>) => void,
+
+    /**
+     * Parses the given multiaddress.
+     */
     parseMultiaddr: (address: string) => { success: true, address: A } | { success: false, error: string },
+
+    /**
+     * It is outside of the responsibility of this module to provide the compiled Wasm bytecode.
+     * Instead, it is provided here.
+     */
     wasmModule: WebAssembly.Module,
-    maxLogLevel: number;
+
+    /**
+     * Maximum level of the logs that are generated.
+     */
+    maxLogLevel: number,
+
+    /**
+     * Number between 0.0 and 1.0 indicating how much of the CPU time the instance is allowed to
+     * consume.
+     */
     cpuRateLimit: number,
+
+    /**
+     * If `true`, the execution should yield back execution to the JS engine more frequently than
+     * if `false`. Because the yielding is performed using `setTimeout`, this is actually a way
+     * to indicate whether `setTimeout` behaves as expected. If `setTimeout` has a minimum
+     * threshold, then `false` should actually be passed in order to prevent the execution from
+     * being disrupted.
+     *
+     * The value can be changed later with `Instance.setPeriodicallyYield`.
+     */
     periodicallyYield: boolean,
+
+    /**
+     * Environment variables that the instance can pull.
+     */
     envVars: string[],
 
     /**
@@ -64,6 +105,18 @@ export interface Instance {
     setPeriodicallyYield: (y: boolean) => void,
 }
 
+/**
+ * Starts a new instance using the given configuration.
+ *
+ * Even though this function doesn't do anything asynchronous, it needs to be asynchronous due to
+ * the fact that `WebAssembly.instantiate` is for some reason asynchronous.
+ *
+ * After this function returns, the execution of CPU-heavy tasks of smoldot will happen
+ * asynchronously in the background.
+ *
+ * This instance is low-level in the sense that invalid input can lead to crashes and that input
+ * isn't sanitized. In other words, you know what you're doing.
+ */
 export async function startInstance<A>(config: Config<A>): Promise<Instance> {
     const state: {
         // Null before initialization and after a panic.
@@ -635,7 +688,7 @@ export async function startInstance<A>(config: Config<A>): Promise<Instance> {
  *
  * Must match the bindings found in the Rust code.
  */
-export interface SmoldotWasmExports extends WebAssembly.Exports {
+interface SmoldotWasmExports extends WebAssembly.Exports {
     memory: WebAssembly.Memory,
     init: (maxLogLevel: number) => void,
     advance_execution: () => number,
@@ -658,6 +711,6 @@ export interface SmoldotWasmExports extends WebAssembly.Exports {
     stream_reset: (connectionId: number, streamId: number) => void,
 }
 
-export interface SmoldotWasmInstance extends WebAssembly.Instance {
+interface SmoldotWasmInstance extends WebAssembly.Instance {
     readonly exports: SmoldotWasmExports;
 }
