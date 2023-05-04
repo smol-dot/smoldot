@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix panic when a remote opens a substream then immediately resets it before smoldot has been able to determine asynchronously whether to accept it or not. ([#521](https://github.com/smol-dot/smoldot/pull/521))
+
 ## 1.0.4 - 2023-05-03
 
 ### Added

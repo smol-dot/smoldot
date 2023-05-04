@@ -1059,7 +1059,7 @@ where
         match self.inner {
             SubstreamInner::InboundNegotiating(_, _) => None,
             SubstreamInner::InboundNegotiatingAccept(_, _) => None,
-            SubstreamInner::InboundNegotiatingApiWait(_) => None,
+            SubstreamInner::InboundNegotiatingApiWait(_) => Some(Event::InboundNegotiatedCancel),
             SubstreamInner::InboundFailed => None,
             SubstreamInner::RequestOut { .. } => Some(Event::Response {
                 response: Err(RequestError::SubstreamReset),
@@ -1354,6 +1354,11 @@ pub enum Event {
     /// An inbound substream has successfully negotiated a protocol. Call
     /// [`Substream::accept_inbound`] or [`Substream::reject_inbound`] in order to resume.
     InboundNegotiated(String),
+
+    /// An inbound substream that had successfully negotiated a protocol got abruptly closed
+    /// while waiting for the call to [`Substream::accept_inbound`] or
+    /// [`Substream::reject_inbound`].
+    InboundNegotiatedCancel,
 
     /// Received a request in the context of a request-response protocol.
     RequestIn {
