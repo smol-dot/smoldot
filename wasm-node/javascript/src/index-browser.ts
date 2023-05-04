@@ -54,13 +54,6 @@ export function start(options?: ClientOptions): Client {
     const wasmModule = WebAssembly.compile(inflate(classicDecode(wasmBase64)));
 
     return innerStart<ParsedAddress>(options, wasmModule, {
-        registerShouldPeriodicallyYield: (callback) => {
-            if (typeof document === 'undefined')   // We might be in a web worker.
-                return [false, () => { }];
-            const wrappedCallback = () => callback(document.visibilityState === 'visible');
-            document.addEventListener('visibilitychange', wrappedCallback);
-            return [document.visibilityState === 'visible', () => { document.removeEventListener('visibilitychange', wrappedCallback) }]
-        },
         performanceNow: () => {
             return performance.now()
         },
