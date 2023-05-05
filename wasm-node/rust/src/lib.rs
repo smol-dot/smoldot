@@ -46,6 +46,9 @@ fn init(max_log_level: u32) {
 
 fn start_shutdown() {
     *EXECUTOR_EXECUTE.lock().unwrap() = ExecutionState::ShuttingDown;
+    unsafe {
+        bindings::advance_execution_ready();
+    }
 }
 
 fn add_chain(
