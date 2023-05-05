@@ -119,8 +119,8 @@ const client = smoldot.startWithBytecode({
 
 // `worker.ts`
 
-import * as smoldot from '@substrate/smoldot-light/worker';
-import { compileBytecode } from '@substrate/smoldot-light/bytecode';
+import * as smoldot from 'smoldot/worker';
+import { compileBytecode } from 'smoldot/bytecode';
 
 compileBytecode().then((bytecode) => postMessage(bytecode))
 onmessage = (msg) => smoldot.run(msg.data);
