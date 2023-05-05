@@ -26,7 +26,7 @@
 //   is ready to accept more JSON-RPC responses, after which the server can send responses at any
 //   time and the client queues them locally.
 
-import * as instance from './local.js';
+import * as instance from './local-instance.js';
 
 export interface ConnectConfig {
     wasmModule: Promise<WebAssembly.Module>,

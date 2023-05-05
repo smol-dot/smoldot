@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import * as instance from './instance/remote.js'
+import * as instance from './internals/remote-instance.js'
 
 /**
  * Runs the CPU-heavy parts of smoldot. Must be passed a port whose other end is passed to

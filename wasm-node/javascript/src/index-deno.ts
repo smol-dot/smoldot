@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { Client, ClientOptions } from './public-types.js'
-import { start as innerStart, Connection, ConnectionConfig } from './client.js'
+import { start as innerStart, Connection, ConnectionConfig } from './internals/client.js'
 import { compileModule } from './module-deno.js'
 
 export {

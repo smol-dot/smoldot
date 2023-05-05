@@ -15,9 +15,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { Client, ClientOptions, QueueFullError, AlreadyDestroyedError, AddChainError, AddChainOptions, Chain, JsonRpcDisabledError, MalformedJsonRpcError, CrashError } from './public-types.js';
-import * as instance from './instance/local.js';
-import * as remote from './instance/remote.js';
+import { Client, ClientOptions, QueueFullError, AlreadyDestroyedError, AddChainError, AddChainOptions, Chain, JsonRpcDisabledError, MalformedJsonRpcError, CrashError } from '../public-types.js';
+import * as instance from './local-instance.js';
+import * as remote from './remote-instance.js';
 
 /**
  * Contains functions that the client will use when it needs to leverage the platform.
