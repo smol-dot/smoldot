@@ -20,11 +20,12 @@ import * as buffer from './buffer.js';
 /**
  * Configuration for {@link startLocalInstance}.
  */
-export interface Config<A> {
-    /**
-     * Parses the given multiaddress.
-     */
-    parseMultiaddr: (address: string) => { success: true, address: A } | { success: false, error: string },
+export interface Config {
+    forbidTcp: boolean,
+    forbidWs: boolean,
+    forbidNonLocalWs: boolean,
+    forbidWss: boolean,
+    forbidWebRtc: boolean,
 
     /**
      * Maximum level of the logs that are generated.
@@ -53,19 +54,24 @@ export interface Config<A> {
     getRandomValues: (buffer: Uint8Array) => void,
 }
 
-export type Event<A> =
+export type Event =
     { ty: "add-chain-result", success: true, chainId: number } |
     { ty: "add-chain-result", success: false, error: string } |
     { ty: "log", level: number, target: string, message: string } |
     { ty: "json-rpc-responses-non-empty", chainId: number } |
     { ty: "current-task", taskName: string | null } |
     { ty: "wasm-panic", message: string } |
-    { ty: "new-connection", connectionId: number, address: A } |
+    { ty: "new-connection", connectionId: number, address: ParsedMultiaddr } |
     { ty: "connection-reset", connectionId: number } |
     { ty: "connection-stream-open", connectionId: number } |
     { ty: "connection-stream-reset", connectionId: number, streamId: number } |
     { ty: "stream-send", connectionId: number, streamId?: number, data: Uint8Array } |
     { ty: "stream-send-close", connectionId: number, streamId?: number };
+
+export type ParsedMultiaddr =
+    { ty: "tcp", hostname: string, port: number } |
+    { ty: "websocket", url: string } |
+    { ty: "webrtc", targetPort: string, ipVersion: string, targetIp: string, remoteCertMultibase: string };
 
 export interface Instance {
     request: (request: string, chainId: number) => number,
@@ -99,7 +105,7 @@ export interface Instance {
  * This instance is low-level in the sense that invalid input can lead to crashes and that input
  * isn't sanitized. In other words, you know what you're doing.
  */
-export async function startLocalInstance<A>(config: Config<A>, wasmModule: WebAssembly.Module, eventCallback: (event: Event<A>) => void): Promise<Instance> {
+export async function startLocalInstance(config: Config, wasmModule: WebAssembly.Module, eventCallback: (event: Event) => void): Promise<Instance> {
     const state: {
         // Null before initialization and after a panic.
         instance: SmoldotWasmInstance | null
@@ -212,7 +218,8 @@ export async function startLocalInstance<A>(config: Config<A>, wasmModule: WebAs
             errorBufferIndexPtr >>>= 0;
 
             const address = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), addrPtr, addrLen);
-            const result = config.parseMultiaddr(address);
+            // TODO: consider extracting config options so user can't change the fields dynamically
+            const result = parseMultiaddr(address, config.forbidTcp, config.forbidWs, config.forbidNonLocalWs, config.forbidWss, config.forbidWebRtc);
             if (result.success) {
                 eventCallback({ ty: "new-connection", connectionId, address: result.address });
                 return 0
@@ -694,4 +701,62 @@ interface SmoldotWasmExports extends WebAssembly.Exports {
 
 interface SmoldotWasmInstance extends WebAssembly.Instance {
     readonly exports: SmoldotWasmExports;
+}
+
+// TODO: consider moving this function somewhere else or something
+export function parseMultiaddr(
+    address: string,
+    forbidTcp: boolean,
+    forbidWs: boolean,
+    forbidNonLocalWs: boolean,
+    forbidWss: boolean,
+    forbidWebRtc: boolean
+): { success: true, address: ParsedMultiaddr } | { success: false, error: string } {
+    const tcpParsed = address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)$/);
+    // TODO: remove support for `/wss` in a long time (https://github.com/paritytech/smoldot/issues/1940)
+    const wsParsed = address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)\/(ws|wss|tls\/ws)$/);
+    const webRTCParsed = address.match(/^\/(ip4|ip6)\/(.*?)\/udp\/(.*?)\/webrtc-direct\/certhash\/(.*?)$/);
+
+    if (wsParsed != null) {
+        const proto = (wsParsed[4] == 'ws') ? 'ws' : 'wss';
+        if (proto == 'ws' && forbidWs) {
+            return { success: false, error: 'WebSocket connections not available' }
+        }
+        if (proto == 'wss' && forbidWss) {
+            return { success: false, error: 'WebSocket secure connections not available' }
+        }
+        if (proto == 'ws' && wsParsed[2] != 'localhost' && wsParsed[2] != '127.0.0.1' && forbidNonLocalWs) {
+            return { success: false, error: 'Non-local WebSocket connections not available' }
+        }
+
+        const url = (wsParsed[1] == 'ip6') ?
+            (proto + "://[" + wsParsed[2] + "]:" + wsParsed[3]) :
+            (proto + "://" + wsParsed[2] + ":" + wsParsed[3]);
+
+        return { success: true, address: { ty: "websocket", url } }
+    } else if (tcpParsed != null) {
+        if (forbidTcp) {
+            return { success: false, error: 'TCP connections not available' }
+        }
+
+        return { success: true, address: { ty: "tcp", hostname: tcpParsed[2]!, port: parseInt(tcpParsed[3]!) } }
+
+    } else if (webRTCParsed != null) {
+        const targetPort = webRTCParsed[3]!;
+        if (forbidWebRtc) {
+            return { success: false, error: 'WebRTC connections not available' }
+        }
+        if (targetPort === '0') {
+            return { success: false, error: 'Invalid WebRTC target port' }
+        }
+
+        const ipVersion = webRTCParsed[1] == 'ip4' ? '4' : '6';
+        const targetIp = webRTCParsed[2]!;
+        const remoteCertMultibase = webRTCParsed[4]!;
+
+        return { success: true, address: { ty: "webrtc", targetPort, ipVersion, targetIp, remoteCertMultibase } }
+
+    } else {
+        return { success: false, error: 'Unrecognized multiaddr format' }
+    }
 }
