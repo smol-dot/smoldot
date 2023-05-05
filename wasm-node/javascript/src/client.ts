@@ -15,8 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { start as startInstance } from './instance/instance.js';
-import { Client, ClientOptions, AlreadyDestroyedError, AddChainError, AddChainOptions, Chain, JsonRpcDisabledError, MalformedJsonRpcError } from './public-types.js';
+import { Client, ClientOptions, QueueFullError, AlreadyDestroyedError, AddChainError, AddChainOptions, Chain, JsonRpcDisabledError, MalformedJsonRpcError, CrashError } from './public-types.js';
+import * as instance from './instance/raw-instance.js';
 
 /**
  * Contains functions that the client will use when it needs to leverage the platform.
@@ -236,30 +236,196 @@ export function start<A>(options: ClientOptions, wasmModule: Promise<WebAssembly
 
     // This object holds the state of everything.
     const state: {
+        instance:
+        { status: "not-created" } |
+        { status: "not-ready", whenReady: Promise<void> } |
+        { status: "ready", instance: instance.Instance } |
+        { status: "destroyed", error: AlreadyDestroyedError | CrashError },
         // For each chain object returned by `addChain`, the associated internal chain id.
         // Immediately cleared when `remove()` is called on a chain.
         chainIds: WeakMap<Chain, number>,
-        // If `Client.terminate()̀  is called, this error is set to a value.
-        // All the functions of the public API check if this contains a value.
-        alreadyDestroyedError: null | AlreadyDestroyedError,
+        // Task currently being executed by the Wasm. Used for diagnostic about when a panic
+        // happens.
+        // TODO: consider moving this to raw-instance and report the name as part of the wasm-panic event
+        currentTaskName: string | null,
+        // List of all active connections. Keys are IDs assigned by the instance.
+        connections: Map<number, Connection>,
+        // FIFO queue. When `addChain` is called, an entry is added to this queue. When the
+        // instance notifies that a chain creation has succeeded or failed, an entry is popped.
+        addChainResults: Array<(outcome: { success: true, chainId: number } | { success: false, error: string }) => void>,
+        // List of all active chains. Keys are chainIDs assigned by the instance.
+        chains: Map<number, {
+            // Callbacks woken up when a JSON-RPC response is ready or when the chain is destroyed
+            // or when the instance crashes.
+            jsonRpcResponsesPromises: (() => void)[],
+        }>,
     } = {
+        instance: { status: "not-created" },
         chainIds: new WeakMap(),
-        alreadyDestroyedError: null,
+        currentTaskName: null,
+        connections: new Map(),
+        addChainResults: [],
+        chains: new Map(),
     };
 
-    const instance = startInstance({
-        wasmModule,
-        // Maximum level of log entries sent by the client.
-        // 0 = Logging disabled, 1 = Error, 2 = Warn, 3 = Info, 4 = Debug, 5 = Trace
-        maxLogLevel: options.maxLogLevel || 3,
-        logCallback,
-        cpuRateLimit,
-    }, platformBindings);
+    // Callback called during the execution of the instance.
+    const eventCallback = (event: instance.Event<A>) => {
+        switch (event.ty) {
+            case "wasm-panic": {
+                console.error(
+                    "Smoldot has panicked" +
+                    (state.currentTaskName ? (" while executing task `" + state.currentTaskName + "`") : "") +
+                    ". This is a bug in smoldot. Please open an issue at " +
+                    "https://github.com/smol-dot/smoldot/issues with the following message:\n" +
+                    event.message
+                );
+
+                state.instance = {
+                    status: "destroyed",
+                    error: new CrashError(event.message),
+                }
+
+                state.connections.forEach((connec) => connec.reset());
+                state.connections.clear();
+
+                for (const addChainResult of state.addChainResults) {
+                    addChainResult({ success: false, error: "Smoldot has crashed" });
+                }
+                state.addChainResults = [];
+
+                for (const chain of Array.from(state.chains.values())) {
+                    for (const callback of chain.jsonRpcResponsesPromises) {
+                        callback()
+                    }
+                    chain.jsonRpcResponsesPromises = [];
+                }
+                state.chains.clear();
+
+                state.currentTaskName = null;
+
+                break
+            }
+            case "log": {
+                logCallback(event.level, event.target, event.message)
+                break;
+            }
+            case "add-chain-result": {
+                (state.addChainResults.shift()!)(event);
+                break;
+            }
+            case "json-rpc-responses-non-empty": {
+                // Notify every single promise found in `jsonRpcResponsesPromises`.
+                const callbacks = state.chains.get(event.chainId)!.jsonRpcResponsesPromises;
+                while (callbacks.length !== 0) {
+                    (callbacks.shift()!)();
+                }
+                break;
+            }
+            case "current-task": {
+                state.currentTaskName = event.taskName;
+                break;
+            }
+            case "new-connection": {
+                const connectionId = event.connectionId;
+                state.connections.set(connectionId, platformBindings.connect({
+                    address: event.address,
+                    onConnectionReset(message) {
+                        if (state.instance.status !== "ready")
+                            throw new Error();
+                        state.connections.delete(connectionId);
+                        state.instance.instance.connectionReset(connectionId, message);
+                    },
+                    onMessage(message, streamId) {
+                        if (state.instance.status !== "ready")
+                            throw new Error();
+                        state.instance.instance.streamMessage(connectionId, message, streamId);
+                    },
+                    onStreamOpened(streamId, direction, initialWritableBytes) {
+                        if (state.instance.status !== "ready")
+                            throw new Error();
+                        state.instance.instance.streamOpened(connectionId, streamId, direction, initialWritableBytes);
+                    },
+                    onOpen(info) {
+                        if (state.instance.status !== "ready")
+                            throw new Error();
+                        state.instance.instance.connectionOpened(connectionId, info);
+                    },
+                    onWritableBytes(numExtra, streamId) {
+                        if (state.instance.status !== "ready")
+                            throw new Error();
+                        state.instance.instance.streamWritableBytes(connectionId, numExtra, streamId);
+                    },
+                    onStreamReset(streamId) {
+                        if (state.instance.status !== "ready")
+                            throw new Error();
+                        state.instance.instance.streamReset(connectionId, streamId);
+                    },
+                }));
+                break;
+            }
+            case "connection-reset": {
+                const connection = state.connections.get(event.connectionId)!;
+                connection.reset();
+                state.connections.delete(event.connectionId);
+                break;
+            }
+            case "connection-stream-open": {
+                const connection = state.connections.get(event.connectionId)!;
+                connection.openOutSubstream();
+                break;
+            }
+            case "connection-stream-reset": {
+                const connection = state.connections.get(event.connectionId)!;
+                connection.reset(event.streamId);
+                break;
+            }
+            case "stream-send": {
+                const connection = state.connections.get(event.connectionId)!;
+                connection.send(event.data, event.streamId);
+                break;
+            }
+            case "stream-send-close": {
+                const connection = state.connections.get(event.connectionId)!;
+                connection.closeSend(event.streamId);
+                break;
+            }
+        }
+    };
+
+    state.instance = {
+        status: "not-ready",
+        whenReady: wasmModule
+            .then((wasmModule) => {
+                return instance.startLocalInstance({
+                    parseMultiaddr: platformBindings.parseMultiaddr,
+                    wasmModule,
+                    maxLogLevel: options.maxLogLevel || 3,
+                    cpuRateLimit,
+                    envVars: [],
+                    performanceNow: platformBindings.performanceNow,
+                    getRandomValues: platformBindings.getRandomValues,
+                }, eventCallback)
+            })
+            .then((instance) => {
+                // The Wasm instance might have been crashed before this callback is called.
+                if (state.instance.status === "destroyed")
+                    return;
+                state.instance = {
+                    status: "ready",
+                    instance,
+                };
+            })
+    };
 
     return {
         addChain: async (options: AddChainOptions): Promise<Chain> => {
-            if (state.alreadyDestroyedError)
-                throw state.alreadyDestroyedError;
+            if (state.instance.status === "not-ready")
+                await state.instance.whenReady;
+            if (state.instance.status === "destroyed")
+                throw state.instance.error;
+
+            if (state.instance.status === "not-created" || state.instance.status === "not-ready")
+                throw new Error();  // Internal error, not supposed to ever happen.
 
             // Passing a JSON object for the chain spec is an easy mistake, so we provide a more
             // readable error.
@@ -278,47 +444,84 @@ export function start<A>(options: ClientOptions, wasmModule: Promise<WebAssembly
                 }
             }
 
-            const outcome = await instance.addChain(options.chainSpec, typeof options.databaseContent === 'string' ? options.databaseContent : "", potentialRelayChainsIds, !!options.disableJsonRpc);
+            const promise = new Promise<{ success: true, chainId: number } | { success: false, error: string }>((resolve) => state.addChainResults.push(resolve));
 
+            state.instance.instance.addChain(
+                options.chainSpec,
+                typeof options.databaseContent === 'string' ? options.databaseContent : "",
+                potentialRelayChainsIds,
+                !!options.disableJsonRpc
+            );
+
+            const outcome = await promise;
             if (!outcome.success)
                 throw new AddChainError(outcome.error);
 
             const chainId = outcome.chainId;
-            const wasDestroyed = { destroyed: false };
 
-            // `expected` was pushed by the `addChain` method.
-            // Resolve the promise that `addChain` returned to the user.
+            state.chains.set(chainId, {
+                jsonRpcResponsesPromises: new Array()
+            });
+
             const newChain: Chain = {
                 sendJsonRpc: (request) => {
-                    if (state.alreadyDestroyedError)
-                        throw state.alreadyDestroyedError;
-                    if (wasDestroyed.destroyed)
+                    if (state.instance.status === "destroyed")
+                        throw state.instance.error;
+                    if (state.instance.status !== "ready")
+                        throw new Error(); // Internal error. Never supposed to happen.
+                    if (!state.chains.has(chainId))
                         throw new AlreadyDestroyedError();
                     if (options.disableJsonRpc)
                         throw new JsonRpcDisabledError();
                     if (request.length >= 64 * 1024 * 1024) {
                         throw new MalformedJsonRpcError();
                     };
-                    instance.request(request, chainId);
+
+                    const retVal = state.instance.instance.request(request, chainId);
+                    switch (retVal) {
+                        case 0: break;
+                        case 1: throw new MalformedJsonRpcError();
+                        case 2: throw new QueueFullError();
+                        default: throw new Error("Internal error: unknown json_rpc_send error code: " + retVal)
+                    }
                 },
-                nextJsonRpcResponse: () => {
-                    if (state.alreadyDestroyedError)
-                        return Promise.reject(state.alreadyDestroyedError);
-                    if (wasDestroyed.destroyed)
-                        return Promise.reject(new AlreadyDestroyedError());
+                nextJsonRpcResponse: async () => {
+                    if (!state.chains.has(chainId))
+                        throw new AlreadyDestroyedError();
                     if (options.disableJsonRpc)
                         return Promise.reject(new JsonRpcDisabledError());
-                    return instance.nextJsonRpcResponse(chainId);
+
+                    while (true) {
+                        if (state.instance.status === "destroyed")
+                            throw state.instance.error;
+                        if (state.instance.status !== "ready")
+                            throw new Error(); // Internal error. Never supposed to happen.
+
+                        // Try to pop a message from the queue.
+                        const message = state.instance.instance.peekJsonRpcResponse(chainId);
+                        if (message)
+                            return message;
+
+                        // If no message is available, wait for one to be.
+                        await new Promise<void>((resolve) => {
+                            state.chains.get(chainId)!.jsonRpcResponsesPromises.push(resolve)
+                        });
+                    }
                 },
                 remove: () => {
-                    if (state.alreadyDestroyedError)
-                        throw state.alreadyDestroyedError;
-                    if (wasDestroyed.destroyed)
+                    if (state.instance.status === "destroyed")
+                        throw state.instance.error;
+                    if (state.instance.status !== "ready")
+                        throw new Error(); // Internal error. Never supposed to happen.
+                    if (!state.chains.has(chainId))
                         throw new AlreadyDestroyedError();
-                    wasDestroyed.destroyed = true;
                     console.assert(state.chainIds.has(newChain));
                     state.chainIds.delete(newChain);
-                    instance.removeChain(chainId);
+                    for (const callback of state.chains.get(chainId)!.jsonRpcResponsesPromises) {
+                        callback();
+                    }
+                    state.chains.delete(chainId);
+                    state.instance.instance.removeChain(chainId);
                 },
             };
 
@@ -326,10 +529,14 @@ export function start<A>(options: ClientOptions, wasmModule: Promise<WebAssembly
             return newChain;
         },
         terminate: async () => {
-            if (state.alreadyDestroyedError)
-                throw state.alreadyDestroyedError
-            state.alreadyDestroyedError = new AlreadyDestroyedError();
-            instance.startShutdown()
+            if (state.instance.status === "not-ready")
+                await state.instance.whenReady;
+            if (state.instance.status === "destroyed")
+                throw state.instance.error;
+            if (state.instance.status !== "ready")
+                throw new Error(); // Internal error. Never supposed to happen.
+            state.instance.instance.startShutdown();
+            state.instance = { status: "destroyed", error: new AlreadyDestroyedError() };
         }
     }
 }

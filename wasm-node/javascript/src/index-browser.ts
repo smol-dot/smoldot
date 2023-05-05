@@ -18,8 +18,7 @@
 /// <reference lib="dom" />
 
 import { Client, ClientOptions } from './public-types.js'
-import { start as innerStart } from './client.js'
-import { Connection, ConnectionConfig } from './instance/instance.js';
+import { start as innerStart, Connection, ConnectionConfig } from './client.js'
 import { multibaseBase64Decode } from './base64.js'
 import { compileModule } from './module-browser.js'
 
