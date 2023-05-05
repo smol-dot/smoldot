@@ -15,8 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { default as wasmBase64 } from './module/autogen/wasm.js';
-import { classicDecode } from './base64.js'
+import { default as wasmBase64 } from './internals/module/wasm.js';
+import { classicDecode } from './internals/base64.js'
 import { inflate } from 'pako';
 
 /**

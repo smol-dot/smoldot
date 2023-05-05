@@ -20,7 +20,7 @@
 // with both at the same time.
 
 import { Client, ClientOptions } from './public-types.js'
-import { start as innerStart, Connection, ConnectionConfig } from './client.js'
+import { start as innerStart, Connection, ConnectionConfig } from './internals/client.js'
 import { compileModule } from './module-nodejs.js'
 
 import { WebSocket } from 'ws';

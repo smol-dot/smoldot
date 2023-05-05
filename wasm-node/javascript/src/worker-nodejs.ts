@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import * as instance from './instance/remote.js'
+import * as instance from './internals/remote-instance.js'
 import { performance } from 'node:perf_hooks';
 import { randomFillSync } from 'node:crypto';
 
