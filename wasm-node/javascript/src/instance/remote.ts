@@ -214,15 +214,22 @@ export async function startInstanceServer<A>(config: instance.Config<A>, portToC
                 break;
             }
             case "json-rpc-responses-non-empty": {
-                const numAccepted = state.acceptedJsonRpcResponses.get(event.chainId)!;
-                if (numAccepted == 0)
-                    return;
-                const response = state.instance!.peekJsonRpcResponse(event.chainId);
-                if (response) {
-                    state.acceptedJsonRpcResponses.set(event.chainId, numAccepted - 1);
-                    const msg: ServerToClient<A> = { ty: "json-rpc-response", chainId: event.chainId, response };
-                    portToClient.postMessage(msg);
-                }
+                // Process this event asynchronously because we can't call into `instance`
+                // from within the events callback itself.
+                // TODO: do better than setTimeout?
+                setTimeout(() => {
+                    if (!state.instance)
+                        return;
+                    const numAccepted = state.acceptedJsonRpcResponses.get(event.chainId)!;
+                    if (numAccepted == 0)
+                        return;
+                    const response = state.instance.peekJsonRpcResponse(event.chainId);
+                    if (response) {
+                        state.acceptedJsonRpcResponses.set(event.chainId, numAccepted - 1);
+                        const msg: ServerToClient<A> = { ty: "json-rpc-response", chainId: event.chainId, response };
+                        portToClient.postMessage(msg);
+                    }
+                }, 0);
                 return;
             }
             case "new-connection": {
