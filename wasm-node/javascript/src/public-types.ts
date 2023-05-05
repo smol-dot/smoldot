@@ -213,6 +213,20 @@ export type LogCallback = (level: number, target: string, message: string) => vo
  */
 export interface ClientOptions {
     /**
+     * One end of a port (created using `new MessageChannel`). The other end must be passed to the
+     * `run` function found in `smoldot/worker`.
+     *
+     * If this option isn't set then the smoldot light client will run entirely on the "current
+     * thread", which might slow down other components that also run on this thread.
+     * If this option is set, then the {@link Client} that is created is merely a frontend that
+     * sends messages on the provided port.
+     *
+     * It is intended that the other end of this port is sent to a background worker, and the
+     * `run` function be called in this background worker. However this is in no way mandatory.
+     */
+    portToWorker?: MessagePort,
+
+    /**
      * Callback that the client will invoke in order to report a log event.
      *
      * By default, prints the log on the `console`. If you want to disable logging altogether,
@@ -240,6 +254,9 @@ export interface ClientOptions {
      * Note that this is implemented by sleeping for certain amounts of time in order for the average
      * CPU consumption to not go beyond the given limit. It is therefore still possible for the
      * client to use high amounts of CPU for short amounts of time.
+     *
+     * If {@link ClientOptions.portToWorker} is set, then the CPU rate limit applies to the
+     * worker.
      */
     cpuRateLimit?: number;
 

@@ -21,6 +21,7 @@ import * as smoldot from '../dist/mjs/index-nodejs.js';
 import { WebSocketServer } from 'ws';
 import * as process from 'node:process';
 import * as fs from 'node:fs';
+import { Worker } from 'node:worker_threads';
 
 // List of files containing chains available to the user.
 // The first item has a specific role in that we always connect to it at initialization.
@@ -50,7 +51,13 @@ for (const file of chainSpecsFiles) {
     };
 }
 
+const { port1, port2 } = new MessageChannel();
+const worker = new Worker("./demo/demo-worker.mjs");
+worker.on('error', (err) => { console.log("Worker error: \n" + err.message + "\n" + err.stack) });
+worker.postMessage(port2, [port2]);
+
 const client = smoldot.start({
+    portToWorker: port1,
     maxLogLevel: 3,  // Can be increased for more verbosity
     forbidTcp: false,
     forbidWs: false,

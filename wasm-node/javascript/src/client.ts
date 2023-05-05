@@ -16,7 +16,8 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { Client, ClientOptions, QueueFullError, AlreadyDestroyedError, AddChainError, AddChainOptions, Chain, JsonRpcDisabledError, MalformedJsonRpcError, CrashError } from './public-types.js';
-import * as instance from './instance/raw-instance.js';
+import * as instance from './instance/local.js';
+import * as remote from './instance/remote.js';
 
 /**
  * Contains functions that the client will use when it needs to leverage the platform.
@@ -136,7 +137,7 @@ export interface ConnectionConfig {
     /**
      * Parsed multiaddress, as returned by the `parseMultiaddr` function.
      */
-    address: ParsedMultiaddr,
+    address: instance.ParsedMultiaddr,
 
     /**
      * Callback called when the connection transitions from the `Opening` to the `Open` state.
@@ -205,11 +206,6 @@ export interface ConnectionConfig {
     onMessage: (message: Uint8Array, streamId?: number) => void;
 }
 
-export type ParsedMultiaddr =
-    { ty: "tcp", hostname: string, port: number } |
-    { ty: "websocket", url: string } |
-    { ty: "webrtc", targetPort: string, ipVersion: string, targetIp: string, remoteCertMultibase: string };
-
 // This function is similar to the `start` function found in `index.ts`, except with an extra
 // parameter containing the platform-specific bindings.
 // Contrary to the one within `index.js`, this function is not supposed to be directly used.
@@ -272,7 +268,7 @@ export function start(options: ClientOptions, wasmModule: Promise<WebAssembly.Mo
     };
 
     // Callback called during the execution of the instance.
-    const eventCallback = (event: instance.Event<ParsedMultiaddr>) => {
+    const eventCallback = (event: instance.Event) => {
         switch (event.ty) {
             case "wasm-panic": {
                 console.error(
@@ -395,40 +391,62 @@ export function start(options: ClientOptions, wasmModule: Promise<WebAssembly.Mo
         }
     };
 
-    state.instance = {
-        status: "not-ready",
-        whenReady: wasmModule
-            .then((wasmModule) => {
-                return instance.startLocalInstance({
-                    parseMultiaddr: (address) => {
-                        // TODO: extract options so that user can't change them dynamically?
-                        return parseMultiaddr(
-                            address,
-                            options.forbidTcp || false,
-                            options.forbidWs || false,
-                            options.forbidNonLocalWs || false,
-                            options.forbidWss || false,
-                            options.forbidWebRtc || false
-                        );
-                    },
-                    wasmModule,
-                    maxLogLevel: options.maxLogLevel || 3,
-                    cpuRateLimit,
-                    envVars: [],
-                    performanceNow: platformBindings.performanceNow,
-                    getRandomValues: platformBindings.getRandomValues,
-                }, eventCallback)
-            })
-            .then((instance) => {
-                // The Wasm instance might have been crashed before this callback is called.
-                if (state.instance.status === "destroyed")
-                    return;
-                state.instance = {
-                    status: "ready",
-                    instance,
-                };
-            })
-    };
+    const portToWorker = options.portToWorker;
+    if (!portToWorker) {
+        // Start a local instance.
+        state.instance = {
+            status: "not-ready",
+            whenReady: wasmModule
+                .then((wasmModule) => {
+                    return instance.startLocalInstance({
+                        forbidTcp: options.forbidTcp || false,
+                        forbidWs: options.forbidWs || false,
+                        forbidNonLocalWs: options.forbidNonLocalWs || false,
+                        forbidWss: options.forbidWss || false,
+                        forbidWebRtc: options.forbidWebRtc || false,
+                        maxLogLevel: options.maxLogLevel || 3,
+                        cpuRateLimit,
+                        envVars: [],
+                        performanceNow: platformBindings.performanceNow,
+                        getRandomValues: platformBindings.getRandomValues,
+                    }, wasmModule, eventCallback)
+                })
+                .then((instance) => {
+                    // The Wasm instance might have been crashed before this callback is called.
+                    if (state.instance.status === "destroyed")
+                        return;
+                    state.instance = {
+                        status: "ready",
+                        instance,
+                    };
+                })
+        };
+    } else {
+        // Connect to the remote instance.
+        state.instance = {
+            status: "not-ready",
+            whenReady: remote.connectToInstanceServer({
+                wasmModule,
+                forbidTcp: options.forbidTcp || false,
+                forbidWs: options.forbidWs || false,
+                forbidNonLocalWs: options.forbidNonLocalWs || false,
+                forbidWss: options.forbidWss || false,
+                forbidWebRtc: options.forbidWebRtc || false,
+                maxLogLevel: options.maxLogLevel || 3,
+                cpuRateLimit,
+                portToServer: portToWorker,
+                eventCallback
+            }).then((instance) => {
+                    // The Wasm instance might have been crashed before this callback is called.
+                    if (state.instance.status === "destroyed")
+                        return;
+                    state.instance = {
+                        status: "ready",
+                        instance,
+                    };
+                })
+        };
+    }
 
     return {
         addChain: async (options: AddChainOptions): Promise<Chain> => {
@@ -565,63 +583,5 @@ export function start(options: ClientOptions, wasmModule: Promise<WebAssembly.Mo
             state.chains.clear();
             state.currentTaskName = null;
         }
-    }
-}
-
-// TODO: consider doing the parsing in the Rust code instead
-function parseMultiaddr(
-    address: string,
-    forbidTcp: boolean,
-    forbidWs: boolean,
-    forbidNonLocalWs: boolean,
-    forbidWss: boolean,
-    forbidWebRtc: boolean
-): { success: true, address: ParsedMultiaddr } | { success: false, error: string } {
-    const tcpParsed = address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)$/);
-    // TODO: remove support for `/wss` in a long time (https://github.com/paritytech/smoldot/issues/1940)
-    const wsParsed = address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)\/(ws|wss|tls\/ws)$/);
-    const webRTCParsed = address.match(/^\/(ip4|ip6)\/(.*?)\/udp\/(.*?)\/webrtc-direct\/certhash\/(.*?)$/);
-
-    if (wsParsed != null) {
-        const proto = (wsParsed[4] == 'ws') ? 'ws' : 'wss';
-        if (proto == 'ws' && forbidWs) {
-            return { success: false, error: 'WebSocket connections not available' }
-        }
-        if (proto == 'wss' && forbidWss) {
-            return { success: false, error: 'WebSocket secure connections not available' }
-        }
-        if (proto == 'ws' && wsParsed[2] != 'localhost' && wsParsed[2] != '127.0.0.1' && forbidNonLocalWs) {
-            return { success: false, error: 'Non-local WebSocket connections not available' }
-        }
-
-        const url = (wsParsed[1] == 'ip6') ?
-            (proto + "://[" + wsParsed[2] + "]:" + wsParsed[3]) :
-            (proto + "://" + wsParsed[2] + ":" + wsParsed[3]);
-
-        return { success: true, address: { ty: "websocket", url } }
-    } else if (tcpParsed != null) {
-        if (forbidTcp) {
-            return { success: false, error: 'TCP connections not available' }
-        }
-
-        return { success: true, address: { ty: "tcp", hostname: tcpParsed[2]!, port: parseInt(tcpParsed[3]!) } }
-
-    } else if (webRTCParsed != null) {
-        const targetPort = webRTCParsed[3]!;
-        if (forbidWebRtc) {
-            return { success: false, error: 'WebRTC connections not available' }
-        }
-        if (targetPort === '0') {
-            return { success: false, error: 'Invalid WebRTC target port' }
-        }
-
-        const ipVersion = webRTCParsed[1] == 'ip4' ? '4' : '6';
-        const targetIp = webRTCParsed[2]!;
-        const remoteCertMultibase = webRTCParsed[4]!;
-
-        return { success: true, address: { ty: "webrtc", targetPort, ipVersion, targetIp, remoteCertMultibase } }
-
-    } else {
-        return { success: false, error: 'Unrecognized multiaddr format' }
     }
 }
