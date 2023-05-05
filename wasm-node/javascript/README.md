@@ -67,3 +67,61 @@ chains must be passed as parameter to `addChain` as well. In situations where th
 specifications passed to `addChain` are not trusted, it is important for security reasons to not
 establish a parachain-relay-chain link between two chains that aren't part of the same "trust
 sandbox".
+
+## Usage with a worker
+
+By default, calling `start()` will run smoldot entirely in the current thread. This can cause
+performance issues if other CPU-heavy operations are done in that thread.
+
+In order to help with this, it possible to use smoldot in conjunction with a worker.
+To do so, you must first create a worker. Since creating a worker has some subtle differences
+depending on the platform, this is outside of the responsibility of smoldot.
+
+Once the worker is created, create two `MessagePort`s using `new MessageChannel`, and send one
+of them to the worker. Then, pass one port to the `ClientOptions.portToWorker` field and the
+other port to the `run()` function of smoldot, which can be imported with
+`import { run } from 'smoldot/worker';` (on Deno, it is found in `worker-deno.ts`).
+
+Another optimization that is orthogonal to but is related to running smoldot in a worker consists
+in also loading the smoldot bytecode in that worker. The smoldot bytecode weights several
+megabytes, and loading it in a worker rather than the main thread makes it possible to load the
+UI while smoldot is still initializing. This is especially important when smoldot is included in
+an application served over the web.
+
+In order to load the smoldot bytecode in a worker, import `compileBytecode` with
+`import { compileBytecode } from 'smoldot/bytecode';` (on Deno: `bytecode-deno.ts`), then call the
+function and send the result to the main thread. From the main thread, rather than using the
+`start` function imported from `smoldot`, use the `startWithBytecode` function that can be imported
+using `import { startWithBytecode } from 'smoldot/no-auto-bytecode';` (on Deno:
+`no-auto-bytecode-deno.ts`). The options provided to `startWithBytecode` are the same as the ones
+passed to `start`, except for an additional `bytecode` field that must be set to the bytecode
+created in the worker.
+
+Here is an example of all this, assuming a browser environment:
+
+```ts
+import * as smoldot from 'smoldot/no-auto-bytecode';
+
+const worker = new Worker(new URL('./worker.js', import.meta.url));
+
+const bytecode = new Promise((resolve) => {
+    worker.onmessage = (event) => resolve(event.data);
+});
+
+const { port1, port2 } = new MessageChannel();
+worker.postMessage(port1, [port1]);
+
+const client = smoldot.startWithBytecode({
+    bytecode,
+    portToWorker: port2,
+});
+
+
+// `worker.ts`
+
+import * as smoldot from '@substrate/smoldot-light/worker';
+import { compileBytecode } from '@substrate/smoldot-light/bytecode';
+
+compileBytecode().then((bytecode) => postMessage(bytecode))
+onmessage = (msg) => smoldot.run(msg.data);
+```

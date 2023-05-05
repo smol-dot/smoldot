@@ -15,16 +15,18 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { default as wasmBase64 } from './internals/module/wasm.js';
+import { default as wasmBase64 } from './internals/bytecode/wasm.js';
 import { inflate } from 'pako';
+import { SmoldotBytecode } from './public-types.js';
 
 /**
  * Compiles and returns the smoldot WebAssembly binary.
  */
-export async function compileModule(): Promise<WebAssembly.Module> {
+export async function compileBytecode(): Promise<SmoldotBytecode> {
     // The actual Wasm bytecode is base64-decoded then deflate-decoded from a constant found in a
     // different file.
     // This is suboptimal compared to using `instantiateStreaming`, but it is the most
     // cross-platform cross-bundler approach.
-    return WebAssembly.compile(inflate(Buffer.from(wasmBase64, 'base64')));
+    return WebAssembly.compile(inflate(Buffer.from(wasmBase64, 'base64')))
+        .then((m) => { return { wasm: m } });
 }

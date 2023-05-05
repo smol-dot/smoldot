@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { Client, ClientOptions, QueueFullError, AlreadyDestroyedError, AddChainError, AddChainOptions, Chain, JsonRpcDisabledError, MalformedJsonRpcError, CrashError } from '../public-types.js';
+import { Client, ClientOptions, QueueFullError, AlreadyDestroyedError, AddChainError, AddChainOptions, Chain, JsonRpcDisabledError, MalformedJsonRpcError, CrashError, SmoldotBytecode } from '../public-types.js';
 import * as instance from './local-instance.js';
 import * as remote from './remote-instance.js';
 
@@ -209,7 +209,7 @@ export interface ConnectionConfig {
 // This function is similar to the `start` function found in `index.ts`, except with an extra
 // parameter containing the platform-specific bindings.
 // Contrary to the one within `index.js`, this function is not supposed to be directly used.
-export function start(options: ClientOptions, wasmModule: Promise<WebAssembly.Module>, platformBindings: PlatformBindings): Client {
+export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Promise<SmoldotBytecode>, platformBindings: PlatformBindings): Client {
     const logCallback = options.logCallback || ((level, target, message) => {
         // The first parameter of the methods of `console` has some printf-like substitution
         // capabilities. We don't really need to use this, but not using it means that the logs might
@@ -226,6 +226,10 @@ export function start(options: ClientOptions, wasmModule: Promise<WebAssembly.Mo
             console.trace("[%s] %s", target, message);
         }
     });
+
+    if (!(wasmModule instanceof Promise)) {
+        wasmModule = Promise.resolve(wasmModule);
+    }
 
     // Extract (to make sure the value doesn't change) and sanitize `cpuRateLimit`.
     let cpuRateLimit = options.cpuRateLimit || 1.0;
@@ -409,7 +413,7 @@ export function start(options: ClientOptions, wasmModule: Promise<WebAssembly.Mo
                         envVars: [],
                         performanceNow: platformBindings.performanceNow,
                         getRandomValues: platformBindings.getRandomValues,
-                    }, wasmModule, eventCallback)
+                    }, wasmModule.wasm, eventCallback)
                 })
                 .then((instance) => {
                     // The Wasm instance might have been crashed before this callback is called.
@@ -426,7 +430,7 @@ export function start(options: ClientOptions, wasmModule: Promise<WebAssembly.Mo
         state.instance = {
             status: "not-ready",
             whenReady: remote.connectToInstanceServer({
-                wasmModule,
+                wasmModule: wasmModule.then((b) => b.wasm),
                 forbidTcp: options.forbidTcp || false,
                 forbidWs: options.forbidWs || false,
                 forbidNonLocalWs: options.forbidNonLocalWs || false,

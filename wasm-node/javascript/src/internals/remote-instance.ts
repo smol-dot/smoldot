@@ -41,6 +41,15 @@ export interface ConnectConfig {
     eventCallback: (event: instance.Event) => void
 }
 
+// Implementation note: it is unclear even in the official specification
+// (https://html.spec.whatwg.org/multipage/web-messaging.html) whether both sides of a
+// `MessagePort` should be closed, or if one is enough.
+//
+// It has been noticed that doing `port.postMessage(...); port.close();` doesn't deliver the
+// message on Firefox (but it does on Chrome). The code below takes note of this, and only closes
+// a port upon *receiving* the last possible message. It therefore assumes that closing only one
+// side is enough. It is unclear whether this causes any memory leak.
+
 export async function connectToInstanceServer(config: ConnectConfig): Promise<instance.Instance> {
     // Send the wasm module and configuration to the server.
     // Note that we await the `wasmModule` `Promise` here.
@@ -49,7 +58,8 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
     // In order to simplify the implementation, we create new ports and send one of them to
     // the server. This is necessary so that the server can pause receiving messages while the
     // instance is being initialized.
-    const { port1: newPortToServer, port2: serverToClient } = new MessageChannel();
+    const { port1: portToServer, port2: serverToClient } = new MessageChannel();
+    const initialPort = config.portToServer;
     const initialMessage: InitialMessage = {
         wasmModule: await config.wasmModule,
         serverToClient,
@@ -61,16 +71,16 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
         forbidTcp: config.forbidTcp,
         forbidWebRtc: config.forbidWebRtc
     };
-    config.portToServer.postMessage(initialMessage, [serverToClient]);
-    config.portToServer.close();
-    config.portToServer = newPortToServer;
+    initialPort.postMessage(initialMessage, [serverToClient]);
+    // Note that closing `initialPort` here will lead to the message not being delivered on Firefox
+    // for some reason. It is therefore closed only on shutdown.
 
     const state = {
         jsonRpcResponses: new Map<number, string[]>(),
         connections: new Map<number, Set<number>>(),
     };
 
-    config.portToServer.onmessage = (messageEvent) => {
+    portToServer.onmessage = (messageEvent) => {
         const message = messageEvent.data as ServerToClient;
 
         // Update some local state.
@@ -78,7 +88,8 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
             case "wasm-panic": {
                 state.jsonRpcResponses.clear();
                 state.connections.clear();
-                config.portToServer.close();
+                portToServer.close();
+                initialPort.close();
                 break;
             }
             case "add-chain-result": {
@@ -86,7 +97,7 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
                     state.jsonRpcResponses.set(message.chainId, new Array);
                     const moreAccepted: ClientToServer = { ty: "accept-more-json-rpc-answers", chainId: message.chainId }
                     for (let i = 0; i < 10; ++i)
-                    config.portToServer.postMessage(moreAccepted);
+                    portToServer.postMessage(moreAccepted);
                 }
                 break;
             }
@@ -150,18 +161,18 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
     return {
         async addChain(chainSpec, databaseContent, potentialRelayChains, disableJsonRpc) {
             const msg: ClientToServer = { ty: "add-chain", chainSpec, databaseContent, potentialRelayChains, disableJsonRpc };
-            config.portToServer.postMessage(msg);
+            portToServer.postMessage(msg);
         },
 
         removeChain(chainId) {
             state.jsonRpcResponses.delete(chainId);
             const msg: ClientToServer = { ty: "remove-chain", chainId };
-            config.portToServer.postMessage(msg);
+            portToServer.postMessage(msg);
         },
 
         request(request, chainId) {
             const msg: ClientToServer = { ty: "request", chainId, request };
-            config.portToServer.postMessage(msg);
+            portToServer.postMessage(msg);
             return 0; // TODO: wrong return value
         },
 
@@ -170,47 +181,46 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
             if (!item)
                 return null;
             const msg: ClientToServer = { ty: "accept-more-json-rpc-answers", chainId };
-            config.portToServer.postMessage(msg);
+            portToServer.postMessage(msg);
             return item;
         },
 
         startShutdown() {
             const msg: ClientToServer = { ty: "shutdown" };
-            config.portToServer.postMessage(msg);
-            config.portToServer.close();
+            portToServer.postMessage(msg);
         },
 
         connectionReset(connectionId, message) {
             state.connections.delete(connectionId);
             const msg: ClientToServer = { ty: "connection-reset", connectionId, message };
-            config.portToServer.postMessage(msg);
+            portToServer.postMessage(msg);
         },
 
         connectionOpened(connectionId, info) {
             const msg: ClientToServer = { ty: "connection-opened", connectionId, info };
-            config.portToServer.postMessage(msg);
+            portToServer.postMessage(msg);
         },
 
         streamMessage(connectionId, message, streamId) {
             const msg: ClientToServer = { ty: "stream-message", connectionId, message, streamId };
-            config.portToServer.postMessage(msg);
+            portToServer.postMessage(msg);
         },
 
         streamOpened(connectionId, streamId, direction, initialWritableBytes) {
             state.connections.get(connectionId)!.add(streamId);
             const msg: ClientToServer = { ty: "stream-opened", connectionId, streamId, direction, initialWritableBytes };
-            config.portToServer.postMessage(msg);
+            portToServer.postMessage(msg);
         },
 
         streamWritableBytes(connectionId, numExtra, streamId) {
             const msg: ClientToServer = { ty: "stream-writable-bytes", connectionId, numExtra, streamId };
-            config.portToServer.postMessage(msg);
+            portToServer.postMessage(msg);
         },
 
         streamReset(connectionId, streamId) {
             state.connections.get(connectionId)!.delete(streamId);
             const msg: ClientToServer = { ty: "stream-reset", connectionId, streamId };
-            config.portToServer.postMessage(msg);
+            portToServer.postMessage(msg);
         },
     };
 }
@@ -273,7 +283,6 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 state.acceptedJsonRpcResponses.clear();
                 if (state.onShutdown)
                     state.onShutdown();
-                portToClient.close();
                 break;
             }
             case "json-rpc-responses-non-empty": {

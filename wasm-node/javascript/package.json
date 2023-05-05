@@ -29,6 +29,16 @@
         "require": "./dist/cjs/index-browser.js"
       }
     },
+    "./no-auto-bytecode": {
+      "node": {
+        "import": "./dist/mjs/no-auto-bytecode-nodejs.js",
+        "require": "./dist/cjs/no-auto-bytecode-nodejs.js"
+      },
+      "default": {
+        "import": "./dist/mjs/no-auto-bytecode-browser.js",
+        "require": "./dist/cjs/no-auto-bytecode-browser.js"
+      }
+    },
     "./worker": {
       "node": {
         "import": "./dist/mjs/worker-nodejs.js",
@@ -37,6 +47,16 @@
       "default": {
         "import": "./dist/mjs/worker-browser.js",
         "require": "./dist/cjs/worker-browser.js"
+      }
+    },
+    "./bytecode": {
+      "node": {
+        "import": "./dist/mjs/bytecode-nodejs.js",
+        "require": "./dist/cjs/bytecode-nodejs.js"
+      },
+      "default": {
+        "import": "./dist/mjs/bytecode-browser.js",
+        "require": "./dist/cjs/bytecode-browser.js"
       }
     }
   },
