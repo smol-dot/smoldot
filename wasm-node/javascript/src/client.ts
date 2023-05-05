@@ -425,18 +425,18 @@ export function start(options: ClientOptions, wasmModule: Promise<WebAssembly.Mo
         // Connect to the remote instance.
         state.instance = {
             status: "not-ready",
-            whenReady: remote.connectToInstanceServer(
+            whenReady: remote.connectToInstanceServer({
                 wasmModule,
-                options.forbidTcp || false,
-                options.forbidWs || false,
-                options.forbidNonLocalWs || false,
-                options.forbidWss || false,
-                options.forbidWebRtc || false,
-                options.maxLogLevel || 3,
+                forbidTcp: options.forbidTcp || false,
+                forbidWs: options.forbidWs || false,
+                forbidNonLocalWs: options.forbidNonLocalWs || false,
+                forbidWss: options.forbidWss || false,
+                forbidWebRtc: options.forbidWebRtc || false,
+                maxLogLevel: options.maxLogLevel || 3,
                 cpuRateLimit,
-                portToWorker,
+                portToServer: portToWorker,
                 eventCallback
-            ).then((instance) => {
+            }).then((instance) => {
                     // The Wasm instance might have been crashed before this callback is called.
                     if (state.instance.status === "destroyed")
                         return;

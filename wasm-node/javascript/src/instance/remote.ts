@@ -28,9 +28,8 @@
 
 import * as instance from './local.js';
 
-// TODO: add a config struct
-export async function connectToInstanceServer(
-    wasmModule: Promise<WebAssembly.Module>, 
+export interface ConnectConfig {
+    wasmModule: Promise<WebAssembly.Module>,
     forbidTcp: boolean,
     forbidWs: boolean,
     forbidNonLocalWs: boolean,
@@ -40,7 +39,9 @@ export async function connectToInstanceServer(
     cpuRateLimit: number,
     portToServer: MessagePort,
     eventCallback: (event: instance.Event) => void
-): Promise<instance.Instance> {
+}
+
+export async function connectToInstanceServer(config: ConnectConfig): Promise<instance.Instance> {
     // Send the module to the server.
     // Note that we await the `wasmModule` `Promise` here.
     // If instead we used `wasmModule.then(...)`, the user would be able to start using the
@@ -49,17 +50,27 @@ export async function connectToInstanceServer(
     // the server. This is necessary so that the server can pause receiving messages while the
     // instance is being initialized.
     const { port1: newPortToServer, port2: serverToClient } = new MessageChannel();
-    const initialMessage: InitialMessage = { wasmModule: await wasmModule, serverToClient, maxLogLevel, cpuRateLimit, forbidWs, forbidWss, forbidNonLocalWs, forbidTcp, forbidWebRtc };
-    portToServer.postMessage(initialMessage, [serverToClient]);
-    portToServer.close();
-    portToServer = newPortToServer;
+    const initialMessage: InitialMessage = {
+        wasmModule: await config.wasmModule,
+        serverToClient,
+        maxLogLevel: config.maxLogLevel,
+        cpuRateLimit: config.cpuRateLimit,
+        forbidWs: config.forbidWs,
+        forbidWss: config.forbidWss,
+        forbidNonLocalWs: config.forbidNonLocalWs,
+        forbidTcp: config.forbidTcp,
+        forbidWebRtc: config.forbidWebRtc
+    };
+    config.portToServer.postMessage(initialMessage, [serverToClient]);
+    config.portToServer.close();
+    config.portToServer = newPortToServer;
 
     const state = {
         jsonRpcResponses: new Map<number, string[]>(),
         connections: new Map<number, Set<number>>(),
     };
 
-    portToServer.onmessage = (messageEvent) => {
+    config.portToServer.onmessage = (messageEvent) => {
         const message = messageEvent.data as ServerToClient;
 
         // Update some local state.
@@ -67,15 +78,15 @@ export async function connectToInstanceServer(
             case "wasm-panic": {
                 state.jsonRpcResponses.clear();
                 state.connections.clear();
-                portToServer.close();
+                config.portToServer.close();
                 break;
             }
             case "add-chain-result": {
                 if (message.success) {
                     state.jsonRpcResponses.set(message.chainId, new Array);
                     const moreAccepted: ClientToServer = { ty: "accept-more-json-rpc-answers", chainId: message.chainId }
-                    for (let i = 0; i< 10; ++i)
-                        portToServer.postMessage(moreAccepted);
+                    for (let i = 0; i < 10; ++i)
+                    config.portToServer.postMessage(moreAccepted);
                 }
                 break;
             }
@@ -128,29 +139,29 @@ export async function connectToInstanceServer(
                 // The chain might have been removed locally in the past.
                 if (queue)
                     queue.push(message.response);
-                eventCallback({ ty: "json-rpc-responses-non-empty", chainId: message.chainId })
+                    config.eventCallback({ ty: "json-rpc-responses-non-empty", chainId: message.chainId })
                 return;
             }
         }
 
-        eventCallback(message);
+        config.eventCallback(message);
     };
 
     return {
         async addChain(chainSpec, databaseContent, potentialRelayChains, disableJsonRpc) {
             const msg: ClientToServer = { ty: "add-chain", chainSpec, databaseContent, potentialRelayChains, disableJsonRpc };
-            portToServer.postMessage(msg);
+            config.portToServer.postMessage(msg);
         },
 
         removeChain(chainId) {
             state.jsonRpcResponses.delete(chainId);
             const msg: ClientToServer = { ty: "remove-chain", chainId };
-            portToServer.postMessage(msg);
+            config.portToServer.postMessage(msg);
         },
 
         request(request, chainId) {
             const msg: ClientToServer = { ty: "request", chainId, request };
-            portToServer.postMessage(msg);
+            config.portToServer.postMessage(msg);
             return 0; // TODO: wrong return value
         },
 
@@ -159,47 +170,47 @@ export async function connectToInstanceServer(
             if (!item)
                 return null;
             const msg: ClientToServer = { ty: "accept-more-json-rpc-answers", chainId };
-            portToServer.postMessage(msg);
+            config.portToServer.postMessage(msg);
             return item;
         },
 
         startShutdown() {
             const msg: ClientToServer = { ty: "shutdown" };
-            portToServer.postMessage(msg);
-            portToServer.close();
+            config.portToServer.postMessage(msg);
+            config.portToServer.close();
         },
 
         connectionReset(connectionId, message) {
             state.connections.delete(connectionId);
             const msg: ClientToServer = { ty: "connection-reset", connectionId, message };
-            portToServer.postMessage(msg);
+            config.portToServer.postMessage(msg);
         },
 
         connectionOpened(connectionId, info) {
             const msg: ClientToServer = { ty: "connection-opened", connectionId, info };
-            portToServer.postMessage(msg);
+            config.portToServer.postMessage(msg);
         },
 
         streamMessage(connectionId, message, streamId) {
             const msg: ClientToServer = { ty: "stream-message", connectionId, message, streamId };
-            portToServer.postMessage(msg);
+            config.portToServer.postMessage(msg);
         },
 
         streamOpened(connectionId, streamId, direction, initialWritableBytes) {
             state.connections.get(connectionId)!.add(streamId);
             const msg: ClientToServer = { ty: "stream-opened", connectionId, streamId, direction, initialWritableBytes };
-            portToServer.postMessage(msg);
+            config.portToServer.postMessage(msg);
         },
 
         streamWritableBytes(connectionId, numExtra, streamId) {
             const msg: ClientToServer = { ty: "stream-writable-bytes", connectionId, numExtra, streamId };
-            portToServer.postMessage(msg);
+            config.portToServer.postMessage(msg);
         },
 
         streamReset(connectionId, streamId) {
             state.connections.get(connectionId)!.delete(streamId);
             const msg: ClientToServer = { ty: "stream-reset", connectionId, streamId };
-            portToServer.postMessage(msg);
+            config.portToServer.postMessage(msg);
         },
     };
 }
@@ -298,7 +309,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
             }
         }
 
-        const ev: ServerToClient= event;
+        const ev: ServerToClient = event;
         portToClient.postMessage(ev);
     };
 
@@ -425,7 +436,7 @@ type InitialMessage = {
 };
 
 type ServerToClient = Exclude<instance.Event, { ty: "json-rpc-responses-non-empty", chainId: number }> |
-    { ty: "json-rpc-response", chainId: number, response: string };
+{ ty: "json-rpc-response", chainId: number, response: string };
 
 type ClientToServer =
     { ty: "add-chain", chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean } |
