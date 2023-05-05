@@ -507,7 +507,10 @@ function connect(config: ConnectionConfig): Connection {
                 }
             }
         };
+
     } else {
+        // Should never happen, as we tweak the options to refuse connection types that
+        // we don't support.
         throw new Error();
     }
 }

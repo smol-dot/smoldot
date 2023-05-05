@@ -53,6 +53,8 @@ export {
 export function start(options?: ClientOptions): Client {
     options = options || {};
 
+    options.forbidWebRtc = true;
+
     return innerStart(options || {}, compileModule(), {
         performanceNow: () => {
             return performance.now()
@@ -208,7 +210,10 @@ function connect(config: ConnectionConfig): Connection {
             },
             openOutSubstream: () => { throw new Error('Wrong connection type') }
         };
+
     } else {
+        // Should never happen, as we tweak the options to refuse connection types that
+        // we don't support.
         throw new Error();
     }
 }
