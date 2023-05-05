@@ -51,6 +51,7 @@ export async function connectToInstanceServer(
     const { port1: newPortToServer, port2: serverToClient } = new MessageChannel();
     const initialMessage: InitialMessage = { wasmModule: await wasmModule, serverToClient, maxLogLevel, cpuRateLimit, forbidWs, forbidWss, forbidNonLocalWs, forbidTcp, forbidWebRtc };
     portToServer.postMessage(initialMessage, [serverToClient]);
+    portToServer.close();
     portToServer = newPortToServer;
 
     const state = {
@@ -66,6 +67,7 @@ export async function connectToInstanceServer(
             case "wasm-panic": {
                 state.jsonRpcResponses.clear();
                 state.connections.clear();
+                portToServer.close();
                 break;
             }
             case "add-chain-result": {
@@ -164,6 +166,7 @@ export async function connectToInstanceServer(
         startShutdown() {
             const msg: ClientToServer = { ty: "shutdown" };
             portToServer.postMessage(msg);
+            portToServer.close();
         },
 
         connectionReset(connectionId, message) {
@@ -232,8 +235,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
         await new Promise<InitialMessage>((resolve) => {
             initPortToClient.onmessage = (event) => resolve(event.data);
         });
-
-    // TODO: detect port closing?
+    initPortToClient.close();
 
     const state: {
         instance: instance.Instance | null,
@@ -260,6 +262,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 state.acceptedJsonRpcResponses.clear();
                 if (state.onShutdown)
                     state.onShutdown();
+                portToClient.close();
                 break;
             }
             case "json-rpc-responses-non-empty": {
@@ -344,6 +347,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 if (state.onShutdown)
                     state.onShutdown();
                 state.instance.startShutdown();
+                portToClient.close();
                 break;
             }
             case "connection-reset": {
