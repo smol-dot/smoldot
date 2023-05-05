@@ -426,7 +426,7 @@ export function start(options: ClientOptions, wasmModule: Promise<WebAssembly.Mo
         // Connect to the remote instance.
         state.instance = {
             status: "not-ready",
-            whenReady: remote.startInstanceClient(
+            whenReady: remote.connectToInstanceServer(
                 wasmModule,
                 options.forbidTcp || false,
                 options.forbidWs || false,

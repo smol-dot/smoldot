@@ -29,7 +29,7 @@
 import * as instance from './local.js';
 
 // TODO: add a config struct
-export async function startInstanceClient(
+export async function connectToInstanceServer(
     wasmModule: Promise<WebAssembly.Module>, 
     forbidTcp: boolean,
     forbidWs: boolean,
