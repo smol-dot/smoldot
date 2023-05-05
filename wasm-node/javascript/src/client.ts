@@ -17,6 +17,7 @@
 
 import { Client, ClientOptions, QueueFullError, AlreadyDestroyedError, AddChainError, AddChainOptions, Chain, JsonRpcDisabledError, MalformedJsonRpcError, CrashError } from './public-types.js';
 import * as instance from './instance/local.js';
+import * as remote from './instance/remote.js';
 
 /**
  * Contains functions that the client will use when it needs to leverage the platform.
@@ -392,30 +393,53 @@ export function start<A>(options: ClientOptions, wasmModule: Promise<WebAssembly
         }
     };
 
-    state.instance = {
-        status: "not-ready",
-        whenReady: wasmModule
-            .then((wasmModule) => {
-                return instance.startLocalInstance({
-                    parseMultiaddr: platformBindings.parseMultiaddr,
-                    wasmModule,
-                    maxLogLevel: options.maxLogLevel || 3,
-                    cpuRateLimit,
-                    envVars: [],
-                    performanceNow: platformBindings.performanceNow,
-                    getRandomValues: platformBindings.getRandomValues,
-                }, eventCallback)
-            })
-            .then((instance) => {
-                // The Wasm instance might have been crashed before this callback is called.
-                if (state.instance.status === "destroyed")
-                    return;
-                state.instance = {
-                    status: "ready",
-                    instance,
-                };
-            })
-    };
+    const portToWorker = options.portToWorker;
+    if (!portToWorker) {
+        // Start a local instance.
+        state.instance = {
+            status: "not-ready",
+            whenReady: wasmModule
+                .then((wasmModule) => {
+                    return instance.startLocalInstance({
+                        parseMultiaddr: platformBindings.parseMultiaddr,
+                        wasmModule,
+                        maxLogLevel: options.maxLogLevel || 3,
+                        cpuRateLimit,
+                        envVars: [],
+                        performanceNow: platformBindings.performanceNow,
+                        getRandomValues: platformBindings.getRandomValues,
+                    }, eventCallback)
+                })
+                .then((instance) => {
+                    // The Wasm instance might have been crashed before this callback is called.
+                    if (state.instance.status === "destroyed")
+                        return;
+                    state.instance = {
+                        status: "ready",
+                        instance,
+                    };
+                })
+        };
+    } else {
+        // Connect to the remote instance.
+        state.instance = {
+            status: "not-ready",
+            whenReady: wasmModule
+                .then((_wasmModule) => {
+                    // TODO: send the wasm module to worker
+                    return remote.startInstanceClient(portToWorker, eventCallback)
+                })
+                .then((instance) => {
+                    // The Wasm instance might have been crashed before this callback is called.
+                    if (state.instance.status === "destroyed")
+                        return;
+                    state.instance = {
+                        status: "ready",
+                        instance,
+                    };
+                })
+        };
+    }
 
     return {
         addChain: async (options: AddChainOptions): Promise<Chain> => {

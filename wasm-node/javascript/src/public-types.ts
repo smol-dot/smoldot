@@ -212,6 +212,8 @@ export type LogCallback = (level: number, target: string, message: string) => vo
  * Configuration of a client.
  */
 export interface ClientOptions {
+    portToWorker?: MessagePort,
+
     /**
      * Callback that the client will invoke in order to report a log event.
      *
