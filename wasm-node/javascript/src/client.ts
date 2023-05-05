@@ -537,6 +537,20 @@ export function start<A>(options: ClientOptions, wasmModule: Promise<WebAssembly
                 throw new Error(); // Internal error. Never supposed to happen.
             state.instance.instance.startShutdown();
             state.instance = { status: "destroyed", error: new AlreadyDestroyedError() };
+            state.connections.forEach((connec) => connec.reset());
+            state.connections.clear();
+            for (const addChainResult of state.addChainResults) {
+                addChainResult({ success: false, error: "Smoldot has crashed" });
+            }
+            state.addChainResults = [];
+            for (const chain of Array.from(state.chains.values())) {
+                for (const callback of chain.jsonRpcResponsesPromises) {
+                    callback()
+                }
+                chain.jsonRpcResponsesPromises = [];
+            }
+            state.chains.clear();
+            state.currentTaskName = null;
         }
     }
 }
