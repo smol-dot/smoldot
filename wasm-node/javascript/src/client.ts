@@ -402,13 +402,12 @@ export function start<A>(options: ClientOptions, wasmModule: Promise<WebAssembly
                 .then((wasmModule) => {
                     return instance.startLocalInstance({
                         parseMultiaddr: platformBindings.parseMultiaddr,
-                        wasmModule,
                         maxLogLevel: options.maxLogLevel || 3,
                         cpuRateLimit,
                         envVars: [],
                         performanceNow: platformBindings.performanceNow,
                         getRandomValues: platformBindings.getRandomValues,
-                    }, eventCallback)
+                    }, wasmModule, eventCallback)
                 })
                 .then((instance) => {
                     // The Wasm instance might have been crashed before this callback is called.
@@ -424,11 +423,7 @@ export function start<A>(options: ClientOptions, wasmModule: Promise<WebAssembly
         // Connect to the remote instance.
         state.instance = {
             status: "not-ready",
-            whenReady: wasmModule
-                .then((_wasmModule) => {
-                    // TODO: send the wasm module to worker
-                    return remote.startInstanceClient(portToWorker, eventCallback)
-                })
+            whenReady: remote.startInstanceClient(wasmModule, portToWorker, eventCallback)
                 .then((instance) => {
                     // The Wasm instance might have been crashed before this callback is called.
                     if (state.instance.status === "destroyed")

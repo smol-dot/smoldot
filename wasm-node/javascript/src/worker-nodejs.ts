@@ -16,7 +16,6 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import * as instance from './instance/remote.js'
-import { compileModule } from './module-nodejs.js'
 import { performance } from 'node:perf_hooks';
 import { randomFillSync } from 'node:crypto';
 
@@ -25,7 +24,6 @@ export async function run(messagePort: MessagePort, cpuRateLimit: number): Promi
         cpuRateLimit,  // TODO: must be sanitized
         envVars: [],
         maxLogLevel: 3,
-        wasmModule: await compileModule(),  // TODO: receive from port instead
         performanceNow: () => {
             return performance.now()
         },

@@ -27,12 +27,6 @@ export interface Config<A> {
     parseMultiaddr: (address: string) => { success: true, address: A } | { success: false, error: string },
 
     /**
-     * It is outside of the responsibility of this module to provide the compiled Wasm bytecode.
-     * Instead, it is provided here.
-     */
-    wasmModule: WebAssembly.Module,
-
-    /**
      * Maximum level of the logs that are generated.
      */
     maxLogLevel: number,
@@ -105,7 +99,7 @@ export interface Instance {
  * This instance is low-level in the sense that invalid input can lead to crashes and that input
  * isn't sanitized. In other words, you know what you're doing.
  */
-export async function startLocalInstance<A>(config: Config<A>, eventCallback: (event: Event<A>) => void): Promise<Instance> {
+export async function startLocalInstance<A>(config: Config<A>, wasmModule: WebAssembly.Module, eventCallback: (event: Event<A>) => void): Promise<Instance> {
     const state: {
         // Null before initialization and after a panic.
         instance: SmoldotWasmInstance | null
@@ -455,7 +449,7 @@ export async function startLocalInstance<A>(config: Config<A>, eventCallback: (e
     // Start the Wasm virtual machine.
     // The Rust code defines a list of imports that must be fulfilled by the environment. The second
     // parameter provides their implementations.
-    const result = await WebAssembly.instantiate(config.wasmModule, {
+    const result = await WebAssembly.instantiate(wasmModule, {
         // The functions with the "smoldot" prefix are specific to smoldot.
         "smoldot": smoldotJsBindings,
         // As the Rust code is compiled for wasi, some more wasi-specific imports exist.

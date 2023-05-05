@@ -28,7 +28,19 @@
 
 import * as instance from './local.js';
 
-export async function startInstanceClient<A>(portToServer: MessagePort, eventCallback: (event: instance.Event<A>) => void): Promise<instance.Instance> {
+export async function startInstanceClient<A>(wasmModule: Promise<WebAssembly.Module>, portToServer: MessagePort, eventCallback: (event: instance.Event<A>) => void): Promise<instance.Instance> {
+    // Send the module to the server.
+    // Note that we await the `wasmModule` `Promise` here.
+    // If instead we used `wasmModule.then(...)`, the user would be able to start using the
+    // returned instance before the module has been sent to the server.
+    // In order to simplify the implementation, we create new ports and send one of them to
+    // the server. This is necessary so that the server can pause receiving messages while the
+    // instance is being initialized.
+    const { port1: newPortToServer, port2: serverToClient } = new MessageChannel();
+    const initialMessage: InitialMessage = { wasmModule: await wasmModule, serverToClient };
+    portToServer.postMessage(initialMessage, [serverToClient]);
+    portToServer = newPortToServer;
+
     const state = {
         jsonRpcResponses: new Map<number, string[]>(),
         connections: new Map<number, Set<number>>(),
@@ -183,7 +195,11 @@ export async function startInstanceClient<A>(portToServer: MessagePort, eventCal
  * outer `Promise` yields once the instance starts, and the inner `Promise` yields once the
  * instance shuts down.
  */
-export async function startInstanceServer<A>(config: instance.Config<A>, portToClient: MessagePort): Promise<Promise<void>> {
+export async function startInstanceServer<A>(config: instance.Config<A>, initPortToClient: MessagePort): Promise<Promise<void>> {
+    const { serverToClient: portToClient, wasmModule } = await new Promise<InitialMessage>((resolve) => {
+        initPortToClient.onmessage = (event) => resolve(event.data);
+    });
+
     // TODO: detect port closing?
 
     const state: {
@@ -250,7 +266,7 @@ export async function startInstanceServer<A>(config: instance.Config<A>, portToC
         portToClient.postMessage(ev);
     };
 
-    state.instance = await instance.startLocalInstance(config, eventsCallback);
+    state.instance = await instance.startLocalInstance(config, wasmModule, eventsCallback);
 
     portToClient.onmessage = (messageEvent) => {
         const message = messageEvent.data as ClientToServer;
@@ -349,6 +365,8 @@ export async function startInstanceServer<A>(config: instance.Config<A>, portToC
         return Promise.resolve();
     return new Promise((resolve) => state.onShutdown = resolve);
 }
+
+type InitialMessage = { serverToClient: MessagePort, wasmModule: WebAssembly.Module };
 
 type ServerToClient<A> = Exclude<instance.Event<A>, { ty: "json-rpc-responses-non-empty", chainId: number }> |
     { ty: "json-rpc-response", chainId: number, response: string };
