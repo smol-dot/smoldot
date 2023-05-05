@@ -123,10 +123,5 @@ import * as smoldot from '@substrate/smoldot-light/worker';
 import { compileBytecode } from '@substrate/smoldot-light/bytecode';
 
 compileBytecode().then((bytecode) => postMessage(bytecode))
-
-const portPromise = new Promise((resolve) => {
-    onmessage = (msg) => resolve(msg.data);
-});
-
-portPromise.then((port) => smoldot.run(port));
+onmessage = (msg) => smoldot.run(msg.data);
 ```
