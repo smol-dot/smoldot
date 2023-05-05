@@ -53,7 +53,7 @@ export {
 export function start(options?: ClientOptions): Client {
     options = options || {};
 
-    return innerStart<ParsedAddress>(options || {}, compileModule(), {
+    return innerStart(options || {}, compileModule(), {
         performanceNow: () => {
             return performance.now()
         },
@@ -62,45 +62,11 @@ export function start(options?: ClientOptions): Client {
                 throw new Error('getRandomValues buffer too large')
             randomFillSync(buffer)
         },
-        parseMultiaddr: (address) => {
-            const wsParsed = address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)\/(ws|wss|tls\/ws)$/);
-            const tcpParsed = address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)$/);
-
-            if (wsParsed != null) {
-                const proto = (wsParsed[4] == 'ws') ? 'ws' : 'wss';
-                if (
-                    (proto == 'ws' && options?.forbidWs) ||
-                    (proto == 'ws' && wsParsed[2] != 'localhost' && wsParsed[2] != '127.0.0.1' && options?.forbidNonLocalWs) ||
-                    (proto == 'wss' && options?.forbidWss)
-                ) {
-                    return { success: false, error: 'TCP connections not available' }
-                }
-
-                const url = (wsParsed[1] == 'ip6') ?
-                    (proto + "://[" + wsParsed[2] + "]:" + wsParsed[3]) :
-                    (proto + "://" + wsParsed[2] + ":" + wsParsed[3]);
-
-                return { success: true, address: { ty: "websocket", url } }
-            } else if (tcpParsed != null) {
-                if (options?.forbidTcp) {
-                    return { success: false, error: 'TCP connections not available' }
-                }
-
-                return { success: true, address: { ty: "tcp", hostname: tcpParsed[2]!, port: parseInt(tcpParsed[3]!) } }
-
-            } else {
-                return { success: false, error: 'Unrecognized multiaddr format' }
-            }
-        },
         connect: (config) => {
             return connect(config)
         }
     })
 }
-
-type ParsedAddress =
-    { ty: "tcp", hostname: string, port: number } |
-    { ty: "websocket", url: string }
 
 /**
  * Tries to open a new connection using the given configuration.
@@ -108,7 +74,7 @@ type ParsedAddress =
  * @see Connection
  * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
  */
-function connect(config: ConnectionConfig<ParsedAddress>): Connection {
+function connect(config: ConnectionConfig): Connection {
     if (config.address.ty === "websocket") {
         const socket = new WebSocket(config.address.url);
         socket.binaryType = 'arraybuffer';
@@ -182,7 +148,7 @@ function connect(config: ConnectionConfig<ParsedAddress>): Connection {
             openOutSubstream: () => { throw new Error('Wrong connection type') }
         };
 
-    } else {
+    } else if (config.address.ty === "tcp") {
         const socket = nodeCreateConnection({
             host: config.address.hostname,
             port: config.address.port,
@@ -242,5 +208,7 @@ function connect(config: ConnectionConfig<ParsedAddress>): Connection {
             },
             openOutSubstream: () => { throw new Error('Wrong connection type') }
         };
+    } else {
+        throw new Error();
     }
 }

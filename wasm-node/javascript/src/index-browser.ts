@@ -46,7 +46,9 @@ export {
 export function start(options?: ClientOptions): Client {
     options = options || {}
 
-    return innerStart<ParsedAddress>(options, compileModule(), {
+    options.forbidTcp = true;
+
+    return innerStart(options, compileModule(), {
         performanceNow: () => {
             return performance.now()
         },
@@ -66,53 +68,11 @@ export function start(options?: ClientOptions): Client {
                 buffer.set(tmpArray);
             }
         },
-        parseMultiaddr: (address) => {
-            // Attempt to parse the multiaddress.
-            // TODO: remove support for `/wss` in a long time (https://github.com/paritytech/smoldot/issues/1940)
-            const wsParsed = address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)\/(ws|wss|tls\/ws)$/);
-            const webRTCParsed = address.match(/^\/(ip4|ip6)\/(.*?)\/udp\/(.*?)\/webrtc-direct\/certhash\/(.*?)$/);
-        
-            if (wsParsed != null) {
-                const proto = (wsParsed[4] == 'ws') ? 'ws' : 'wss';
-                if (
-                    (proto == 'ws' && options?.forbidWs) ||
-                    (proto == 'ws' && wsParsed[2] != 'localhost' && wsParsed[2] != '127.0.0.1' && options?.forbidNonLocalWs) ||
-                    (proto == 'wss' && options?.forbidWss)
-                ) {
-                    return { success: false, error: 'Connection type not allowed' }
-                }
-        
-                const url = (wsParsed[1] == 'ip6') ?
-                    (proto + "://[" + wsParsed[2] + "]:" + wsParsed[3]) :
-                    (proto + "://" + wsParsed[2] + ":" + wsParsed[3]);
-
-                return { success: true, address: { ty: "websocket", url } }
-
-            } else if (webRTCParsed != null) {
-                const targetPort = webRTCParsed[3]!;
-                if (options?.forbidWebRtc || targetPort === '0') {
-                    return { success: false, error: 'Connection type not allowed' }
-                }
-        
-                const ipVersion = webRTCParsed[1] == 'ip4' ? '4' : '6';
-                const targetIp = webRTCParsed[2]!;
-                const remoteCertMultibase = webRTCParsed[4]!;
-
-                return { success: true, address: { ty: "webrtc", targetPort, ipVersion, targetIp, remoteCertMultibase } }
-
-            } else {
-                return { success: false, error: 'Unrecognized multiaddr format' }
-            }
-        },
         connect: (config) => {
             return connect(config)
         }
     })
 }
-
-type ParsedAddress =
-    { ty: "websocket", url: string } |
-    { ty: "webrtc", targetPort: string, ipVersion: string, targetIp: string, remoteCertMultibase: string }
 
 /**
  * Tries to open a new connection using the given configuration.
@@ -120,7 +80,7 @@ type ParsedAddress =
  * @see Connection
  * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
  */
-function connect(config: ConnectionConfig<ParsedAddress>): Connection {
+function connect(config: ConnectionConfig): Connection {
     if (config.address.ty === "websocket") {
         const connection = new WebSocket(config.address.url);
         connection.binaryType = 'arraybuffer';
@@ -183,7 +143,7 @@ function connect(config: ConnectionConfig<ParsedAddress>): Connection {
             closeSend: (): void => { throw new Error('Wrong connection type') },
             openOutSubstream: () => { throw new Error('Wrong connection type') }
         };
-    } else {
+    } else if (config.address.ty === "webrtc") {
         const { targetPort, ipVersion, targetIp, remoteCertMultibase } =
             config.address;
 
@@ -547,6 +507,8 @@ function connect(config: ConnectionConfig<ParsedAddress>): Connection {
                 }
             }
         };
+    } else {
+        throw new Error();
     }
 }
 
