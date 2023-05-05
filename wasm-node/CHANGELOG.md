@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- It is now possible to run the CPU-heavy tasks of smoldot within a worker (WebWorker, worker threads, etc.). To do so, create two ports using `new MessageChannel()`, then pass one of the two ports in the `ClientOptions.portToWorker` field, then send the other port to a web worker, then call `run(port)` from within that worker. The `run` function can be found by importing `import { run } from 'smoldot/worker'`.
+
 ### Changed
 
 - When in the browser, smoldot no longer uses `document.visibilityState` to determine whether to reduce the number of calls to `setTimeout`. Instead, the execution dynamically adjusts based on the time `setTimeout` actually takes compared to how much was passed as parameter. ([#518](https://github.com/smol-dot/smoldot/pull/518))
