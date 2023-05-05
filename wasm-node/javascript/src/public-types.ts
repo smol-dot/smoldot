@@ -76,6 +76,13 @@ export class QueueFullError extends Error {
 }
 
 /**
+ * Bytecode of the smoldot client.
+ */
+export interface SmoldotBytecode {
+    readonly wasm: WebAssembly.Module
+}
+
+/**
  * Client with zero or more active connections to blockchains.
  */
 export interface Client {
@@ -318,6 +325,16 @@ export interface ClientOptions {
      * supported anyway.
      */
     forbidWebRtc?: boolean;
+}
+
+/**
+ * Configuration of a client.
+ */
+export interface ClientOptionsWithBytecode extends ClientOptions {
+    /**
+     * Smoldot bytecode. Can be either fully loaded or a `Promise`.
+     */
+    bytecode: SmoldotBytecode | Promise<SmoldotBytecode>,
 }
 
 /**
