@@ -78,6 +78,12 @@ export interface Instance {
     peekJsonRpcResponse: (chainId: number) => string | null,
     addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean) => void,
     removeChain: (chainId: number) => void,
+    /**
+     * Starts the instance shutdown process in the background. After this function returns, no
+     * more event is generated and all further function calls might throw or have no effect.
+     * Existing connections are *not* closed. It is the responsibility of the API user to close
+     * all connections.
+     */
     startShutdown: () => void,
     connectionOpened: (connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number, writeClosable: boolean } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateMultihash: Uint8Array, remoteTlsCertificateMultihash: Uint8Array }) => void,
     connectionReset: (connectionId: number, message: string) => void,
@@ -592,7 +598,9 @@ export async function startLocalInstance<A>(config: Config<A>, eventCallback: (e
         startShutdown: (): void => {
             if (!state.instance)
                 return;
-            state.instance.exports.start_shutdown();
+            const instance = state.instance;
+            state.instance = null;
+            instance.exports.start_shutdown();
         },
 
         connectionOpened: (connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number, writeClosable: boolean } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateMultihash: Uint8Array, remoteTlsCertificateMultihash: Uint8Array }) => {
