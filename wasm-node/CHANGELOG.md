@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.5 - 2023-05-05
+
 It is now possible to run the CPU-heavy tasks of smoldot within a worker (WebWorker, worker threads, etc.). To do so, create two ports using `new MessageChannel()`, pass one of the two ports in the `ClientOptions.portToWorker` field and send the other port to a web worker, then call `run(port)` from within that worker. The `run` function can be found by importing `import { run } from 'smoldot/worker'`. If a `portToWorker` is provided, then the `cpuRateLimit` setting applies to the worker.
 
 It is also now possible to load the smoldot bytecode separately or within a worker. To do so, import the `compileBytecode` function using `import { compileBytecode } from 'smoldot/bytecode';`, call it, optionally send it from a worker to the main thread if necessary, then pass the object to the options of the new `startWithBytecode` function. The new `startWithBytecode` function can be imported with `import { startWithBytecode } from 'smoldot/no-auto-bytecode';`. It is equivalent to `start`, except that its configuration must contains a `bytecode` field.
