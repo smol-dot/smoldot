@@ -45,9 +45,7 @@ fn init(max_log_level: u32) {
 }
 
 fn start_shutdown() {
-    // TODO: do this in a clean way
     *EXECUTOR_EXECUTE.lock().unwrap() = ExecutionState::ShuttingDown;
-    std::process::exit(0)
 }
 
 fn add_chain(
