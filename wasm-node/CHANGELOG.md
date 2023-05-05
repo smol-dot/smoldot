@@ -2,9 +2,20 @@
 
 ## Unreleased
 
+It is now possible to run the CPU-heavy tasks of smoldot within a worker (WebWorker, worker threads, etc.). To do so, create two ports using `new MessageChannel()`, pass one of the two ports in the `ClientOptions.portToWorker` field and send the other port to a web worker, then call `run(port)` from within that worker. The `run` function can be found by importing `import { run } from 'smoldot/worker'`. If a `portToWorker` is provided, then the `cpuRateLimit` setting applies to the worker.
+
+It is also now possible to load the smoldot bytecode separately or within a worker. To do so, import the `compileBytecode` function using `import { compileBytecode } from 'smoldot/bytecode';`, call it, optionally send it from a worker to the main thread if necessary, then pass the object to the options of the new `startWithBytecode` function. The new `startWithBytecode` function can be imported with `import { startWithBytecode } from 'smoldot/no-auto-bytecode';`. It is equivalent to `start`, except that its configuration must contains a `bytecode` field.
+
+See the README of the JavaScript package for more information.
+
 ### Added
 
-- It is now possible to run the CPU-heavy tasks of smoldot within a worker (WebWorker, worker threads, etc.). To do so, create two ports using `new MessageChannel()`, pass one of the two ports in the `ClientOptions.portToWorker` field and send the other port to a web worker, then call `run(port)` from within that worker. The `run` function can be found by importing `import { run } from 'smoldot/worker'`. If a `portToWorker` is provided, then the `cpuRateLimit` setting applies to the worker. ([#529](https://github.com/smol-dot/smoldot/pull/529))
+- Add `ClientOptions.portToWorker` field. ([#529](https://github.com/smol-dot/smoldot/pull/529))
+- Add a new `worker` entry point to the library (for Deno: `worker-deno.ts`) containing a `run` function ([#529](https://github.com/smol-dot/smoldot/pull/529))
+- Add a new `SmoldotBytecode` public interface. ([#532](https://github.com/smol-dot/smoldot/pull/532))
+- Add a new `ClientOptionsWithBytecode` interface that extends `ClientOptions` with an extra `bytecode` field. ([#532](https://github.com/smol-dot/smoldot/pull/532))
+- Add a new `bytecode` entry point to the library (for Deno: `bytecode-deno.ts`) containin a `comileBytecode` function. ([#532](https://github.com/smol-dot/smoldot/pull/532))
+- Add a new `no-auto-bytecode` entry point to the library (for Deno: `no-auto-bytecode-deno.ts`) containin a `startWithBytecode` function. This function is equivalent to `start`, but accepts a `ClientOptionsWithBytecode` rather than a `ClientOptions`. ([#532](https://github.com/smol-dot/smoldot/pull/532))
 
 ### Changed
 
