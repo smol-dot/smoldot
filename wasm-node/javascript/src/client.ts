@@ -422,7 +422,6 @@ export function start(options: ClientOptions, wasmModule: Promise<WebAssembly.Mo
                 })
         };
     } else {
-        // TODO: cpuRateLimit option is ignored
         // Connect to the remote instance.
         state.instance = {
             status: "not-ready",
@@ -434,6 +433,7 @@ export function start(options: ClientOptions, wasmModule: Promise<WebAssembly.Mo
                 options.forbidWss || false,
                 options.forbidWebRtc || false,
                 options.maxLogLevel || 3,
+                cpuRateLimit,
                 portToWorker,
                 eventCallback
             ).then((instance) => {

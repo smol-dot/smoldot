@@ -37,6 +37,7 @@ export async function connectToInstanceServer(
     forbidWss: boolean,
     forbidWebRtc: boolean,
     maxLogLevel: number,
+    cpuRateLimit: number,
     portToServer: MessagePort,
     eventCallback: (event: instance.Event) => void
 ): Promise<instance.Instance> {
@@ -48,7 +49,7 @@ export async function connectToInstanceServer(
     // the server. This is necessary so that the server can pause receiving messages while the
     // instance is being initialized.
     const { port1: newPortToServer, port2: serverToClient } = new MessageChannel();
-    const initialMessage: InitialMessage = { wasmModule: await wasmModule, serverToClient, maxLogLevel, forbidWs, forbidWss, forbidNonLocalWs, forbidTcp, forbidWebRtc };
+    const initialMessage: InitialMessage = { wasmModule: await wasmModule, serverToClient, maxLogLevel, cpuRateLimit, forbidWs, forbidWss, forbidNonLocalWs, forbidTcp, forbidWebRtc };
     portToServer.postMessage(initialMessage, [serverToClient]);
     portToServer = newPortToServer;
 
@@ -205,12 +206,6 @@ export async function connectToInstanceServer(
  */
 export interface ServerConfig {
     /**
-     * Number between 0.0 and 1.0 indicating how much of the CPU time the instance is allowed to
-     * consume.
-     */
-    cpuRateLimit: number,
-
-    /**
      * Environment variables that the instance can pull.
      */
     envVars: string[],
@@ -233,7 +228,7 @@ export interface ServerConfig {
  * instance shuts down.
  */
 export async function startInstanceServer(config: ServerConfig, initPortToClient: MessagePort): Promise<Promise<void>> {
-    const { serverToClient: portToClient, wasmModule, maxLogLevel, forbidTcp, forbidWs, forbidWss, forbidNonLocalWs, forbidWebRtc } =
+    const { serverToClient: portToClient, wasmModule, maxLogLevel, cpuRateLimit, forbidTcp, forbidWs, forbidWss, forbidNonLocalWs, forbidWebRtc } =
         await new Promise<InitialMessage>((resolve) => {
             initPortToClient.onmessage = (event) => resolve(event.data);
         });
@@ -310,6 +305,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
         forbidNonLocalWs,
         forbidWss,
         forbidWebRtc,
+        cpuRateLimit,
         maxLogLevel,
         ...config
     }, wasmModule, eventsCallback);
@@ -421,6 +417,7 @@ type InitialMessage = {
     forbidWss: boolean,
     forbidWebRtc: boolean,
     maxLogLevel: number,
+    cpuRateLimit: number,
 };
 
 type ServerToClient = Exclude<instance.Event, { ty: "json-rpc-responses-non-empty", chainId: number }> |

@@ -19,9 +19,8 @@ import * as instance from './instance/remote.js'
 import { performance } from 'node:perf_hooks';
 import { randomFillSync } from 'node:crypto';
 
-export async function run(messagePort: MessagePort, cpuRateLimit: number): Promise<Promise<void>> {
+export async function run(messagePort: MessagePort): Promise<Promise<void>> {
     const whenShutdown = await instance.startInstanceServer({
-        cpuRateLimit,  // TODO: must be sanitized
         envVars: [],
         performanceNow: () => {
             return performance.now()
