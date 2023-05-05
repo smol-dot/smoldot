@@ -26,7 +26,7 @@
 //   is ready to accept more JSON-RPC responses, after which the server can send responses at any
 //   time and the client queues them locally.
 
-import * as instance from './raw-instance.js';
+import * as instance from './local.js';
 
 export async function startInstanceClient<A>(portToServer: MessagePort, eventCallback: (event: instance.Event<A>) => void): Promise<instance.Instance> {
     const state = {

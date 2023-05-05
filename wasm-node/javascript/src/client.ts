@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { Client, ClientOptions, QueueFullError, AlreadyDestroyedError, AddChainError, AddChainOptions, Chain, JsonRpcDisabledError, MalformedJsonRpcError, CrashError } from './public-types.js';
-import * as instance from './instance/raw-instance.js';
+import * as instance from './instance/local.js';
 
 /**
  * Contains functions that the client will use when it needs to leverage the platform.
