@@ -584,12 +584,14 @@ function parseMultiaddr(
 
     if (wsParsed != null) {
         const proto = (wsParsed[4] == 'ws') ? 'ws' : 'wss';
-        if (
-            (proto == 'ws' && forbidWs) ||
-            (proto == 'ws' && wsParsed[2] != 'localhost' && wsParsed[2] != '127.0.0.1' && forbidNonLocalWs) ||
-            (proto == 'wss' && forbidWss)
-        ) {
-            return { success: false, error: 'TCP connections not available' }
+        if (proto == 'ws' && forbidWs) {
+            return { success: false, error: 'WebSocket connections not available' }
+        }
+        if (proto == 'wss' && forbidWss) {
+            return { success: false, error: 'WebSocket secure connections not available' }
+        }
+        if (proto == 'ws' && wsParsed[2] != 'localhost' && wsParsed[2] != '127.0.0.1' && forbidNonLocalWs) {
+            return { success: false, error: 'Non-local WebSocket connections not available' }
         }
 
         const url = (wsParsed[1] == 'ip6') ?
@@ -606,8 +608,11 @@ function parseMultiaddr(
 
     } else if (webRTCParsed != null) {
         const targetPort = webRTCParsed[3]!;
-        if (forbidWebRtc || targetPort === '0') {
-            return { success: false, error: 'Connection type not allowed' }
+        if (forbidWebRtc) {
+            return { success: false, error: 'WebRTC connections not available' }
+        }
+        if (targetPort === '0') {
+            return { success: false, error: 'Invalid WebRTC target port' }
         }
 
         const ipVersion = webRTCParsed[1] == 'ip4' ? '4' : '6';
