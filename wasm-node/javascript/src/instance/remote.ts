@@ -42,7 +42,7 @@ export interface ConnectConfig {
 }
 
 export async function connectToInstanceServer(config: ConnectConfig): Promise<instance.Instance> {
-    // Send the module to the server.
+    // Send the wasm module and configuration to the server.
     // Note that we await the `wasmModule` `Promise` here.
     // If instead we used `wasmModule.then(...)`, the user would be able to start using the
     // returned instance before the module has been sent to the server.
