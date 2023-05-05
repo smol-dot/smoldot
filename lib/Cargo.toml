@@ -87,7 +87,7 @@ soketto = { version = "0.7.1", optional = true }
 
 # BELOW: DEPENDENCIES TO REMOVE
 # TODO:
-parity-scale-codec = { version = "3.4.0", features = ["derive"], default-features = false } # TODO: a lot of unnecessary overhead in terms of memory allocations
+parity-scale-codec = { version = "3.5.0", features = ["derive"], default-features = false } # TODO: a lot of unnecessary overhead in terms of memory allocations
 
 # This list of targets matches the tier 1 and tier 2 of platforms supported by wasmtime: <https://docs.wasmtime.dev/stability-tiers.html>
 # The arch and OS of a specific target can be found with the command `rustc +nightly -Z unstable-options --print target-spec-json --target ...`
