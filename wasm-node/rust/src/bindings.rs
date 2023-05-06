@@ -307,18 +307,6 @@ pub extern "C" fn advance_execution() -> u32 {
     super::advance_execution()
 }
 
-/// Instructs the client to start shutting down.
-///
-/// Later, the client will use `exit` to stop.
-///
-/// It is still legal to call all the other functions of these bindings. The client continues to
-/// operate normally until the call to `exit`, which happens at some point in the future.
-// TODO: can this be called multiple times?
-#[no_mangle]
-pub extern "C" fn start_shutdown() {
-    crate::start_shutdown();
-}
-
 /// Adds a chain to the client. The client will try to stay connected and synchronize this chain.
 ///
 /// Assign a so-called "buffer index" (a `u32`) representing the chain specification, database
