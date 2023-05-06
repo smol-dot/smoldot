@@ -570,7 +570,7 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 throw state.instance.error;
             if (state.instance.status !== "ready")
                 throw new Error(); // Internal error. Never supposed to happen.
-            state.instance.instance.startShutdown();
+            state.instance.instance.shutdownExecutor();
             state.instance = { status: "destroyed", error: new AlreadyDestroyedError() };
             state.connections.forEach((connec) => connec.reset());
             state.connections.clear();

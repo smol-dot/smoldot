@@ -185,7 +185,7 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
             return item;
         },
 
-        startShutdown() {
+        shutdownExecutor() {
             const msg: ClientToServer = { ty: "shutdown" };
             portToServer.postMessage(msg);
         },
@@ -366,7 +366,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
             case "shutdown": {
                 if (state.onShutdown)
                     state.onShutdown();
-                state.instance.startShutdown();
+                state.instance.shutdownExecutor();
                 portToClient.close();
                 break;
             }
