@@ -263,7 +263,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
         instance: instance.Instance | null,
         connections: Map<number, Set<number>>,
         acceptedJsonRpcResponses: Map<number, number>,
-        onShutdown?: (() => void),
+        onExecutorShutdownOrWasmPanic?: (() => void),
     } = {
         instance: null,
         connections: new Map(),
@@ -278,13 +278,23 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 }
                 break;
             }
-            case "wasm-panic":
             case "executor-shutdown": {
+                if (state.onExecutorShutdownOrWasmPanic) {
+                    const cb = state.onExecutorShutdownOrWasmPanic;
+                    delete state.onExecutorShutdownOrWasmPanic
+                    cb();
+                }
+                break;
+            }
+            case "wasm-panic": {
                 state.instance = null;
                 state.connections.clear();
                 state.acceptedJsonRpcResponses.clear();
-                if (state.onShutdown)
-                    state.onShutdown();
+                if (state.onExecutorShutdownOrWasmPanic) {
+                    const cb = state.onExecutorShutdownOrWasmPanic;
+                    delete state.onExecutorShutdownOrWasmPanic
+                    cb();
+                }
                 break;
             }
             case "json-rpc-responses-non-empty": {
@@ -428,7 +438,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
     // The instance might already have crashed. Handle this situation.
     if (!state.instance)
         return Promise.resolve();
-    return new Promise((resolve) => state.onShutdown = resolve);
+    return new Promise((resolve) => state.onExecutorShutdownOrWasmPanic = resolve);
 }
 
 type InitialMessage = {
