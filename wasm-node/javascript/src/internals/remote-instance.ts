@@ -85,7 +85,8 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
 
         // Update some local state.
         switch (message.ty) {
-            case "wasm-panic": {
+            case "wasm-panic":
+            case "executor-shutdown": {
                 state.jsonRpcResponses.clear();
                 state.connections.clear();
                 portToServer.close();
@@ -277,7 +278,8 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 }
                 break;
             }
-            case "wasm-panic": {
+            case "wasm-panic":
+            case "executor-shutdown": {
                 state.instance = null;
                 state.connections.clear();
                 state.acceptedJsonRpcResponses.clear();
@@ -364,10 +366,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 break;
             }
             case "shutdown": {
-                if (state.onShutdown)
-                    state.onShutdown();
                 state.instance.shutdownExecutor();
-                portToClient.close();
                 break;
             }
             case "connection-reset": {
