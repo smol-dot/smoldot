@@ -300,10 +300,8 @@ pub extern "C" fn init(max_log_level: u32) {
 ///
 /// After this function is called or during a call to this function, [`advance_execution_ready`]
 /// might be called, indicating that [`advance_execution`] should be called again.
-///
-/// Returns `0` if the client is shutting down, otherwise returns a non-zero value.
 #[no_mangle]
-pub extern "C" fn advance_execution() -> u32 {
+pub extern "C" fn advance_execution() {
     super::advance_execution()
 }
 

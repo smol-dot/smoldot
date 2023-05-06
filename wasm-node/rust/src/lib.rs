@@ -355,7 +355,7 @@ enum ExecutionState {
     Ready(async_task::Runnable),
 }
 
-fn advance_execution() -> u32 {
+fn advance_execution() {
     let runnable = {
         let mut executor_execute_guard = EXECUTOR_EXECUTE.lock().unwrap();
         match *executor_execute_guard {
@@ -396,7 +396,7 @@ fn advance_execution() -> u32 {
                 *executor_execute_guard = ExecutionState::NotReady;
                 runnable
             }
-            ExecutionState::NotReady => return 1,
+            ExecutionState::NotReady => return,
             ExecutionState::Ready(_) => {
                 let ExecutionState::Ready(runnable) = mem::replace(&mut *executor_execute_guard, ExecutionState::NotReady)
                     else { unreachable!() };
@@ -406,5 +406,4 @@ fn advance_execution() -> u32 {
     };
 
     runnable.run();
-    1
 }
