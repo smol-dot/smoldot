@@ -73,7 +73,7 @@
     "ws": "^8.8.1"
   },
   "devDependencies": {
-    "@types/node": "^18.0.0",
+    "@types/node": "^20.1.0",
     "@types/pako": "^2.0.0",
     "@types/ws": "^8.5.3",
     "ava": "^5.0.1",
