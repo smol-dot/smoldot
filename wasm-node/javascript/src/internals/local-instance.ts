@@ -60,6 +60,10 @@ export type Event =
     { ty: "log", level: number, target: string, message: string } |
     { ty: "json-rpc-responses-non-empty", chainId: number } |
     { ty: "current-task", taskName: string | null } |
+    // Smoldot has crashed. Note that the public API of the instance can technically still be
+    // used, as all functions will start running fallback code. Existing connections are *not*
+    // closed. It is the responsibility of the API user to close all connections if they stop
+    // using the instance.
     { ty: "wasm-panic", message: string } |
     { ty: "executor-shutdown" } |
     { ty: "new-connection", connectionId: number, address: ParsedMultiaddr } |
@@ -116,14 +120,14 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
         advanceExecutionPromise: null | (() => void),
         stdoutBuffer: string,
         stderrBuffer: string,
-        shutdownExecutorCallback: () => void,
+        onShutdownExecutorOrWasmPanic: () => void,
     } = {
         instance: null,
         bufferIndices: new Array(),
         advanceExecutionPromise: null,
         stdoutBuffer: "",
         stderrBuffer: "",
-        shutdownExecutorCallback: () => {}
+        onShutdownExecutorOrWasmPanic: () => { }
     };
 
     const smoldotJsBindings = {
@@ -138,8 +142,8 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
 
             const message = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), ptr, len);
             eventCallback({ ty: "wasm-panic", message });
-            state.shutdownExecutorCallback();
-            state.shutdownExecutorCallback = () => {};
+            state.onShutdownExecutorOrWasmPanic();
+            state.onShutdownExecutorOrWasmPanic = () => { };
             throw new Error();
         },
 
@@ -408,8 +412,8 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
         proc_exit: (retCode: number) => {
             state.instance = null;
             eventCallback({ ty: "wasm-panic", message: `proc_exit called: ${retCode}` });
-            state.shutdownExecutorCallback();
-            state.shutdownExecutorCallback = () => {};
+            state.onShutdownExecutorOrWasmPanic();
+            state.onShutdownExecutorOrWasmPanic = () => { };
             throw new Error();
         },
 
@@ -478,8 +482,9 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
     // configuration.
     state.instance.exports.init(config.maxLogLevel);
 
-    // Promise that is notified when the `shutdownExecutor` function is called.
-    const shutdownExecutorPromise = new Promise<"stop">((resolve) => state.shutdownExecutorCallback = () => resolve("stop"));
+    // Promise that is notified when the `shutdownExecutor` function is called or when a Wasm
+    // panic happens.
+    const shutdownExecutorOrWasmPanicPromise = new Promise<"stop">((resolve) => state.onShutdownExecutorOrWasmPanic = () => resolve("stop"));
 
     (async () => {
         const cpuRateLimit = config.cpuRateLimit;
@@ -516,15 +521,12 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
                 if (missingSleep > 2147483646)  // Doc says `> 2147483647`, but I don't really trust their pedanticism so let's be safe
                     missingSleep = 2147483646;
 
-                const outcome = await Promise.race([
-                    new Promise<"timeout" | "stop">((resolve) => setTimeout(() => resolve("timeout"), missingSleep)),
-                    shutdownExecutorPromise
-                ]);
-                if (outcome === "stop")
+                const sleepFinished = new Promise<"timeout" | "stop">((resolve) => setTimeout(() => resolve("timeout"), missingSleep));
+                if (await Promise.race([sleepFinished, shutdownExecutorOrWasmPanicPromise]) === "stop")
                     break;
             }
 
-            if (await Promise.race([whenReadyAgain, shutdownExecutorPromise]) === "stop")
+            if (await Promise.race([whenReadyAgain, shutdownExecutorOrWasmPanicPromise]) === "stop")
                 break;
 
             const afterWait = config.performanceNow();
@@ -619,8 +621,8 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
         shutdownExecutor: (): void => {
             if (!state.instance)
                 return;
-            const cb = state.shutdownExecutorCallback;
-            state.shutdownExecutorCallback = () => {};
+            const cb = state.onShutdownExecutorOrWasmPanic;
+            state.onShutdownExecutorOrWasmPanic = () => { };
             cb();
         },
 

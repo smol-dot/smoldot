@@ -87,8 +87,6 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
         switch (message.ty) {
             case "wasm-panic":
             case "executor-shutdown": {
-                state.jsonRpcResponses.clear();
-                state.connections.clear();
                 portToServer.close();
                 initialPort.close();
                 break;
@@ -260,6 +258,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
     initPortToClient.close();
 
     const state: {
+        // Always set except at the very beginning.
         instance: instance.Instance | null,
         connections: Map<number, Set<number>>,
         acceptedJsonRpcResponses: Map<number, number>,
@@ -278,18 +277,8 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 }
                 break;
             }
-            case "executor-shutdown": {
-                if (state.onExecutorShutdownOrWasmPanic) {
-                    const cb = state.onExecutorShutdownOrWasmPanic;
-                    delete state.onExecutorShutdownOrWasmPanic
-                    cb();
-                }
-                break;
-            }
+            case "executor-shutdown":
             case "wasm-panic": {
-                state.instance = null;
-                state.connections.clear();
-                state.acceptedJsonRpcResponses.clear();
                 if (state.onExecutorShutdownOrWasmPanic) {
                     const cb = state.onExecutorShutdownOrWasmPanic;
                     delete state.onExecutorShutdownOrWasmPanic
@@ -302,12 +291,10 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 // from within the events callback itself.
                 // TODO: do better than setTimeout?
                 setTimeout(() => {
-                    if (!state.instance)
-                        return;
                     const numAccepted = state.acceptedJsonRpcResponses.get(event.chainId)!;
                     if (numAccepted == 0)
                         return;
-                    const response = state.instance.peekJsonRpcResponse(event.chainId);
+                    const response = state.instance!.peekJsonRpcResponse(event.chainId);
                     if (response) {
                         state.acceptedJsonRpcResponses.set(event.chainId, numAccepted - 1);
                         const msg: ServerToClient = { ty: "json-rpc-response", chainId: event.chainId, response };
@@ -334,6 +321,10 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
         portToClient.postMessage(ev);
     };
 
+    // We create the `Promise` ahead of time in order to potentially catch potential `wasm-panic`
+    // events as early as during initialization.
+    const execFinishedPromise = new Promise<void>((resolve) => state.onExecutorShutdownOrWasmPanic = resolve);
+
     state.instance = await instance.startLocalInstance({
         forbidTcp,
         forbidWs,
@@ -348,24 +339,21 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
     portToClient.onmessage = (messageEvent) => {
         const message = messageEvent.data as ClientToServer;
 
-        if (!state.instance)
-            return;
-
         switch (message.ty) {
             case "add-chain": {
-                state.instance.addChain(message.chainSpec, message.databaseContent, message.potentialRelayChains, message.disableJsonRpc);
+                state.instance!.addChain(message.chainSpec, message.databaseContent, message.potentialRelayChains, message.disableJsonRpc);
                 break;
             }
             case "remove-chain": {
-                state.instance.removeChain(message.chainId);
+                state.instance!.removeChain(message.chainId);
                 break;
             }
             case "request": {
-                state.instance.request(message.request, message.chainId); // TODO: return value unused
+                state.instance!.request(message.request, message.chainId); // TODO: return value unused
                 break;
             }
             case "accept-more-json-rpc-answers": {
-                const response = state.instance.peekJsonRpcResponse(message.chainId);
+                const response = state.instance!.peekJsonRpcResponse(message.chainId);
                 if (response) {
                     const msg: ServerToClient = { ty: "json-rpc-response", chainId: message.chainId, response };
                     portToClient.postMessage(msg);
@@ -376,21 +364,21 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 break;
             }
             case "shutdown": {
-                state.instance.shutdownExecutor();
+                state.instance!.shutdownExecutor();
                 break;
             }
             case "connection-reset": {
                 // The connection might have been reset locally in the past.
                 if (!state.connections.has(message.connectionId))
                     return;
-                state.instance.connectionReset(message.connectionId, message.message);
+                state.instance!.connectionReset(message.connectionId, message.message);
                 break;
             }
             case "connection-opened": {
                 // The connection might have been reset locally in the past.
                 if (!state.connections.has(message.connectionId))
                     return;
-                state.instance.connectionOpened(message.connectionId, message.info);
+                state.instance!.connectionOpened(message.connectionId, message.info);
                 break;
             }
             case "stream-message": {
@@ -400,7 +388,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 // The stream might have been reset locally in the past.
                 if (message.streamId && !state.connections.get(message.connectionId)!.has(message.streamId))
                     return;
-                state.instance.streamMessage(message.connectionId, message.message, message.streamId);
+                state.instance!.streamMessage(message.connectionId, message.message, message.streamId);
                 break;
             }
             case "stream-opened": {
@@ -408,7 +396,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 if (!state.connections.has(message.connectionId))
                     return;
                 state.connections.get(message.connectionId)!.add(message.streamId);
-                state.instance.streamOpened(message.connectionId, message.streamId, message.direction, message.initialWritableBytes);
+                state.instance!.streamOpened(message.connectionId, message.streamId, message.direction, message.initialWritableBytes);
                 break;
             }
             case "stream-writable-bytes": {
@@ -418,7 +406,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 // The stream might have been reset locally in the past.
                 if (message.streamId && !state.connections.get(message.connectionId)!.has(message.streamId))
                     return;
-                state.instance.streamWritableBytes(message.connectionId, message.numExtra, message.streamId);
+                state.instance!.streamWritableBytes(message.connectionId, message.numExtra, message.streamId);
                 break;
             }
             case "stream-reset": {
@@ -429,16 +417,13 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 if (message.streamId && !state.connections.get(message.connectionId)!.has(message.streamId))
                     return;
                 state.connections.get(message.connectionId)!.delete(message.streamId);
-                state.instance.streamReset(message.connectionId, message.streamId);
+                state.instance!.streamReset(message.connectionId, message.streamId);
                 break;
             }
         }
     };
 
-    // The instance might already have crashed. Handle this situation.
-    if (!state.instance)
-        return Promise.resolve();
-    return new Promise((resolve) => state.onExecutorShutdownOrWasmPanic = resolve);
+    return execFinishedPromise;
 }
 
 type InitialMessage = {
