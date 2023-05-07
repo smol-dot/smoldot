@@ -256,6 +256,8 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
         // FIFO queue. When `addChain` is called, an entry is added to this queue. When the
         // instance notifies that a chain creation has succeeded or failed, an entry is popped.
         addChainResults: Array<(outcome: { success: true, chainId: number } | { success: false, error: string }) => void>,
+        /// Callback called when the `executor-shutdown` or `wasm-panic` event is received.
+        onExecutorShutdownOrWasmPanic: () => void,
         // List of all active chains. Keys are chainIDs assigned by the instance.
         chains: Map<number, {
             // Callbacks woken up when a JSON-RPC response is ready or when the chain is destroyed
@@ -268,6 +270,7 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
         currentTaskName: null,
         connections: new Map(),
         addChainResults: [],
+        onExecutorShutdownOrWasmPanic: () => {},
         chains: new Map(),
     };
 
@@ -306,7 +309,16 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
 
                 state.currentTaskName = null;
 
+                const cb = state.onExecutorShutdownOrWasmPanic;
+                state.onExecutorShutdownOrWasmPanic = () => {};
+                cb();
                 break
+            }
+            case "executor-shutdown": {
+                const cb = state.onExecutorShutdownOrWasmPanic;
+                state.onExecutorShutdownOrWasmPanic = () => {};
+                cb();
+                break;
             }
             case "log": {
                 logCallback(event.level, event.target, event.message)
@@ -570,7 +582,7 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 throw state.instance.error;
             if (state.instance.status !== "ready")
                 throw new Error(); // Internal error. Never supposed to happen.
-            state.instance.instance.startShutdown();
+            state.instance.instance.shutdownExecutor();
             state.instance = { status: "destroyed", error: new AlreadyDestroyedError() };
             state.connections.forEach((connec) => connec.reset());
             state.connections.clear();
@@ -586,6 +598,9 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
             }
             state.chains.clear();
             state.currentTaskName = null;
+
+            // Wait for the `executor-shutdown` event to be generated.
+            await new Promise<void>((resolve) => state.onExecutorShutdownOrWasmPanic = resolve);
         }
     }
 }

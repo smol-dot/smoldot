@@ -44,13 +44,6 @@ fn init(max_log_level: u32) {
     init::init(max_log_level);
 }
 
-fn start_shutdown() {
-    *EXECUTOR_EXECUTE.lock().unwrap() = ExecutionState::ShuttingDown;
-    unsafe {
-        bindings::advance_execution_ready();
-    }
-}
-
 fn add_chain(
     chain_spec: Vec<u8>,
     database_content: Vec<u8>,
@@ -360,12 +353,9 @@ enum ExecutionState {
     NotReady,
     /// Execution has been woken up. Ready to continue running.
     Ready(async_task::Runnable),
-    /// The client is shutting down. Execution is either waiting to be woken up, after which it
-    /// will self-destroy, or has already self-destroyed.
-    ShuttingDown,
 }
 
-fn advance_execution() -> u32 {
+fn advance_execution() {
     let runnable = {
         let mut executor_execute_guard = EXECUTOR_EXECUTE.lock().unwrap();
         match *executor_execute_guard {
@@ -406,8 +396,7 @@ fn advance_execution() -> u32 {
                 *executor_execute_guard = ExecutionState::NotReady;
                 runnable
             }
-            ExecutionState::NotReady => return 1,
-            ExecutionState::ShuttingDown => return 0,
+            ExecutionState::NotReady => return,
             ExecutionState::Ready(_) => {
                 let ExecutionState::Ready(runnable) = mem::replace(&mut *executor_execute_guard, ExecutionState::NotReady)
                     else { unreachable!() };
@@ -417,5 +406,4 @@ fn advance_execution() -> u32 {
     };
 
     runnable.run();
-    1
 }

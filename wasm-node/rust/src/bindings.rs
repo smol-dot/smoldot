@@ -300,23 +300,9 @@ pub extern "C" fn init(max_log_level: u32) {
 ///
 /// After this function is called or during a call to this function, [`advance_execution_ready`]
 /// might be called, indicating that [`advance_execution`] should be called again.
-///
-/// Returns `0` if the client is shutting down, otherwise returns a non-zero value.
 #[no_mangle]
-pub extern "C" fn advance_execution() -> u32 {
+pub extern "C" fn advance_execution() {
     super::advance_execution()
-}
-
-/// Instructs the client to start shutting down.
-///
-/// Later, the client will use `exit` to stop.
-///
-/// It is still legal to call all the other functions of these bindings. The client continues to
-/// operate normally until the call to `exit`, which happens at some point in the future.
-// TODO: can this be called multiple times?
-#[no_mangle]
-pub extern "C" fn start_shutdown() {
-    crate::start_shutdown();
 }
 
 /// Adds a chain to the client. The client will try to stay connected and synchronize this chain.

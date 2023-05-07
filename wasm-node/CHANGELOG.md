@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- The `Promise` returned by `terminate()` now correctly waits for everything to be completely shut down before yielding instead of letting the shutdown continue happening in the background. ([#538](https://github.com/smol-dot/smoldot/pull/538))
+
 ## 1.0.5 - 2023-05-05
 
 It is now possible to run the CPU-heavy tasks of smoldot within a worker (WebWorker, worker threads, etc.). To do so, create two ports using `new MessageChannel()`, pass one of the two ports in the `ClientOptions.portToWorker` field and send the other port to a web worker, then call `run(port)` from within that worker. The `run` function can be found by importing `import { run } from 'smoldot/worker'`. If a `portToWorker` is provided, then the `cpuRateLimit` setting applies to the worker.

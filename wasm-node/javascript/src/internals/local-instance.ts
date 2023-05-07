@@ -60,7 +60,12 @@ export type Event =
     { ty: "log", level: number, target: string, message: string } |
     { ty: "json-rpc-responses-non-empty", chainId: number } |
     { ty: "current-task", taskName: string | null } |
+    // Smoldot has crashed. Note that the public API of the instance can technically still be
+    // used, as all functions will start running fallback code. Existing connections are *not*
+    // closed. It is the responsibility of the API user to close all connections if they stop
+    // using the instance.
     { ty: "wasm-panic", message: string } |
+    { ty: "executor-shutdown" } |
     { ty: "new-connection", connectionId: number, address: ParsedMultiaddr } |
     { ty: "connection-reset", connectionId: number } |
     { ty: "connection-stream-open", connectionId: number } |
@@ -79,12 +84,14 @@ export interface Instance {
     addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean) => void,
     removeChain: (chainId: number) => void,
     /**
-     * Starts the instance shutdown process in the background. After this function returns, no
-     * more event is generated and all further function calls might throw or have no effect.
+     * Notifies the background executor that it should stop. Once it has effectively stopped,
+     * a `shutdown-finished` event will be generated.
+     * Note that the instance can technically still be used, and all the functions still work, but
+     * in practice nothing is being run in the background and as such it won't do much.
      * Existing connections are *not* closed. It is the responsibility of the API user to close
      * all connections.
      */
-    startShutdown: () => void,
+    shutdownExecutor: () => void,
     connectionOpened: (connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number, writeClosable: boolean } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateMultihash: Uint8Array, remoteTlsCertificateMultihash: Uint8Array }) => void,
     connectionReset: (connectionId: number, message: string) => void,
     streamWritableBytes: (connectionId: number, numExtra: number, streamId?: number) => void,
@@ -113,12 +120,14 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
         advanceExecutionPromise: null | (() => void),
         stdoutBuffer: string,
         stderrBuffer: string,
+        onShutdownExecutorOrWasmPanic: () => void,
     } = {
         instance: null,
         bufferIndices: new Array(),
         advanceExecutionPromise: null,
         stdoutBuffer: "",
         stderrBuffer: "",
+        onShutdownExecutorOrWasmPanic: () => { }
     };
 
     const smoldotJsBindings = {
@@ -133,6 +142,8 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
 
             const message = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), ptr, len);
             eventCallback({ ty: "wasm-panic", message });
+            state.onShutdownExecutorOrWasmPanic();
+            state.onShutdownExecutorOrWasmPanic = () => { };
             throw new Error();
         },
 
@@ -401,6 +412,8 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
         proc_exit: (retCode: number) => {
             state.instance = null;
             eventCallback({ ty: "wasm-panic", message: `proc_exit called: ${retCode}` });
+            state.onShutdownExecutorOrWasmPanic();
+            state.onShutdownExecutorOrWasmPanic = () => { };
             throw new Error();
         },
 
@@ -469,6 +482,10 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
     // configuration.
     state.instance.exports.init(config.maxLogLevel);
 
+    // Promise that is notified when the `shutdownExecutor` function is called or when a Wasm
+    // panic happens.
+    const shutdownExecutorOrWasmPanicPromise = new Promise<"stop">((resolve) => state.onShutdownExecutorOrWasmPanic = () => resolve("stop"));
+
     (async () => {
         const cpuRateLimit = config.cpuRateLimit;
 
@@ -479,14 +496,11 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
         let now = config.performanceNow();
 
         while (true) {
-            const whenReadyAgain = new Promise((resolve) => state.advanceExecutionPromise = resolve as () => void);
+            const whenReadyAgain = new Promise<"ready">((resolve) => state.advanceExecutionPromise = () => resolve("ready"));
 
             if (!state.instance)
                 break;
-            const outcome = state.instance.exports.advance_execution();
-            if (outcome === 0) {
-                break;
-            }
+            state.instance.exports.advance_execution();
 
             const afterExec = config.performanceNow();
             const elapsed = afterExec - now;
@@ -506,10 +520,14 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
                 // really care for such extreme values.
                 if (missingSleep > 2147483646)  // Doc says `> 2147483647`, but I don't really trust their pedanticism so let's be safe
                     missingSleep = 2147483646;
-                await new Promise((resolve) => setTimeout(resolve, missingSleep));
+
+                const sleepFinished = new Promise<"timeout" | "stop">((resolve) => setTimeout(() => resolve("timeout"), missingSleep));
+                if (await Promise.race([sleepFinished, shutdownExecutorOrWasmPanicPromise]) === "stop")
+                    break;
             }
 
-            await whenReadyAgain;
+            if (await Promise.race([whenReadyAgain, shutdownExecutorOrWasmPanicPromise]) === "stop")
+                break;
 
             const afterWait = config.performanceNow();
 
@@ -527,6 +545,10 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
 
             now = afterWait;
         }
+
+        if (!state.instance)
+            return;
+        eventCallback({ ty: "executor-shutdown" })
     })();
 
     return {
@@ -596,12 +618,12 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             state.instance.exports.remove_chain(chainId);
         },
 
-        startShutdown: (): void => {
+        shutdownExecutor: (): void => {
             if (!state.instance)
                 return;
-            const instance = state.instance;
-            state.instance = null;
-            instance.exports.start_shutdown();
+            const cb = state.onShutdownExecutorOrWasmPanic;
+            state.onShutdownExecutorOrWasmPanic = () => { };
+            cb();
         },
 
         connectionOpened: (connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number, writeClosable: boolean } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateMultihash: Uint8Array, remoteTlsCertificateMultihash: Uint8Array }) => {
@@ -679,8 +701,7 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
 interface SmoldotWasmExports extends WebAssembly.Exports {
     memory: WebAssembly.Memory,
     init: (maxLogLevel: number) => void,
-    advance_execution: () => number,
-    start_shutdown: () => void,
+    advance_execution: () => void,
     add_chain: (chainSpecBufferIndex: number, databaseContentBufferIndex: number, jsonRpcRunning: number, potentialRelayChainsBufferIndex: number) => number;
     remove_chain: (chainId: number) => void,
     chain_is_ok: (chainId: number) => number,
