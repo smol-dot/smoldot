@@ -318,7 +318,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
             (
                 ToBackground::IsNearHeadOfChainHeuristic { send_back },
                 ParachainBackgroundState::Subscribed(sub),
-            ) if sub.async_tree.finalized_async_user_data().is_some() => {
+            ) if sub.async_tree.output_finalized_async_user_data().is_some() => {
                 // Since there is a mapping between relay chain blocks and parachain blocks,
                 // whether a parachain is at the head of the chain is the same thing as whether
                 // its relay chain is at the head of the chain.
@@ -374,8 +374,9 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 // `obsolete_finalized_parahead`. The rest of this module makes sure that no
                 // other block is reported to subscriptions as long as this is the case, and that
                 // subscriptions are reset once the first known finalized parahead is known.
-                if let Some(finalized_parahead) =
-                    runtime_subscription.async_tree.finalized_async_user_data()
+                if let Some(finalized_parahead) = runtime_subscription
+                    .async_tree
+                    .output_finalized_async_user_data()
                 {
                     // Finalized parahead is known.
                     let finalized_parahash =
@@ -391,8 +392,9 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                         .num_input_non_finalized_blocks(),
                                 );
 
-                            for relay_block in
-                                runtime_subscription.async_tree.input_iter_ancestry_order()
+                            for relay_block in runtime_subscription
+                                .async_tree
+                                .input_output_iter_ancestry_order()
                             {
                                 let parablock = match relay_block.async_op_user_data {
                                     Some(b) => b.as_ref().unwrap(),
@@ -598,7 +600,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
             runtime_subscription.reported_best_parahead_hash.is_some(),
             runtime_subscription
                 .async_tree
-                .finalized_async_user_data()
+                .output_finalized_async_user_data()
                 .is_some()
         );
 
@@ -801,7 +803,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
 
                     let best_block_hash = runtime_subscription
                         .async_tree
-                        .best_block_index()
+                        .output_best_block_index()
                         .map(|(_, parahead)| {
                             header::hash_from_scale_encoded_header(parahead.as_ref().unwrap())
                         })
@@ -825,18 +827,20 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 | async_tree::OutputUpdate::BestBlockChanged { .. } => {
                     // Do not report anything to subscriptions if no finalized parahead is
                     // known yet.
-                    let finalized_parahead =
-                        match runtime_subscription.async_tree.finalized_async_user_data() {
-                            Some(p) => p,
-                            None => continue,
-                        };
+                    let finalized_parahead = match runtime_subscription
+                        .async_tree
+                        .output_finalized_async_user_data()
+                    {
+                        Some(p) => p,
+                        None => continue,
+                    };
 
                     // Calculate hash of the parablock corresponding to the new best relay
                     // chain block.
                     let parahash = header::hash_from_scale_encoded_header(
                         runtime_subscription
                             .async_tree
-                            .best_block_index()
+                            .output_best_block_index()
                             .map(|(_, b)| b.as_ref().unwrap())
                             .unwrap_or(finalized_parahead),
                     );
@@ -873,11 +877,13 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
 
                     // Do not report anything to subscriptions if no finalized parahead is
                     // known yet.
-                    let finalized_parahead =
-                        match runtime_subscription.async_tree.finalized_async_user_data() {
-                            Some(p) => p,
-                            None => continue,
-                        };
+                    let finalized_parahead = match runtime_subscription
+                        .async_tree
+                        .output_finalized_async_user_data()
+                    {
+                        Some(p) => p,
+                        None => continue,
+                    };
 
                     // Do not report the new block if it has already been reported in the
                     // past. This covers situations where the parahead is identical to the
@@ -886,7 +892,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     if *finalized_parahead == scale_encoded_header
                         || runtime_subscription
                             .async_tree
-                            .input_iter_unordered()
+                            .input_output_iter_unordered()
                             .filter(|item| item.id != block_index)
                             .filter_map(|item| item.async_op_user_data)
                             .any(|item| item.as_ref() == Some(&scale_encoded_header))
@@ -988,13 +994,13 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
 
                 let finalized = runtime_subscription
                     .async_tree
-                    .input_iter_unordered()
+                    .input_output_iter_unordered()
                     .find(|b| *b.user_data == hash)
                     .unwrap()
                     .id;
                 let best = runtime_subscription
                     .async_tree
-                    .input_iter_unordered()
+                    .input_output_iter_unordered()
                     .find(|b| *b.user_data == best_block_hash)
                     .unwrap()
                     .id;
@@ -1014,7 +1020,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
 
                 let parent = runtime_subscription
                     .async_tree
-                    .input_iter_unordered()
+                    .input_output_iter_unordered()
                     .find(|b| *b.user_data == block.parent_hash)
                     .map(|b| b.id); // TODO: check if finalized
                 runtime_subscription.async_tree.input_insert_block(
@@ -1035,7 +1041,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 // finalized block (that has left the tree already).
                 let node_idx = runtime_subscription
                     .async_tree
-                    .input_iter_unordered()
+                    .input_output_iter_unordered()
                     .find(|b| *b.user_data == hash)
                     .map(|b| b.id);
                 runtime_subscription
@@ -1074,7 +1080,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
             for block in relay_chain_subscribe_all.non_finalized_blocks_ancestry_order {
                 let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
                 let parent = async_tree
-                    .input_iter_unordered()
+                    .input_output_iter_unordered()
                     .find(|b| *b.user_data == block.parent_hash)
                     .map(|b| b.id)
                     .unwrap_or(finalized_index);
