@@ -79,10 +79,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         network_up_to_date_best: true,
         network_up_to_date_finalized: true,
         known_finalized_runtime: None,
-        pending_block_requests: stream::FuturesUnordered::new(),
-        pending_grandpa_requests: stream::FuturesUnordered::new(),
-        pending_storage_requests: stream::FuturesUnordered::new(),
-        pending_call_proof_requests: stream::FuturesUnordered::new(),
+        pending_requests: stream::FuturesUnordered::new(),
         warp_sync_taking_long_time_warning: future::Either::Left(
             platform.sleep(Duration::from_secs(10)),
         )
@@ -215,39 +212,30 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 continue;
             },
 
-            (request_id, result) = task.pending_block_requests.select_next_some() => {
-                // A block(s) request has been finished.
-                // `result` is an error if the block request got cancelled by the sync state
-                // machine.
-                if let Ok(result) = result {
-                    // Inject the result of the request into the sync state machine.
-                    task.sync.blocks_request_response(
-                        request_id,
-                        result.map_err(|_| ()).map(|v| {
-                            v.into_iter().filter_map(|block| {
+            (request_id, result) = task.pending_requests.select_next_some() => {
+                // A request has been finished.
+                // `result` is an error if the request got cancelled by the sync state machine.
+                let Ok(result) = result else { continue; };
+
+                // Inject the result of the request into the sync state machine.
+                match result {
+                    RequestOutcome::Block(Ok(v)) => {
+                        task.sync.blocks_request_response(
+                            request_id,
+                            Ok(v.into_iter().filter_map(|block| {
                                 Some(all::BlockRequestSuccessBlock {
                                     scale_encoded_header: block.header?,
                                     scale_encoded_justifications: block.justifications.unwrap_or(Vec::new()),
                                     scale_encoded_extrinsics: Vec::new(),
                                     user_data: (),
                                 })
-                            })
-                        })
-                    ).1
-
-                } else {
-                    // The sync state machine has emitted a `Action::Cancel` earlier, and is
-                    // thus no longer interested in the response.
-                    continue;
-                }
-            },
-
-            (request_id, result) = task.pending_grandpa_requests.select_next_some() => {
-                // A GrandPa warp sync request has been finished.
-                // `result` is an error if the block request got cancelled by the sync state
-                // machine.
-                match result {
-                    Ok(Ok(result)) => {
+                            }))
+                        ).1
+                    },
+                    RequestOutcome::Block(Err(_)) => {
+                        task.sync.blocks_request_response(request_id, Err::<iter::Empty<_>, _>(())).1
+                    },
+                    RequestOutcome::WarpSync(Ok(result)) => {
                         let decoded = result.decode();
                         let fragments = decoded.fragments
                             .into_iter()
@@ -262,50 +250,15 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                             decoded.is_finished,
                         ).1
                     }
-                    Ok(Err(_)) => {
+                    RequestOutcome::WarpSync(Err(_)) => {
                         task.sync.grandpa_warp_sync_response_err(
                             request_id,
                         );
                         continue;
                     }
-                    Err(_) => {
-                        // The sync state machine has emitted a `Action::Cancel` earlier, and is
-                        // thus no longer interested in the response.
-                        continue;
-                    }
-                }
-            },
-
-            (request_id, result) = task.pending_storage_requests.select_next_some() => {
-                // A storage request has been finished.
-                // `result` is an error if the request got cancelled by the sync state machine.
-                if let Ok(result) = result {
-                    // Inject the result of the request into the sync state machine.
-                    task.sync.storage_get_response(request_id, result).1
-                } else {
-                    // The sync state machine has emitted a `Action::Cancel` earlier, and is
-                    // thus no longer interested in the response.
-                    continue;
-                }
-            },
-
-            (request_id, result) = task.pending_call_proof_requests.select_next_some() => {
-                // A call proof request has been finished.
-                // `result` is an error if the request got cancelled by the sync state machine.
-                if let Ok(result) = result {
-                    // Inject the result of the request into the sync state machine.
-                    task.sync.call_proof_response(
-                        request_id,
-                        match result {
-                            Ok(ref r) => Ok(r.decode().to_owned()), // TODO: need help from networking service to avoid this to_owned
-                            Err(err) => Err(err),
-                        }
-                    ).1
-
-                } else {
-                    // The sync state machine has emitted a `Action::Cancel` earlier, and is
-                    // thus no longer interested in the response.
-                    continue;
+                    RequestOutcome::Storage(r) => task.sync.storage_get_response(request_id, r).1,
+                    RequestOutcome::CallProof(Ok(r)) => task.sync.call_proof_response(request_id, Ok(r.decode().to_owned())).1, // TODO: need help from networking service to avoid this to_owned
+                    RequestOutcome::CallProof(Err(err)) => task.sync.call_proof_response(request_id, Err(err)).1,
                 }
             },
 
@@ -405,52 +358,22 @@ struct Task<TPlat: PlatformRef> {
     /// the network service whenever a request is started.
     network_chain_index: usize,
 
-    /// List of block requests currently in progress.
-    pending_block_requests: stream::FuturesUnordered<
-        future::BoxFuture<
-            'static,
-            (
-                all::RequestId,
-                Result<
-                    Result<Vec<protocol::BlockData>, network_service::BlocksRequestError>,
-                    future::Aborted,
-                >,
-            ),
-        >,
+    /// List of requests currently in progress.
+    pending_requests: stream::FuturesUnordered<
+        future::BoxFuture<'static, (all::RequestId, Result<RequestOutcome, future::Aborted>)>,
     >,
+}
 
-    /// List of grandpa warp sync requests currently in progress.
-    pending_grandpa_requests: stream::FuturesUnordered<
-        future::BoxFuture<
-            'static,
-            (
-                all::RequestId,
-                Result<
-                    Result<
-                        network::service::EncodedGrandpaWarpSyncResponse,
-                        network_service::GrandpaWarpSyncRequestError,
-                    >,
-                    future::Aborted,
-                >,
-            ),
+enum RequestOutcome {
+    Block(Result<Vec<protocol::BlockData>, network_service::BlocksRequestError>),
+    WarpSync(
+        Result<
+            network::service::EncodedGrandpaWarpSyncResponse,
+            network_service::GrandpaWarpSyncRequestError,
         >,
-    >,
-
-    /// List of storage requests currently in progress.
-    pending_storage_requests: stream::FuturesUnordered<
-        future::BoxFuture<'static, (all::RequestId, Result<Result<Vec<u8>, ()>, future::Aborted>)>,
-    >,
-
-    /// List of call proof requests currently in progress.
-    pending_call_proof_requests: stream::FuturesUnordered<
-        future::BoxFuture<
-            'static,
-            (
-                all::RequestId,
-                Result<Result<network::service::EncodedMerkleProof, ()>, future::Aborted>,
-            ),
-        >,
-    >,
+    ),
+    Storage(Result<Vec<u8>, ()>),
+    CallProof(Result<network::service::EncodedMerkleProof, ()>),
 }
 
 impl<TPlat: PlatformRef> Task<TPlat> {
@@ -522,8 +445,10 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     .sync
                     .add_request(source_id, request_detail.into(), abort);
 
-                self.pending_block_requests
-                    .push(async move { (request_id, block_request.await) }.boxed());
+                self.pending_requests.push(
+                    async move { (request_id, block_request.await.map(RequestOutcome::Block)) }
+                        .boxed(),
+                );
             }
 
             all::DesiredRequest::GrandpaWarpSync {
@@ -547,8 +472,15 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     .sync
                     .add_request(source_id, request_detail.into(), abort);
 
-                self.pending_grandpa_requests
-                    .push(async move { (request_id, grandpa_request.await) }.boxed());
+                self.pending_requests.push(
+                    async move {
+                        (
+                            request_id,
+                            grandpa_request.await.map(RequestOutcome::WarpSync),
+                        )
+                    }
+                    .boxed(),
+                );
             }
 
             all::DesiredRequest::StorageGetMerkleProof {
@@ -582,8 +514,15 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     .sync
                     .add_request(source_id, request_detail.into(), abort);
 
-                self.pending_storage_requests
-                    .push(async move { (request_id, storage_request.await) }.boxed());
+                self.pending_requests.push(
+                    async move {
+                        (
+                            request_id,
+                            storage_request.await.map(RequestOutcome::Storage),
+                        )
+                    }
+                    .boxed(),
+                );
             }
 
             all::DesiredRequest::RuntimeCallMerkleProof {
@@ -621,8 +560,15 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     .sync
                     .add_request(source_id, request_detail.into(), abort);
 
-                self.pending_call_proof_requests
-                    .push(async move { (request_id, call_proof_request.await) }.boxed());
+                self.pending_requests.push(
+                    async move {
+                        (
+                            request_id,
+                            call_proof_request.await.map(RequestOutcome::CallProof),
+                        )
+                    }
+                    .boxed(),
+                );
             }
         }
 
