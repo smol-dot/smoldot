@@ -216,7 +216,7 @@ where
 
     /// Returns the number of non-finalized blocks.
     ///
-    /// This is equal to the number of items yielded by [`AsyncTree::input_iter_unordered`].
+    /// This is equal to the number of items yielded by [`AsyncTree::input_output_iter_unordered`].
     pub fn num_input_non_finalized_blocks(&self) -> usize {
         self.non_finalized_blocks.len()
     }
@@ -394,7 +394,7 @@ where
     ///
     /// Does not include the finalized output block itself, but includes all descendants of it.
     ///
-    /// Similar to [`AsyncTree::input_iter_unordered`], except that the returned items are
+    /// Similar to [`AsyncTree::input_output_iter_unordered`], except that the returned items are
     /// guaranteed to be in an order in which the parents are found before their children.
     pub fn input_output_iter_ancestry_order(
         &'_ self,
@@ -1176,7 +1176,8 @@ where
     }
 }
 
-/// See [`AsyncTree::input_iter_unordered`] and [`AsyncTree::input_iter_ancestry_order`].
+/// See [`AsyncTree::input_output_iter_unordered`] and
+/// [`AsyncTree::input_output_iter_ancestry_order`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputIterItem<'a, TBl, TAsync> {
     /// Index of the block.
