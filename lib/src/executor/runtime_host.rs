@@ -485,10 +485,8 @@ impl NextKey {
                             .main_trie_root_calculation_cache
                             .as_mut()
                             .unwrap()
-                            .storage_value_update(&key, false);
-                        self.inner
-                            .main_trie_changes
-                            .diff_insert_erase(key.clone(), ());
+                            .storage_value_update(key, false);
+                        self.inner.main_trie_changes.diff_insert_erase(key, ());
                         self.keys_removed_so_far += 1;
                         self.key_overwrite = Some(key.to_owned()); // TODO: might be expensive if lots of keys
                         self.inner.vm = req.into();

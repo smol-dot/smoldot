@@ -575,18 +575,11 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             };
 
             // TODO: O(n)
-            if !self
-                .in_progress_requests
-                .iter()
-                .any(|(_, (_, _, rq))| match rq {
+            if !self.in_progress_requests.iter().any(|(_, (_, _, rq))| {
+                matches!(rq,
                     RequestDetail::WarpSyncRequest { block_hash }
-                        if *block_hash == start_block_hash =>
-                    {
-                        true
-                    }
-                    _ => false,
-                })
-            {
+                        if *block_hash == start_block_hash)
+            }) {
                 // Combine the request with every single available source.
                 either::Left(self.sources.iter().filter_map(move |(src_id, src)| {
                     // TODO: also filter by source finalized block? so that we don't request from sources below us

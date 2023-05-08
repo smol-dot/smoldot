@@ -411,7 +411,7 @@ impl<T> Yamux<T> {
             return Err(OpenSubstreamError::GoAwayReceived);
         }
 
-        let substream_id = self.inner.next_outbound_substream.clone();
+        let substream_id = self.inner.next_outbound_substream;
 
         self.inner.next_outbound_substream = match self.inner.next_outbound_substream.checked_add(2)
         {

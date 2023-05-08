@@ -65,6 +65,23 @@ pub struct WithBuffers<T> {
     flush_pending: bool,
 }
 
+/// See [`WithBuffers::buffers`].
+pub struct Buffers<'a> {
+    /// Two buffers which, when concatenated, represent the data available from the socket.
+    ///
+    /// `None` if the reading side of the socket has been closed.
+    pub read_buffer: Option<(&'a [u8], &'a [u8])>,
+
+    /// Two buffers which, when concatenated, can be written to in order to send data to the
+    /// socket.
+    ///
+    /// `None` if the writing side of the socket has been closed.
+    ///
+    /// > **Note**: The write buffer is `None` only after the writing side has actually been
+    /// >           closed, not immediately after calling [`WithBuffers::close`].
+    pub write_buffer: Option<(&'a mut [u8], &'a mut [u8])>,
+}
+
 impl<T> WithBuffers<T> {
     /// Initializes a new [`WithBuffers`] with the given socket.
     ///
@@ -91,20 +108,11 @@ impl<T> WithBuffers<T> {
     ///
     /// If an error happened on the socket earlier, it is returned instead.
     ///
-    /// The read buffer is an `Option` containing `None` if the reading side of the socket has
-    /// been closed. The write buffer is an `Option` containing `None` if the writing side of the
-    /// socket has been closed.
-    ///
-    /// If this method returns `Ok(None, None)`, the socket is now useless and can be dropped.
-    ///
-    /// > **Note**: The write buffer is `None` only after the writing side has actually been
-    /// >           closed, not immediately after calling [`WithBuffers::close`].
+    /// If the returned object contains two `None`, the socket is now useless and can be dropped.
     ///
     /// This method is idempotent. You should later call [`WithBuffers::advance`] to advance the
     /// cursor in these buffers.
-    pub fn buffers(
-        &mut self,
-    ) -> Result<(Option<(&[u8], &[u8])>, Option<(&mut [u8], &mut [u8])>), &io::Error> {
+    pub fn buffers(&mut self) -> Result<Buffers, &io::Error> {
         if let Some(error) = self.error.as_ref() {
             return Err(error);
         }
@@ -147,7 +155,10 @@ impl<T> WithBuffers<T> {
             Some((buf1, buf2))
         };
 
-        Ok((read_buffer, write_buffer))
+        Ok(Buffers {
+            read_buffer,
+            write_buffer,
+        })
     }
 
     /// Advances the cursors of the buffers.

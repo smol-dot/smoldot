@@ -730,10 +730,10 @@ impl<TUd> TrieStructure<TUd> {
             // Consumes the nibbles at the start of `start_key`.
             let pk_compare = {
                 let mut result = cmp::Ordering::Equal;
-                for iter_node_pk_nibble in iter_node.partial_key.iter().cloned() {
+                for iter_node_pk_nibble in iter_node.partial_key.iter() {
                     match start_key
                         .next()
-                        .map(|nibble| nibble.cmp(&iter_node_pk_nibble))
+                        .map(|nibble| nibble.cmp(iter_node_pk_nibble))
                     {
                         None | Some(cmp::Ordering::Less) => {
                             result = cmp::Ordering::Less;
@@ -878,9 +878,7 @@ impl<TUd> TrieStructure<TUd> {
                 {
                     // `child` might be after the end bound if its partial key is superior or
                     // equal to the `end_key`.
-                    for child_pk_nibble in
-                        self.nodes.get(child).unwrap().partial_key.iter().copied()
-                    {
+                    for child_pk_nibble in self.nodes.get(child).unwrap().partial_key.iter() {
                         match child_pk_nibble.cmp(end_key.peek().unwrap()) {
                             cmp::Ordering::Greater if iter_key_nibbles_extra == 0 => return None,
                             cmp::Ordering::Greater | cmp::Ordering::Less => {
@@ -900,10 +898,9 @@ impl<TUd> TrieStructure<TUd> {
                     }
 
                     iter = (child, None);
-                } else if iter_key_nibbles_extra == 0 {
-                    return None;
-                } else if iter_key_nibbles_extra == 1
-                    && iter_1.map_or(true, |iter_1| iter_1 > *end_key.peek().unwrap())
+                } else if iter_key_nibbles_extra == 0
+                    || (iter_key_nibbles_extra == 1
+                        && iter_1.map_or(true, |iter_1| iter_1 > *end_key.peek().unwrap()))
                 {
                     return None;
                 } else if let Some(child_index) = iter_1.and_then(|iter_1| {

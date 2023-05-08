@@ -96,7 +96,10 @@ pub(super) async fn established_connection_task(
         }
 
         let wake_up_after = if let Some(socket) = socket_container.as_mut() {
-            let (read_buffer, write_buffer) = match socket.buffers() {
+            let with_buffers::Buffers {
+                read_buffer,
+                write_buffer,
+            } = match socket.buffers() {
                 Ok(b) => b,
                 Err(error) => {
                     log::debug!("connection-error; error={}", error);
