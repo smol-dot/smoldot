@@ -223,13 +223,13 @@ impl<T> NonFinalizedTreeInner<T> {
             (consensus, finality)
         };
 
-        let mut context = VerifyContext {
+        let mut context = Box::new(VerifyContext {
             chain: self,
             header: scale_encoded_header,
             parent_tree_index,
             consensus,
             finality,
-        };
+        });
 
         if full {
             VerifyOut::Body(BodyVerifyStep1::ParentRuntimeRequired(
@@ -320,7 +320,7 @@ impl<T> NonFinalizedTreeInner<T> {
 
 enum VerifyOut<T> {
     HeaderOk(
-        VerifyContext<T>,
+        Box<VerifyContext<T>>,
         bool,
         BlockConsensus,
         BlockFinality,
@@ -608,7 +608,7 @@ impl<T> VerifyContext<T> {
         (is_new_best, consensus, finality)
     }
 
-    fn with_body_verify(mut self, inner: verify::header_body::Verify) -> BodyVerifyStep2<T> {
+    fn with_body_verify(mut self: Box<Self>, inner: verify::header_body::Verify) -> BodyVerifyStep2<T> {
         match inner {
             verify::header_body::Verify::Finished(Ok(success)) => {
                 // TODO: lots of code in common with header verification
@@ -698,7 +698,7 @@ pub enum BodyVerifyStep1<T> {
 /// of the parent block must be provided.
 #[must_use]
 pub struct BodyVerifyRuntimeRequired<T> {
-    context: VerifyContext<T>,
+    context: Box<VerifyContext<T>>,
     now_from_unix_epoch: Duration,
 }
 
@@ -927,7 +927,7 @@ pub enum BodyVerifyError {
 #[must_use]
 pub struct StorageGet<T> {
     inner: verify::header_body::StorageGet,
-    context: VerifyContext<T>,
+    context: Box<VerifyContext<T>>,
 }
 
 impl<T> StorageGet<T> {
@@ -986,7 +986,7 @@ impl<T> StorageGet<T> {
 #[must_use]
 pub struct StoragePrefixKeys<T> {
     inner: verify::header_body::StoragePrefixKeys,
-    context: VerifyContext<T>,
+    context: Box<VerifyContext<T>>,
 }
 
 impl<T> StoragePrefixKeys<T> {
@@ -1045,7 +1045,7 @@ impl<T> StoragePrefixKeys<T> {
 #[must_use]
 pub struct StorageNextKey<T> {
     inner: verify::header_body::StorageNextKey,
-    context: VerifyContext<T>,
+    context: Box<VerifyContext<T>>,
 }
 
 impl<T> StorageNextKey<T> {
@@ -1121,7 +1121,7 @@ impl<T> StorageNextKey<T> {
 #[must_use]
 pub struct RuntimeCompilation<T> {
     inner: verify::header_body::RuntimeCompilation,
-    context: VerifyContext<T>,
+    context: Box<VerifyContext<T>>,
 }
 
 impl<T> RuntimeCompilation<T> {
@@ -1155,7 +1155,7 @@ pub struct HeaderInsert<'c, T>(Box<HeaderInsertInner<'c, T>>);
 
 struct HeaderInsertInner<'c, T> {
     chain: &'c mut NonFinalizedTree<T>,
-    context: Option<VerifyContext<T>>,
+    context: Option<Box<VerifyContext<T>>>,
     hash: [u8; 32],
     is_new_best: bool,
     consensus: Option<BlockConsensus>,
@@ -1255,7 +1255,7 @@ pub enum HeaderVerifyError {
 pub struct BodyInsert<T>(Box<BodyInsertInner<T>>);
 
 struct BodyInsertInner<T> {
-    context: VerifyContext<T>,
+    context: Box<VerifyContext<T>>,
     hash: [u8; 32],
     is_new_best: bool,
     consensus: BlockConsensus,
