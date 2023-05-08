@@ -202,11 +202,10 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                 subscription: (&subscription_id).into(),
                                 result: methods::FollowEvent::NewBlock {
                                     block_hash: methods::HashHexString(hash),
-                                    new_runtime: if let Some(new_runtime) = &block.new_runtime {
-                                        Some(convert_runtime_spec(new_runtime))
-                                    } else {
-                                        None
-                                    },
+                                    new_runtime: block
+                                        .new_runtime
+                                        .as_ref()
+                                        .map(convert_runtime_spec),
                                     parent_block_hash: methods::HashHexString(block.parent_hash),
                                 },
                             }
@@ -879,11 +878,10 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                 result: methods::FollowEvent::NewBlock {
                                     block_hash: methods::HashHexString(hash),
                                     parent_block_hash: methods::HashHexString(block.parent_hash),
-                                    new_runtime: if let Some(new_runtime) = &block.new_runtime {
-                                        Some(convert_runtime_spec(new_runtime))
-                                    } else {
-                                        None
-                                    },
+                                    new_runtime: block
+                                        .new_runtime
+                                        .as_ref()
+                                        .map(convert_runtime_spec),
                                 },
                             }
                             .to_json_call_object_parameters(None),
@@ -1038,7 +1036,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 };
 
                 self.start_chain_head_body(
-                    &requests_subscriptions,
+                    requests_subscriptions,
                     (&get_request_id.0, &get_request_id.1),
                     hash,
                     network_config,
@@ -1067,7 +1065,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 };
 
                 self.start_chain_head_storage(
-                    &requests_subscriptions,
+                    requests_subscriptions,
                     (&get_request_id.0, &get_request_id.1),
                     hash,
                     key,
@@ -1128,7 +1126,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 };
 
                 self.start_chain_head_call(
-                    &requests_subscriptions,
+                    requests_subscriptions,
                     (&get_request_id.0, &get_request_id.1),
                     &function_to_call,
                     call_parameters,

@@ -453,7 +453,7 @@ impl NetworkService {
             let on_foreground_shutdown = foreground_shutdown.listen();
             let to_background_tx = to_background_tx.clone();
             Box::pin(async move {
-                let _ = on_foreground_shutdown.await;
+                let () = on_foreground_shutdown.await;
                 let _ = to_background_tx
                     .send(ToBackground::ForegroundShutdown)
                     .await;

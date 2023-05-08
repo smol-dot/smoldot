@@ -222,7 +222,7 @@ fn chain_error_ptr(chain_id: u32) -> u32 {
 
 fn json_rpc_send(json_rpc_request: Vec<u8>, chain_id: u32) -> u32 {
     // As mentioned in the documentation, the bytes *must* be valid UTF-8.
-    let json_rpc_request: String = String::from_utf8(json_rpc_request.into())
+    let json_rpc_request: String = String::from_utf8(json_rpc_request)
         .unwrap_or_else(|_| panic!("non-UTF-8 JSON-RPC request"));
 
     let mut client_lock = CLIENT.lock().unwrap();

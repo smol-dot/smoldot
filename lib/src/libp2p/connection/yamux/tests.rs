@@ -203,12 +203,9 @@ fn ack_sent() {
             let outcome = yamux.incoming_data(&data[cursor..]).unwrap();
             yamux = outcome.yamux;
             cursor += outcome.bytes_read;
-            match outcome.detail {
-                Some(IncomingDataDetail::IncomingSubstream) => {
-                    assert!(opened_substream.is_none());
-                    opened_substream = Some(yamux.accept_pending_substream(()).unwrap())
-                }
-                _ => {}
+            if let Some(IncomingDataDetail::IncomingSubstream) = outcome.detail {
+                assert!(opened_substream.is_none());
+                opened_substream = Some(yamux.accept_pending_substream(()).unwrap())
             }
         }
     }
@@ -310,11 +307,8 @@ fn data_with_rst() {
                 yamux = outcome.yamux;
                 cursor += outcome.bytes_read;
 
-                match outcome.detail {
-                    Some(IncomingDataDetail::IncomingSubstream) => {
-                        yamux.accept_pending_substream(()).unwrap();
-                    }
-                    _ => {}
+                if let Some(IncomingDataDetail::IncomingSubstream) = outcome.detail {
+                    yamux.accept_pending_substream(()).unwrap();
                 }
             }
             Err(Error::DataWithRst) => return,
@@ -349,11 +343,8 @@ fn empty_data_frame_with_rst() {
                 yamux = outcome.yamux;
                 cursor += outcome.bytes_read;
 
-                match outcome.detail {
-                    Some(IncomingDataDetail::IncomingSubstream) => {
-                        yamux.accept_pending_substream(()).unwrap();
-                    }
-                    _ => {}
+                if let Some(IncomingDataDetail::IncomingSubstream) = outcome.detail {
+                    yamux.accept_pending_substream(()).unwrap();
                 }
             }
             Err(_) => panic!(),
@@ -381,11 +372,8 @@ fn rst_sent_when_rejecting() {
             let outcome = yamux.incoming_data(&data[cursor..]).unwrap();
             yamux = outcome.yamux;
             cursor += outcome.bytes_read;
-            match outcome.detail {
-                Some(IncomingDataDetail::IncomingSubstream) => {
-                    yamux.reject_pending_substream().unwrap()
-                }
-                _ => {}
+            if let Some(IncomingDataDetail::IncomingSubstream) = outcome.detail {
+                yamux.reject_pending_substream().unwrap()
             }
         }
     }
@@ -424,11 +412,8 @@ fn max_simultaneous_rst_substreams() {
             Ok(outcome) => {
                 yamux = outcome.yamux;
                 cursor += outcome.bytes_read;
-                match outcome.detail {
-                    Some(IncomingDataDetail::IncomingSubstream) => {
-                        yamux.reject_pending_substream().unwrap()
-                    }
-                    _ => {}
+                if let Some(IncomingDataDetail::IncomingSubstream) = outcome.detail {
+                    yamux.reject_pending_substream().unwrap()
                 }
             }
             Err(Error::MaxSimultaneousRstSubstreamsExceeded) => return,

@@ -293,7 +293,7 @@ impl<T> NonFinalizedTreeInner<T> {
                     .unwrap(), // TODO: inefficiency ; in case of header only verify we do an extra allocation to build the context above
                 block_number_bytes: context.chain.block_number_bytes,
                 parent_block_header: header::decode(
-                    &parent_block_header,
+                    parent_block_header,
                     context.chain.block_number_bytes,
                 )
                 .unwrap(),
@@ -833,7 +833,7 @@ impl<T> BodyVerifyRuntimeRequired<T> {
             .unwrap(),
             block_number_bytes: self.context.chain.block_number_bytes,
             parent_block_header: header::decode(
-                &parent_block_header,
+                parent_block_header,
                 self.context.chain.block_number_bytes,
             )
             .unwrap(),

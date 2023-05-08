@@ -255,11 +255,9 @@ async fn single_stream_connection_task<TPlat: PlatformRef>(
             let mut read_write = ReadWrite {
                 now: now.clone(),
                 incoming_buffer,
-                outgoing_buffer: if let Some(write_buffer) = write_buffer.as_mut() {
-                    Some((&mut write_buffer[..writable_bytes], &mut []))
-                } else {
-                    None
-                },
+                outgoing_buffer: write_buffer
+                    .as_mut()
+                    .map(|b| (&mut b[..writable_bytes], &mut [][..])),
                 read_bytes: 0,
                 written_bytes: 0,
                 wake_up_after: None,

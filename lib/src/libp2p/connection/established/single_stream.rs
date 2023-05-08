@@ -462,15 +462,13 @@ where
                             read_write.wake_up_after(&wake_up_after);
                         }
 
-                        let event_pass_through = if let Some(event) = event {
-                            Some(Self::pass_through_substream_event(
+                        let event_pass_through = event.map(|ev| {
+                            Self::pass_through_substream_event(
                                 dead_substream_id,
                                 &mut substream_user_data,
-                                event,
-                            ))
-                        } else {
-                            None
-                        };
+                                ev,
+                            )
+                        });
 
                         if let Some(substream_update) = substream_update {
                             // Put back the substream state machine. It will be picked up again
@@ -609,14 +607,9 @@ where
             inner.yamux.close(substream_id).unwrap();
         }
 
-        let event_to_yield = match event {
-            None => None,
-            Some(other) => Some(Self::pass_through_substream_event(
-                substream_id,
-                &mut substream_user_data,
-                other,
-            )),
-        };
+        let event_to_yield = event.map(|ev| {
+            Self::pass_through_substream_event(substream_id, &mut substream_user_data, ev)
+        });
 
         match substream_update {
             Some(s) => *inner.yamux.user_data_mut(substream_id) = Some((s, substream_user_data)),
