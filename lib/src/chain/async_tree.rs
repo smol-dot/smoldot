@@ -1217,7 +1217,7 @@ pub enum OutputUpdate<'a, TBl, TAsync> {
         /// User data associated to the `async` operation of this block.
         ///
         /// This is the same value as is now returned by
-        /// [`AsyncTree::finalized_async_user_data`], and is provided here for convenience.
+        /// [`AsyncTree::output_finalized_async_user_data`], and is provided here for convenience.
         async_op_user_data: &'a TAsync,
 
         /// User data associated to the `async` operation of the previous finalized block.
