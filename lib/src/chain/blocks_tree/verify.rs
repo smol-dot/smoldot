@@ -608,7 +608,10 @@ impl<T> VerifyContext<T> {
         (is_new_best, consensus, finality)
     }
 
-    fn with_body_verify(mut self: Box<Self>, inner: verify::header_body::Verify) -> BodyVerifyStep2<T> {
+    fn with_body_verify(
+        mut self: Box<Self>,
+        inner: verify::header_body::Verify,
+    ) -> BodyVerifyStep2<T> {
         match inner {
             verify::header_body::Verify::Finished(Ok(success)) => {
                 // TODO: lots of code in common with header verification
