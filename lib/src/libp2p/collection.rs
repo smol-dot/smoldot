@@ -505,7 +505,7 @@ where
             self.request_response_protocols.len() + self.notification_protocols.len() * 2 + 2;
 
         let handshake = noise::HandshakeInProgress::new(noise::Config {
-            key: &noise_key,
+            key: noise_key,
             // It's the "server" that initiates the Noise handshake.
             is_initiator: !is_initiator,
             prologue: &noise_prologue,
@@ -1345,7 +1345,7 @@ where
                                 },
                             },
                         ));
-                    } else if &*self.ping_protocol == &*protocol_name {
+                    } else if *self.ping_protocol == *protocol_name {
                         self.messages_to_connections.push_back((
                             connection_id,
                             CoordinatorToConnectionInner::AcceptInbound {

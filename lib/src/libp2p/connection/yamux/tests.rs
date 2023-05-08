@@ -1538,7 +1538,7 @@ fn substream_reset_on_goaway_if_not_acked() {
 
     let substream_id = yamux.open_substream(()).unwrap();
     yamux.write(substream_id, b"foo".to_vec()).unwrap();
-    while let Some(_) = yamux.extract_next(usize::max_value()) {}
+    while yamux.extract_next(usize::max_value()).is_some() {}
 
     // GoAway frame.
     let data = &[0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
@@ -1657,10 +1657,10 @@ fn ignore_incoming_substreams_after_goaway() {
         let outcome = yamux.incoming_data(&data[cursor..]).unwrap();
         yamux = outcome.yamux;
         cursor += outcome.bytes_read;
-        match outcome.detail {
-            Some(IncomingDataDetail::IncomingSubstream) => panic!(),
-            _ => {}
-        }
+        assert!(!matches!(
+            outcome.detail,
+            Some(IncomingDataDetail::IncomingSubstream)
+        ));
     }
 
     let mut output = Vec::new();
