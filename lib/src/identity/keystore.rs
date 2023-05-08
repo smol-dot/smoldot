@@ -163,8 +163,8 @@ impl Keystore {
                             ),
                             nom::bytes::complete::tag("-"),
                             nom::combinator::map_opt(
-                                nom::bytes::complete::take_while(|c| {
-                                    ('0'..='9').contains(&c) || ('a'..='f').contains(&c)
+                                nom::bytes::complete::take_while(|c: char| {
+                                    c.is_ascii_digit() || ('a'..='f').contains(&c)
                                 }),
                                 |k: &str| {
                                     if k.len() == 64 {

@@ -76,7 +76,7 @@ pub struct SingleStream<TNow, TSubUd> {
     encryption: noise::Noise,
 
     /// Extra fields. Segregated in order to solve borrowing questions.
-    inner: Inner<TNow, TSubUd>,
+    inner: Box<Inner<TNow, TSubUd>>,
 }
 
 /// Extra fields. Segregated in order to solve borrowing questions.
@@ -558,83 +558,77 @@ where
         outer_read_write: &mut ReadWrite<TNow>,
         in_data: &[u8],
     ) -> (usize, Option<Event<TSubUd>>) {
-        let mut total_read = 0;
-
-        loop {
-            let (state_machine, mut substream_user_data) =
-                match inner.yamux.user_data_mut(substream_id).take() {
-                    Some(s) => s,
-                    None => break (total_read, None),
-                };
-
-            let read_is_closed = !inner.yamux.can_receive(substream_id);
-            let write_is_closed = !inner.yamux.can_send(substream_id);
-
-            let mut substream_read_write = ReadWrite {
-                now: outer_read_write.now.clone(),
-                incoming_buffer: if read_is_closed {
-                    assert!(in_data.is_empty());
-                    None
-                } else {
-                    Some(&in_data[total_read..])
-                },
-                outgoing_buffer: if !write_is_closed {
-                    Some((&mut inner.intermediary_buffer, &mut []))
-                } else {
-                    None
-                },
-                read_bytes: 0,
-                written_bytes: 0,
-                wake_up_after: None,
+        let (state_machine, mut substream_user_data) =
+            match inner.yamux.user_data_mut(substream_id).take() {
+                Some(s) => s,
+                None => return (0, None),
             };
 
-            let (substream_update, event) = state_machine.read_write(&mut substream_read_write);
+        let read_is_closed = !inner.yamux.can_receive(substream_id);
+        let write_is_closed = !inner.yamux.can_send(substream_id);
 
-            total_read += substream_read_write.read_bytes;
-            if let Some(wake_up_after) = substream_read_write.wake_up_after {
-                outer_read_write.wake_up_after(&wake_up_after);
-            }
+        let mut substream_read_write = ReadWrite {
+            now: outer_read_write.now.clone(),
+            incoming_buffer: if read_is_closed {
+                assert!(in_data.is_empty());
+                None
+            } else {
+                Some(in_data)
+            },
+            outgoing_buffer: if !write_is_closed {
+                Some((&mut inner.intermediary_buffer, &mut []))
+            } else {
+                None
+            },
+            read_bytes: 0,
+            written_bytes: 0,
+            wake_up_after: None,
+        };
 
-            let closed_after = substream_read_write.outgoing_buffer.is_none();
-            let written_bytes = substream_read_write.written_bytes;
-            if written_bytes != 0 {
-                debug_assert!(!write_is_closed);
-                inner
-                    .yamux
-                    .write(
-                        substream_id,
-                        inner.intermediary_buffer[..written_bytes].to_vec(),
-                    )
-                    .unwrap();
-            }
-            if !write_is_closed && closed_after {
-                debug_assert_eq!(written_bytes, 0);
-                inner.yamux.close(substream_id).unwrap();
-            }
+        let (substream_update, event) = state_machine.read_write(&mut substream_read_write);
 
-            let event_to_yield = match event {
-                None => None,
-                Some(other) => Some(Self::pass_through_substream_event(
-                    substream_id,
-                    &mut substream_user_data,
-                    other,
-                )),
-            };
-
-            match substream_update {
-                Some(s) => {
-                    *inner.yamux.user_data_mut(substream_id) = Some((s, substream_user_data))
-                }
-                None => {
-                    if !closed_after || !read_is_closed {
-                        // TODO: what we do here is definitely correct, but the docs of `reset()` seem sketchy, investigate
-                        inner.yamux.reset(substream_id).unwrap();
-                    }
-                }
-            };
-
-            break (total_read, event_to_yield);
+        if let Some(wake_up_after) = substream_read_write.wake_up_after {
+            outer_read_write.wake_up_after(&wake_up_after);
         }
+
+        let closed_after = substream_read_write.outgoing_buffer.is_none();
+        let read_bytes = substream_read_write.read_bytes;
+        let written_bytes = substream_read_write.written_bytes;
+        if written_bytes != 0 {
+            debug_assert!(!write_is_closed);
+            inner
+                .yamux
+                .write(
+                    substream_id,
+                    inner.intermediary_buffer[..written_bytes].to_vec(),
+                )
+                .unwrap();
+        }
+        if !write_is_closed && closed_after {
+            debug_assert_eq!(written_bytes, 0);
+            inner.yamux.close(substream_id).unwrap();
+        }
+
+        let event_to_yield = match event {
+            None => None,
+            Some(other) => Some(Self::pass_through_substream_event(
+                substream_id,
+                &mut substream_user_data,
+                other,
+            )),
+        };
+
+        match substream_update {
+            Some(s) => *inner.yamux.user_data_mut(substream_id) = Some((s, substream_user_data)),
+            None => {
+                if !closed_after || !read_is_closed {
+                    // TODO: what we do here is definitely correct, but the docs of `reset()` seem sketchy, investigate
+                    inner.yamux.reset(substream_id).unwrap();
+                }
+            }
+        };
+
+        (read_bytes, event_to_yield)
     }
 
     /// Turns an event from the [`substream`] module into an [`Event`].
@@ -1153,7 +1147,7 @@ impl ConnectionPrototype {
 
         SingleStream {
             encryption: self.encryption,
-            inner: Inner {
+            inner: Box::new(Inner {
                 yamux,
                 current_data_frame: None,
                 outgoing_pings,
@@ -1164,7 +1158,7 @@ impl ConnectionPrototype {
                 ping_interval: config.ping_interval,
                 ping_timeout: config.ping_timeout,
                 intermediary_buffer: vec![0u8; 2048].into_boxed_slice(),
-            },
+            }),
         }
     }
 }

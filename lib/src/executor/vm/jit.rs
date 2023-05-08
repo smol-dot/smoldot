@@ -607,21 +607,13 @@ enum JitInner {
         params: Vec<wasmtime::Val>,
     },
     /// `Future` that drives the execution. Contains an invocation of `wasmtime::Func::call_async`.
-    Executing(
-        Pin<
-            Box<
-                dyn future::Future<
-                        Output = (
-                            wasmtime::Store<()>,
-                            Result<Option<WasmValue>, wasmtime::Error>,
-                        ),
-                    > + Send,
-            >,
-        >,
-    ),
+    Executing(BoxFuture<(wasmtime::Store<()>, ExecOutcomeValue)>),
     /// Execution has finished because the future has returned `Poll::Ready` in the past.
     Done(wasmtime::Store<()>),
 }
+
+type BoxFuture<T> = Pin<Box<dyn future::Future<Output = T> + Send>>;
+type ExecOutcomeValue = Result<Option<WasmValue>, wasmtime::Error>;
 
 impl Jit {
     /// See [`super::VirtualMachine::run`].

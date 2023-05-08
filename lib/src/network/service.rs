@@ -483,10 +483,10 @@ where
         let (expected_peer_id, multiaddr, when_connected) = self.pending_ids.remove(id.0);
 
         let (connection_id, connection_task) = self.inner.add_single_stream_outgoing_connection(
-            when_connected.clone(),
+            when_connected,
             handshake_kind,
             &expected_peer_id,
-            multiaddr.clone(),
+            multiaddr,
         );
 
         // Update `self.peers`.
@@ -525,10 +525,10 @@ where
         let (expected_peer_id, multiaddr, when_connected) = self.pending_ids.remove(id.0);
 
         let (connection_id, connection_task) = self.inner.add_multi_stream_outgoing_connection(
-            when_connected.clone(),
+            when_connected,
             handshake_kind,
             &expected_peer_id,
-            multiaddr.clone(),
+            multiaddr,
         );
 
         // Update `self.peers`.

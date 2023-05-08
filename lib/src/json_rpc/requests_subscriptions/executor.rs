@@ -265,7 +265,7 @@ mod tests {
 
             // Stop the test as soon as one executor is finished, as only one executor will
             // actually detect the limit and the others will be sleeping.
-            let _ = finished_rx.next().await.unwrap();
+            finished_rx.next().await.unwrap();
             assert_eq!(counter.load(atomic::Ordering::SeqCst), NUM_TASKS);
         })
     }
