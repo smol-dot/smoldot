@@ -1458,7 +1458,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         // TODO: many of the errors don't properly translate here, needs some refactoring
                         match blocks_append.add_block(
                             &block.scale_encoded_header,
-                            block.scale_encoded_justifications.into_iter(),
+                            block
+                                .scale_encoded_justifications
+                                .into_iter()
+                                .map(|j| (j.engine_id, j.justification)),
                         ) {
                             Ok(all_forks::AddBlock::UnknownBlock(ba)) => {
                                 blocks_append = ba.insert(Some(block.user_data))
@@ -1514,7 +1517,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         inner_request_id,
                         blocks.map(|block| optimistic::RequestSuccessBlock {
                             scale_encoded_header: block.scale_encoded_header,
-                            scale_encoded_justifications: block.scale_encoded_justifications,
+                            scale_encoded_justifications: block
+                                .scale_encoded_justifications
+                                .into_iter()
+                                .map(|j| (j.engine_id, j.justification))
+                                .collect(),
                             scale_encoded_extrinsics: block.scale_encoded_extrinsics,
                             user_data: block.user_data,
                         }),
@@ -1963,9 +1970,18 @@ impl From<DesiredRequest> for RequestDetail {
 
 pub struct BlockRequestSuccessBlock<TBl> {
     pub scale_encoded_header: Vec<u8>,
-    pub scale_encoded_justifications: Vec<([u8; 4], Vec<u8>)>,
+    pub scale_encoded_justifications: Vec<Justification>,
     pub scale_encoded_extrinsics: Vec<Vec<u8>>,
     pub user_data: TBl,
+}
+
+/// See [`BlockRequestSuccessBlock::scale_encoded_justifications`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Justification {
+    /// Short identifier of the consensus engine associated with that justification.
+    pub engine_id: [u8; 4],
+    /// Body of the justification.
+    pub justification: Vec<u8>,
 }
 
 /// Outcome of calling [`AllSync::block_announce`].

@@ -223,17 +223,18 @@ pub fn build_block_response(response: Vec<BlockData>) -> impl Iterator<Item = im
                 let mut j = Vec::with_capacity(
                     4 + justifications
                         .iter()
-                        .fold(0, |sz, (_, j)| sz + 4 + 6 + j.len()),
+                        .fold(0, |sz, j| sz + 4 + 6 + j.justification.len()),
                 );
                 j.extend_from_slice(
                     crate::util::encode_scale_compact_usize(justifications.len()).as_ref(),
                 );
-                for (consensus_engine, justification) in &justifications {
-                    j.extend_from_slice(consensus_engine);
+                for justification in &justifications {
+                    j.extend_from_slice(&justification.engine_id);
                     j.extend_from_slice(
-                        crate::util::encode_scale_compact_usize(justification.len()).as_ref(),
+                        crate::util::encode_scale_compact_usize(justification.justification.len())
+                            .as_ref(),
                     );
-                    j.extend_from_slice(justification);
+                    j.extend_from_slice(&justification.justification);
                 }
                 Some(j)
             } else {
@@ -351,8 +352,16 @@ pub struct BlockData {
     /// justifications.
     ///
     /// Will be `None` if and only if not requested.
-    // TODO: consider strong typing for the consensus engine id
-    pub justifications: Option<Vec<([u8; 4], Vec<u8>)>>,
+    pub justifications: Option<Vec<Justification>>,
+}
+
+/// See [`BlockData::justifications`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Justification {
+    /// Short identifier of the consensus engine associated with that justification.
+    pub engine_id: [u8; 4],
+    /// Body of the justification.
+    pub justification: Vec<u8>,
 }
 
 /// Error potentially returned by [`decode_block_request`].
@@ -388,7 +397,7 @@ pub enum DecodeBlockResponseError {
 
 fn decode_justifications<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
-) -> nom::IResult<&'a [u8], Vec<([u8; 4], Vec<u8>)>, E> {
+) -> nom::IResult<&'a [u8], Vec<Justification>, E> {
     nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
         nom::multi::many_m_n(
             num_elems,
@@ -398,11 +407,9 @@ fn decode_justifications<'a, E: nom::error::ParseError<&'a [u8]>>(
                     nom::bytes::complete::take(4u32),
                     crate::util::nom_bytes_decode,
                 )),
-                move |(consensus_engine, justification)| {
-                    (
-                        <[u8; 4]>::try_from(consensus_engine).unwrap(),
-                        justification.to_owned(),
-                    )
+                move |(consensus_engine, justification)| Justification {
+                    engine_id: <[u8; 4]>::try_from(consensus_engine).unwrap(),
+                    justification: justification.to_owned(),
                 },
             ),
         )
