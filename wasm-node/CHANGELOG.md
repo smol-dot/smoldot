@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.6 - 2023-05-09
+
 ### Changed
 
 - The version numbers of the `BabeApi`, `GrandpaApi` and `AuraApi` runtime APIs is now checked during the warp sync process. An error is returned if these version numbers aren't equal to known values. These version numbers are changed when the logic of the API has changed, and returning an error in that situation ensures that smoldot will not do the wrong thing such as running with a weakened security. ([#549](https://github.com/smol-dot/smoldot/pull/549))
