@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The version numbers of the `BabeApi`, `GrandpaApi` and `AuraApi` runtime APIs is now checked during the warp sync process. An error is returned if these version numbers aren't equal to known values. These version numbers are changed when the logic of the API has changed, and returning an error in that situation ensures that smoldot will not do the wrong thing such as running with a weakened security.
+
 ### Fixed
 
 - The `Promise` returned by `terminate()` now correctly waits for everything to be completely shut down before yielding instead of letting the shutdown continue happening in the background. ([#538](https://github.com/smol-dot/smoldot/pull/538))

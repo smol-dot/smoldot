@@ -108,6 +108,8 @@ pub enum Error {
     BabeNextEpochOutputDecode,
     /// Failed to decode the output of the `BabeApi_configuration` runtime call.
     BabeConfigurationOutputDecode,
+    /// The version of `GrandaApi` is too old to be able to build the chain information.
+    GrandpaApiTooOld,
     /// Failed to decode the output of the `GrandpaApi_authorities` runtime call.
     GrandpaAuthoritiesOutputDecode,
     /// Failed to decode the output of the `GrandpaApi_current_set_id` runtime call.
@@ -191,17 +193,29 @@ impl ChainInformationBuild {
             .decode()
             .apis
             .find_versions(["AuraApi", "BabeApi", "GrandpaApi"]);
-        let runtime_has_aura = apis_versions[0].is_some();
-        let runtime_has_babe = apis_versions[1].is_some();
-        let runtime_has_grandpa = apis_versions[2].is_some();
+        let runtime_has_aura = apis_versions[0].map_or(false, |version_number| version_number == 1);
+        let runtime_babeapi_is_v1 =
+            apis_versions[1].and_then(|version_number| match version_number {
+                1 => Some(true),
+                2 => Some(false),
+                _ => None,
+            });
+        let runtime_grandpa_supports_currentsetid =
+            apis_versions[2].and_then(|version_number| match version_number {
+                // Version 1 is from 2019 and isn't used by any chain in production, so we don't
+                // care about it.
+                2 => Some(false),
+                3 => Some(true),
+                _ => None,
+            });
 
         let inner = ChainInformationBuildInner {
             finalized_block_header: config.finalized_block_header,
             call_in_progress: None,
             virtual_machine: Some(config.runtime),
             runtime_has_aura,
-            runtime_has_babe,
-            runtime_has_grandpa,
+            runtime_babeapi_is_v1,
+            runtime_grandpa_supports_currentsetid,
             aura_autorities_call_output: None,
             aura_slot_duration_call_output: None,
             babe_current_epoch_call_output: None,
@@ -324,7 +338,7 @@ impl ChainInformationBuild {
         let babe_current_epoch = if !matches!(
             inner.finalized_block_header,
             ConfigFinalizedBlockHeader::Genesis { .. }
-        ) && inner.runtime_has_babe
+        ) && inner.runtime_babeapi_is_v1.is_some()
             && inner.babe_current_epoch_call_output.is_none()
         {
             Some(RuntimeCall::BabeApiCurrentEpoch)
@@ -335,7 +349,7 @@ impl ChainInformationBuild {
         let babe_next_epoch = if !matches!(
             inner.finalized_block_header,
             ConfigFinalizedBlockHeader::Genesis { .. }
-        ) && inner.runtime_has_babe
+        ) && inner.runtime_babeapi_is_v1.is_some()
             && inner.babe_next_epoch_call_output.is_none()
         {
             Some(RuntimeCall::BabeApiNextEpoch)
@@ -343,12 +357,13 @@ impl ChainInformationBuild {
             None
         };
 
-        let babe_configuration =
-            if inner.runtime_has_babe && inner.babe_configuration_call_output.is_none() {
-                Some(RuntimeCall::BabeApiConfiguration)
-            } else {
-                None
-            };
+        let babe_configuration = if inner.runtime_babeapi_is_v1.is_some()
+            && inner.babe_configuration_call_output.is_none()
+        {
+            Some(RuntimeCall::BabeApiConfiguration)
+        } else {
+            None
+        };
 
         let grandpa_authorities = if !matches!(
             inner.finalized_block_header,
@@ -356,7 +371,7 @@ impl ChainInformationBuild {
                 known_finality: Some(chain_information::ChainInformationFinality::Grandpa { .. }),
                 ..
             },
-        ) && inner.runtime_has_grandpa
+        ) && inner.runtime_grandpa_supports_currentsetid.is_some()
             && inner.grandpa_autorities_call_output.is_none()
         {
             Some(RuntimeCall::GrandpaApiAuthorities)
@@ -373,7 +388,8 @@ impl ChainInformationBuild {
                 known_finality: None,
                 ..
             },
-        ) && inner.runtime_has_grandpa
+        ) && inner.runtime_grandpa_supports_currentsetid
+            == Some(true)
             && inner.grandpa_current_set_id_call_output.is_none()
         {
             Some(RuntimeCall::GrandpaApiCurrentSetId)
@@ -424,17 +440,17 @@ impl ChainInformationBuild {
 
             let consensus = match (
                 inner.runtime_has_aura,
-                inner.runtime_has_babe,
+                inner.runtime_babeapi_is_v1,
                 &inner.finalized_block_header,
             ) {
-                (true, true, _) => {
+                (true, Some(_), _) => {
                     return ChainInformationBuild::Finished {
                         result: Err(Error::MultipleConsensusAlgorithms),
                         virtual_machine: inner.virtual_machine.take().unwrap(),
                     }
                 }
-                (false, false, _) => chain_information::ChainInformationConsensus::Unknown,
-                (false, true, ConfigFinalizedBlockHeader::NonGenesis { .. }) => {
+                (false, None, _) => chain_information::ChainInformationConsensus::Unknown,
+                (false, Some(_), ConfigFinalizedBlockHeader::NonGenesis { .. }) => {
                     chain_information::ChainInformationConsensus::Babe {
                         finalized_block_epoch_information: Some(
                             inner.babe_current_epoch_call_output.take().unwrap(),
@@ -450,7 +466,7 @@ impl ChainInformationBuild {
                             .slots_per_epoch,
                     }
                 }
-                (false, true, ConfigFinalizedBlockHeader::Genesis { .. }) => {
+                (false, Some(_), ConfigFinalizedBlockHeader::Genesis { .. }) => {
                     let config = inner.babe_configuration_call_output.take().unwrap();
                     chain_information::ChainInformationConsensus::Babe {
                         slots_per_epoch: config.slots_per_epoch,
@@ -465,7 +481,7 @@ impl ChainInformationBuild {
                         },
                     }
                 }
-                (true, false, _) => chain_information::ChainInformationConsensus::Aura {
+                (true, None, _) => chain_information::ChainInformationConsensus::Aura {
                     finalized_authorities_list: inner.aura_autorities_call_output.take().unwrap(),
                     slot_duration: inner.aura_slot_duration_call_output.take().unwrap(),
                 },
@@ -496,13 +512,24 @@ impl ChainInformationBuild {
             // Build the finality information if not known yet.
             let finality = if let Some(known_finality) = known_finality {
                 known_finality
-            } else if inner.runtime_has_grandpa {
+            } else if inner.runtime_grandpa_supports_currentsetid.is_some() {
                 chain_information::ChainInformationFinality::Grandpa {
                     after_finalized_block_authorities_set_id: if finalized_block_header.number == 0
                     {
                         0
                     } else {
-                        inner.grandpa_current_set_id_call_output.take().unwrap()
+                        // If the GrandPa runtime API version is too old, it is not possible to
+                        // determine the current set ID.
+                        let Some(grandpa_current_set_id_call_output) = inner.grandpa_current_set_id_call_output.take()
+                            else {
+                                debug_assert_eq!(inner.runtime_grandpa_supports_currentsetid, Some(false));
+                                return ChainInformationBuild::Finished {
+                                    result: Err(Error::GrandpaApiTooOld),
+                                    virtual_machine: inner.virtual_machine.take().unwrap(),
+                                }
+                            };
+
+                        grandpa_current_set_id_call_output
                     },
                     // TODO: The runtime doesn't give us a way to know the current scheduled change. At the moment the runtime it never schedules changes with a delay of more than 0. So in practice this `None` is correct, but it relies on implementation details
                     finalized_scheduled_change: None,
@@ -622,6 +649,7 @@ impl ChainInformationBuild {
                         Some(RuntimeCall::BabeApiConfiguration) => {
                             let result = decode_babe_configuration_output(
                                 success.virtual_machine.value().as_ref(),
+                                inner.runtime_babeapi_is_v1.unwrap(),
                             );
                             let virtual_machine = success.virtual_machine.into_prototype();
                             match result {
@@ -726,10 +754,12 @@ struct ChainInformationBuildInner {
 
     /// If `true`, the runtime supports `AuraApi` functions.
     runtime_has_aura: bool,
-    /// If `true`, the runtime supports `BabeApi` functions.
-    runtime_has_babe: bool,
-    /// If `true`, the runtime supports `GrandpaApi` functions.
-    runtime_has_grandpa: bool,
+    /// If `Some`, the runtime supports `BabeApi` functions. If `true`, the version is V1 (the old
+    /// version). If `false`, the version is V2.
+    runtime_babeapi_is_v1: Option<bool>,
+    /// If `Some`, the runtime supports `GrandpaApi` functions. If `true`, the API supports the
+    /// `GrandpaApi_current_set_id` runtime call.
+    runtime_grandpa_supports_currentsetid: Option<bool>,
 
     /// Output of the call to `AuraApi_slot_duration`, if it was already made.
     aura_slot_duration_call_output: Option<NonZeroU64>,
@@ -772,7 +802,10 @@ struct BabeGenesisConfiguration {
 }
 
 /// Decodes the output of a call to `BabeApi_configuration`.
-fn decode_babe_configuration_output(bytes: &[u8]) -> Result<BabeGenesisConfiguration, Error> {
+fn decode_babe_configuration_output(
+    bytes: &[u8],
+    is_babe_api_v1: bool,
+) -> Result<BabeGenesisConfiguration, Error> {
     let result: nom::IResult<_, _> =
         nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
             nom::sequence::tuple((
@@ -799,17 +832,30 @@ fn decode_babe_configuration_output(bytes: &[u8]) -> Result<BabeGenesisConfigura
                 nom::combinator::map(nom::bytes::complete::take(32u32), |b| {
                     <[u8; 32]>::try_from(b).unwrap()
                 }),
-                nom::branch::alt((
-                    nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| {
-                        header::BabeAllowedSlots::PrimarySlots
-                    }),
-                    nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| {
-                        header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots
-                    }),
-                    nom::combinator::map(nom::bytes::complete::tag(&[2]), |_| {
-                        header::BabeAllowedSlots::PrimaryAndSecondaryVrfSlots
-                    }),
-                )),
+                |b| {
+                    if is_babe_api_v1 {
+                        nom::branch::alt((
+                            nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| {
+                                header::BabeAllowedSlots::PrimarySlots
+                            }),
+                            nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| {
+                                header::BabeAllowedSlots::PrimaryAndSecondaryVrfSlots
+                            }),
+                        ))(b)
+                    } else {
+                        nom::branch::alt((
+                            nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| {
+                                header::BabeAllowedSlots::PrimarySlots
+                            }),
+                            nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| {
+                                header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots
+                            }),
+                            nom::combinator::map(nom::bytes::complete::tag(&[2]), |_| {
+                                header::BabeAllowedSlots::PrimaryAndSecondaryVrfSlots
+                            }),
+                        ))(b)
+                    }
+                },
             )),
             |(_slot_duration, slots_per_epoch, c0, c1, authorities, randomness, allowed_slots)| {
                 // Note that the slot duration is unused as it is not modifiable anyway.
