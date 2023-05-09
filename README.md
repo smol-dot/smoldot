@@ -15,6 +15,7 @@ This repository contains the following components:
   - 📦 <https://crates.io/crates/smoldot>
   - 📚 <https://docs.rs/smoldot> (latest published version)
   - 📚 <https://smol-dot.github.io/smoldot/doc-rust/smoldot/index.html> (latest commit)
+  - Tests coverage: <https://smol-dot.github.io/smoldot/tests-coverage/index.html> (latest commit)
   - Has an unstable API.
 
 - `smoldot-light` (`/light-base`): A platform-agnostic Rust library that can connect to a Substrate-based chain as a light client. Serves as the base for the `smoldot-light-js` component explained above.
