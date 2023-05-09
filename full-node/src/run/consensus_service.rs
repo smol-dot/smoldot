@@ -440,7 +440,8 @@ impl SyncBackground {
     async fn run(mut self) {
         loop {
             self.start_network_requests().await;
-            self = self.process_blocks().await;
+            let (new_self, must_loop_again_asap) = self.process_blocks().await;
+            self = new_self;
 
             // Creating the block authoring state and prepare a future that is ready when something
             // related to the block authoring is ready.
@@ -670,6 +671,11 @@ impl SyncBackground {
                         self.peers_source_id_map.remove(&info.unwrap().peer_id).unwrap();
                     }
                 },
+
+                () = if must_loop_again_asap { either::Left(future::ready(())) } else { either::Right(future::pending()) }.fuse() => {
+                    // This block exists just so that we continue looping if `must_loop_again_asap`
+                    // is `true`.
+                }
             }
         }
     }
@@ -1081,202 +1087,176 @@ impl SyncBackground {
         }
     }
 
-    async fn process_blocks(mut self) -> Self {
+    async fn process_blocks(mut self) -> (Self, bool) {
         // The sync state machine can be in a few various states. At the time of writing:
         // idle, verifying header, verifying block, verifying grandpa warp sync proof,
         // verifying storage proof.
         // If the state is one of the "verifying" states, perform the actual verification and
         // loop again until the sync is in an idle state.
-        loop {
-            let unix_time = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap();
+        let unix_time = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap();
 
-            match self.sync.process_one() {
-                all::ProcessOne::AllSync(idle) => {
-                    self.sync = idle;
-                    break;
-                }
-                all::ProcessOne::VerifyWarpSyncFragment(_)
-                | all::ProcessOne::WarpSyncError { .. }
-                | all::ProcessOne::WarpSyncFinished { .. } => unreachable!(),
-                all::ProcessOne::VerifyBodyHeader(verify) => {
-                    let hash_to_verify = verify.hash();
-                    let height_to_verify = verify.height();
-                    let scale_encoded_header_to_verify = verify.scale_encoded_header().to_owned(); // TODO: copy :-/
+        match self.sync.process_one() {
+            all::ProcessOne::AllSync(idle) => {
+                self.sync = idle;
+                (self, false)
+            }
+            all::ProcessOne::VerifyWarpSyncFragment(_)
+            | all::ProcessOne::WarpSyncError { .. }
+            | all::ProcessOne::WarpSyncFinished { .. } => unreachable!(),
+            all::ProcessOne::VerifyBodyHeader(verify) => {
+                let hash_to_verify = verify.hash();
+                let height_to_verify = verify.height();
+                let scale_encoded_header_to_verify = verify.scale_encoded_header().to_owned(); // TODO: copy :-/
 
-                    let _jaeger_span = self.jaeger_service.block_body_verify_span(&hash_to_verify);
+                let _jaeger_span = self.jaeger_service.block_body_verify_span(&hash_to_verify);
 
-                    let mut verify = verify.start(unix_time, ());
-                    // TODO: check this block against the chain spec's badBlocks
-                    loop {
-                        match verify {
-                            all::BlockVerification::Error {
-                                sync: sync_out,
-                                error,
-                                ..
-                            } => {
-                                // Print a separate warning because it is important for the user
-                                // to be aware of the verification failure.
-                                // `error` is last because it's quite big.
-                                log::warn!(
-                                    "failed-block-verification; hash={}; height={}; error={}",
-                                    HashDisplay(&hash_to_verify),
-                                    height_to_verify,
-                                    error
+                let mut verify = verify.start(unix_time, ());
+                // TODO: check this block against the chain spec's badBlocks
+                loop {
+                    match verify {
+                        all::BlockVerification::Error {
+                            sync: sync_out,
+                            error,
+                            ..
+                        } => {
+                            // Print a separate warning because it is important for the user
+                            // to be aware of the verification failure.
+                            // `error` is last because it's quite big.
+                            log::warn!(
+                                "failed-block-verification; hash={}; height={}; error={}",
+                                HashDisplay(&hash_to_verify),
+                                height_to_verify,
+                                error
+                            );
+                            self.sync = sync_out;
+                            return (self, true);
+                        }
+                        all::BlockVerification::Success {
+                            is_new_best,
+                            sync: sync_out,
+                            ..
+                        } => {
+                            log::debug!(
+                                "block-verification-success; hash={}; height={}; is_new_best={:?}",
+                                HashDisplay(&hash_to_verify),
+                                height_to_verify,
+                                is_new_best
+                            );
+
+                            // Processing has made a step forward.
+
+                            if is_new_best {
+                                // Update the networking.
+                                let fut = self.network_service.set_local_best_block(
+                                    self.network_chain_index,
+                                    sync_out.best_block_hash(),
+                                    sync_out.best_block_number(),
                                 );
-                                self.sync = sync_out;
-                                break;
-                            }
-                            all::BlockVerification::Success {
-                                is_new_best,
-                                sync: sync_out,
-                                ..
-                            } => {
-                                log::debug!(
-                                    "block-verification-success; hash={}; height={}; is_new_best={:?}",
-                                    HashDisplay(&hash_to_verify), height_to_verify, is_new_best
-                                );
+                                fut.await;
 
-                                // Processing has made a step forward.
-
-                                if is_new_best {
-                                    // Update the networking.
-                                    let fut = self.network_service.set_local_best_block(
-                                        self.network_chain_index,
-                                        sync_out.best_block_hash(),
-                                        sync_out.best_block_number(),
-                                    );
-                                    fut.await;
-
-                                    // Reset the block authoring, in order to potentially build a
-                                    // block on top of this new best.
-                                    self.block_authoring = None;
-                                }
-
-                                self.sync = sync_out;
-
-                                // Announce the newly-verified block to all the sources that might
-                                // not be aware of it. We can never be guaranteed that a certain
-                                // source does *not* know about a block, however it is not a big
-                                // problem to send a block announce to a source that already knows
-                                // about that block. For this reason, the list of sources we send
-                                // the block announce to is `all_sources - sources_that_know_it`.
-                                //
-                                // Note that not sending block announces to sources that already
-                                // know that block means that these sources might also miss the
-                                // fact that our local best block has been updated. This is in
-                                // practice not a problem either.
-                                let sources_to_announce_to = {
-                                    let mut all_sources =
-                                        self.sync
-                                            .sources()
-                                            .collect::<HashSet<_, fnv::FnvBuildHasher>>();
-                                    for knows in self.sync.knows_non_finalized_block(
-                                        height_to_verify,
-                                        &hash_to_verify,
-                                    ) {
-                                        all_sources.remove(&knows);
-                                    }
-                                    all_sources
-                                };
-
-                                for source_id in sources_to_announce_to {
-                                    let peer_id = match &self.sync[source_id] {
-                                        Some(info) if !info.is_disconnected => &info.peer_id,
-                                        _ => continue,
-                                    };
-
-                                    if self
-                                        .network_service
-                                        .clone()
-                                        .send_block_announce(
-                                            peer_id.clone(),
-                                            0,
-                                            scale_encoded_header_to_verify.clone(),
-                                            is_new_best,
-                                        )
-                                        .await
-                                        .is_ok()
-                                    {
-                                        // Note that `try_add_known_block_to_source` might have
-                                        // no effect, which is not a problem considering that this
-                                        // block tracking is mostly about optimizations and
-                                        // politeness.
-                                        self.sync.try_add_known_block_to_source(
-                                            source_id,
-                                            height_to_verify,
-                                            hash_to_verify,
-                                        );
-                                    }
-                                }
-
-                                break;
+                                // Reset the block authoring, in order to potentially build a
+                                // block on top of this new best.
+                                self.block_authoring = None;
                             }
 
-                            all::BlockVerification::FinalizedStorageGet(req) => {
-                                let value = match self
-                                    .finalized_block_storage
-                                    .node(bytes_to_nibbles(req.key().as_ref().iter().copied()))
+                            self.sync = sync_out;
+
+                            // Announce the newly-verified block to all the sources that might
+                            // not be aware of it. We can never be guaranteed that a certain
+                            // source does *not* know about a block, however it is not a big
+                            // problem to send a block announce to a source that already knows
+                            // about that block. For this reason, the list of sources we send
+                            // the block announce to is `all_sources - sources_that_know_it`.
+                            //
+                            // Note that not sending block announces to sources that already
+                            // know that block means that these sources might also miss the
+                            // fact that our local best block has been updated. This is in
+                            // practice not a problem either.
+                            let sources_to_announce_to = {
+                                let mut all_sources =
+                                    self.sync
+                                        .sources()
+                                        .collect::<HashSet<_, fnv::FnvBuildHasher>>();
+                                for knows in self
+                                    .sync
+                                    .knows_non_finalized_block(height_to_verify, &hash_to_verify)
                                 {
-                                    trie_structure::Entry::Occupied(
-                                        trie_structure::NodeAccess::Storage(node),
-                                    ) => {
-                                        let (val, vers) = node.into_user_data().as_ref().unwrap();
-                                        Some((&val[..], *vers))
-                                    }
-                                    trie_structure::Entry::Occupied(
-                                        trie_structure::NodeAccess::Branch(_),
+                                    all_sources.remove(&knows);
+                                }
+                                all_sources
+                            };
+
+                            for source_id in sources_to_announce_to {
+                                let peer_id = match &self.sync[source_id] {
+                                    Some(info) if !info.is_disconnected => &info.peer_id,
+                                    _ => continue,
+                                };
+
+                                if self
+                                    .network_service
+                                    .clone()
+                                    .send_block_announce(
+                                        peer_id.clone(),
+                                        0,
+                                        scale_encoded_header_to_verify.clone(),
+                                        is_new_best,
                                     )
-                                    | trie_structure::Entry::Vacant(_) => None,
-                                };
-
-                                verify = req.inject_value(value);
+                                    .await
+                                    .is_ok()
+                                {
+                                    // Note that `try_add_known_block_to_source` might have
+                                    // no effect, which is not a problem considering that this
+                                    // block tracking is mostly about optimizations and
+                                    // politeness.
+                                    self.sync.try_add_known_block_to_source(
+                                        source_id,
+                                        height_to_verify,
+                                        hash_to_verify,
+                                    );
+                                }
                             }
-                            all::BlockVerification::FinalizedStorageNextKey(req) => {
-                                let next_key = {
-                                    let req_key = req.key();
-                                    let out = self
-                                        .finalized_block_storage
-                                        .range(
-                                            if req.or_equal() {
-                                                ops::Bound::Included(req_key.as_ref())
-                                            } else {
-                                                ops::Bound::Excluded(req_key.as_ref())
-                                            },
-                                            ops::Bound::Unbounded,
-                                        )
-                                        .filter(|node_index| {
-                                            self.finalized_block_storage.is_storage(*node_index)
-                                        })
-                                        .next()
-                                        .map(|node_index| {
-                                            // TODO: consider detecting if nibbles are uneven instead of ignoring the problem
-                                            nibbles_to_bytes_suffix_extend(
-                                                self.finalized_block_storage
-                                                    .node_full_key_by_index(node_index)
-                                                    .unwrap(),
-                                            )
-                                            .collect::<Vec<_>>()
-                                        })
-                                        .filter(|k| k.starts_with(req.prefix().as_ref()));
-                                    out
-                                };
 
-                                debug_assert!(next_key
-                                    .as_ref()
-                                    .map_or(true, |k| &**k > req.key().as_ref()));
-                                verify = req.inject_key(next_key);
-                            }
-                            all::BlockVerification::FinalizedStoragePrefixKeys(req) => {
-                                // TODO: to_vec() :-/ range() immediately calculates the range of keys so there's no borrowing issue, but the take_while needs to keep req borrowed, which isn't possible
-                                let prefix = req.prefix().as_ref().to_vec();
-                                let keys = self
+                            return (self, true);
+                        }
+
+                        all::BlockVerification::FinalizedStorageGet(req) => {
+                            let value = match self
+                                .finalized_block_storage
+                                .node(bytes_to_nibbles(req.key().as_ref().iter().copied()))
+                            {
+                                trie_structure::Entry::Occupied(
+                                    trie_structure::NodeAccess::Storage(node),
+                                ) => {
+                                    let (val, vers) = node.into_user_data().as_ref().unwrap();
+                                    Some((&val[..], *vers))
+                                }
+                                trie_structure::Entry::Occupied(
+                                    trie_structure::NodeAccess::Branch(_),
+                                )
+                                | trie_structure::Entry::Vacant(_) => None,
+                            };
+
+                            verify = req.inject_value(value);
+                        }
+                        all::BlockVerification::FinalizedStorageNextKey(req) => {
+                            let next_key = {
+                                let req_key = req.key();
+                                let out = self
                                     .finalized_block_storage
-                                    .range(ops::Bound::Included(&prefix), ops::Bound::Unbounded)
+                                    .range(
+                                        if req.or_equal() {
+                                            ops::Bound::Included(req_key.as_ref())
+                                        } else {
+                                            ops::Bound::Excluded(req_key.as_ref())
+                                        },
+                                        ops::Bound::Unbounded,
+                                    )
                                     .filter(|node_index| {
                                         self.finalized_block_storage.is_storage(*node_index)
                                     })
+                                    .next()
                                     .map(|node_index| {
                                         // TODO: consider detecting if nibbles are uneven instead of ignoring the problem
                                         nibbles_to_bytes_suffix_extend(
@@ -1286,169 +1266,188 @@ impl SyncBackground {
                                         )
                                         .collect::<Vec<_>>()
                                     })
-                                    .take_while(|k| k.starts_with(&prefix));
-                                verify = req.inject_keys_ordered(keys);
-                            }
-                            all::BlockVerification::RuntimeCompilation(rt) => {
-                                verify = rt.build();
-                            }
+                                    .filter(|k| k.starts_with(req.prefix().as_ref()));
+                                out
+                            };
+
+                            debug_assert!(next_key
+                                .as_ref()
+                                .map_or(true, |k| &**k > req.key().as_ref()));
+                            verify = req.inject_key(next_key);
                         }
-                    }
-                }
-
-                all::ProcessOne::VerifyFinalityProof(verify) => {
-                    match verify.perform(rand::random()) {
-                        (
-                            sync_out,
-                            all::FinalityProofVerifyOutcome::NewFinalized {
-                                finalized_blocks,
-                                updates_best_block,
-                            },
-                        ) => {
-                            log::debug!("finality-proof-verification; outcome=success");
-                            self.sync = sync_out;
-
-                            if updates_best_block {
-                                let fut = self.network_service.set_local_best_block(
-                                    self.network_chain_index,
-                                    self.sync.best_block_hash(),
-                                    self.sync.best_block_number(),
-                                );
-                                fut.await;
-
-                                // Reset the block authoring, in order to potentially build a
-                                // block on top of this new best.
-                                self.block_authoring = None;
-                            }
-
-                            // TODO: maybe write in a separate task? but then we can't access the finalized storage immediately after?
-                            for block in &finalized_blocks {
-                                for (key, value, ()) in block
-                                    .full
-                                    .as_ref()
-                                    .unwrap()
-                                    .storage_main_trie_changes
-                                    .diff_iter_unordered()
-                                {
-                                    if let Some(value) = value {
-                                        match self
-                                            .finalized_block_storage
-                                            .node(bytes_to_nibbles(key.iter().copied()))
-                                        {
-                                            trie_structure::Entry::Occupied(mut node) => {
-                                                *node.user_data() = Some((
-                                                    value.to_owned(),
-                                                    block.full.as_ref().unwrap().state_trie_version,
-                                                ));
-
-                                                if let trie_structure::NodeAccess::Branch(node) =
-                                                    node
-                                                {
-                                                    node.insert_storage_value();
-                                                }
-                                            }
-                                            trie_structure::Entry::Vacant(node) => {
-                                                node.insert_storage_value().insert(
-                                                    Some((
-                                                        value.to_owned(),
-                                                        block
-                                                            .full
-                                                            .as_ref()
-                                                            .unwrap()
-                                                            .state_trie_version,
-                                                    )),
-                                                    None,
-                                                );
-                                            }
-                                        }
-                                    } else {
-                                        // TODO: if a block inserts a new value then removes it, the key will remain in the diff anyway; either solve this or document this
-                                        if let trie_structure::Entry::Occupied(
-                                            trie_structure::NodeAccess::Storage(node),
-                                        ) = self
-                                            .finalized_block_storage
-                                            .node(bytes_to_nibbles(key.iter().copied()))
-                                        {
-                                            if let trie_structure::Remove::StorageToBranch(
-                                                mut new_node,
-                                            ) = node.remove()
-                                            {
-                                                *new_node.user_data() = None;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            let new_finalized_hash = finalized_blocks
-                                .last()
-                                .map(|lf| lf.header.hash(self.sync.block_number_bytes()))
-                                .unwrap();
-                            let block_number_bytes = self.sync.block_number_bytes();
-                            database_blocks(&self.database, finalized_blocks, block_number_bytes)
-                                .await;
-                            database_set_finalized(&self.database, new_finalized_hash).await;
-                            continue;
+                        all::BlockVerification::FinalizedStoragePrefixKeys(req) => {
+                            // TODO: to_vec() :-/ range() immediately calculates the range of keys so there's no borrowing issue, but the take_while needs to keep req borrowed, which isn't possible
+                            let prefix = req.prefix().as_ref().to_vec();
+                            let keys = self
+                                .finalized_block_storage
+                                .range(ops::Bound::Included(&prefix), ops::Bound::Unbounded)
+                                .filter(|node_index| {
+                                    self.finalized_block_storage.is_storage(*node_index)
+                                })
+                                .map(|node_index| {
+                                    // TODO: consider detecting if nibbles are uneven instead of ignoring the problem
+                                    nibbles_to_bytes_suffix_extend(
+                                        self.finalized_block_storage
+                                            .node_full_key_by_index(node_index)
+                                            .unwrap(),
+                                    )
+                                    .collect::<Vec<_>>()
+                                })
+                                .take_while(|k| k.starts_with(&prefix));
+                            verify = req.inject_keys_ordered(keys);
                         }
-                        (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitPending) => {
-                            log::debug!("finality-proof-verification; outcome=pending");
-                            self.sync = sync_out;
-                            continue;
-                        }
-                        (sync_out, all::FinalityProofVerifyOutcome::AlreadyFinalized) => {
-                            log::debug!("finality-proof-verification; outcome=already-finalized");
-                            self.sync = sync_out;
-                            continue;
-                        }
-                        (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitError(error)) => {
-                            log::warn!("finality-proof-verification-failure; error={}", error);
-                            self.sync = sync_out;
-                            continue;
-                        }
-                        (sync_out, all::FinalityProofVerifyOutcome::JustificationError(error)) => {
-                            log::warn!("finality-proof-verification-failure; error={}", error);
-                            self.sync = sync_out;
-                            continue;
-                        }
-                    }
-                }
-
-                all::ProcessOne::VerifyHeader(verify) => {
-                    let hash_to_verify = verify.hash();
-                    let height_to_verify = verify.height();
-
-                    let _jaeger_span = self
-                        .jaeger_service
-                        .block_header_verify_span(&hash_to_verify);
-
-                    match verify.perform(unix_time, ()) {
-                        all::HeaderVerifyOutcome::Success { sync: sync_out, .. } => {
-                            log::debug!(
-                                "header-verification; hash={}; height={}; outcome=success",
-                                HashDisplay(&hash_to_verify),
-                                height_to_verify
-                            );
-                            self.sync = sync_out;
-                            continue;
-                        }
-                        all::HeaderVerifyOutcome::Error {
-                            sync: sync_out,
-                            error,
-                            ..
-                        } => {
-                            log::debug!(
-                            "header-verification; hash={}; height={}; outcome=failure; error={}",
-                            HashDisplay(&hash_to_verify), height_to_verify, error
-                        );
-                            self.sync = sync_out;
-                            continue;
+                        all::BlockVerification::RuntimeCompilation(rt) => {
+                            verify = rt.build();
                         }
                     }
                 }
             }
-        }
 
-        self
+            all::ProcessOne::VerifyFinalityProof(verify) => {
+                match verify.perform(rand::random()) {
+                    (
+                        sync_out,
+                        all::FinalityProofVerifyOutcome::NewFinalized {
+                            finalized_blocks,
+                            updates_best_block,
+                        },
+                    ) => {
+                        log::debug!("finality-proof-verification; outcome=success");
+                        self.sync = sync_out;
+
+                        if updates_best_block {
+                            let fut = self.network_service.set_local_best_block(
+                                self.network_chain_index,
+                                self.sync.best_block_hash(),
+                                self.sync.best_block_number(),
+                            );
+                            fut.await;
+
+                            // Reset the block authoring, in order to potentially build a
+                            // block on top of this new best.
+                            self.block_authoring = None;
+                        }
+
+                        // TODO: maybe write in a separate task? but then we can't access the finalized storage immediately after?
+                        for block in &finalized_blocks {
+                            for (key, value, ()) in block
+                                .full
+                                .as_ref()
+                                .unwrap()
+                                .storage_main_trie_changes
+                                .diff_iter_unordered()
+                            {
+                                if let Some(value) = value {
+                                    match self
+                                        .finalized_block_storage
+                                        .node(bytes_to_nibbles(key.iter().copied()))
+                                    {
+                                        trie_structure::Entry::Occupied(mut node) => {
+                                            *node.user_data() = Some((
+                                                value.to_owned(),
+                                                block.full.as_ref().unwrap().state_trie_version,
+                                            ));
+
+                                            if let trie_structure::NodeAccess::Branch(node) = node {
+                                                node.insert_storage_value();
+                                            }
+                                        }
+                                        trie_structure::Entry::Vacant(node) => {
+                                            node.insert_storage_value().insert(
+                                                Some((
+                                                    value.to_owned(),
+                                                    block.full.as_ref().unwrap().state_trie_version,
+                                                )),
+                                                None,
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    // TODO: if a block inserts a new value then removes it, the key will remain in the diff anyway; either solve this or document this
+                                    if let trie_structure::Entry::Occupied(
+                                        trie_structure::NodeAccess::Storage(node),
+                                    ) = self
+                                        .finalized_block_storage
+                                        .node(bytes_to_nibbles(key.iter().copied()))
+                                    {
+                                        if let trie_structure::Remove::StorageToBranch(
+                                            mut new_node,
+                                        ) = node.remove()
+                                        {
+                                            *new_node.user_data() = None;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let new_finalized_hash = finalized_blocks
+                            .last()
+                            .map(|lf| lf.header.hash(self.sync.block_number_bytes()))
+                            .unwrap();
+                        let block_number_bytes = self.sync.block_number_bytes();
+                        database_blocks(&self.database, finalized_blocks, block_number_bytes).await;
+                        database_set_finalized(&self.database, new_finalized_hash).await;
+                        (self, true)
+                    }
+                    (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitPending) => {
+                        log::debug!("finality-proof-verification; outcome=pending");
+                        self.sync = sync_out;
+                        (self, true)
+                    }
+                    (sync_out, all::FinalityProofVerifyOutcome::AlreadyFinalized) => {
+                        log::debug!("finality-proof-verification; outcome=already-finalized");
+                        self.sync = sync_out;
+                        (self, true)
+                    }
+                    (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitError(error)) => {
+                        log::warn!("finality-proof-verification-failure; error={}", error);
+                        self.sync = sync_out;
+                        (self, true)
+                    }
+                    (sync_out, all::FinalityProofVerifyOutcome::JustificationError(error)) => {
+                        log::warn!("finality-proof-verification-failure; error={}", error);
+                        self.sync = sync_out;
+                        (self, true)
+                    }
+                }
+            }
+
+            all::ProcessOne::VerifyHeader(verify) => {
+                let hash_to_verify = verify.hash();
+                let height_to_verify = verify.height();
+
+                let _jaeger_span = self
+                    .jaeger_service
+                    .block_header_verify_span(&hash_to_verify);
+
+                match verify.perform(unix_time, ()) {
+                    all::HeaderVerifyOutcome::Success { sync: sync_out, .. } => {
+                        log::debug!(
+                            "header-verification; hash={}; height={}; outcome=success",
+                            HashDisplay(&hash_to_verify),
+                            height_to_verify
+                        );
+                        self.sync = sync_out;
+                        (self, true)
+                    }
+                    all::HeaderVerifyOutcome::Error {
+                        sync: sync_out,
+                        error,
+                        ..
+                    } => {
+                        log::debug!(
+                            "header-verification; hash={}; height={}; outcome=failure; error={}",
+                            HashDisplay(&hash_to_verify),
+                            height_to_verify,
+                            error
+                        );
+                        self.sync = sync_out;
+                        (self, true)
+                    }
+                }
+            }
+        }
     }
 }
 
