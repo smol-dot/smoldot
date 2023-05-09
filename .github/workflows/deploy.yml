@@ -66,6 +66,7 @@ jobs:
       - uses: actions/setup-node@v3.6.0
         with:
           node-version: current
+      - run: apt install -y jq
       - run: npm install
         working-directory: ./repo/wasm-node/javascript
       - uses: Swatinem/rust-cache@v2
