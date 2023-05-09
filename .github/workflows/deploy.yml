@@ -109,7 +109,7 @@ jobs:
         with:
           name: code-coverage-report
           path: ./upload
-      - run: run: ls -R   # TODO: remove; for testing
+      - run: ls -R   # TODO: remove; for testing
       - run: mv code-coverage-report tests-coverage
         working-directory: ./upload
       - run: |
