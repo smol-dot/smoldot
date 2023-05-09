@@ -54,7 +54,7 @@ pub enum ConfigFinalizedBlockHeader {
     /// The block is not the genesis block of the chain.
     NonGenesis {
         /// Header of the block.
-        header: Vec<u8>,
+        scale_encoded_header: Vec<u8>,
         /// Can be used to pass information about the finality of the chain, if already known.
         known_finality: Option<chain_information::ChainInformationFinality>,
     },
@@ -183,8 +183,10 @@ impl ChainInformationBuild {
     ///
     pub fn new(config: Config) -> Self {
         // TODO: document
-        if let ConfigFinalizedBlockHeader::NonGenesis { header, .. } =
-            &config.finalized_block_header
+        if let ConfigFinalizedBlockHeader::NonGenesis {
+            scale_encoded_header: header,
+            ..
+        } = &config.finalized_block_header
         {
             assert_ne!(
                 header::decode(&header, config.block_number_bytes)
@@ -500,7 +502,7 @@ impl ChainInformationBuild {
                     (header, None)
                 }
                 ConfigFinalizedBlockHeader::NonGenesis {
-                    header,
+                    scale_encoded_header: header,
                     known_finality,
                 } => (header, known_finality),
             };
@@ -715,7 +717,10 @@ impl ChainInformationBuild {
                         ConfigFinalizedBlockHeader::Genesis {
                             state_trie_root_hash,
                         } => state_trie_root_hash,
-                        ConfigFinalizedBlockHeader::NonGenesis { header, .. } => {
+                        ConfigFinalizedBlockHeader::NonGenesis {
+                            scale_encoded_header: header,
+                            ..
+                        } => {
                             &header::decode(header, inner.block_number_bytes)
                                 .unwrap()
                                 .state_root
