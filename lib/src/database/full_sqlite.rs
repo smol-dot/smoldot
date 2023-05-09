@@ -647,30 +647,30 @@ impl SqliteFullDatabase {
                     header::DigestItemRef::GrandpaConsensus(gp) => Some(gp),
                     _ => None,
                 }) {
-                    match grandpa_digest_item {
-                        header::GrandpaConsensusLogRef::ScheduledChange(change) => {
-                            assert_eq!(change.delay, 0); // TODO: not implemented if != 0
+                    // TODO: implement items other than ScheduledChange
+                    if let header::GrandpaConsensusLogRef::ScheduledChange(change) =
+                        grandpa_digest_item
+                    {
+                        assert_eq!(change.delay, 0); // TODO: not implemented if != 0
 
-                            connection
-                                .execute("DELETE FROM grandpa_triggered_authorities")
+                        connection
+                            .execute("DELETE FROM grandpa_triggered_authorities")
+                            .unwrap();
+
+                        let mut statement = connection.prepare("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)").unwrap();
+                        for (index, item) in change.next_authorities.enumerate() {
+                            statement = statement
+                                .bind(1, i64::try_from(index).unwrap())
+                                .unwrap()
+                                .bind(2, &item.public_key[..])
+                                .unwrap()
+                                .bind(3, i64::from_ne_bytes(item.weight.get().to_ne_bytes()))
                                 .unwrap();
-
-                            let mut statement = connection.prepare("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)").unwrap();
-                            for (index, item) in change.next_authorities.enumerate() {
-                                statement = statement
-                                    .bind(1, i64::try_from(index).unwrap())
-                                    .unwrap()
-                                    .bind(2, &item.public_key[..])
-                                    .unwrap()
-                                    .bind(3, i64::from_ne_bytes(item.weight.get().to_ne_bytes()))
-                                    .unwrap();
-                                statement.next().unwrap();
-                                statement = statement.reset().unwrap();
-                            }
-
-                            connection.execute(r#"UPDATE meta SET value_number = value_number + 1 WHERE key = "grandpa_authorities_set_id""#).unwrap();
+                            statement.next().unwrap();
+                            statement = statement.reset().unwrap();
                         }
-                        _ => {} // TODO: unimplemented
+
+                        connection.execute(r#"UPDATE meta SET value_number = value_number + 1 WHERE key = "grandpa_authorities_set_id""#).unwrap();
                     }
                 }
             }
