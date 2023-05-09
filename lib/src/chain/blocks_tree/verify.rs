@@ -537,30 +537,28 @@ impl<T> VerifyContext<T> {
                     header::DigestItemRef::GrandpaConsensus(gp) => Some(gp),
                     _ => None,
                 }) {
-                    match grandpa_digest_item {
-                        header::GrandpaConsensusLogRef::ScheduledChange(change) => {
-                            let trigger_block_height =
-                                decoded_header.number.checked_add(change.delay).unwrap();
+                    // TODO: implement items other than ScheduledChange
+                    // TODO: when it comes to forced change, they take precedence over scheduled changes but only sheduled changes within the same block
+                    if let header::GrandpaConsensusLogRef::ScheduledChange(change) =
+                        grandpa_digest_item
+                    {
+                        let trigger_block_height =
+                            decoded_header.number.checked_add(change.delay).unwrap();
 
-                            // It is forbidden to schedule a change while a change is already
-                            // scheduled, otherwise the block is invalid. This is verified during
-                            // the block verification.
-                            match scheduled_change {
-                                Some(_) => {
-                                    // Ignore any new change if a change is already in progress.
-                                    // Matches the behaviour here: <https://github.com/paritytech/substrate/blob/a357c29ebabb075235977edd5e3901c66575f995/client/finality-grandpa/src/authorities.rs#L479>
-                                }
-                                None => {
-                                    scheduled_change = Some((
-                                        trigger_block_height,
-                                        change.next_authorities.map(|a| a.into()).collect(),
-                                    ));
-                                }
+                        // It is forbidden to schedule a change while a change is already
+                        // scheduled, otherwise the block is invalid. This is verified during
+                        // the block verification.
+                        match scheduled_change {
+                            Some(_) => {
+                                // Ignore any new change if a change is already in progress.
+                                // Matches the behaviour here: <https://github.com/paritytech/substrate/blob/a357c29ebabb075235977edd5e3901c66575f995/client/finality-grandpa/src/authorities.rs#L479>
                             }
-                        }
-                        _ => {
-                            // TODO: unimplemented
-                            // TODO: when it comes to forced change, they take precedence over scheduled changes but only sheduled changes within the same block
+                            None => {
+                                scheduled_change = Some((
+                                    trigger_block_height,
+                                    change.next_authorities.map(|a| a.into()).collect(),
+                                ));
+                            }
                         }
                     }
                 }

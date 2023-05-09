@@ -86,13 +86,13 @@ pub struct Connection<T> {
 enum Read<T> {
     Idle(soketto::connection::Receiver<T>, Vec<u8>, usize),
     Error(soketto::connection::Error),
-    InProgress(
-        future::BoxFuture<
-            'static,
-            Result<(soketto::connection::Receiver<T>, Vec<u8>), soketto::connection::Error>,
-        >,
-    ),
+    InProgress(future::BoxFuture<'static, Result<ReadOutcome<T>, soketto::connection::Error>>),
     Poisoned,
+}
+
+struct ReadOutcome<T> {
+    socket: soketto::connection::Receiver<T>,
+    buffer: Vec<u8>,
 }
 
 enum Write<T> {
@@ -136,7 +136,7 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> AsyncRead for Connectio
                     buffer.clear();
                     self.receiver = Read::InProgress(Box::pin(async move {
                         socket.receive_data(&mut buffer).await?;
-                        Ok((socket, buffer))
+                        Ok(ReadOutcome { socket, buffer })
                     }));
                 }
                 Read::InProgress(mut future) => match Pin::new(&mut future).poll(cx) {
@@ -144,7 +144,7 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> AsyncRead for Connectio
                         self.receiver = Read::InProgress(future);
                         return Poll::Pending;
                     }
-                    Poll::Ready(Ok((socket, buffer))) => {
+                    Poll::Ready(Ok(ReadOutcome { socket, buffer })) => {
                         self.receiver = Read::Idle(socket, buffer, 0);
                     }
                     Poll::Ready(Err(err)) => {

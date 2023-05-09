@@ -288,8 +288,8 @@ impl<TTx> Pool<TTx> {
         // FIXME: /!\
         // TODO: /!\
         #![allow(unreachable_code)]
-        let _i: core::iter::Empty<_> = todo!();
-        _i
+        todo!();
+        core::iter::empty()
     }
 
     /// Returns the list of all transactions within the pool.
