@@ -665,11 +665,21 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                         match network_event {
                             network_service::Event::BlockAnnounce {
                                 chain_index: 0,
-                                header,
+                                scale_encoded_header,
                                 ..
-                            } => match network_known_best {
-                                Some(n) if n >= header.number => {}
-                                _ => network_known_best = Some(header.number),
+                            } => match (
+                                network_known_best,
+                                header::decode(
+                                    &scale_encoded_header,
+                                    usize::from(chain_spec.block_number_bytes()),
+                                ),
+                            ) {
+                                (Some(n), Ok(header)) if n >= header.number => {}
+                                (_, Ok(header)) => network_known_best = Some(header.number),
+                                (_, Err(_)) => {
+                                    // Do nothing if the block is invalid. This is just for the
+                                    // informant and not for consensus-related purposes.
+                                }
                             },
                             network_service::Event::Connected {
                                 chain_index: 0,

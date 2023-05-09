@@ -613,16 +613,16 @@ impl SyncBackground {
                                 *is_disconnected = true;
                             }
                         },
-                        network_service::Event::BlockAnnounce { chain_index, peer_id, header, is_best }
+                        network_service::Event::BlockAnnounce { chain_index, peer_id, scale_encoded_header, is_best }
                             if chain_index == self.network_chain_index =>
                         {
                             let _jaeger_span = self
                                 .jaeger_service
-                                .block_announce_process_span(&header.hash(self.sync.block_number_bytes()));
+                                .block_announce_process_span(&header::hash_from_scale_encoded_header(&scale_encoded_header));
 
                             let id = *self.peers_source_id_map.get(&peer_id).unwrap();
                             // TODO: log the outcome
-                            match self.sync.block_announce(id, header.scale_encoding_vec(self.sync.block_number_bytes()), is_best) {
+                            match self.sync.block_announce(id, scale_encoded_header, is_best) {
                                 all::BlockAnnounceOutcome::HeaderVerify => {},
                                 all::BlockAnnounceOutcome::TooOld { .. } => {},
                                 all::BlockAnnounceOutcome::AlreadyInChain => {},
