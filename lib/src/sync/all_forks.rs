@@ -88,7 +88,7 @@ use crate::{
     header, verify,
 };
 
-use alloc::{borrow::ToOwned as _, vec::Vec};
+use alloc::{borrow::ToOwned as _, boxed::Box, vec::Vec};
 use core::{
     cmp, mem,
     num::{NonZeroU32, NonZeroU64},
