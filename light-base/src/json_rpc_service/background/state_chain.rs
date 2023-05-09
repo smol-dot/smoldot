@@ -1276,7 +1276,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         };
 
         let response = match self
-            .runtime_lock(&block_hash)
+            .runtime_access(&block_hash)
             .await
             .map(|l| l.specification())
         {

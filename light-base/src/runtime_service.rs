@@ -437,11 +437,11 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     ///
     /// Panics if the given block isn't currently pinned by the given subscription.
     ///
-    pub async fn pinned_block_runtime_lock(
+    pub async fn pinned_block_runtime_access(
         &self,
         subscription_id: SubscriptionId,
         block_hash: &[u8; 32],
-    ) -> Result<RuntimeLock<TPlat>, PinnedBlockRuntimeLockError> {
+    ) -> Result<RuntimeAccess<TPlat>, PinnedBlockRuntimeAccessError> {
         // Note: copying the hash ahead of time fixes some weird intermittent borrow checker
         // issue.
         let block_hash = *block_hash;
@@ -465,16 +465,16 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
                         {
                             panic!("block already unpinned for subscription {sub_name}");
                         } else {
-                            return Err(PinnedBlockRuntimeLockError::ObsoleteSubscription);
+                            return Err(PinnedBlockRuntimeAccessError::ObsoleteSubscription);
                         }
                     }
                 }
             } else {
-                return Err(PinnedBlockRuntimeLockError::ObsoleteSubscription);
+                return Err(PinnedBlockRuntimeAccessError::ObsoleteSubscription);
             }
         };
 
-        Ok(RuntimeLock {
+        Ok(RuntimeAccess {
             sync_service: self.sync_service.clone(),
             hash: block_hash,
             runtime: pinned_block.runtime,
@@ -493,14 +493,14 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     ///
     /// Panics if the provided [`PinnedRuntimeId`] is stale or invalid.
     ///
-    pub async fn pinned_runtime_lock(
+    pub async fn pinned_runtime_access(
         &self,
         pinned_runtime_id: PinnedRuntimeId,
         block_hash: [u8; 32],
         block_number: u64,
         block_state_trie_root_hash: [u8; 32],
-    ) -> RuntimeLock<TPlat> {
-        RuntimeLock {
+    ) -> RuntimeAccess<TPlat> {
+        RuntimeAccess {
             sync_service: self.sync_service.clone(),
             hash: block_hash,
             runtime: pinned_runtime_id.0,
@@ -741,17 +741,16 @@ async fn is_near_head_of_chain_heuristic<TPlat: PlatformRef>(
     guarded.lock().await.best_near_head_of_chain
 }
 
-/// See [`RuntimeService::pinned_block_runtime_lock`].
+/// See [`RuntimeService::pinned_block_runtime_access`].
 #[derive(Debug, derive_more::Display, Clone)]
-pub enum PinnedBlockRuntimeLockError {
+pub enum PinnedBlockRuntimeAccessError {
     /// Subscription is dead.
     ObsoleteSubscription,
 }
 
-/// See [`RuntimeService::pinned_block_runtime_lock`].
-// TODO: rename, as it doesn't lock anything anymore
+/// See [`RuntimeService::pinned_block_runtime_access`].
 #[must_use]
-pub struct RuntimeLock<TPlat: PlatformRef> {
+pub struct RuntimeAccess<TPlat: PlatformRef> {
     sync_service: Arc<sync_service::SyncService<TPlat>>,
 
     block_number: u64,
@@ -760,7 +759,7 @@ pub struct RuntimeLock<TPlat: PlatformRef> {
     runtime: Arc<Runtime>,
 }
 
-impl<TPlat: PlatformRef> RuntimeLock<TPlat> {
+impl<TPlat: PlatformRef> RuntimeAccess<TPlat> {
     /// Returns the hash of the block the call is being made against.
     pub fn block_hash(&self) -> &[u8; 32] {
         &self.hash
@@ -781,7 +780,7 @@ impl<TPlat: PlatformRef> RuntimeLock<TPlat> {
         total_attempts: u32,
         timeout_per_request: Duration,
         max_parallel: NonZeroU32,
-    ) -> Result<(RuntimeCallLock<'b>, executor::host::HostVmPrototype), RuntimeCallError> {
+    ) -> Result<(RuntimeCall<'b>, executor::host::HostVmPrototype), RuntimeCallError> {
         // TODO: DRY :-/ this whole thing is messy
 
         // Perform the call proof request.
@@ -824,7 +823,7 @@ impl<TPlat: PlatformRef> RuntimeLock<TPlat> {
             }
         };
 
-        let lock = RuntimeCallLock {
+        let lock = RuntimeCall {
             guarded,
             block_state_root_hash: self.block_state_root_hash,
             call_proof,
@@ -834,15 +833,15 @@ impl<TPlat: PlatformRef> RuntimeLock<TPlat> {
     }
 }
 
-/// See [`RuntimeService::pinned_block_runtime_lock`].
+/// See [`RuntimeService::pinned_block_runtime_access`].
 #[must_use]
-pub struct RuntimeCallLock<'a> {
+pub struct RuntimeCall<'a> {
     guarded: MutexGuard<'a, Option<executor::host::HostVmPrototype>>,
     block_state_root_hash: [u8; 32],
     call_proof: Result<trie::proof_decode::DecodedTrieProof<Vec<u8>>, RuntimeCallError>,
 }
 
-impl<'a> RuntimeCallLock<'a> {
+impl<'a> RuntimeCall<'a> {
     /// Returns the storage root of the block the call is being made against.
     pub fn block_storage_root(&self) -> &[u8; 32] {
         &self.block_state_root_hash
@@ -934,10 +933,10 @@ impl<'a> RuntimeCallLock<'a> {
     }
 }
 
-impl<'a> Drop for RuntimeCallLock<'a> {
+impl<'a> Drop for RuntimeCall<'a> {
     fn drop(&mut self) {
         if self.guarded.is_none() {
-            // The [`RuntimeCallLock`] has been destroyed without being properly unlocked.
+            // The [`RuntimeCall`] has been destroyed without being properly unlocked.
             panic!()
         }
     }

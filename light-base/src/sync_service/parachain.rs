@@ -1116,11 +1116,11 @@ async fn parahead<TPlat: PlatformRef>(
     // For each relay chain block, call `ParachainHost_persisted_validation_data` in
     // order to know where the parachains are.
     let precall = match relay_chain_sync
-        .pinned_block_runtime_lock(subscription_id, block_hash)
+        .pinned_block_runtime_access(subscription_id, block_hash)
         .await
     {
         Ok(p) => p,
-        Err(runtime_service::PinnedBlockRuntimeLockError::ObsoleteSubscription) => {
+        Err(runtime_service::PinnedBlockRuntimeAccessError::ObsoleteSubscription) => {
             return Err(ParaheadError::ObsoleteSubscription)
         }
     };
