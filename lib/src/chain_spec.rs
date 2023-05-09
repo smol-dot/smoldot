@@ -151,6 +151,7 @@ impl ChainSpec {
                     }
                 },
             },
+            block_number_bytes: usize::from(self.block_number_bytes()),
             runtime: vm_prototype,
         });
 

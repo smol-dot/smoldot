@@ -39,6 +39,9 @@ pub struct Config {
     /// Runtime of the finalized block. Must be built using the Wasm code found at the `:code` key
     /// of the block storage.
     pub runtime: host::HostVmPrototype,
+
+    /// Number of bytes of the block number encoded in the block header.
+    pub block_number_bytes: usize,
 }
 
 /// See [`Config::finalized_block_header`].
@@ -51,7 +54,7 @@ pub enum ConfigFinalizedBlockHeader {
     /// The block is not the genesis block of the chain.
     NonGenesis {
         /// Header of the block.
-        header: header::Header,
+        scale_encoded_header: Vec<u8>,
         /// Can be used to pass information about the finality of the chain, if already known.
         known_finality: Option<chain_information::ChainInformationFinality>,
     },
@@ -173,15 +176,24 @@ impl ChainInformationBuild {
     ///
     /// # Panic
     ///
+    /// Panics if a [`ConfigFinalizedBlockHeader::NonGenesis`] is provided, and the header can't
+    /// be decoded.
     /// Panics if a [`ConfigFinalizedBlockHeader::NonGenesis`] is provided, and the header has
     /// number 0.
     ///
     pub fn new(config: Config) -> Self {
         // TODO: document
-        if let ConfigFinalizedBlockHeader::NonGenesis { header, .. } =
-            &config.finalized_block_header
+        if let ConfigFinalizedBlockHeader::NonGenesis {
+            scale_encoded_header: header,
+            ..
+        } = &config.finalized_block_header
         {
-            assert_ne!(header.number, 0);
+            assert_ne!(
+                header::decode(&header, config.block_number_bytes)
+                    .unwrap()
+                    .number,
+                0
+            );
         }
 
         // TODO: also check version numbers?
@@ -197,6 +209,7 @@ impl ChainInformationBuild {
 
         let inner = ChainInformationBuildInner {
             finalized_block_header: config.finalized_block_header,
+            block_number_bytes: config.block_number_bytes,
             call_in_progress: None,
             virtual_machine: Some(config.runtime),
             runtime_has_aura,
@@ -477,18 +490,19 @@ impl ChainInformationBuild {
                 ConfigFinalizedBlockHeader::Genesis {
                     state_trie_root_hash,
                 } => {
-                    let header = header::Header {
-                        parent_hash: [0; 32],
+                    let header = header::HeaderRef {
+                        parent_hash: &[0; 32],
                         number: 0,
-                        state_root: state_trie_root_hash,
-                        extrinsics_root: trie::empty_trie_merkle_value(),
+                        state_root: &state_trie_root_hash,
+                        extrinsics_root: &trie::empty_trie_merkle_value(),
                         digest: header::DigestRef::empty().into(),
-                    };
+                    }
+                    .scale_encoding_vec(inner.block_number_bytes);
 
                     (header, None)
                 }
                 ConfigFinalizedBlockHeader::NonGenesis {
-                    header,
+                    scale_encoded_header: header,
                     known_finality,
                 } => (header, known_finality),
             };
@@ -498,7 +512,13 @@ impl ChainInformationBuild {
                 known_finality
             } else if inner.runtime_has_grandpa {
                 chain_information::ChainInformationFinality::Grandpa {
-                    after_finalized_block_authorities_set_id: if finalized_block_header.number == 0
+                    after_finalized_block_authorities_set_id: if header::decode(
+                        &finalized_block_header,
+                        inner.block_number_bytes,
+                    )
+                    .unwrap()
+                    .number
+                        == 0
                     {
                         0
                     } else {
@@ -521,7 +541,12 @@ impl ChainInformationBuild {
             // epochs that don't follow each other.
             let chain_information = match chain_information::ValidChainInformation::try_from(
                 chain_information::ChainInformation {
-                    finalized_block_header,
+                    finalized_block_header: header::decode(
+                        &finalized_block_header,
+                        inner.block_number_bytes,
+                    )
+                    .unwrap()
+                    .into(),
                     finality,
                     consensus,
                 },
@@ -692,7 +717,14 @@ impl ChainInformationBuild {
                         ConfigFinalizedBlockHeader::Genesis {
                             state_trie_root_hash,
                         } => state_trie_root_hash,
-                        ConfigFinalizedBlockHeader::NonGenesis { header, .. } => &header.state_root,
+                        ConfigFinalizedBlockHeader::NonGenesis {
+                            scale_encoded_header: header,
+                            ..
+                        } => {
+                            &header::decode(header, inner.block_number_bytes)
+                                .unwrap()
+                                .state_root
+                        }
                     })
                 }
                 read_only_runtime_host::RuntimeHostVm::NextKey(call) => {
@@ -713,6 +745,8 @@ impl ChainInformationBuild {
 struct ChainInformationBuildInner {
     /// See [`Config::finalized_block_header`].
     finalized_block_header: ConfigFinalizedBlockHeader,
+    /// See [`Config::block_number_bytes`].
+    block_number_bytes: usize,
 
     /// Which call is currently in progress, if any.
     call_in_progress: Option<RuntimeCall>,
