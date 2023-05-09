@@ -1116,10 +1116,10 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
     /// Obtain a lock to the runtime of the given block against the runtime service.
     // TODO: return better error?
-    async fn runtime_lock(
+    async fn runtime_access(
         self: &Arc<Self>,
         block_hash: &[u8; 32],
-    ) -> Result<runtime_service::RuntimeLock<TPlat>, RuntimeCallError> {
+    ) -> Result<runtime_service::RuntimeAccess<TPlat>, RuntimeCallError> {
         let cache_lock = self.cache.lock().await;
 
         // Try to find the block in the cache of recent blocks. Most of the time, the call target
@@ -1128,7 +1128,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             // The runtime service has the block pinned, meaning that we can ask the runtime
             // service to perform the call.
             self.runtime_service
-                .pinned_block_runtime_lock(cache_lock.subscription_id.unwrap(), block_hash)
+                .pinned_block_runtime_access(cache_lock.subscription_id.unwrap(), block_hash)
                 .await
                 .ok()
         } else {
@@ -1184,7 +1184,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
             let precall = self
                 .runtime_service
-                .pinned_runtime_lock(
+                .pinned_runtime_access(
                     pinned_runtime_id.clone(),
                     *block_hash,
                     block_number,
@@ -1268,7 +1268,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
     ) -> Result<(Vec<u8>, Option<u32>), RuntimeCallError> {
         // This function contains two steps: obtaining the runtime of the block in question,
         // then performing the actual call. The first step is the longest and most difficult.
-        let precall = self.runtime_lock(block_hash).await?;
+        let precall = self.runtime_access(block_hash).await?;
 
         let (runtime_call_lock, virtual_machine) = precall
             .start(

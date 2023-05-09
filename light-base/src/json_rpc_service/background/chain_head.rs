@@ -1105,7 +1105,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         }
 
                         self.runtime_service
-                            .pinned_block_runtime_lock(subscription_id, &hash.0)
+                            .pinned_block_runtime_access(subscription_id, &hash.0)
                             .await
                             .ok()
                     }
@@ -1569,7 +1569,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         request_id: (&str, &requests_subscriptions::RequestId),
         function_to_call: &str,
         call_parameters: methods::HexString,
-        pre_runtime_call: Option<runtime_service::RuntimeLock<TPlat>>,
+        pre_runtime_call: Option<runtime_service::RuntimeAccess<TPlat>>,
         network_config: methods::NetworkConfig,
     ) {
         let (subscription_id, mut messages_rx, subscription_start) = match requests_subscriptions
