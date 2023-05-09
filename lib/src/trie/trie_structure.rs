@@ -855,9 +855,7 @@ impl<TUd> TrieStructure<TUd> {
                 // `end_key` must never be empty, as otherwise the iteration has ended.
                 // We return `None` instead of panicking, as it is legitimately possible to reach
                 // this situation through some code paths.
-                if end_key.peek().is_none() {
-                    let _ = end_key.peek()?;
-                }
+                let _ = end_key.peek()?;
 
                 // If `iter` points to an actual node, yield it and jump to the position right
                 // after.
