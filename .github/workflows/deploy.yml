@@ -64,6 +64,8 @@ jobs:
         with:
           path: repo
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./repo -> target
       - run: |
           mkdir -p ../coverage
           RUSTFLAGS="-C instrument-coverage" LLVM_PROFILE_FILE="../coverage/default_%m_%p.profraw" cargo test --workspace --tests
@@ -96,6 +98,8 @@ jobs:
       - run: npm install
         working-directory: ./repo/wasm-node/javascript
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./repo -> target
       - run: cargo doc --verbose --all-features --no-deps --package smoldot --package smoldot-light
         working-directory: ./repo
       - run: npm run doc
