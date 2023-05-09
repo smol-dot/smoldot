@@ -58,10 +58,11 @@ jobs:
     container:
       image: rust:1.69
     steps:
+      - run: apt update && apt install -y jq
+      - run: rustup component add llvm-tools-preview
       - uses: actions/checkout@v3
         with:
           path: repo
-      - run: apt update && apt install -y jq
       - uses: Swatinem/rust-cache@v2
       - run: |
           mkdir -p ../coverage
@@ -69,7 +70,6 @@ jobs:
           RUSTFLAGS="-C instrument-coverage" cargo test --tests --no-run --message-format=json | jq -r "select(.profile.test == true) | .filenames[]" | grep -v dSYM > ../coverage/binaries-list
         working-directory: ./repo
       - run: |
-          rustup component add llvm-tools-preview
           `rustc --print sysroot`/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata merge -sparse ./coverage/default_*.profraw -o ./coverage/tests-coverage.profdata
           `rustc --print sysroot`/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov show --format=html --output-dir=./html-out --instr-profile=./coverage/tests-coverage.profdata --ignore-filename-regex='/.cargo/registry' --ignore-filename-regex='/rustc/' --show-instantiations --show-line-counts-or-regions $(for file in `cat ./coverage/binaries-list`; do printf "%s %s " -object $file; done)
       - uses: actions/upload-artifact@v3
