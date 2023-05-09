@@ -1297,10 +1297,11 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                         }
                     } else {
                         chain_information::build::ConfigFinalizedBlockHeader::NonGenesis {
-                            header: header.clone(),
+                            header: header.scale_encoding_vec(self.inner.block_number_bytes),
                             known_finality: Some(chain_information_finality.clone()),
                         }
                     },
+                    block_number_bytes: self.inner.block_number_bytes,
                     runtime,
                 },
             );
