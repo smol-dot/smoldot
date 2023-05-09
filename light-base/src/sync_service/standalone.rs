@@ -225,7 +225,11 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                             Ok(v.into_iter().filter_map(|block| {
                                 Some(all::BlockRequestSuccessBlock {
                                     scale_encoded_header: block.header?,
-                                    scale_encoded_justifications: block.justifications.unwrap_or(Vec::new()),
+                                    scale_encoded_justifications: block.justifications
+                                        .unwrap_or(Vec::new())
+                                        .into_iter()
+                                        .map(|j| all::Justification { engine_id: j.engine_id, justification: j.justification })
+                                        .collect(),
                                     scale_encoded_extrinsics: Vec::new(),
                                     user_data: (),
                                 })

@@ -644,7 +644,11 @@ impl SyncBackground {
                     let (_, response_outcome) = self.sync.blocks_request_response(request_id, result.map(|v| v.into_iter().map(|block| all::BlockRequestSuccessBlock {
                         scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
                         scale_encoded_extrinsics: block.body.unwrap(), // TODO: don't unwrap
-                        scale_encoded_justifications: block.justifications.unwrap_or_default(),
+                        scale_encoded_justifications: block.justifications
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|j| all::Justification { engine_id: j.engine_id, justification: j.justification })
+                            .collect(),
                         user_data: (),
                     })));
 

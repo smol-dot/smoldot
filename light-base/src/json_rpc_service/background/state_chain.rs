@@ -188,7 +188,11 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     self.sync_service.block_number_bytes(),
                 )
                 .unwrap(),
-                justifications: block.justifications,
+                justifications: block.justifications.map(|list| {
+                    list.into_iter()
+                        .map(|j| (j.engine_id, j.justification))
+                        .collect()
+                }),
             })
             .to_json_response(request_id.0)
         } else {
