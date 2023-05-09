@@ -88,7 +88,7 @@ use crate::{
     header, verify,
 };
 
-use alloc::{borrow::ToOwned as _, vec::Vec};
+use alloc::{borrow::ToOwned as _, boxed::Box, vec::Vec};
 use core::{
     cmp, mem,
     num::{NonZeroU32, NonZeroU64},
@@ -175,7 +175,7 @@ pub struct AllForksSync<TBl, TRq, TSrc> {
     chain: blocks_tree::NonFinalizedTree<Block<TBl>>,
 
     /// Extra fields. In a separate structure in order to be moved around.
-    inner: Inner<TBl, TRq, TSrc>,
+    inner: Box<Inner<TBl, TRq, TSrc>>,
 }
 
 /// Extra fields. In a separate structure in order to be moved around.
@@ -433,7 +433,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
 
         Self {
             chain,
-            inner: Inner {
+            inner: Box::new(Inner {
                 blocks: pending_blocks::PendingBlocks::new(pending_blocks::Config {
                     blocks_capacity: config.blocks_capacity,
                     finalized_block_height,
@@ -441,7 +441,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     sources_capacity: config.sources_capacity,
                     verify_bodies: config.full,
                 }),
-            },
+            }),
         }
     }
 
