@@ -155,7 +155,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     };
 
     // TODO: don't unwrap?
-    let genesis_chain_information = chain_spec.as_chain_information().unwrap().0;
+    let genesis_chain_information = chain_spec.to_chain_information().unwrap().0;
 
     // If `chain_spec` define a parachain, also load the specs of the relay chain.
     let (relay_chain_spec, _parachain_id) =
@@ -189,7 +189,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     // TODO: don't unwrap?
     let relay_genesis_chain_information = relay_chain_spec
         .as_ref()
-        .map(|relay_chain_spec| relay_chain_spec.as_chain_information().unwrap().0);
+        .map(|relay_chain_spec| relay_chain_spec.to_chain_information().unwrap().0);
 
     // Create an executor where tasks are going to be spawned onto.
     let executor = Arc::new(smol::Executor::new());

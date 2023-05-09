@@ -88,7 +88,7 @@ impl ChainSpec {
     ///
     /// In addition to the information, also returns the virtual machine of the runtime of the
     /// genesis block.
-    pub fn as_chain_information(
+    pub fn to_chain_information(
         &self,
     ) -> Result<(ValidChainInformation, executor::host::HostVmPrototype), FromGenesisStorageError>
     {
@@ -420,7 +420,7 @@ fn convert_epoch(epoch: &light_sync_state::BabeEpoch) -> BabeEpochInformation {
 }
 
 impl LightSyncState {
-    pub fn as_chain_information(&self) -> ChainInformation {
+    pub fn to_chain_information(&self) -> ChainInformation {
         // Create a sorted list of all regular epochs that haven't been pruned from the sync state.
         let mut epochs: Vec<_> = self
             .inner

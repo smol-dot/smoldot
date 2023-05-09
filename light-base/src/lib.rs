@@ -362,10 +362,10 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         // TODO: clean up that block
         let (chain_information, genesis_block_header, checkpoint_nodes) = {
             match (
-                chain_spec.as_chain_information().map(|(ci, _)| ci), // TODO: don't just throw away the runtime
+                chain_spec.to_chain_information().map(|(ci, _)| ci), // TODO: don't just throw away the runtime
                 chain_spec.light_sync_state().map(|s| {
                     chain::chain_information::ValidChainInformation::try_from(
-                        s.as_chain_information(),
+                        s.to_chain_information(),
                     )
                 }),
                 database::decode_database(
