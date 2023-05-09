@@ -129,7 +129,7 @@ pub enum Event {
     BlockAnnounce {
         chain_index: usize,
         peer_id: PeerId,
-        header: header::Header,
+        scale_encoded_header: Vec<u8>,
         is_best: bool,
     },
 }
@@ -811,7 +811,7 @@ async fn background_task(mut inner: Inner) {
                                     chain_index,
                                     peer_id,
                                     is_best: decoded.is_best,
-                                    header: decoded_header.into(), // TODO: somewhat wasteful allocation here
+                                    scale_encoded_header: decoded.scale_encoded_header.to_owned(), // TODO: somewhat wasteful to copy here, could pass the entire announce
                                 });
                             }
                             Err(error) => {
