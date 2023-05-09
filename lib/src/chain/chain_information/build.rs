@@ -754,8 +754,8 @@ struct ChainInformationBuildInner {
 
     /// If `true`, the runtime supports `AuraApi` functions.
     runtime_has_aura: bool,
-    /// If `Some`, the runtime supports `BabeApi` functions. If `true`, the version is V1 (the old
-    /// version). If `false`, the version is V2.
+    /// If `Some`, the runtime supports `BabeApi` functions. If `true`, the version is 1 (the old
+    /// version). If `false`, the version is 2.
     runtime_babeapi_is_v1: Option<bool>,
     /// If `Some`, the runtime supports `GrandpaApi` functions. If `true`, the API supports the
     /// `GrandpaApi_current_set_id` runtime call.
