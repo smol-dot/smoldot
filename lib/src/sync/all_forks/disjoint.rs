@@ -255,32 +255,45 @@ impl<TBl> DisjointBlocks<TBl> {
     ///
     #[track_caller]
     pub fn set_block_bad(&mut self, height: u64, hash: &[u8; 32]) {
-        // The implementation of this method is far from being optimized, but it is by far the
-        // easiest way to implement it, and this operation is expected to happen rarely.
-
         // Initially contains the concerned block, then will contain the children of the concerned
         // block, then the grand-children, then the grand-grand-children, and so on.
         let mut blocks = vec![(height, *hash)];
 
+        // Maintained in parallel of `blocks`. Contains the same hashes as `blocks`.
+        let mut blocks_hashes =
+            hashbrown::HashSet::with_capacity_and_hasher(1, fnv::FnvBuildHasher::default());
+        blocks_hashes.insert(*hash);
+
         while !blocks.is_empty() {
-            let mut children = Vec::new();
+            let mut children = Vec::with_capacity(blocks.len() * 4);
+            let mut children_hashes = hashbrown::HashSet::with_capacity_and_hasher(
+                blocks.len() * 4,
+                fnv::FnvBuildHasher::default(),
+            );
 
             for (height, hash) in blocks {
                 self.blocks.get_mut(&(height, hash)).unwrap().bad = true;
+            }
 
-                // Iterate over all blocks whose height is `height + 1` to try find children.
-                for ((_maybe_child_height, maybe_child_hash), maybe_child) in self
-                    .blocks
-                    .range((height + 1, [0; 32])..=(height + 1, [0xff; 32]))
+            // Iterate over all blocks whose height is `height + 1` to try find children.
+            for ((_maybe_child_height, maybe_child_hash), maybe_child) in self
+                .blocks
+                .range((height + 1, [0; 32])..=(height + 1, [0xff; 32]))
+            {
+                debug_assert_eq!(*_maybe_child_height, height + 1);
+                if maybe_child
+                    .parent_hash
+                    .as_ref()
+                    .map_or(false, |p| blocks_hashes.contains(p))
                 {
-                    debug_assert_eq!(*_maybe_child_height, height + 1);
-                    if maybe_child.parent_hash.as_ref() == Some(&hash) {
-                        children.push((height + 1, *maybe_child_hash));
-                    }
+                    children.push((height + 1, *maybe_child_hash));
+                    children_hashes.insert(*maybe_child_hash);
                 }
             }
 
+            debug_assert_eq!(children.len(), children_hashes.len());
             blocks = children;
+            blocks_hashes = children_hashes;
         }
     }
 
