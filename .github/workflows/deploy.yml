@@ -118,11 +118,10 @@ jobs:
           RUSTFLAGS="-C instrument-coverage" LLVM_PROFILE_FILE="`pwd`/../coverage/default_%m_%p.profraw" cargo test --workspace --tests
           RUSTFLAGS="-C instrument-coverage" cargo test --tests --no-run --message-format=json | jq -r "select(.profile.test == true) | .filenames[]" | grep -v dSYM > ../coverage/binaries-list
           mv ./default_*.profraw ../coverage/
+          `rustc --print sysroot`/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata merge -sparse ../coverage/default_*.profraw -o ../coverage/tests-coverage.profdata
+          `rustc --print sysroot`/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov show --format=html --output-dir=./html-out --instr-profile=../coverage/tests-coverage.profdata --ignore-filename-regex='cargo/registry' --ignore-filename-regex='/rustc/' --show-instantiations --show-line-counts-or-regions $(for file in `cat ../coverage/binaries-list`; do printf "%s %s " -object $file; done)
+          `rustc --print sysroot`/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov report --instr-profile=../coverage/tests-coverage.profdata --ignore-filename-regex='cargo/registry' --ignore-filename-regex='/rustc/' $(for file in `cat ../coverage/binaries-list`; do printf "%s %s " -object $file; done)
         working-directory: ./repo
-      - run: |
-          `rustc --print sysroot`/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata merge -sparse ./coverage/default_*.profraw -o ./coverage/tests-coverage.profdata
-          `rustc --print sysroot`/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov show --format=html --output-dir=./html-out --instr-profile=./coverage/tests-coverage.profdata --ignore-filename-regex='cargo/registry' --ignore-filename-regex='/rustc/' --show-instantiations --show-line-counts-or-regions $(for file in `cat ./coverage/binaries-list`; do printf "%s %s " -object $file; done)
-          `rustc --print sysroot`/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov report --instr-profile=./coverage/tests-coverage.profdata --ignore-filename-regex='cargo/registry' --ignore-filename-regex='/rustc/' $(for file in `cat ./coverage/binaries-list`; do printf "%s %s " -object $file; done)
       - uses: actions/upload-artifact@v3
         with:
           name: code-coverage-report
