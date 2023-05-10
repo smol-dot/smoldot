@@ -254,26 +254,18 @@ impl<TBl> DisjointBlocks<TBl> {
     /// Panics if the block with the given height and hash hasn't been inserted before.
     ///
     #[track_caller]
-    pub fn set_block_bad(&mut self, height: u64, hash: &[u8; 32]) {
+    pub fn set_block_bad(&mut self, mut height: u64, hash: &[u8; 32]) {
         // Initially contains the concerned block, then will contain the children of the concerned
         // block, then the grand-children, then the grand-grand-children, and so on.
-        let mut blocks = vec![(height, *hash)];
-
-        // Maintained in parallel of `blocks`. Contains the same hashes as `blocks`.
-        let mut blocks_hashes =
+        let mut blocks =
             hashbrown::HashSet::with_capacity_and_hasher(1, fnv::FnvBuildHasher::default());
-        blocks_hashes.insert(*hash);
+        blocks.insert(*hash);
 
         while !blocks.is_empty() {
-            let mut children = Vec::with_capacity(blocks.len() * 4);
-            let mut children_hashes = hashbrown::HashSet::with_capacity_and_hasher(
+            let mut children = hashbrown::HashSet::with_capacity_and_hasher(
                 blocks.len() * 4,
                 fnv::FnvBuildHasher::default(),
             );
-
-            for (height, hash) in blocks {
-                self.blocks.get_mut(&(height, hash)).unwrap().bad = true;
-            }
 
             // Iterate over all blocks whose height is `height + 1` to try find children.
             for ((_maybe_child_height, maybe_child_hash), maybe_child) in self
@@ -284,16 +276,18 @@ impl<TBl> DisjointBlocks<TBl> {
                 if maybe_child
                     .parent_hash
                     .as_ref()
-                    .map_or(false, |p| blocks_hashes.contains(p))
+                    .map_or(false, |p| blocks.contains(p))
                 {
-                    children.push((height + 1, *maybe_child_hash));
-                    children_hashes.insert(*maybe_child_hash);
+                    children.insert(*maybe_child_hash);
                 }
             }
 
-            debug_assert_eq!(children.len(), children_hashes.len());
+            for hash in blocks {
+                self.blocks.get_mut(&(height, hash)).unwrap().bad = true;
+            }
+
             blocks = children;
-            blocks_hashes = children_hashes;
+            height += 1;
         }
     }
 
