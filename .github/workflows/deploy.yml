@@ -117,7 +117,6 @@ jobs:
           mkdir -p ../coverage
           RUSTFLAGS="-C instrument-coverage" LLVM_PROFILE_FILE="`pwd`/../coverage/default_%m_%p.profraw" cargo test --workspace --tests
           RUSTFLAGS="-C instrument-coverage" cargo test --workspace --tests --no-run --message-format=json | jq -r "select(.profile.test == true) | .filenames[]" | grep -v dSYM > ../coverage/binaries-list
-          mv ./default_*.profraw ../coverage/
         working-directory: ./repo
       - run: |
           `rustc --print sysroot`/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata merge -sparse ./coverage/default_*.profraw -o ./coverage/tests-coverage.profdata
