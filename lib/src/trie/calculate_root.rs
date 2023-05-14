@@ -313,7 +313,8 @@ impl CalcInner {
                         .unwrap();
 
                         return RootMerkleValueCalculation::Finished {
-                            hash: merkle_value.into(),
+                            // Guaranteed to never panic for the root node.
+                            hash: merkle_value.try_into().unwrap_or_else(|_| panic!()),
                             cache: self.cache,
                         };
                     }
@@ -345,7 +346,8 @@ impl CalcInner {
                         let mut root_node = trie_structure.root_node().unwrap();
                         let merkle_value = root_node.user_data().merkle_value.clone().unwrap();
                         return RootMerkleValueCalculation::Finished {
-                            hash: merkle_value.into(),
+                            // Guaranteed to never panic for the root node.
+                            hash: merkle_value.try_into().unwrap_or_else(|_| panic!()),
                             cache: self.cache,
                         };
                     }
