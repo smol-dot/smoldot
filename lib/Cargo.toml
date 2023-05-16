@@ -100,7 +100,7 @@ async-std = "1.12.0"
 criterion = "0.4.0"
 futures-executor = { version = "0.3.28", default-features = false }
 tempfile = "3.5.0"
-wat = "1.0.63"
+wat = "1.0.64"
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]
