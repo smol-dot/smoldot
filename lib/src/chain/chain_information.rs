@@ -31,7 +31,7 @@
 //! contained in the structure.
 //!
 //! They do not, however, contain the storage of the finalized block, which is necessary to verify
-//! the correctness of new blocks. It possible possible, though, for instance to download the
+//! the correctness of new blocks. It is possible, though, for instance to download the
 //! storage of the finalized block from another node. This downloaded storage can be verified
 //! to make sure that it matches the content of the [`ChainInformation`].
 //!
