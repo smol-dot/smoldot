@@ -142,6 +142,7 @@ jobs:
           mkdir -p ./upload/doc-javascript
           mkdir -p ./upload/doc-rust
           mkdir -p ./upload/tests-coverage
+          touch ./upload/.nojekyll
       - uses: actions/download-artifact@v3
         with:
           name: javascript-documentation
