@@ -142,6 +142,7 @@ jobs:
           mkdir -p ./upload/doc-javascript
           mkdir -p ./upload/doc-rust
           mkdir -p ./upload/tests-coverage
+          touch ./upload/.nojekyll
       - uses: actions/download-artifact@v3
         with:
           name: javascript-documentation
@@ -154,8 +155,6 @@ jobs:
         with:
           name: code-coverage-report
           path: ./upload/tests-coverage
-      - run: |
-          touch ./upload/.nojekyll
       - run: |
           git config user.email "github-action@users.noreply.github.com"
           git config user.name "GitHub Action"
