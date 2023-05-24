@@ -143,7 +143,6 @@ jobs:
           mkdir -p ./upload/doc-rust
           mkdir -p ./upload/tests-coverage
           touch ./upload/.nojekyll
-          ls -aR
       - uses: actions/download-artifact@v3
         with:
           name: javascript-documentation
@@ -164,6 +163,7 @@ jobs:
           git rm -rf .
           git clean -d --force
           mv ../upload/* .
+          ls -aR
           git add --all
           git commit -m "Documentation"
         working-directory: ./repo
