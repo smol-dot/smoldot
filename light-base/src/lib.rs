@@ -464,19 +464,26 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
 
                 (Err(err), _, _) => return Err(AddChainError::InvalidGenesisStorage(err)),
 
-                (_, Some(Err(err)), _) => {
-                    return Err(AddChainError::InvalidCheckpoint(err));
-                }
-
                 (Ok(genesis_ci), Some(Ok(checkpoint)), _) => {
                     let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
                     (checkpoint, genesis_header.into(), Default::default())
                 }
 
-                (Ok(genesis_ci), None, _) => {
+                (
+                    Ok(genesis_ci),
+                    None
+                    | Some(Err(
+                        chain_spec::CheckpointToChainInformationError::GenesisBlockCheckpoint,
+                    )),
+                    _,
+                ) => {
                     let genesis_header =
                         header::Header::from(genesis_ci.as_ref().finalized_block_header.clone());
                     (genesis_ci, genesis_header, Default::default())
+                }
+
+                (_, Some(Err(err)), _) => {
+                    return Err(AddChainError::InvalidCheckpoint(err));
                 }
             }
         };
@@ -1009,7 +1016,7 @@ pub enum AddChainError {
     ChainSpecNeitherGenesisStorageNorCheckpoint,
     /// Checkpoint provided in the chain specification is invalid.
     #[display(fmt = "Invalid checkpoint in chain specification: {_0}")]
-    InvalidCheckpoint(chain_spec::InvalidCheckpointError),
+    InvalidCheckpoint(chain_spec::CheckpointToChainInformationError),
     /// Failed to build the information about the chain from the genesis storage. This indicates
     /// invalid data in the genesis storage.
     #[display(fmt = "Failed to build genesis chain information: {_0}")]

@@ -420,8 +420,14 @@ fn convert_epoch(epoch: &light_sync_state::BabeEpoch) -> BabeEpochInformation {
 }
 
 impl LightSyncState {
-    pub fn to_chain_information(&self) -> Result<ValidChainInformation, InvalidCheckpointError> {
+    pub fn to_chain_information(
+        &self,
+    ) -> Result<ValidChainInformation, CheckpointToChainInformationError> {
         // TODO: this code is a bit of a shitshow when it comes to corner cases and should be cleaned up after https://github.com/paritytech/substrate/issues/11184
+
+        if self.inner.finalized_block_header.number == 0 {
+            return Err(CheckpointToChainInformationError::GenesisBlockCheckpoint);
+        }
 
         // Create a sorted list of all regular epochs that haven't been pruned from the sync state.
         let mut epochs: Vec<_> = self
@@ -444,22 +450,18 @@ impl LightSyncState {
         epochs.dedup_by_key(|(_, epoch)| epoch.epoch_index);
 
         // Get the latest two epochs.
-        let finalized_block_epoch_information = if epochs.len() >= 2 {
-            Some(convert_epoch(epochs[epochs.len() - 2].1))
-        } else {
-            None
-        };
-        if epochs.is_empty() {
-            return Err(InvalidCheckpointError::EmptyBabeEpochsList);
+        if epochs.len() < 2 {
+            return Err(CheckpointToChainInformationError::GenesisBlockCheckpoint);
         }
+        let current_epoch = epochs[epochs.len() - 2].1;
         let next_epoch = epochs[epochs.len() - 1].1;
 
         ChainInformation {
             finalized_block_header: self.inner.finalized_block_header.clone(),
             consensus: ChainInformationConsensus::Babe {
                 slots_per_epoch: NonZeroU64::new(next_epoch.duration)
-                    .ok_or(InvalidCheckpointError::InvalidBabeSlotsPerEpoch)?,
-                finalized_block_epoch_information,
+                    .ok_or(CheckpointToChainInformationError::InvalidBabeSlotsPerEpoch)?,
+                finalized_block_epoch_information: Some(convert_epoch(current_epoch)),
                 finalized_next_epoch_transition: convert_epoch(next_epoch),
             },
             finality: ChainInformationFinality::Grandpa {
@@ -473,7 +475,7 @@ impl LightSyncState {
                             Ok(crate::header::GrandpaAuthority {
                                 public_key: authority.public_key,
                                 weight: NonZeroU64::new(authority.weight)
-                                    .ok_or(InvalidCheckpointError::InvalidGrandpaAuthorityWeight)?,
+                                    .ok_or(CheckpointToChainInformationError::InvalidGrandpaAuthorityWeight)?,
                             })
                         })
                         .collect::<Result<_, _>>()?
@@ -482,7 +484,7 @@ impl LightSyncState {
             },
         }
         .try_into()
-        .map_err(InvalidCheckpointError::InvalidData)
+        .map_err(CheckpointToChainInformationError::InvalidData)
     }
 }
 
@@ -515,11 +517,11 @@ pub enum FromGenesisStorageError {
     UnknownStorageItems,
 }
 
-/// Error when building the chain information from the genesis storage.
+/// Error when building the chain information corresponding to a checkpoint.
 #[derive(Debug, derive_more::Display)]
-pub enum InvalidCheckpointError {
-    /// The list of Babe epochs is empty.
-    EmptyBabeEpochsList,
+pub enum CheckpointToChainInformationError {
+    /// The checkpoint corresponds to the genesis block.
+    GenesisBlockCheckpoint,
     /// Found a value of 0 for the number of Babe slots per epoch.
     InvalidBabeSlotsPerEpoch,
     /// Found a Grandpa authority with a weight of 0.
