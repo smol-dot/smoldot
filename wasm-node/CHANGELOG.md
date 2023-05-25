@@ -4,8 +4,8 @@
 
 ### Fixed
 
-- Fix panic when the checkpoint in the chain specification contains an empty list of Babe epochs, which can normally only happen if the checkpoint was modified manually.
-- Fix panic when the checkpoint in the chain specification contains only one Babe epoch, which can happen if the checkpoint was generated before any block was authored.
+- Fix panic when the checkpoint in the chain specification contains an empty list of Babe epochs, which can normally only happen if the checkpoint was modified manually. ([#603](https://github.com/smol-dot/smoldot/pull/603))
+- Fix panic when the checkpoint in the chain specification contains only one Babe epoch, which can happen if the checkpoint was generated before any block was authored. ([#603](https://github.com/smol-dot/smoldot/pull/603))
 
 ## 1.0.6 - 2023-05-09
 
