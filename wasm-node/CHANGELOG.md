@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- When a runtime contains a `runtime_apis` custom section but no `runtime_version` custom section, or vice-versa, smoldot now falls back to calling `Core_version`.
+
 ## 1.0.6 - 2023-05-09
 
 ### Changed
