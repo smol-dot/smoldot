@@ -132,8 +132,6 @@ jobs:
     needs: [build-js-doc, build-rust-doc, build-tests-coverage]
     permissions:
       contents: write   # Necessary to push on the `gh-pages` branch.
-    container:
-      image: rust:1.69  # TODO: overkill
     steps:
       - uses: actions/checkout@v3
         with:
@@ -162,12 +160,13 @@ jobs:
           git checkout --orphan gh-pages
           git rm -rf .
           git clean -d --force
+          shopt -s dotglob
           mv ../upload/* .
-          mv ../upload/.* .
           ls -aR
           git add --all
           git commit -m "Documentation"
         working-directory: ./repo
+        shell: bash       # Necessary for `shopt`
       - run: git push -f origin gh-pages:gh-pages
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         working-directory: ./repo
