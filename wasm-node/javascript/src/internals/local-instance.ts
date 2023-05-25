@@ -85,7 +85,7 @@ export interface Instance {
     removeChain: (chainId: number) => void,
     /**
      * Notifies the background executor that it should stop. Once it has effectively stopped,
-     * a `shutdown-finished` event will be generated.
+     * a `executor-shutdown` event will be generated.
      * Note that the instance can technically still be used, and all the functions still work, but
      * in practice nothing is being run in the background and as such it won't do much.
      * Existing connections are *not* closed. It is the responsibility of the API user to close
