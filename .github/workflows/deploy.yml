@@ -162,7 +162,8 @@ jobs:
           git checkout --orphan gh-pages
           git rm -rf .
           git clean -d --force
-          mv ../upload/{.,}* .
+          mv ../upload/* .
+          mv ../upload/.* .
           ls -aR
           git add --all
           git commit -m "Documentation"
