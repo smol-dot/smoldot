@@ -162,7 +162,6 @@ jobs:
           git clean -d --force
           shopt -s dotglob
           mv ../upload/* .
-          ls -aR
           git add --all
           git commit -m "Documentation"
         working-directory: ./repo
