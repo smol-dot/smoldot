@@ -457,7 +457,8 @@ impl LightSyncState {
         ChainInformation {
             finalized_block_header: self.inner.finalized_block_header.clone(),
             consensus: ChainInformationConsensus::Babe {
-                slots_per_epoch: NonZeroU64::new(next_epoch.duration).unwrap(),
+                slots_per_epoch: NonZeroU64::new(next_epoch.duration)
+                    .ok_or(InvalidCheckpointError::InvalidBabeSlotsPerEpoch)?,
                 finalized_block_epoch_information,
                 finalized_next_epoch_transition: convert_epoch(next_epoch),
             },
@@ -468,11 +469,14 @@ impl LightSyncState {
                         .grandpa_authority_set
                         .current_authorities
                         .iter()
-                        .map(|authority| crate::header::GrandpaAuthority {
-                            public_key: authority.public_key,
-                            weight: NonZeroU64::new(authority.weight).unwrap(),
+                        .map(|authority| {
+                            Ok(crate::header::GrandpaAuthority {
+                                public_key: authority.public_key,
+                                weight: NonZeroU64::new(authority.weight)
+                                    .ok_or(InvalidCheckpointError::InvalidGrandpaAuthorityWeight)?,
+                            })
                         })
-                        .collect()
+                        .collect::<Result<_, _>>()?
                 },
                 finalized_scheduled_change: None, // TODO: unimplemented
             },
@@ -516,6 +520,10 @@ pub enum FromGenesisStorageError {
 pub enum InvalidCheckpointError {
     /// The list of Babe epochs is empty.
     EmptyBabeEpochsList,
+    /// Found a value of 0 for the number of Babe slots per epoch.
+    InvalidBabeSlotsPerEpoch,
+    /// Found a Grandpa authority with a weight of 0.
+    InvalidGrandpaAuthorityWeight,
     /// Information found in the checkpoint is invalid.
     #[display(fmt = "{_0}")]
     InvalidData(ValidityError),
