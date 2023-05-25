@@ -222,7 +222,8 @@ fn rococo_genesis_works() {
             exec_hint,
             heap_pages: HeapPages::new(1024),
             module: &module_bytes,
-        }).is_ok());
+        })
+        .is_ok());
     }
 }
 
