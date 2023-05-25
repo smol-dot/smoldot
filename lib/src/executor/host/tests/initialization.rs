@@ -210,4 +210,21 @@ fn host_function_bad_signature() {
     }
 }
 
+#[test]
+fn rococo_genesis_works() {
+    // The Rococo genesis runtime has the particularity that it has a `runtime_apis` custom
+    // section but no `runtime_version` custom section.
+    let module_bytes = &include_bytes!("./rococo-genesis.wasm")[..];
+
+    for exec_hint in ExecHint::available_engines() {
+        assert!(HostVmPrototype::new(Config {
+            allow_unresolved_imports: true,
+            exec_hint,
+            heap_pages: HeapPages::new(1024),
+            module: &module_bytes,
+        })
+        .is_ok());
+    }
+}
+
 // TODO: add tests for the runtime version gathering after clarifying the errors in host.rs

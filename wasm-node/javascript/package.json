@@ -62,10 +62,10 @@
   },
   "scripts": {
     "buildModules": "tsc -p tsconfig-mjs.json && tsc -p tsconfig-cjs.json && bash fix-package-type.sh",
-    "prepublishOnly": "node prepare.mjs --release && rimraf ./dist && npm run buildModules",
-    "build": "node prepare.mjs --release && rimraf ./dist && npm run buildModules",
-    "start": "node prepare.mjs --debug && rimraf ./dist && npm run buildModules && node demo/demo.mjs",
-    "test": "node prepare.mjs --debug && rimraf ./dist && npm run buildModules && deno run ./dist/mjs/index-deno.js && ava --timeout=2m --concurrency 2 --no-worker-threads",
+    "prepublishOnly": "node prepare.mjs --release && rm -rf ./dist && npm run buildModules",
+    "build": "node prepare.mjs --release && rm -rf ./dist && npm run buildModules",
+    "start": "node prepare.mjs --debug && rm -rf ./dist && npm run buildModules && node demo/demo.mjs",
+    "test": "node prepare.mjs --debug && rm -rf ./dist && npm run buildModules && deno run ./dist/mjs/index-deno.js && ava --timeout=2m --concurrency 2 --no-worker-threads",
     "doc": "node prepare.mjs --debug && typedoc --basePath ./src --out ./dist/doc --treatWarningsAsErrors ./src/index-browser.ts"
   },
   "dependencies": {
@@ -78,7 +78,6 @@
     "@types/ws": "^8.5.3",
     "ava": "^5.0.1",
     "dtslint": "^4.0.6",
-    "rimraf": "^5.0.0",
     "typedoc": "^0.24.1",
     "typescript": "^5.0.2"
   }

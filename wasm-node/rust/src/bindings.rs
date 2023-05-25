@@ -38,12 +38,7 @@
 //!
 //! The Rust code is expected to be compiled for the `wasm32-wasi` target, and not just
 //! `wasm32-unknown-unknown`. The `wasi` platform is used in order for example to obtain a source
-//! of randomness.
-//!
-//! > **Note**: While wasi could theoretically also be used in order to obtain the current time,
-//! >           the Wasi syscall cannot be implemented in pure JavaScript code at the moment, due
-//! >           to `u64`s being unusable in JavaScript. As such, alternatives are present in the
-//! >           `extern` block below.
+//! of randomness and time.
 //!
 //! Consequently, the exports found in the `extern` block below are not the only functions that
 //! must be implemented. Several functions required by the Wasi ABI are also used. The best place

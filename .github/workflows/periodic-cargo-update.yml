@@ -1,0 +1,32 @@
+name: periodic-cargo-update
+
+on:
+  workflow_dispatch:      # Allow triggering through the UI
+  schedule:
+    - cron: '0 8 * * *'   # Every day at 8am
+
+jobs:
+  cargo-update:
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1.69
+    steps:
+    - uses: actions/checkout@v3
+    - run: cargo update --workspace
+    - run: cargo update
+      working-directory: fuzz
+    - uses: peter-evans/create-pull-request@v5
+      with:
+        # We use a custom secret (rather than the default GITHUB_TOKEN) so that opening the pull
+        # request triggers other actions such as the CI checks. GitHub prevents actions that use
+        # GITHUB_TOKEN from triggering further actions, to avoid recursive actions.
+        token: ${{ secrets.GH_TOKEN }}
+        committer: Smoldot <pierre.krieger1708@gmail.com>
+        author: Smoldot <pierre.krieger1708@gmail.com>
+        branch: cargo-update
+        base: main
+        title: Periodic `cargo update`
+        body: >
+          This automatic pull request runs `cargo update` on the repository.
+        commit-message: Periodic `cargo update`
+        delete-branch: true

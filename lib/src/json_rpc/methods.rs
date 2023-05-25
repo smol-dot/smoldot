@@ -1062,15 +1062,25 @@ pub enum SystemPeerRole {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum TransactionStatus {
+    #[serde(rename = "future")]
     Future,
+    #[serde(rename = "ready")]
     Ready,
+    #[serde(rename = "broadcast")]
     Broadcast(Vec<String>), // Base58 PeerIds  // TODO: stronger typing
+    #[serde(rename = "inBlock")]
     InBlock(HashHexString),
+    #[serde(rename = "retracted")]
     Retracted(HashHexString),
+    #[serde(rename = "finalityTimeout")]
     FinalityTimeout(HashHexString),
+    #[serde(rename = "finalized")]
     Finalized(HashHexString),
+    #[serde(rename = "usurped")]
     Usurped(HashHexString),
+    #[serde(rename = "dropped")]
     Dropped,
+    #[serde(rename = "invalid")]
     Invalid,
 }
 

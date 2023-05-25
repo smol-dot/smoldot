@@ -206,7 +206,10 @@ use tiny_keccak::Hasher as _;
 
 pub mod runtime_version;
 
-pub use runtime_version::{CoreVersion, CoreVersionError, CoreVersionRef};
+pub use runtime_version::{
+    CoreVersion, CoreVersionApisFromSliceErr, CoreVersionError, CoreVersionRef,
+    FindEncodedEmbeddedRuntimeVersionApisError,
+};
 pub use trie::TrieEntryVersion;
 pub use vm::HeapPages;
 pub use zstd::Error as ModuleFormatError;
@@ -284,8 +287,31 @@ impl HostVmPrototype {
         // initialization. `Ok(None)` can also be returned, in which case the sections are
         // missing, and we will instead try to retrieve the version through a runtime call later
         // down this function.
-        let runtime_version = runtime_version::find_embedded_runtime_version(&module_bytes)
-            .map_err(NewErr::RuntimeVersion)?;
+        // In the case of `CustomSectionsPresenceMismatch`, indicating that one section is present
+        // but not the other, we must ignore the custom sections. This is necessary due to some
+        // historical accidents.
+        let runtime_version = match runtime_version::find_embedded_runtime_version(&module_bytes) {
+            Ok(Some(r)) => Some(r),
+            Ok(None) => None,
+            Err(
+                runtime_version::FindEmbeddedRuntimeVersionError::CustomSectionsPresenceMismatch,
+            ) => None,
+            Err(runtime_version::FindEmbeddedRuntimeVersionError::FindSections(err)) => {
+                return Err(NewErr::RuntimeVersion(
+                    FindEmbeddedRuntimeVersionError::FindSections(err),
+                ))
+            }
+            Err(runtime_version::FindEmbeddedRuntimeVersionError::RuntimeApisDecode(err)) => {
+                return Err(NewErr::RuntimeVersion(
+                    FindEmbeddedRuntimeVersionError::RuntimeApisDecode(err),
+                ))
+            }
+            Err(runtime_version::FindEmbeddedRuntimeVersionError::RuntimeVersionDecode) => {
+                return Err(NewErr::RuntimeVersion(
+                    FindEmbeddedRuntimeVersionError::RuntimeVersionDecode,
+                ))
+            }
+        };
 
         // Initialize the virtual machine.
         // Each symbol requested by the Wasm runtime will be put in `registered_functions`. Later,
@@ -3659,7 +3685,7 @@ pub enum NewErr {
     VirtualMachine(vm::NewErr),
     /// Error while finding the runtime-version-related sections in the Wasm blob.
     #[display(fmt = "Error in runtime spec Wasm sections: {_0}")]
-    RuntimeVersion(runtime_version::FindEmbeddedRuntimeVersionError),
+    RuntimeVersion(FindEmbeddedRuntimeVersionError),
     /// Error while calling `Core_version` to determine the runtime version.
     #[display(fmt = "Error while calling Core_version: {_0}")]
     CoreVersion(CoreVersionError),
@@ -3668,6 +3694,19 @@ pub enum NewErr {
     /// Maximum size of the Wasm memory found in the module is too low to provide the requested
     /// number of heap pages.
     MemoryMaxSizeTooLow,
+}
+
+/// Error while determining .
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum FindEmbeddedRuntimeVersionError {
+    /// Error while finding the custom section.
+    #[display(fmt = "{_0}")]
+    FindSections(FindEncodedEmbeddedRuntimeVersionApisError),
+    /// Error while decoding the runtime version.
+    RuntimeVersionDecode,
+    /// Error while decoding the runtime APIs.
+    #[display(fmt = "{_0}")]
+    RuntimeApisDecode(CoreVersionApisFromSliceErr),
 }
 
 /// Error that can happen when starting a VM.

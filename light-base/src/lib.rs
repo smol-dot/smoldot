@@ -79,8 +79,7 @@ use futures_util::{future, FutureExt as _};
 use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
 use smoldot::{
-    chain::{self, chain_information},
-    chain_spec, header,
+    chain, chain_spec, header,
     informant::HashDisplay,
     libp2p::{connection, multiaddr, peer_id},
 };
@@ -363,11 +362,9 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         let (chain_information, genesis_block_header, checkpoint_nodes) = {
             match (
                 chain_spec.to_chain_information().map(|(ci, _)| ci), // TODO: don't just throw away the runtime
-                chain_spec.light_sync_state().map(|s| {
-                    chain::chain_information::ValidChainInformation::try_from(
-                        s.to_chain_information(),
-                    )
-                }),
+                chain_spec
+                    .light_sync_state()
+                    .map(|s| s.to_chain_information()),
                 database::decode_database(
                     config.database_content,
                     chain_spec.block_number_bytes().into(),
@@ -467,19 +464,26 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
 
                 (Err(err), _, _) => return Err(AddChainError::InvalidGenesisStorage(err)),
 
-                (_, Some(Err(err)), _) => {
-                    return Err(AddChainError::InvalidCheckpoint(err));
-                }
-
                 (Ok(genesis_ci), Some(Ok(checkpoint)), _) => {
                     let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
                     (checkpoint, genesis_header.into(), Default::default())
                 }
 
-                (Ok(genesis_ci), None, _) => {
+                (
+                    Ok(genesis_ci),
+                    None
+                    | Some(Err(
+                        chain_spec::CheckpointToChainInformationError::GenesisBlockCheckpoint,
+                    )),
+                    _,
+                ) => {
                     let genesis_header =
                         header::Header::from(genesis_ci.as_ref().finalized_block_header.clone());
                     (genesis_ci, genesis_header, Default::default())
+                }
+
+                (_, Some(Err(err)), _) => {
+                    return Err(AddChainError::InvalidCheckpoint(err));
                 }
             }
         };
@@ -1012,7 +1016,7 @@ pub enum AddChainError {
     ChainSpecNeitherGenesisStorageNorCheckpoint,
     /// Checkpoint provided in the chain specification is invalid.
     #[display(fmt = "Invalid checkpoint in chain specification: {_0}")]
-    InvalidCheckpoint(chain_information::ValidityError),
+    InvalidCheckpoint(chain_spec::CheckpointToChainInformationError),
     /// Failed to build the information about the chain from the genesis storage. This indicates
     /// invalid data in the genesis storage.
     #[display(fmt = "Failed to build genesis chain information: {_0}")]
