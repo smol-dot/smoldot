@@ -363,11 +363,9 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         let (chain_information, genesis_block_header, checkpoint_nodes) = {
             match (
                 chain_spec.to_chain_information().map(|(ci, _)| ci), // TODO: don't just throw away the runtime
-                chain_spec.light_sync_state().map(|s| {
-                    chain::chain_information::ValidChainInformation::try_from(
-                        s.to_chain_information(),
-                    )
-                }),
+                chain_spec
+                    .light_sync_state()
+                    .map(|s| s.to_chain_information()),
                 database::decode_database(
                     config.database_content,
                     chain_spec.block_number_bytes().into(),
@@ -1012,7 +1010,7 @@ pub enum AddChainError {
     ChainSpecNeitherGenesisStorageNorCheckpoint,
     /// Checkpoint provided in the chain specification is invalid.
     #[display(fmt = "Invalid checkpoint in chain specification: {_0}")]
-    InvalidCheckpoint(chain_information::ValidityError),
+    InvalidCheckpoint(chain_spec::InvalidCheckpointError),
     /// Failed to build the information about the chain from the genesis storage. This indicates
     /// invalid data in the genesis storage.
     #[display(fmt = "Failed to build genesis chain information: {_0}")]
