@@ -79,8 +79,7 @@ use futures_util::{future, FutureExt as _};
 use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
 use smoldot::{
-    chain::{self, chain_information},
-    chain_spec, header,
+    chain, chain_spec, header,
     informant::HashDisplay,
     libp2p::{connection, multiaddr, peer_id},
 };
