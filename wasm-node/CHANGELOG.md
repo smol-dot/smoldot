@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.7 - 2023-05-25
+
 ### Fixed
 
 - When a runtime contains a `runtime_apis` custom section but no `runtime_version` custom section, or vice-versa, smoldot now falls back to calling `Core_version`. ([#607](https://github.com/smol-dot/smoldot/pull/607))
