@@ -22,7 +22,10 @@
 //! The algorithm for calculating the trie root is roughly:
 //!
 //! ```notrust
+//! TrieRoot = TrieNodeValue(FindBaseTrieWithoutErases(∅))
+//!
 //! TrieNodeValue(Key) = Encode(StorageValue(Key), Child1(Key), ..., Child16(Key))
+//!
 //! ChildN(Key) = TrieNodeValue(
 //!     LongestCommonDenominator(
 //!         FindBaseTrieWithoutErases(Concat(Key, N),
@@ -44,6 +47,7 @@
 use super::storage_diff::TrieDiff;
 use crate::trie;
 
+/// Configuration for [`trie_root_calculator`].
 pub struct Config {
     pub diff: TrieDiff,
 
@@ -55,6 +59,7 @@ pub struct Config {
     pub max_trie_recalculation_depth_hint: usize,
 }
 
+/// Starts a new calculation.
 pub fn trie_root_calculator(config: Config) -> InProgress {
     Box::new(Inner {
         stack: Vec::with_capacity(config.max_trie_recalculation_depth_hint),
