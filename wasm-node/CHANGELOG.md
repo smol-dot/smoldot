@@ -4,7 +4,7 @@
 
 ### Changed
 
-- The parameter of `chainHead_unstable_follow` has been renamed from `runtimeUpdates` to `withRuntime` in accordance with the latest JSON-RPC specification changes.
+- The parameter of `chainHead_unstable_follow` has been renamed from `runtimeUpdates` to `withRuntime` in accordance with the latest JSON-RPC specification changes. ([#624](https://github.com/smol-dot/smoldot/pull/624))
 
 ## 1.0.7 - 2023-05-25
 
