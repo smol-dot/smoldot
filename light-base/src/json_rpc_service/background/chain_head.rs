@@ -100,7 +100,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
     pub(super) async fn chain_head_follow(
         self: &Arc<Self>,
         request_id: (&str, &requests_subscriptions::RequestId),
-        runtime_updates: bool,
+        with_runtime: bool,
     ) {
         let (subscription_id, messages_rx, subscription_start) = match self
             .requests_subscriptions
@@ -126,7 +126,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             }
         };
 
-        let subscription = if runtime_updates {
+        let subscription = if with_runtime {
             let subscribe_all = self
                 .runtime_service
                 .subscribe_all("chainHead_follow", 32, NonZeroUsize::new(32).unwrap())
@@ -312,11 +312,11 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 non_finalized_blocks,
                 pinned_blocks_headers,
                 subscription: match subscription {
-                    either::Left((sub, id)) => Subscription::RuntimeUpdates {
+                    either::Left((sub, id)) => Subscription::WithRuntime {
                         notifications: sub.new_blocks,
                         subscription_id: id,
                     },
-                    either::Right(sub) => Subscription::NoRuntimeUpdates(sub.new_blocks),
+                    either::Right(sub) => Subscription::WithoutRuntime(sub.new_blocks),
                 },
                 log_target,
                 runtime_service,
@@ -707,12 +707,12 @@ struct ChainHeadFollowTask<TPlat: PlatformRef> {
 }
 
 enum Subscription<TPlat: PlatformRef> {
-    RuntimeUpdates {
+    WithRuntime {
         notifications: runtime_service::Subscription<TPlat>,
         subscription_id: runtime_service::SubscriptionId,
     },
     // TODO: better typing?
-    NoRuntimeUpdates(mpsc::Receiver<sync_service::Notification>),
+    WithoutRuntime(mpsc::Receiver<sync_service::Notification>),
 }
 
 impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
@@ -750,10 +750,10 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         loop {
             let outcome = {
                 let next_block = pin::pin!(match &mut self.subscription {
-                    Subscription::RuntimeUpdates { notifications, .. } => {
+                    Subscription::WithRuntime { notifications, .. } => {
                         future::Either::Left(notifications.next().map(either::Left))
                     }
-                    Subscription::NoRuntimeUpdates(notifications) => {
+                    Subscription::WithoutRuntime(notifications) => {
                         future::Either::Right(notifications.next().map(either::Right))
                     }
                 });
@@ -1086,7 +1086,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             } => {
                 // Determine whether the requested block hash is valid and start the call.
                 let pre_runtime_call = match self.subscription {
-                    Subscription::RuntimeUpdates {
+                    Subscription::WithRuntime {
                         subscription_id, ..
                     } => {
                         if !self.pinned_blocks_headers.contains_key(&hash.0) {
@@ -1109,7 +1109,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             .await
                             .ok()
                     }
-                    Subscription::NoRuntimeUpdates(_) => {
+                    Subscription::WithoutRuntime(_) => {
                         requests_subscriptions
                             .respond(
                                 &get_request_id.1,
@@ -1162,7 +1162,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             } => {
                 let valid = {
                     if self.pinned_blocks_headers.remove(&hash.0).is_some() {
-                        if let Subscription::RuntimeUpdates {
+                        if let Subscription::WithRuntime {
                             subscription_id, ..
                         } = self.subscription
                         {
