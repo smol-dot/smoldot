@@ -214,7 +214,7 @@ macro_rules! define_methods {
             /// Panics if the `id_json` isn't valid JSON.
             ///
             pub fn to_json_call_object_parameters(&self, id_json: Option<&str>) -> String {
-                parse::build_call(parse::Call {
+                parse::build_call(&parse::Call {
                     id_json,
                     method: self.name(),
                     // Note that we never skip the `params` field, even if empty. This is an

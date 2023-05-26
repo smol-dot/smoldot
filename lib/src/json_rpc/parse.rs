@@ -54,7 +54,7 @@ pub fn parse_call(call_json: &str) -> Result<Call, ParseError> {
 ///
 /// Panics if the [`Call::id_json`] or [`Call::params_json`] isn't valid JSON.
 ///
-pub fn build_call(call: Call) -> String {
+pub fn build_call(call: &Call) -> String {
     serde_json::to_string(&SerdeCall {
         jsonrpc: SerdeVersion::V2,
         id: call.id_json.map(|id| serde_json::from_str(id).unwrap()),
@@ -65,7 +65,7 @@ pub fn build_call(call: Call) -> String {
 }
 
 /// Decoded JSON-RPC call.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Call<'a> {
     /// JSON-formatted identifier of the request. `None` for notifications.
     pub id_json: Option<&'a str>,
@@ -386,5 +386,37 @@ mod tests {
         assert!(
             super::parse_call(r#"{"jsonrpc":"2.0","id":{},"method":"foo","params":[]}"#).is_err()
         );
+    }
+
+    #[test]
+    fn build_call() {
+        let call = super::Call {
+            id_json: Some("5"),
+            method: "test",
+            params_json: Some("{}"),
+        };
+
+        let encoded = super::build_call(&call);
+        assert_eq!(super::parse_call(&encoded).unwrap(), call);
+    }
+
+    #[test]
+    #[should_panic]
+    fn build_call_panics_invalid_id() {
+        super::build_call(&super::Call {
+            id_json: Some("test"),
+            method: "test",
+            params_json: None,
+        });
+    }
+
+    #[test]
+    #[should_panic]
+    fn build_call_panics_invalid_params() {
+        super::build_call(&super::Call {
+            id_json: Some("5"),
+            method: "test",
+            params_json: Some("invalid"),
+        });
     }
 }
