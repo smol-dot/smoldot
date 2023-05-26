@@ -2405,7 +2405,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "arrayvec 0.7.2",
  "async-lock",
@@ -2491,7 +2491,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot-light"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-lock",
  "async-std",
