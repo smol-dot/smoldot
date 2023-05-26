@@ -60,7 +60,7 @@
 //! fragment represents a change in the list of Grandpa authorities, and a list of signatures of
 //! the previous authorities that certify that this change is correct.
 //! - Verifying the fragments. Each fragment that is successfully verified progresses towards
-//! towards the head of the chain. Even if one fragment is invalid, all the previously-verified
+//! the head of the chain. Even if one fragment is invalid, all the previously-verified
 //! fragments can still be kept, and the warp syncing can resume from there.
 //! - Downloading from a source the runtime code of the final block of the proof.
 //! - Performing some runtime calls in order to obtain the current consensus-related parameters
