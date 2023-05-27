@@ -293,8 +293,9 @@ impl StorageGet {
                 if let trie_root_calculator::InProgress::StorageValue(value_request) =
                     self.inner.root_calculation.take().unwrap()
                 {
-                    self.inner.root_calculation =
-                        Some(value_request.inject_value(value.map(|(v, vers)| (&v[..], vers))));
+                    self.inner.root_calculation = Some(
+                        value_request.inject_value(value.as_ref().map(|(v, vers)| (&v[..], *vers))),
+                    );
                 } else {
                     // We only create a `StorageGet` if the state is `StorageValue`.
                     panic!()
@@ -324,8 +325,8 @@ impl PrefixKeys {
 
     /// Injects the list of keys ordered lexicographically.
     pub fn inject_keys_ordered(
-        mut self,
-        keys: impl Iterator<Item = impl AsRef<[u8]>>,
+        self,
+        _keys: impl Iterator<Item = impl AsRef<[u8]>>,
     ) -> RuntimeHostVm {
         unreachable!()
     }
@@ -728,7 +729,7 @@ impl Inner {
                     if self.root_calculation.is_none() {
                         self.root_calculation = Some(trie_root_calculator::trie_root_calculator(
                             trie_root_calculator::Config {
-                                diff: self.main_trie_changes,
+                                diff: self.main_trie_changes.clone(), // TODO: don't clone?
                                 diff_trie_entries_version: self.state_trie_version,
                                 max_trie_recalculation_depth_hint: 16, // TODO: ?!
                             },
@@ -736,34 +737,39 @@ impl Inner {
                     }
 
                     match self.root_calculation.take().unwrap() {
-                        trie_root_calculator::InProgress::ClosestDescendant(req) => {
-                            self.root_calculation =
-                                Some(trie_root_calculator::InProgress::ClosestDescendant(req));
+                        trie_root_calculator::InProgress::ClosestDescendant(calc_req) => {
+                            self.vm = req.into();
+                            self.root_calculation = Some(
+                                trie_root_calculator::InProgress::ClosestDescendant(calc_req),
+                            );
                             return RuntimeHostVm::NextKey(NextKey {
                                 inner: self,
                                 key_overwrite: None,
                                 keys_removed_so_far: 0,
                             });
                         }
-                        trie_root_calculator::InProgress::StorageValue(req) => {
-                            if req
+                        trie_root_calculator::InProgress::StorageValue(calc_req) => {
+                            self.vm = req.into();
+
+                            if calc_req
                                 .key()
                                 .fold(0, |count, slice| count + slice.as_ref().len())
                                 % 2
                                 == 0
                             {
                                 self.root_calculation =
-                                    Some(trie_root_calculator::InProgress::StorageValue(req));
+                                    Some(trie_root_calculator::InProgress::StorageValue(calc_req));
                                 return RuntimeHostVm::StorageGet(StorageGet { inner: self });
                             } else {
                                 // If the number of nibbles in the key is uneven, we are sure that
                                 // there exists no storage value.
-                                self.root_calculation = Some(req.inject_value(None));
+                                self.root_calculation = Some(calc_req.inject_value(None));
                             }
                         }
-                        trie_root_calculator::InProgress::MerkleValue(req) => {
+                        trie_root_calculator::InProgress::MerkleValue(calc_req) => {
                             // TODO: temporary hack to test if things work; instead propagate this to the outside
-                            self.root_calculation = Some(req.resume_unknown());
+                            self.vm = req.into();
+                            self.root_calculation = Some(calc_req.resume_unknown());
                         }
                         trie_root_calculator::InProgress::Finished { trie_root_hash } => {
                             self.vm = req.resume(Some(&trie_root_hash));

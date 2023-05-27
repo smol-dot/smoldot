@@ -56,7 +56,7 @@
 //!
 
 use alloc::{boxed::Box, vec::Vec};
-use core::{cmp, iter};
+use core::{cmp, iter, ops};
 
 use super::storage_diff::TrieDiff;
 use crate::trie;
@@ -131,11 +131,16 @@ impl ClosestDescendant {
         let mut diff_inserts_lcd_partial_key = None::<&[u8]>;
         {
             // TODO: could be optimized?
-            let prefix = trie::nibbles_to_bytes_suffix_extend(
-                self.key().flat_map(|n| n.as_ref().iter().copied()),
-            )
-            .collect::<Vec<_>>();
-            for (key, erases) in self.0.diff.diff_range_ordered(prefix..) {
+            let prefix_nibbles = self.key().fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            });
+            let prefix = trie::nibbles_to_bytes_suffix_extend(prefix_nibbles.into_iter())
+                .collect::<Vec<_>>();
+            for (key, erases) in self.0.diff.diff_range_ordered::<[u8]>((
+                ops::Bound::Included(&prefix[..]),
+                ops::Bound::Unbounded,
+            )) {
                 if !key.starts_with(&prefix) {
                     break;
                 }
@@ -233,10 +238,13 @@ impl StorageValue {
         // Adjust the storage value to take the diff into account.
         // In other words, we calculate `MaybeStorageValue` from `BaseTrieStorageValue`.
         let maybe_storage_value = if self.key().count() % 2 == 0 {
-            let key_as_u8 = trie::nibbles_to_bytes_suffix_extend(
-                self.key().flat_map(|a| a.as_ref().iter().copied()),
-            )
-            .collect::<Vec<_>>();
+            // TODO: could be optimized?
+            let key_nibbles = self.key().fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            });
+            let key_as_u8 =
+                trie::nibbles_to_bytes_suffix_extend(key_nibbles.into_iter()).collect::<Vec<_>>();
             if let Some((value, _)) = self.0.diff.diff_get(&key_as_u8) {
                 value.map(|v| (v, self.0.diff_trie_entries_version))
             } else {
@@ -258,7 +266,7 @@ impl StorageValue {
                 parent_node.children.push(None);
                 self.0.next()
             }
-            (None, 1, _) => {
+            (None, 1, parent_node) => {
                 // Trie node no longer exists after the diff has been applied, but it has exactly
                 // one child.
                 let child_merkle_value = calculated_elem
@@ -281,21 +289,31 @@ impl StorageValue {
                     }
                 }
             }
-            _ => {
+            (_, _, parent_node) => {
                 // Trie node still exists. Calculate its Merkle value.
+
+                // Due to some borrow checker troubles, we need to calculate the storage value
+                // hash ahead of time if relevant.
+                let storage_value_hash =
+                    if let Some((value, TrieEntryVersion::V1)) = maybe_storage_value {
+                        Some(blake2_rfc::blake2b::blake2b(8, &[], value))
+                    } else {
+                        None
+                    };
                 let merkle_value = trie::trie_node::calculate_merkle_value(
                     trie::trie_node::Decoded {
-                        children: *<&[_; 16]>::try_from(calculated_elem.children.as_ref())
-                            .unwrap_or_else(|_| panic!()),
+                        children: <&[_; 16]>::try_from(calculated_elem.children.as_ref())
+                            .unwrap_or_else(|_| panic!())
+                            .clone(),
                         partial_key: calculated_elem.partial_key.iter().copied(),
                         storage_value: match maybe_storage_value {
                             Some((value, TrieEntryVersion::V0)) => {
                                 trie::trie_node::StorageValue::Unhashed(value)
                             }
-                            Some((value, TrieEntryVersion::V1)) => {
+                            Some((_, TrieEntryVersion::V1)) => {
                                 trie::trie_node::StorageValue::Hashed(
                                     <&[u8; 32]>::try_from(
-                                        blake2_rfc::blake2b::blake2b(8, &[], value).as_bytes(),
+                                        storage_value_hash.as_ref().unwrap().as_bytes(),
                                     )
                                     .unwrap_or_else(|_| panic!()),
                                 )
@@ -332,6 +350,8 @@ pub struct MerkleValue(Box<Inner>);
 impl MerkleValue {
     /// Returns an iterator of slices, which, when joined together, form the full key of the trie
     /// node whose Merkle value must be fetched.
+    ///
+    /// The key is guaranteed to have been injected through [`ClosestDescendant::inject`] earlier.
     pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[Nibble]> + '_> + '_ {
         self.0.current_node_full_key()
     }
@@ -340,7 +360,7 @@ impl MerkleValue {
     ///
     /// This function be used if you are unaware of the Merkle value. The algorithm will perform
     /// the calculation of this Merkle value manually, which takes more time.
-    pub fn resume_unknown(mut self) -> InProgress {
+    pub fn resume_unknown(self) -> InProgress {
         // The element currently being iterated was `Btcd`, and is now switched to being
         // `MaybeNodeKey`. Because a `MerkleValue` is only ever created if the diff doesn't
         // contain any entry below the currently iterated node, we know for sure that
@@ -350,6 +370,9 @@ impl MerkleValue {
 
     /// Indicate the Merkle value of the trie node indicated by [`MerkleValue::key`] and resume
     /// the calculation.
+    ///
+    /// Note that there is no way to indicate that the trie node doesn't exist. This is because the
+    /// node is guaranteed to have been injected through [`ClosestDescendant::inject`] earlier.
     pub fn inject_merkle_value(mut self, merkle_value: &[u8]) -> InProgress {
         // We are after a call to `BaseTrieMerkleValue` in the algorithm shown at the top.
 
@@ -363,7 +386,7 @@ impl MerkleValue {
         });
 
         // Pop the element at the top of the stack, as we know its Merkle value.
-        let Some(current_node) = self.0.stack.pop() else { unreachable!() };
+        self.0.stack.pop();
 
         if let Some(parent_node) = self.0.stack.last_mut() {
             // If the element has a parent, add the Merkle value to its children and resume the
