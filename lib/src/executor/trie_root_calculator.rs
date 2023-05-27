@@ -63,6 +63,8 @@ use crate::trie;
 
 pub use trie::{Nibble, TrieEntryVersion};
 
+mod tests;
+
 /// Configuration for [`trie_root_calculator`].
 pub struct Config {
     /// Diff that is being applied on top of the base trie.
