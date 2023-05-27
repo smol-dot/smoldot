@@ -97,7 +97,7 @@ wasmtime = { version = "8.0.1", default-features = false, features = ["async", "
 
 [dev-dependencies]
 async-std = "1.12.0"
-criterion = "0.4.0"
+criterion = "0.5.1"
 futures-executor = { version = "0.3.28", default-features = false }
 tempfile = "3.5.0"
 wat = "1.0.65"
