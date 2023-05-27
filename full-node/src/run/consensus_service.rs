@@ -1275,7 +1275,7 @@ impl SyncBackground {
 
                             debug_assert!(next_key
                                 .as_ref()
-                                .map_or(true, |k| &**k > req.key().as_ref()));
+                                .map_or(true, |k| &**k >= req.key().as_ref()));
                             verify = req.inject_key(next_key);
                         }
                         all::BlockVerification::FinalizedStoragePrefixKeys(req) => {
