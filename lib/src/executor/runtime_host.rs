@@ -39,13 +39,11 @@
 
 use crate::{
     executor::{self, host, storage_diff, trie_root_calculator, vm},
-    trie::{self, calculate_root},
-    util,
+    trie, util,
 };
 
 use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
 use core::fmt;
-use hashbrown::HashSet;
 
 pub use trie::TrieEntryVersion;
 
@@ -237,7 +235,15 @@ impl StorageGet {
                 if let trie_root_calculator::InProgress::StorageValue(value_request) =
                     self.inner.root_calculation.as_ref().unwrap()
                 {
-                    Three::C(value_request.key().collect::<Vec<_>>())
+                    // TODO: optimize?
+                    let key_nibbles = value_request.key().fold(Vec::new(), |mut a, b| {
+                        a.extend_from_slice(b.as_ref());
+                        a
+                    });
+                    Three::C(
+                        trie::nibbles_to_bytes_suffix_extend(key_nibbles.into_iter())
+                            .collect::<Vec<_>>(),
+                    )
                 } else {
                     // We only create a `StorageGet` if the state is `StorageValue`.
                     panic!()
@@ -287,7 +293,8 @@ impl StorageGet {
                 if let trie_root_calculator::InProgress::StorageValue(value_request) =
                     self.inner.root_calculation.take().unwrap()
                 {
-                    self.inner.root_calculation = Some(value_request.inject_value(value));
+                    self.inner.root_calculation =
+                        Some(value_request.inject_value(value.map(|(v, vers)| (&v[..], vers))));
                 } else {
                     // We only create a `StorageGet` if the state is `StorageValue`.
                     panic!()
@@ -303,6 +310,7 @@ impl StorageGet {
 }
 
 /// Fetching the list of keys with a given prefix is required in order to continue.
+// // TODO: unused, remove entirely
 #[must_use]
 pub struct PrefixKeys {
     inner: Inner,
@@ -311,17 +319,7 @@ pub struct PrefixKeys {
 impl PrefixKeys {
     /// Returns the prefix whose keys to load.
     pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
-        match &self.inner.vm {
-            host::HostVm::ExternalStorageClearPrefix(req) => either::Left(match req.prefix() {
-                // TODO: child tries are not implemented correctly
-                host::StorageKey::MainTrie { key } => key,
-                _ => unreachable!(),
-            }),
-            host::HostVm::ExternalStorageRoot { .. } => either::Right(&[]),
-
-            // We only create a `PrefixKeys` if the state is one of the above.
-            _ => unreachable!(),
-        }
+        &[]
     }
 
     /// Injects the list of keys ordered lexicographically.
@@ -329,41 +327,7 @@ impl PrefixKeys {
         mut self,
         keys: impl Iterator<Item = impl AsRef<[u8]>>,
     ) -> RuntimeHostVm {
-        match self.inner.vm {
-            host::HostVm::ExternalStorageRoot { .. } => {
-                if let calculate_root::RootMerkleValueCalculation::AllKeys(all_keys) =
-                    self.inner.root_calculation.take().unwrap()
-                {
-                    // TODO: overhead
-                    let mut list = keys
-                        .filter(|v| {
-                            self.inner
-                                .main_trie_changes
-                                .diff_get(v.as_ref())
-                                .map_or(true, |(v, _)| v.is_some())
-                        })
-                        .map(|v| v.as_ref().to_vec())
-                        .collect::<HashSet<_, fnv::FnvBuildHasher>>();
-                    // TODO: slow to iterate over everything?
-                    for (key, value, ()) in self.inner.main_trie_changes.diff_iter_unordered() {
-                        if value.is_none() {
-                            continue;
-                        }
-                        list.insert(key.to_owned());
-                    }
-                    self.inner.root_calculation =
-                        Some(all_keys.inject(list.into_iter().map(|k| k.into_iter())));
-                } else {
-                    // We only create a `PrefixKeys` if the state is `AllKeys`.
-                    panic!()
-                }
-            }
-
-            // We only create a `PrefixKeys` if the state is one of the above.
-            _ => unreachable!(),
-        };
-
-        self.inner.run()
+        unreachable!()
     }
 }
 
@@ -386,32 +350,49 @@ impl NextKey {
             return either::Left(key_overwrite);
         }
 
-        match &self.inner.vm {
-            host::HostVm::ExternalStorageNextKey(req) => either::Right(match req.key() {
+        either::Right(match &self.inner.vm {
+            host::HostVm::ExternalStorageNextKey(req) => match req.key() {
                 // TODO: child tries are not implemented correctly
-                host::StorageKey::MainTrie { key } => key,
+                host::StorageKey::MainTrie { key } => either::Left(key),
                 _ => unreachable!(),
-            }),
+            },
+
+            host::HostVm::ExternalStorageRoot(_) => {
+                let Some(trie_root_calculator::InProgress::ClosestDescendant(req)) = &self.inner.root_calculation
+                    else { unreachable!() };
+                // TODO: optimize?
+                let key_as_nibbles = req.key().fold(Vec::new(), |mut a, b| {
+                    a.extend_from_slice(b.as_ref());
+                    a
+                });
+                let key = trie::nibbles_to_bytes_suffix_extend(key_as_nibbles.into_iter())
+                    .collect::<Vec<_>>();
+                either::Right(key)
+            }
 
             // Note that in the case `ExternalStorageClearPrefix`, `key_overwrite` is
             // always `Some`.
             _ => unreachable!(),
-        }
+        })
     }
 
     /// If `true`, then the provided value must the one superior or equal to the requested key.
     /// If `false`, then the provided value must be strictly superior to the requested key.
     pub fn or_equal(&self) -> bool {
-        matches!(self.inner.vm, host::HostVm::ExternalStorageClearPrefix(_))
-            && self.keys_removed_so_far == 0
+        (matches!(self.inner.vm, host::HostVm::ExternalStorageClearPrefix(_))
+            && self.keys_removed_so_far == 0)
+            || matches!(self.inner.vm, host::HostVm::ExternalStorageRoot(_))
     }
+
+    // TODO: add function to indicate whether to include branch nodes
 
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
     pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
         match &self.inner.vm {
             host::HostVm::ExternalStorageClearPrefix(req) => either::Left(req.prefix().into_key()),
-            _ => either::Right(&[][..]),
+            host::HostVm::ExternalStorageRoot(_) => either::Right(either::Left(self.key())),
+            _ => either::Right(either::Right(&[][..])),
         }
     }
 
@@ -482,6 +463,16 @@ impl NextKey {
                 } else {
                     self.inner.vm = req.resume(self.keys_removed_so_far, false);
                 }
+            }
+
+            host::HostVm::ExternalStorageRoot(_) => {
+                let Some(trie_root_calculator::InProgress::ClosestDescendant(req)) = self.inner.root_calculation.take()
+                    else { unreachable!() };
+                // TODO: optimize?
+                let key_as_nibbles =
+                    key.map(|key| trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>());
+                let key_as_nibbles = key_as_nibbles.as_ref().map(|v| &v[..]);
+                self.inner.root_calculation = Some(req.inject(key_as_nibbles));
             }
 
             // We only create a `NextKey` if the state is one of the above.
@@ -738,46 +729,45 @@ impl Inner {
                         self.root_calculation = Some(trie_root_calculator::trie_root_calculator(
                             trie_root_calculator::Config {
                                 diff: self.main_trie_changes,
+                                diff_trie_entries_version: self.state_trie_version,
                                 max_trie_recalculation_depth_hint: 16, // TODO: ?!
                             },
                         ));
                     }
 
                     match self.root_calculation.take().unwrap() {
-                        trie_root_calculator::InProgress::BaseTrieGreaterOrEqual(req) => {
-                            todo!()
+                        trie_root_calculator::InProgress::ClosestDescendant(req) => {
+                            self.root_calculation =
+                                Some(trie_root_calculator::InProgress::ClosestDescendant(req));
+                            return RuntimeHostVm::NextKey(NextKey {
+                                inner: self,
+                                key_overwrite: None,
+                                keys_removed_so_far: 0,
+                            });
                         }
                         trie_root_calculator::InProgress::StorageValue(req) => {
-                            todo!()
+                            if req
+                                .key()
+                                .fold(0, |count, slice| count + slice.as_ref().len())
+                                % 2
+                                == 0
+                            {
+                                self.root_calculation =
+                                    Some(trie_root_calculator::InProgress::StorageValue(req));
+                                return RuntimeHostVm::StorageGet(StorageGet { inner: self });
+                            } else {
+                                // If the number of nibbles in the key is uneven, we are sure that
+                                // there exists no storage value.
+                                self.root_calculation = Some(req.inject_value(None));
+                            }
+                        }
+                        trie_root_calculator::InProgress::MerkleValue(req) => {
+                            // TODO: temporary hack to test if things work; instead propagate this to the outside
+                            self.root_calculation = Some(req.resume_unknown());
                         }
                         trie_root_calculator::InProgress::Finished { trie_root_hash } => {
                             self.vm = req.resume(Some(&trie_root_hash));
-                        } // TODO: remove
-                          /*calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
-                              self.vm = req.into();
-                              self.root_calculation =
-                                  Some(calculate_root::RootMerkleValueCalculation::AllKeys(keys));
-                              return RuntimeHostVm::PrefixKeys(PrefixKeys { inner: self });
-                          }
-                          calculate_root::RootMerkleValueCalculation::StorageValue(value_request) => {
-                              self.vm = req.into();
-                              // TODO: allocating a Vec, meh
-                              if let Some((overlay, ())) = self
-                                  .main_trie_changes
-                                  .diff_get(&value_request.key().collect::<Vec<_>>())
-                              {
-                                  self.root_calculation = Some(
-                                      value_request
-                                          .inject(overlay.map(|v| (v, self.state_trie_version))),
-                                  );
-                              } else {
-                                  self.root_calculation =
-                                      Some(calculate_root::RootMerkleValueCalculation::StorageValue(
-                                          value_request,
-                                      ));
-                                  return RuntimeHostVm::StorageGet(StorageGet { inner: self });
-                              }
-                          }*/
+                        }
                     }
                 }
 

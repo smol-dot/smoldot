@@ -55,10 +55,13 @@
 //! nodes that are currently being calculated.
 //!
 
+use alloc::{boxed::Box, vec::Vec};
 use core::{cmp, iter};
 
 use super::storage_diff::TrieDiff;
 use crate::trie;
+
+pub use trie::{Nibble, TrieEntryVersion};
 
 /// Configuration for [`trie_root_calculator`].
 pub struct Config {
@@ -66,7 +69,7 @@ pub struct Config {
     pub diff: TrieDiff,
 
     /// Version to use for the storage values written by [`Config::diff`].
-    pub diff_trie_entries_version: trie::TrieEntryVersion,
+    pub diff_trie_entries_version: TrieEntryVersion,
 
     /// Depth level of the deepest node whose value needs to be calculated. The root node has a
     /// depth level of 1, its children a depth level of 2, etc.
@@ -109,13 +112,13 @@ pub struct ClosestDescendant(Box<Inner>);
 impl ClosestDescendant {
     /// Returns an iterator of slices, which, when joined together, form the full key of the trie
     /// node whose closest descendant must be fetched.
-    pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[trie::Nibble]> + '_> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[Nibble]> + '_> + '_ {
         self.0.current_node_full_key()
     }
 
     /// Indicates the key of the closest descendant to the key indicated by
     /// [`ClosestDescendant::key`] and resume the calculation.
-    pub fn inject(mut self, closest_descendant: Option<&[trie::Nibble]>) -> InProgress {
+    pub fn inject(mut self, closest_descendant: Option<&[Nibble]>) -> InProgress {
         // We are after a call to `BaseTrieClosestDescendant`.
         debug_assert!(self.0.stack.last().map_or(true, |n| n.children.len() != 16));
 
@@ -200,7 +203,7 @@ pub struct StorageValue(Box<Inner>);
 impl StorageValue {
     /// Returns an iterator of slices, which, when joined together, form the full key of the trie
     /// node whose storage value must be fetched.
-    pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[trie::Nibble]> + '_> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[Nibble]> + '_> + '_ {
         self.0.current_node_full_key()
     }
 
@@ -208,7 +211,7 @@ impl StorageValue {
     /// [`StorageValue::key`] and resume the calculation.
     pub fn inject_value(
         mut self,
-        base_trie_storage_value: Option<(&[u8], trie::TrieEntryVersion)>,
+        base_trie_storage_value: Option<(&[u8], TrieEntryVersion)>,
     ) -> InProgress {
         // We have finished obtaining `BaseTrieStorageValue` and we are at the last step of
         // `ClosestDescendantMerkleValue` in the algorithm shown at the top.
@@ -286,10 +289,10 @@ impl StorageValue {
                             .unwrap_or_else(|_| panic!()),
                         partial_key: calculated_elem.partial_key.iter().copied(),
                         storage_value: match maybe_storage_value {
-                            Some((value, trie::TrieEntryVersion::V0)) => {
+                            Some((value, TrieEntryVersion::V0)) => {
                                 trie::trie_node::StorageValue::Unhashed(value)
                             }
-                            Some((value, trie::TrieEntryVersion::V1)) => {
+                            Some((value, TrieEntryVersion::V1)) => {
                                 trie::trie_node::StorageValue::Hashed(
                                     <&[u8; 32]>::try_from(
                                         blake2_rfc::blake2b::blake2b(8, &[], value).as_bytes(),
@@ -329,7 +332,7 @@ pub struct MerkleValue(Box<Inner>);
 impl MerkleValue {
     /// Returns an iterator of slices, which, when joined together, form the full key of the trie
     /// node whose Merkle value must be fetched.
-    pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[trie::Nibble]> + '_> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[Nibble]> + '_> + '_ {
         self.0.current_node_full_key()
     }
 
@@ -400,12 +403,12 @@ struct Inner {
     diff: TrieDiff,
 
     /// Same value as [`Config::diff_trie_entries_version`].
-    diff_trie_entries_version: trie::TrieEntryVersion,
+    diff_trie_entries_version: TrieEntryVersion,
 }
 
 struct InProgressNode {
     /// Partial key of the node currently being calculated.
-    partial_key: Vec<trie::Nibble>,
+    partial_key: Vec<Nibble>,
 
     /// Merkle values of the children of the node. Filled up to 16 elements, then the storage
     /// value is requested. Each element is `Some` or `None` depending on whether a child exists.
@@ -431,13 +434,11 @@ impl Inner {
 
     /// Iterator of arrays which, when joined together, form the full key of the node currently
     /// being iterated.
-    fn current_node_full_key(
-        &'_ self,
-    ) -> impl Iterator<Item = impl AsRef<[trie::Nibble]> + '_> + '_ {
+    fn current_node_full_key(&'_ self) -> impl Iterator<Item = impl AsRef<[Nibble]> + '_> + '_ {
         self.stack.iter().flat_map(move |node| {
             let maybe_child_nibble_u8 =
                 u8::try_from(node.children.len()).unwrap_or_else(|_| unreachable!());
-            let child_nibble = trie::Nibble::try_from(maybe_child_nibble_u8).ok();
+            let child_nibble = Nibble::try_from(maybe_child_nibble_u8).ok();
 
             iter::once(either::Right(&node.partial_key))
                 .chain(child_nibble.map(|n| either::Left([n])).into_iter())
