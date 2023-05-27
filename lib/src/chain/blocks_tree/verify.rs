@@ -23,8 +23,7 @@
 use crate::{
     chain::{chain_information, fork_tree},
     executor::{host, storage_diff},
-    header,
-    verify,
+    header, verify,
 };
 
 use super::{
@@ -1044,6 +1043,12 @@ impl<T> StorageNextKey<T> {
     /// If `false`, then the provided value must be strictly superior to the requested key.
     pub fn or_equal(&self) -> bool {
         self.inner.or_equal()
+    }
+
+    /// If `true`, then the search must include both branch nodes and storage nodes. If `false`,
+    /// the search only covers storage nodes.
+    pub fn branch_nodes(&self) -> bool {
+        self.inner.branch_nodes()
     }
 
     /// Returns the prefix the next key must start with. If the next key doesn't start with the

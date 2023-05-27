@@ -623,6 +623,15 @@ impl NextKey {
         }
     }
 
+    /// If `true`, then the search must include both branch nodes and storage nodes. If `false`,
+    /// the search only covers storage nodes.
+    pub fn branch_nodes(&self) -> bool {
+        match &self.0 {
+            NextKeyInner::Stage1(inner, _) => inner.branch_nodes(),
+            NextKeyInner::Stage2(inner, _) => inner.branch_nodes(),
+        }
+    }
+
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
     pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {

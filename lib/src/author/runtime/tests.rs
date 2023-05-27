@@ -65,6 +65,7 @@ fn block_building_works() {
                 builder = get.inject_value(value.map(|v| (v, super::TrieEntryVersion::V0)));
             }
             super::BlockBuild::NextKey(next_key) => {
+                // TODO: doesn't take branch_nodes() into account
                 let result = genesis_storage.iter().fold(None, |iter, (key, _)| {
                     if key < next_key.key().as_ref()
                         || (key == next_key.key().as_ref() && !next_key.or_equal())

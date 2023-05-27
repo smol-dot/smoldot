@@ -385,7 +385,12 @@ impl NextKey {
             || matches!(self.inner.vm, host::HostVm::ExternalStorageRoot(_))
     }
 
-    // TODO: add function to indicate whether to include branch nodes
+    /// If `true`, then the search must include both branch nodes and storage nodes. If `false`,
+    /// the search only covers storage nodes.
+    // TODO: the key should be as nibbles rather than &[u8]
+    pub fn branch_nodes(&self) -> bool {
+        matches!(self.inner.vm, host::HostVm::ExternalStorageRoot(_))
+    }
 
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.

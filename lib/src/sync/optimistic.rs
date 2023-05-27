@@ -1051,10 +1051,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                         None => shared.inner.finalized_runtime.take().unwrap(),
                     };
 
-                    inner = Inner::Step2(req.resume(
-                        parent_runtime,
-                        shared.block_body.iter(),
-                    ));
+                    inner = Inner::Step2(req.resume(parent_runtime, shared.block_body.iter()));
                 }
 
                 Inner::Step2(blocks_tree::BodyVerifyStep2::Finished {
@@ -1494,6 +1491,12 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
         self.inner.or_equal()
     }
 
+    /// If `true`, then the search must include both branch nodes and storage nodes. If `false`,
+    /// the search only covers storage nodes.
+    pub fn branch_nodes(&self) -> bool {
+        self.inner.branch_nodes()
+    }
+
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
     pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
@@ -1529,6 +1532,8 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
                     self.inner.or_equal(),
                 )
         };
+
+        // TODO: /!\ doesn't take branch_nodes() into account
 
         match search {
             storage_diff::StorageNextKey::Found(mut k) => {

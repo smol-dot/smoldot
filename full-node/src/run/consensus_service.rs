@@ -1253,7 +1253,11 @@ impl SyncBackground {
                                         ops::Bound::Unbounded,
                                     )
                                     .filter(|node_index| {
-                                        self.finalized_block_storage.is_storage(*node_index)
+                                        if req.branch_nodes() {
+                                            true
+                                        } else {
+                                            self.finalized_block_storage.is_storage(*node_index)
+                                        }
                                     })
                                     .next()
                                     .map(|node_index| {
