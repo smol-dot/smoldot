@@ -21,7 +21,6 @@ use crate::{
     author::{aura, runtime},
     executor::host,
     header,
-    trie::calculate_root,
     verify::inherents,
 };
 

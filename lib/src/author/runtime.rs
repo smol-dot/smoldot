@@ -50,7 +50,6 @@ mod tests;
 use crate::{
     executor::{host, runtime_host, storage_diff},
     header,
-    trie::calculate_root,
     util,
     verify::inherents,
 };

@@ -18,9 +18,7 @@
 use crate::{
     chain::chain_information,
     executor::{self, host, runtime_host, storage_diff, vm},
-    header,
-    trie::calculate_root,
-    util,
+    header, util,
     verify::{aura, babe, inherents},
 };
 

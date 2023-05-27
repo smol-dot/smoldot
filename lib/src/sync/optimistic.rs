@@ -49,7 +49,6 @@ use crate::{
     chain::{blocks_tree, chain_information},
     executor::{host, storage_diff},
     header,
-    trie::calculate_root,
 };
 
 use alloc::{

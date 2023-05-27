@@ -24,7 +24,6 @@ use crate::{
     chain::{chain_information, fork_tree},
     executor::{host, storage_diff},
     header,
-    trie::calculate_root,
     verify,
 };
 
