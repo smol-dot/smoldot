@@ -39,7 +39,7 @@
 // TODO: more docs
 
 use alloc::{collections::BTreeMap, vec::Vec};
-use core::{cmp, fmt, iter, ops};
+use core::{borrow::Borrow, cmp, fmt, iter, ops};
 use hashbrown::HashMap;
 
 #[derive(Clone)]
@@ -165,6 +165,21 @@ impl<T> TrieDiff<T> {
         self,
     ) -> impl ExactSizeIterator<Item = (Vec<u8>, Option<Vec<u8>>, T)> {
         self.hashmap.into_iter().map(|(k, (v, ud))| (k, v, ud))
+    }
+
+    /// Returns an iterator to all the entries in the diff within a given range.
+    ///
+    /// Each iterator element is the given and a boolean. This boolean is `true` if the diff
+    /// overwrites this entry, or `false` if it erases the underlying value.
+    pub fn diff_range_ordered<U: ?Sized>(
+        &self,
+        range: impl ops::RangeBounds<U>,
+    ) -> impl Iterator<Item = (&[u8], bool)> + Clone
+    where
+        U: Ord,
+        Vec<u8>: Borrow<U>,
+    {
+        self.btree.range(range).map(|(k, erases)| (&k[..], *erases))
     }
 
     /// Returns the storage key that immediately follows the provided `key`. Must be passed the

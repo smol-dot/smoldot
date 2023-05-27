@@ -102,7 +102,8 @@ pub enum InProgress {
 }
 
 /// In order to continue the calculation, must find in the base trie the closest descendant
-/// (including branch node) to a certain key in the trie.
+/// (including branch node) to a certain key in the trie. This can be equal to the requested key
+/// itself.
 pub struct ClosestDescendant(Box<Inner>);
 
 impl ClosestDescendant {
@@ -112,18 +113,40 @@ impl ClosestDescendant {
         self.0.current_node_full_key()
     }
 
+    /// Indicates the key of the closest descendant to the key indicated by
+    /// [`ClosestDescendant::key`] and resume the calculation.
     pub fn inject(mut self, closest_descendant: Option<&[trie::Nibble]>) -> InProgress {
         // We are after a call to `BaseTrieClosestDescendant`.
         debug_assert!(self.0.stack.last().map_or(true, |n| n.children.len() != 16));
 
-        // Now calculate `DiffContainsEntryWithPrefix` and
-        // `LongestCommonDenominator(DiffInsertsNodesWithPrefix)`.
-        // TODO: do properly
-        let diff_erases_a_descendant = false;
-        let diff_inserts_lcd_partial_key = None::<&[trie::Nibble]>;
-
         // Length of the key returned by `key()`.
         let self_key_len = self.key().fold(0, |acc, k| acc + k.as_ref().len());
+
+        // Now calculate `DiffContainsEntryWithPrefix` and
+        // `LongestCommonDenominator(DiffInsertsNodesWithPrefix)`.
+        let mut diff_erases_a_descendant = false;
+        let mut diff_inserts_lcd_partial_key = None::<&[u8]>;
+        {
+            // TODO: could be optimized?
+            let prefix = trie::nibbles_to_bytes_suffix_extend(
+                self.key().flat_map(|n| n.as_ref().iter().copied()),
+            )
+            .collect::<Vec<_>>();
+            for (key, erases) in self.0.diff.diff_range_ordered(prefix..) {
+                if !key.starts_with(&prefix) {
+                    break;
+                }
+                if erases {
+                    diff_erases_a_descendant = true;
+                } else {
+                    let key_adjusted = &key[(self_key_len / 2)..];
+                    diff_inserts_lcd_partial_key = match diff_inserts_lcd_partial_key.take() {
+                        Some(v) => Some(&key_adjusted[..cmp::min(key_adjusted.len(), v.len())]),
+                        None => Some(key_adjusted),
+                    };
+                }
+            }
+        };
 
         // If the base trie contains a descendant but the diff doesn't contain any descendant,
         // jump to calling `BaseTrieMerkleValue`.
@@ -141,10 +164,10 @@ impl ClosestDescendant {
         let maybe_node_partial_key = match (diff_inserts_lcd_partial_key, closest_descendant) {
             (Some(cpk), Some(d)) => {
                 let d = &d[self_key_len..];
-                &d[..cmp::min(d.len(), cpk.len())]
+                d[..cmp::min(d.len(), cpk.len() * 2)].to_vec()
             }
-            (Some(cpk), None) => cpk,
-            (None, Some(d)) => &d[self_key_len..],
+            (Some(cpk), None) => trie::bytes_to_nibbles(cpk.iter().copied()).collect::<Vec<_>>(),
+            (None, Some(d)) => d[self_key_len..].to_vec(),
             (None, None) => {
                 // If neither the base trie nor the diff contain any descendant, then skip ahead.
                 return if let Some(parent_node) = self.0.stack.last_mut() {
@@ -164,7 +187,7 @@ impl ClosestDescendant {
 
         // Push `MaybeNode` onto the stack and continue the algorithm.
         self.0.stack.push(InProgressNode {
-            partial_key: maybe_node_partial_key.to_vec(),
+            partial_key: maybe_node_partial_key,
             children: arrayvec::ArrayVec::new(),
         });
         self.0.next()
