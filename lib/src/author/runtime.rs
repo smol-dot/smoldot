@@ -84,10 +84,6 @@ pub struct Config<'a> {
     /// > **Note**: In the case of Aura and Babe, contains the slot being claimed.
     pub consensus_digest_log_item: ConfigPreRuntime<'a>,
 
-    /// Optional cache corresponding to the storage trie root hash calculation coming from the
-    /// parent block verification.
-    pub main_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
-
     /// Capacity to reserve for the number of extrinsics. Should be higher than the approximate
     /// number of extrinsics that are going to be applied.
     pub block_body_capacity: usize,
@@ -125,8 +121,6 @@ pub struct Success {
     pub state_trie_version: TrieEntryVersion,
     /// List of changes to the off-chain storage that this block performs.
     pub offchain_storage_changes: storage_diff::TrieDiff,
-    /// Cache used for calculating the main trie root of the new block.
-    pub main_trie_root_calculation_cache: calculate_root::CalculationCache,
     /// Concatenation of all the log messages printed by the runtime.
     pub logs: String,
 }
@@ -190,7 +184,6 @@ pub fn build_block(config: Config) -> BlockBuild {
             }
             .scale_encoding(config.block_number_bytes)
         },
-        main_trie_root_calculation_cache: config.main_trie_root_calculation_cache,
         storage_main_trie_changes: Default::default(),
         offchain_storage_changes: Default::default(),
         max_log_level: config.max_log_level,
@@ -297,7 +290,6 @@ impl BlockBuild {
                         parent_runtime: success.virtual_machine.into_prototype(),
                         storage_main_trie_changes: success.storage_main_trie_changes,
                         offchain_storage_changes: success.offchain_storage_changes,
-                        main_trie_root_calculation_cache: success.main_trie_root_calculation_cache,
                     });
                 }
 
@@ -327,9 +319,6 @@ impl BlockBuild {
                         virtual_machine: success.virtual_machine.into_prototype(),
                         function_to_call: "BlockBuilder_apply_extrinsic",
                         parameter: iter::once(extrinsic),
-                        main_trie_root_calculation_cache: Some(
-                            success.main_trie_root_calculation_cache,
-                        ),
                         storage_main_trie_changes: success.storage_main_trie_changes,
                         offchain_storage_changes: success.offchain_storage_changes,
                         max_log_level: shared.max_log_level,
@@ -349,7 +338,6 @@ impl BlockBuild {
                         parent_runtime: success.virtual_machine.into_prototype(),
                         storage_main_trie_changes: success.storage_main_trie_changes,
                         offchain_storage_changes: success.offchain_storage_changes,
-                        main_trie_root_calculation_cache: success.main_trie_root_calculation_cache,
                     });
                 }
 
@@ -419,8 +407,6 @@ impl BlockBuild {
                             parent_runtime: success.virtual_machine.into_prototype(),
                             storage_main_trie_changes: success.storage_main_trie_changes,
                             offchain_storage_changes: success.offchain_storage_changes,
-                            main_trie_root_calculation_cache: success
-                                .main_trie_root_calculation_cache,
                         },
                     };
                 }
@@ -438,7 +424,6 @@ impl BlockBuild {
                         storage_main_trie_changes: success.storage_main_trie_changes,
                         state_trie_version: success.state_trie_version,
                         offchain_storage_changes: success.offchain_storage_changes,
-                        main_trie_root_calculation_cache: success.main_trie_root_calculation_cache,
                         logs: shared.logs,
                     }));
                 }
@@ -483,7 +468,6 @@ pub struct InherentExtrinsics {
     parent_runtime: host::HostVmPrototype,
     storage_main_trie_changes: storage_diff::TrieDiff,
     offchain_storage_changes: storage_diff::TrieDiff,
-    main_trie_root_calculation_cache: calculate_root::CalculationCache,
 }
 
 impl InherentExtrinsics {
@@ -525,7 +509,6 @@ impl InherentExtrinsics {
                     .map(either::Left)
                     .chain(encoded_list.map(either::Right))
             },
-            main_trie_root_calculation_cache: Some(self.main_trie_root_calculation_cache),
             storage_main_trie_changes: self.storage_main_trie_changes,
             offchain_storage_changes: self.offchain_storage_changes,
             max_log_level: self.shared.max_log_level,
@@ -547,7 +530,6 @@ pub struct ApplyExtrinsic {
     parent_runtime: host::HostVmPrototype,
     storage_main_trie_changes: storage_diff::TrieDiff,
     offchain_storage_changes: storage_diff::TrieDiff,
-    main_trie_root_calculation_cache: calculate_root::CalculationCache,
 }
 
 impl ApplyExtrinsic {
@@ -559,7 +541,6 @@ impl ApplyExtrinsic {
             virtual_machine: self.parent_runtime,
             function_to_call: "BlockBuilder_apply_extrinsic",
             parameter: iter::once(&extrinsic),
-            main_trie_root_calculation_cache: Some(self.main_trie_root_calculation_cache),
             storage_main_trie_changes: self.storage_main_trie_changes,
             offchain_storage_changes: self.offchain_storage_changes,
             max_log_level: self.shared.max_log_level,
@@ -583,7 +564,6 @@ impl ApplyExtrinsic {
             virtual_machine: self.parent_runtime,
             function_to_call: "BlockBuilder_finalize_block",
             parameter: iter::empty::<&[u8]>(),
-            main_trie_root_calculation_cache: Some(self.main_trie_root_calculation_cache),
             storage_main_trie_changes: self.storage_main_trie_changes,
             offchain_storage_changes: self.offchain_storage_changes,
             max_log_level: self.shared.max_log_level,

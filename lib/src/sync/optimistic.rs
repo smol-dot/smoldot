@@ -166,10 +166,6 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
     /// [`OptimisticSyncInner::finalized_runtime`].
     best_runtime: Option<host::HostVmPrototype>,
 
-    /// Cache of calculation for the storage trie of the best block.
-    /// Providing this value when verifying a block considerably speeds up the verification.
-    main_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
-
     /// See [`Config::download_ahead_blocks`].
     download_ahead_blocks: NonZeroU32,
 
@@ -302,7 +298,6 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
                 finalized_runtime: config.full.map(|f| f.finalized_runtime),
                 best_to_finalized_storage_diff: storage_diff::TrieDiff::empty(),
                 best_runtime: None,
-                main_trie_root_calculation_cache: None,
                 sources: HashMap::with_capacity_and_hasher(
                     config.sources_capacity,
                     Default::default(),
@@ -948,7 +943,6 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                 self.inner.make_requests_obsolete(&self.chain);
                 self.inner.best_to_finalized_storage_diff = Default::default();
                 self.inner.best_runtime = None;
-                self.inner.main_trie_root_calculation_cache = None;
 
                 let previous_best_height = self.chain.best_block_header().number;
                 BlockVerification::Reset {
@@ -1061,7 +1055,6 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     inner = Inner::Step2(req.resume(
                         parent_runtime,
                         shared.block_body.iter(),
-                        shared.inner.main_trie_root_calculation_cache.take(),
                     ));
                 }
 
@@ -1069,7 +1062,6 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     storage_main_trie_changes,
                     state_trie_version,
                     offchain_storage_changes,
-                    main_trie_root_calculation_cache,
                     parent_runtime,
                     new_runtime,
                     insert,
@@ -1103,8 +1095,6 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                         }
                     }
 
-                    shared.inner.main_trie_root_calculation_cache =
-                        Some(main_trie_root_calculation_cache);
                     shared
                         .inner
                         .best_to_finalized_storage_diff
@@ -1226,7 +1216,6 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     let mut inner = shared.inner.with_requests_obsoleted(&chain);
                     inner.best_to_finalized_storage_diff = Default::default();
                     inner.best_runtime = None;
-                    inner.main_trie_root_calculation_cache = None;
 
                     break BlockVerification::Reset {
                         previous_best_height: old_chain.best_block_header().number,
@@ -1257,7 +1246,6 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     let mut inner = shared.inner.with_requests_obsoleted(&chain);
                     inner.best_to_finalized_storage_diff = Default::default();
                     inner.best_runtime = None;
-                    inner.main_trie_root_calculation_cache = None;
 
                     break BlockVerification::Reset {
                         previous_best_height: old_chain.best_block_header().number,
@@ -1290,7 +1278,6 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     let mut inner = shared.inner.with_requests_obsoleted(&chain);
                     inner.best_to_finalized_storage_diff = Default::default();
                     inner.best_runtime = None;
-                    inner.main_trie_root_calculation_cache = None;
 
                     break BlockVerification::Reset {
                         previous_best_height: old_chain.best_block_header().number,
@@ -1349,7 +1336,6 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
                 let mut inner = self.inner.with_requests_obsoleted(&chain);
                 inner.best_to_finalized_storage_diff = Default::default();
                 inner.best_runtime = None;
-                inner.main_trie_root_calculation_cache = None;
 
                 let previous_best_height = chain.best_block_header().number;
                 return (

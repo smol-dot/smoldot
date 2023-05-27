@@ -624,7 +624,6 @@ impl<T> VerifyContext<T> {
                     storage_main_trie_changes: success.storage_main_trie_changes,
                     state_trie_version: success.state_trie_version,
                     offchain_storage_changes: success.offchain_storage_changes,
-                    main_trie_root_calculation_cache: success.main_trie_root_calculation_cache,
                     insert: BodyInsert(Box::new(BodyInsertInner {
                         context: self,
                         is_new_best,
@@ -753,18 +752,10 @@ impl<T> BodyVerifyRuntimeRequired<T> {
     ///
     /// `parent_runtime` must be a Wasm virtual machine containing the runtime code of the parent
     /// block.
-    ///
-    /// The value of `main_trie_root_calculation_cache` can be the one provided by the
-    /// [`BodyVerifyStep2::Finished`] variant when the parent block has been verified. `None` can
-    /// be passed if this information isn't available.
-    ///
-    /// While `main_trie_root_calculation_cache` is optional, providing a value will considerably
-    /// speed up the calculation.
     pub fn resume(
         self,
         parent_runtime: host::HostVmPrototype,
         block_body: impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone,
-        main_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
     ) -> BodyVerifyStep2<T> {
         let parent_block_header = if let Some(parent_tree_index) = self.context.parent_tree_index {
             &self
@@ -839,7 +830,6 @@ impl<T> BodyVerifyRuntimeRequired<T> {
             )
             .unwrap(),
             block_body,
-            main_trie_root_calculation_cache,
             max_log_level: 0,
         });
 
@@ -883,10 +873,6 @@ pub enum BodyVerifyStep2<T> {
         state_trie_version: TrieEntryVersion,
         /// List of changes to the off-chain storage that this block performs.
         offchain_storage_changes: storage_diff::TrieDiff,
-        /// Cache of calculation for the storage trie of the best block.
-        /// Pass this value to [`BodyVerifyRuntimeRequired::resume`] when verifying a children of
-        /// this block in order to considerably speed up the verification.
-        main_trie_root_calculation_cache: calculate_root::CalculationCache,
         /// Use to insert the block in the chain.
         insert: BodyInsert<T>,
     },

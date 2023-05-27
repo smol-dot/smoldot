@@ -332,7 +332,6 @@ pub fn validate_transaction(
                     digest: header::DigestRef::empty(),
                 }
                 .scale_encoding(config.block_number_bytes),
-                main_trie_root_calculation_cache: None,
                 storage_main_trie_changes: storage_diff::TrieDiff::empty(),
                 offchain_storage_changes: storage_diff::TrieDiff::empty(),
                 max_log_level: config.max_log_level,
@@ -370,7 +369,6 @@ pub fn validate_transaction(
                     config.source,
                     &header::hash_from_scale_encoded_header(config.scale_encoded_header),
                 ),
-                main_trie_root_calculation_cache: None,
                 storage_main_trie_changes: storage_diff::TrieDiff::empty(),
                 offchain_storage_changes: storage_diff::TrieDiff::empty(),
                 max_log_level: config.max_log_level,
@@ -462,9 +460,6 @@ impl Query {
                         ),
                         storage_main_trie_changes: success.storage_main_trie_changes,
                         offchain_storage_changes: success.offchain_storage_changes,
-                        main_trie_root_calculation_cache: Some(
-                            success.main_trie_root_calculation_cache,
-                        ),
                         max_log_level: info.max_log_level,
                     });
 

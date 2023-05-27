@@ -67,10 +67,6 @@ pub struct Config<'a, TBody> {
     /// Body of the block to verify.
     pub block_body: TBody,
 
-    /// Optional cache corresponding to the storage trie root hash calculation of the parent
-    /// block.
-    pub main_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
-
     /// Maximum log level of the runtime.
     ///
     /// > **Note**: This value is opaque from the point of the view of the client, and the runtime
@@ -131,9 +127,6 @@ pub struct Success {
 
     /// List of changes to the off-chain storage that this block performs.
     pub offchain_storage_changes: storage_diff::TrieDiff,
-
-    /// Cache used for calculating the main trie root.
-    pub main_trie_root_calculation_cache: calculate_root::CalculationCache,
 
     /// Concatenation of all the log messages printed by the runtime.
     pub logs: String,
@@ -369,7 +362,6 @@ pub fn verify(
                     .map(either::Left)
                     .chain(encoded_list.map(either::Right))
             },
-            main_trie_root_calculation_cache: config.main_trie_root_calculation_cache,
             storage_main_trie_changes: Default::default(),
             offchain_storage_changes: Default::default(),
             max_log_level: config.max_log_level,
@@ -447,9 +439,6 @@ impl VerifyInner {
                             virtual_machine: success.virtual_machine.into_prototype(),
                             function_to_call: "Core_execute_block",
                             parameter: iter::once(&self.execution_not_started.as_ref().unwrap()),
-                            main_trie_root_calculation_cache: Some(
-                                success.main_trie_root_calculation_cache,
-                            ),
                             storage_main_trie_changes: success.storage_main_trie_changes,
                             offchain_storage_changes: success.offchain_storage_changes,
                             max_log_level: 0,
@@ -522,8 +511,6 @@ impl VerifyInner {
                                 offchain_storage_changes: success.offchain_storage_changes,
                                 storage_main_trie_changes: success.storage_main_trie_changes,
                                 state_trie_version: success.state_trie_version,
-                                main_trie_root_calculation_cache: success
-                                    .main_trie_root_calculation_cache,
                             });
                         }
                     }
@@ -535,7 +522,6 @@ impl VerifyInner {
                         storage_main_trie_changes: success.storage_main_trie_changes,
                         state_trie_version: success.state_trie_version,
                         offchain_storage_changes: success.offchain_storage_changes,
-                        main_trie_root_calculation_cache: success.main_trie_root_calculation_cache,
                         logs: success.logs,
                     }));
                 }
@@ -676,7 +662,6 @@ pub struct RuntimeCompilation {
     storage_main_trie_changes: storage_diff::TrieDiff,
     state_trie_version: TrieEntryVersion,
     offchain_storage_changes: storage_diff::TrieDiff,
-    main_trie_root_calculation_cache: calculate_root::CalculationCache,
     logs: String,
     heap_pages: vm::HeapPages,
     consensus_success: SuccessConsensus,
@@ -716,7 +701,6 @@ impl RuntimeCompilation {
             storage_main_trie_changes: self.storage_main_trie_changes,
             state_trie_version: self.state_trie_version,
             offchain_storage_changes: self.offchain_storage_changes,
-            main_trie_root_calculation_cache: self.main_trie_root_calculation_cache,
             logs: self.logs,
         }))
     }
