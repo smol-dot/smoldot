@@ -2524,9 +2524,12 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
         match inner {
             optimistic::BlockVerification::NewBest {
                 sync,
-                storage_main_trie_changes,
-                state_trie_version,
-                offchain_storage_changes,
+                full:
+                    Some(optimistic::BlockVerificationSuccessFull {
+                        storage_main_trie_changes,
+                        state_trie_version,
+                        offchain_storage_changes,
+                    }),
                 ..
             } => {
                 // TODO: transition to all_forks
@@ -2541,6 +2544,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     },
                 }
             }
+            optimistic::BlockVerification::NewBest { full: None, .. } => unreachable!(),
             optimistic::BlockVerification::Reset { sync, reason, .. } => BlockVerification::Error {
                 sync: AllSync {
                     inner: AllSyncInner::Optimistic { inner: sync },
