@@ -758,16 +758,20 @@ impl SyncBackground {
         // Actual block production now happening.
         let block = {
             // TODO: no, the best block could be the finalized block
-            let best_block_storage = self.sync
-                [(self.sync.best_block_number(), &self.sync.best_block_hash())]
-                .as_ref()
-                .unwrap()
-                .clone();
+            let (parent_block_storage_arc, parent_runtime_arc) = {
+                let NonFinalizedBlock::Verified {
+                    storage: parent_block_storage_arc,
+                    runtime: parent_runtime_arc,
+                } = &self.sync[(self.sync.best_block_number(), &self.sync.best_block_hash())] else { unreachable!() };
+                (parent_block_storage_arc.clone(), parent_runtime_arc.clone())
+            };
+            let parent_block_storage = &*parent_block_storage_arc;
+            let parent_runtime = parent_runtime_arc.try_lock().unwrap().take().unwrap();
+
+            //  TODO: must put back the parent_runtime at the end of the authoring, but the authoring doesn't yield it back at the moment
 
             // Start the block authoring process.
             let mut block_authoring = {
-                let parent_runtime = best_block_storage_access.runtime().clone(); // TODO: overhead here with cloning, but solving it requires very tricky API changes in syncing code
-
                 authoring_start.start(author::build::AuthoringStartConfig {
                     block_number_bytes: self.sync.block_number_bytes(),
                     parent_hash: &self.sync.best_block_hash(),
@@ -846,21 +850,10 @@ impl SyncBackground {
 
                     // Access to the best block storage.
                     author::build::BuilderAuthoring::StorageGet(req) => {
-                        let value = match best_block_storage
-                            .node(bytes_to_nibbles(req.key().as_ref().iter().copied()))
-                        {
-                            trie_structure::Entry::Occupied(
-                                trie_structure::NodeAccess::Storage(node),
-                            ) => {
-                                let (val, vers) = node.into_user_data().as_ref().unwrap();
-                                Some((&val[..], *vers))
-                            }
-                            trie_structure::Entry::Occupied(
-                                trie_structure::NodeAccess::Branch(_),
-                            )
-                            | trie_structure::Entry::Vacant(_) => None,
-                        };
-
+                        let value = parent_block_storage
+                            .node_by_full_key(bytes_to_nibbles(req.key().as_ref().iter().copied()))
+                            .and_then(|node_index| parent_block_storage[node_index].as_ref())
+                            .map(|(val, vers)| (&val[..], *vers));
                         block_authoring =
                             req.inject_value(value.map(|(val, vers)| (iter::once(val), vers)));
                         continue;
@@ -871,7 +864,7 @@ impl SyncBackground {
                     author::build::BuilderAuthoring::PrefixKeys(prefix_key) => {
                         // TODO: to_vec() :-/ range() immediately calculates the range of keys so there's no borrowing issue, but the take_while needs to keep req borrowed, which isn't possible
                         let prefix = prefix_key.prefix().as_ref().to_vec();
-                        let keys = best_block_storage
+                        let keys = parent_block_storage
                             .range(ops::Bound::Included(&prefix), ops::Bound::Unbounded)
                             .filter(|node_index| {
                                 self.finalized_block_storage.is_storage(*node_index)
@@ -1121,20 +1114,29 @@ impl SyncBackground {
             all::ProcessOne::VerifyBodyHeader(verify) => {
                 let hash_to_verify = verify.hash();
                 let height_to_verify = verify.height();
-                let NonFinalizedBlock::Verified {
-                    storage: parent_block_storage_arc,
-                    runtime: parent_runtime_arc,
-                }= verify.parent_user_data().map(|b| b.clone()) else { unreachable!() };
-                let parent_block_storage = parent_block_storage_arc
+                let parent_info = verify.parent_user_data().map(|b| {
+                    let NonFinalizedBlock::Verified {
+                        storage,
+                        runtime,
+                    } = b else { unreachable!() };
+                    (storage.clone(), runtime.clone())
+                });
+                let parent_block_storage = parent_info
                     .as_ref()
-                    .map(|arc| &**arc)
+                    .map(|arcs| &*arcs.0)
                     .unwrap_or(&self.finalized_block_storage);
+                let parent_runtime_arc = parent_info
+                    .as_ref()
+                    .map(|i| i.1.clone())
+                    .unwrap_or_else(|| self.finalized_runtime.clone());
                 let parent_runtime = parent_runtime_arc.try_lock().unwrap().take().unwrap();
                 let scale_encoded_header_to_verify = verify.scale_encoded_header().to_owned(); // TODO: copy :-/
 
                 let _jaeger_span = self.jaeger_service.block_body_verify_span(&hash_to_verify);
 
-                let mut verify = verify.start(unix_time, parent_runtime, None);
+                let mut verify =
+                    verify.start(unix_time, parent_runtime, NonFinalizedBlock::NotVerified);
+
                 // TODO: check this block against the chain spec's badBlocks
                 loop {
                     match verify {
