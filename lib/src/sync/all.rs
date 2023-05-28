@@ -1783,6 +1783,18 @@ impl<'a, TRq, TSrc, TBl> ops::Index<(u64, &'a [u8; 32])> for AllSync<TRq, TSrc, 
     }
 }
 
+impl<'a, TRq, TSrc, TBl> ops::IndexMut<(u64, &'a [u8; 32])> for AllSync<TRq, TSrc, TBl> {
+    #[track_caller]
+    fn index_mut(&mut self, (block_height, block_hash): (u64, &'a [u8; 32])) -> &mut TBl {
+        match &mut self.inner {
+            AllSyncInner::AllForks(inner) => inner[(block_height, block_hash)].as_mut().unwrap(),
+            AllSyncInner::Optimistic { inner, .. } => &mut inner[block_hash],
+            AllSyncInner::GrandpaWarpSync { .. } => panic!("unknown block"), // No block is ever stored during the warp syncing.
+            AllSyncInner::Poisoned => unreachable!(),
+        }
+    }
+}
+
 /// See [`AllSync::desired_requests`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]

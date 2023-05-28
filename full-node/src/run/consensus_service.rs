@@ -1105,9 +1105,10 @@ impl SyncBackground {
                 let height_to_verify = verify.height();
                 let parent_block_storage_arc = verify
                     .parent_user_data()
-                    .map(|storage| storage.unwrap().clone());
+                    .map(|storage| storage.as_ref().unwrap().clone());
                 let parent_block_storage = parent_block_storage_arc
-                    .map(|arc| &*arc)
+                    .as_ref()
+                    .map(|arc| &**arc)
                     .unwrap_or(&self.finalized_block_storage);
                 let scale_encoded_header_to_verify = verify.scale_encoded_header().to_owned(); // TODO: copy :-/
 
@@ -1136,7 +1137,7 @@ impl SyncBackground {
                         }
                         all::BlockVerification::Success {
                             is_new_best,
-                            sync: sync_out,
+                            sync: mut sync_out,
                             storage_main_trie_changes,
                             state_trie_version,
                             ..
@@ -1268,6 +1269,27 @@ impl SyncBackground {
                                 }
                             }
 
+                            self.database
+                                .with_database_detached(move |database| {
+                                    // TODO: overhead for building the SCALE encoding of the header
+                                    let result = database.insert(
+                                        &scale_encoded_header_to_verify,
+                                        is_new_best,
+                                        iter::empty::<Vec<u8>>(), // TODO:,no /!\
+                                        storage_main_trie_changes
+                                            .diff_iter_unordered()
+                                            .map(|(k, v, ())| (k, v)),
+                                        u8::from(state_trie_version),
+                                    );
+
+                                    match result {
+                                        Ok(()) => {}
+                                        Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
+                                        Err(err) => panic!("{}", err),
+                                    }
+                                })
+                                .await;
+
                             return (self, true);
                         }
 
@@ -1353,7 +1375,7 @@ impl SyncBackground {
                     (
                         sync_out,
                         all::FinalityProofVerifyOutcome::NewFinalized {
-                            finalized_blocks,
+                            mut finalized_blocks,
                             updates_best_block,
                         },
                     ) => {
@@ -1373,69 +1395,18 @@ impl SyncBackground {
                             self.block_authoring = None;
                         }
 
-                        // TODO: maybe write in a separate task? but then we can't access the finalized storage immediately after?
-                        for block in &finalized_blocks {
-                            for (key, value, ()) in block
-                                .full
-                                .as_ref()
-                                .unwrap()
-                                .storage_main_trie_changes
-                                .diff_iter_unordered()
-                            {
-                                if let Some(value) = value {
-                                    match self
-                                        .finalized_block_storage
-                                        .node(bytes_to_nibbles(key.iter().copied()))
-                                    {
-                                        trie_structure::Entry::Occupied(mut node) => {
-                                            *node.user_data() = Some((
-                                                value.to_owned(),
-                                                block.full.as_ref().unwrap().state_trie_version,
-                                            ));
-
-                                            if let trie_structure::NodeAccess::Branch(node) = node {
-                                                node.insert_storage_value();
-                                            }
-                                        }
-                                        trie_structure::Entry::Vacant(node) => {
-                                            node.insert_storage_value().insert(
-                                                Some((
-                                                    value.to_owned(),
-                                                    block.full.as_ref().unwrap().state_trie_version,
-                                                )),
-                                                None,
-                                            );
-                                        }
-                                    }
-                                } else {
-                                    // TODO: if a block inserts a new value then removes it, the key will remain in the diff anyway; either solve this or document this
-                                    if let trie_structure::Entry::Occupied(
-                                        trie_structure::NodeAccess::Storage(node),
-                                    ) = self
-                                        .finalized_block_storage
-                                        .node(bytes_to_nibbles(key.iter().copied()))
-                                    {
-                                        if let trie_structure::Remove::StorageToBranch(
-                                            mut new_node,
-                                        ) = node.remove()
-                                        {
-                                            *new_node.user_data() = None;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
+                        let finalized_block = finalized_blocks.pop().unwrap();
                         self.finalized_block_storage =
-                            Arc::try_unwrap(finalized_blocks.last().unwrap().user_data.unwrap())
+                            Arc::try_unwrap(finalized_block.user_data.unwrap())
                                 .unwrap_or_else(|_| unreachable!());
-                        let new_finalized_hash = finalized_blocks
-                            .last()
-                            .map(|lf| lf.header.hash(self.sync.block_number_bytes()))
-                            .unwrap();
-                        let block_number_bytes = self.sync.block_number_bytes();
-                        database_blocks(&self.database, finalized_blocks, block_number_bytes).await;
-                        database_set_finalized(&self.database, new_finalized_hash).await;
+                        let new_finalized_hash =
+                            finalized_block.header.hash(self.sync.block_number_bytes());
+                        // TODO: what if best block changed?
+                        self.database
+                            .with_database_detached(move |database| {
+                                database.set_finalized(&new_finalized_hash).unwrap();
+                            })
+                            .await;
                         (self, true)
                     }
                     (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitPending) => {
@@ -1497,57 +1468,4 @@ impl SyncBackground {
             }
         }
     }
-}
-
-/// Writes blocks to the database
-async fn database_blocks(
-    database: &database_thread::DatabaseThread,
-    blocks: Vec<all::Block<()>>,
-    block_number_bytes: usize,
-) {
-    database
-        .with_database_detached(move |database| {
-            for block in blocks {
-                // TODO: overhead for building the SCALE encoding of the header
-                let result = database.insert(
-                    &block.header.scale_encoding(block_number_bytes).fold(
-                        Vec::new(),
-                        |mut a, b| {
-                            a.extend_from_slice(b.as_ref());
-                            a
-                        },
-                    ),
-                    true, // TODO: is_new_best?
-                    block.full.as_ref().unwrap().body.iter(),
-                    block
-                        .full
-                        .as_ref()
-                        .unwrap()
-                        .storage_main_trie_changes
-                        .diff_iter_unordered()
-                        .map(|(k, v, ())| (k, v)),
-                    u8::from(block.full.as_ref().unwrap().state_trie_version),
-                );
-
-                match result {
-                    Ok(()) => {}
-                    Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
-                    Err(err) => panic!("{}", err),
-                }
-            }
-        })
-        .await
-}
-
-/// Writes blocks to the database
-async fn database_set_finalized(
-    database: &database_thread::DatabaseThread,
-    finalized_block_hash: [u8; 32],
-) {
-    // TODO: what if best block changed?
-    database
-        .with_database_detached(move |database| {
-            database.set_finalized(&finalized_block_hash).unwrap();
-        })
-        .await
 }
