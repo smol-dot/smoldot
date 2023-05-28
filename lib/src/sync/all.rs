@@ -347,20 +347,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         }
     }
 
-    /// Returns access to the storage of the best block.
-    ///
-    /// Returns `None` if [`Config::full`] was `None`.
-    pub fn best_block_storage(&self) -> Option<BlockStorage<TRq, TSrc, TBl>> {
-        match &self.inner {
-            AllSyncInner::AllForks(_) => None, // TODO: not implemented
-            AllSyncInner::Optimistic { inner } => Some(BlockStorage {
-                inner: BlockStorageInner::Optimistic(inner.best_block_storage()?),
-            }),
-            AllSyncInner::GrandpaWarpSync { .. } => None, // TODO: unclear API
-            AllSyncInner::Poisoned => unreachable!(),
-        }
-    }
-
     /// Returns the header of all known non-finalized blocks in the chain without any specific
     /// order.
     pub fn non_finalized_blocks_unordered(&self) -> impl Iterator<Item = header::HeaderRef> {
@@ -2027,49 +2013,6 @@ pub struct GrandpaWarpSyncResponseFragment<'a> {
     pub scale_encoded_justification: &'a [u8],
 }
 
-/// See [`AllSync::best_block_storage`].
-pub struct BlockStorage<'a, TRq, TSrc, TBl> {
-    inner: BlockStorageInner<'a, TRq, TSrc, TBl>,
-}
-
-enum BlockStorageInner<'a, TRq, TSrc, TBl> {
-    Optimistic(
-        optimistic::BlockStorage<'a, OptimisticRequestExtra<TRq>, OptimisticSourceExtra<TSrc>, TBl>,
-    ),
-}
-
-impl<'a, TRq, TSrc, TBl> BlockStorage<'a, TRq, TSrc, TBl> {
-    /// Returns the runtime built against this block.
-    pub fn runtime(&self) -> &host::HostVmPrototype {
-        match &self.inner {
-            BlockStorageInner::Optimistic(inner) => inner.runtime(),
-        }
-    }
-
-    /// Returns the storage value at the given key. `None` if this key doesn't have any value.
-    pub fn get<'val: 'a>(
-        &'val self, // TODO: unclear lifetime
-        key: &[u8],
-        or_finalized: impl FnOnce() -> Option<(&'val [u8], TrieEntryVersion)>,
-    ) -> Option<(&'val [u8], TrieEntryVersion)> {
-        match &self.inner {
-            BlockStorageInner::Optimistic(inner) => inner.get(key, or_finalized),
-        }
-    }
-
-    pub fn prefix_keys_ordered<'k: 'a>(
-        &'k self, // TODO: unclear lifetime
-        prefix: &'k [u8],
-        in_finalized_ordered: impl Iterator<Item = impl AsRef<[u8]> + 'k> + 'k,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + 'k> + 'k {
-        match &self.inner {
-            BlockStorageInner::Optimistic(inner) => {
-                inner.prefix_keys_ordered(prefix, in_finalized_ordered)
-            }
-        }
-    }
-}
-
 /// Outcome of calling [`AllSync::process_one`].
 pub enum ProcessOne<TRq, TSrc, TBl> {
     /// No block ready to be processed.
@@ -2169,16 +2112,6 @@ pub struct Block<TBl> {
 pub struct BlockFull {
     /// List of SCALE-encoded extrinsics that form the block's body.
     pub body: Vec<Vec<u8>>,
-
-    /// Changes to the storage made by this block compared to its parent.
-    pub storage_main_trie_changes: storage_diff::TrieDiff,
-
-    /// State trie version indicated by the runtime. All the storage changes indicated by
-    /// [`BlockFull::storage_main_trie_changes`] should store this version alongside with them.
-    pub state_trie_version: TrieEntryVersion,
-
-    /// List of changes to the off-chain storage that this block performs.
-    pub offchain_storage_changes: storage_diff::TrieDiff,
 }
 
 pub struct HeaderVerify<TRq, TSrc, TBl> {
@@ -2385,12 +2318,7 @@ impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
                                 header: b.header,
                                 justifications: b.justifications,
                                 user_data: b.user_data,
-                                full: b.full.map(|b| BlockFull {
-                                    body: b.body,
-                                    offchain_storage_changes: b.offchain_storage_changes,
-                                    storage_main_trie_changes: b.storage_main_trie_changes,
-                                    state_trie_version: b.state_trie_version,
-                                }),
+                                full: b.full.map(|b| BlockFull { body: b.body }),
                             })
                             .collect(),
                         updates_best_block: false,
@@ -2496,6 +2424,13 @@ impl<TRq, TSrc, TBl> HeaderBodyVerify<TRq, TSrc, TBl> {
         }
     }
 
+    /// Returns the hash of the parent of the block to be verified.
+    pub fn parent_hash(&self) -> [u8; 32] {
+        match &self.inner {
+            HeaderBodyVerifyInner::Optimistic(verify) => verify.parent_hash(),
+        }
+    }
+
     /// Returns the SCALE-encoded header of the block about to be verified.
     pub fn scale_encoded_header(&self) -> &[u8] {
         match &self.inner {
@@ -2525,6 +2460,14 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
     Success {
         /// True if the newly-verified block is considered the new best block.
         is_new_best: bool,
+        /// Changes to the storage made by this block compared to its parent.
+        storage_main_trie_changes: storage_diff::TrieDiff,
+        /// State trie version indicated by the runtime. All the storage changes indicated by
+        /// [`BlockVerification::Success::storage_main_trie_changes`] should store this version
+        /// alongside with them.
+        state_trie_version: TrieEntryVersion,
+        /// List of changes to the off-chain storage that this block performs.
+        offchain_storage_changes: storage_diff::TrieDiff,
         /// State machine yielded back. Use to continue the processing.
         sync: AllSync<TRq, TSrc, TBl>,
     },
@@ -2539,16 +2482,16 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
         user_data: TBl,
     },
 
-    /// Loading a storage value of the finalized block is required in order to continue.
-    FinalizedStorageGet(StorageGet<TRq, TSrc, TBl>),
+    /// Loading a storage value of the parent block is required in order to continue.
+    ParentStorageGet(StorageGet<TRq, TSrc, TBl>),
 
-    /// Fetching the list of keys of the finalized block with a given prefix is required in order
+    /// Fetching the list of keys of the parent block with a given prefix is required in order
     /// to continue.
-    FinalizedStoragePrefixKeys(StoragePrefixKeys<TRq, TSrc, TBl>),
+    ParentStoragePrefixKeys(StoragePrefixKeys<TRq, TSrc, TBl>),
 
-    /// Fetching the key of the finalized block storage that follows a given one is required in
+    /// Fetching the key of the parent block storage that follows a given one is required in
     /// order to continue.
-    FinalizedStorageNextKey(StorageNextKey<TRq, TSrc, TBl>),
+    ParentStorageNextKey(StorageNextKey<TRq, TSrc, TBl>),
 
     /// Compiling a runtime is required in order to continue.
     RuntimeCompilation(RuntimeCompilation<TRq, TSrc, TBl>),
@@ -2579,10 +2522,19 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
         user_data: TBl,
     ) -> Self {
         match inner {
-            optimistic::BlockVerification::NewBest { sync, .. } => {
+            optimistic::BlockVerification::NewBest {
+                sync,
+                storage_main_trie_changes,
+                state_trie_version,
+                offchain_storage_changes,
+                ..
+            } => {
                 // TODO: transition to all_forks
                 BlockVerification::Success {
                     is_new_best: true,
+                    storage_main_trie_changes,
+                    state_trie_version,
+                    offchain_storage_changes,
                     sync: AllSync {
                         inner: AllSyncInner::Optimistic { inner: sync },
                         shared,
@@ -2613,22 +2565,22 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                 },
                 user_data,
             },
-            optimistic::BlockVerification::FinalizedStorageGet(inner) => {
-                BlockVerification::FinalizedStorageGet(StorageGet {
+            optimistic::BlockVerification::ParentStorageGet(inner) => {
+                BlockVerification::ParentStorageGet(StorageGet {
                     inner,
                     shared,
                     user_data,
                 })
             }
-            optimistic::BlockVerification::FinalizedStoragePrefixKeys(inner) => {
-                BlockVerification::FinalizedStoragePrefixKeys(StoragePrefixKeys {
+            optimistic::BlockVerification::ParentStoragePrefixKeys(inner) => {
+                BlockVerification::ParentStoragePrefixKeys(StoragePrefixKeys {
                     inner,
                     shared,
                     user_data,
                 })
             }
-            optimistic::BlockVerification::FinalizedStorageNextKey(inner) => {
-                BlockVerification::FinalizedStorageNextKey(StorageNextKey {
+            optimistic::BlockVerification::ParentStorageNextKey(inner) => {
+                BlockVerification::ParentStorageNextKey(StorageNextKey {
                     inner,
                     shared,
                     user_data,
