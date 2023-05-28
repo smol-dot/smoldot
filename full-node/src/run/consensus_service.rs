@@ -743,6 +743,7 @@ impl SyncBackground {
             // TODO: no, the best block could be the finalized block
             let best_block_storage = self.sync
                 [(self.sync.best_block_number(), &self.sync.best_block_hash())]
+                .as_ref()
                 .unwrap()
                 .clone();
 
@@ -1294,21 +1295,12 @@ impl SyncBackground {
                         }
 
                         all::BlockVerification::ParentStorageGet(req) => {
-                            let value = match parent_block_storage
-                                .node(bytes_to_nibbles(req.key().as_ref().iter().copied()))
-                            {
-                                trie_structure::Entry::Occupied(
-                                    trie_structure::NodeAccess::Storage(node),
-                                ) => {
-                                    let (val, vers) = node.into_user_data().as_ref().unwrap();
-                                    Some((&val[..], *vers))
-                                }
-                                trie_structure::Entry::Occupied(
-                                    trie_structure::NodeAccess::Branch(_),
-                                )
-                                | trie_structure::Entry::Vacant(_) => None,
-                            };
-
+                            let value = parent_block_storage
+                                .node_by_full_key(bytes_to_nibbles(
+                                    req.key().as_ref().iter().copied(),
+                                ))
+                                .and_then(|node_index| parent_block_storage[node_index].as_ref())
+                                .map(|(val, vers)| (&val[..], *vers));
                             verify = req.inject_value(value);
                         }
                         all::BlockVerification::ParentStorageNextKey(req) => {
