@@ -756,7 +756,7 @@ impl SyncBackground {
         };
 
         // Actual block production now happening.
-        let block = {
+        let (new_block_header, new_block_body, authoring_logs) = {
             // TODO: no, the best block could be the finalized block
             let (parent_block_storage_arc, parent_runtime_arc) = {
                 let NonFinalizedBlock::Verified {
@@ -767,8 +767,6 @@ impl SyncBackground {
             };
             let parent_block_storage = &*parent_block_storage_arc;
             let parent_runtime = parent_runtime_arc.try_lock().unwrap().take().unwrap();
-
-            //  TODO: must put back the parent_runtime at the end of the authoring, but the authoring doesn't yield it back at the moment
 
             // Start the block authoring process.
             let mut block_authoring = {
@@ -803,8 +801,8 @@ impl SyncBackground {
                             &data_to_sign,
                         );
 
-                        match sign_future.await {
-                            Ok(signature) => break seal.inject_sr25519_signature(signature),
+                        let success = match sign_future.await {
+                            Ok(signature) => seal.inject_sr25519_signature(signature),
                             Err(error) => {
                                 // Because the keystore is subject to race conditions, it is
                                 // possible for this situation to happen if the key has been
@@ -815,11 +813,22 @@ impl SyncBackground {
                                 self.block_authoring = None;
                                 return;
                             }
-                        }
+                        };
+
+                        // Put back the parent runtime that we extracted.
+                        *parent_runtime_arc.try_lock().unwrap() = Some(success.parent_runtime);
+
+                        break (success.scale_encoded_header, success.body, success.logs);
                     }
 
-                    author::build::BuilderAuthoring::Error(error) => {
+                    author::build::BuilderAuthoring::Error {
+                        error,
+                        parent_runtime,
+                    } => {
                         // Block authoring process stopped because of an error.
+
+                        // Put back the parent runtime that we extracted.
+                        *parent_runtime_arc.try_lock().unwrap() = Some(parent_runtime);
 
                         // In order to prevent the block authoring from restarting immediately
                         // after and failing again repeatedly, we switch the block authoring to
@@ -888,12 +897,12 @@ impl SyncBackground {
         };
 
         // Block has now finished being generated.
-        let new_block_hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+        let new_block_hash = header::hash_from_scale_encoded_header(&new_block_header);
         log::info!(
             "block-generated; hash={}; body_len={}; runtime_logs={:?}",
             HashDisplay(&new_block_hash),
-            block.body.len(),
-            block.logs
+            new_block_body.len(),
+            authoring_logs
         );
         let _jaeger_span = self
             .jaeger_service
@@ -923,7 +932,7 @@ impl SyncBackground {
         // the local node is a source of block similar to networking peers.
         match self.sync.block_announce(
             self.block_author_sync_source,
-            block.scale_encoded_header.clone(),
+            new_block_header.clone(),
             true, // Since the new block is a child of the current best block, it always becomes the new best.
         ) {
             all::BlockAnnounceOutcome::HeaderVerify
@@ -939,8 +948,8 @@ impl SyncBackground {
         self.authored_block = Some((
             parent_number + 1,
             new_block_hash,
-            block.scale_encoded_header,
-            block.body,
+            new_block_header,
+            new_block_body,
         ));
     }
 
