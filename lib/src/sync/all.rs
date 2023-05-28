@@ -99,16 +99,9 @@ pub struct Config {
     /// block requests.
     pub download_ahead_blocks: NonZeroU32,
 
-    /// If `Some`, the block bodies and storage are also synchronized. Contains the extra
-    /// configuration.
-    pub full: Option<ConfigFull>,
-}
-
-/// See [`Config::full`].
-#[derive(Debug)]
-pub struct ConfigFull {
-    /// Compiled runtime code of the finalized block.
-    pub finalized_runtime: host::HostVmPrototype,
+    /// If `true`, the block bodies and storage are also synchronized and the block bodies are
+    /// verified.
+    pub full_mode: bool,
 }
 
 /// Identifier for a source in the [`AllSync`].
@@ -167,10 +160,8 @@ pub struct AllSync<TRq, TSrc, TBl> {
 impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Initializes a new state machine.
     pub fn new(config: Config) -> Self {
-        let is_full = config.full.is_some();
-
         AllSync {
-            inner: if let Some(config_full) = config.full {
+            inner: if config.full_mode {
                 AllSyncInner::Optimistic {
                     inner: optimistic::OptimisticSync::new(optimistic::Config {
                         chain_information: config.chain_information,
@@ -178,9 +169,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         sources_capacity: config.sources_capacity,
                         blocks_capacity: config.blocks_capacity,
                         download_ahead_blocks: config.download_ahead_blocks,
-                        full: Some(optimistic::ConfigFull {
-                            finalized_runtime: config_full.finalized_runtime,
-                        }),
+                        full_mode: config.full_mode,
                     }),
                 }
             } else {
@@ -205,7 +194,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                                 sources_capacity: config.sources_capacity,
                                 blocks_capacity: config.blocks_capacity,
                                 download_ahead_blocks: config.download_ahead_blocks,
-                                full: None,
+                                full_mode: false,
                             }),
                         }
                     }
@@ -214,7 +203,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             shared: Shared {
                 sources: slab::Slab::with_capacity(config.sources_capacity),
                 requests: slab::Slab::with_capacity(config.sources_capacity),
-                is_full,
+                full_mode: config.full_mode,
                 sources_capacity: config.sources_capacity,
                 blocks_capacity: config.blocks_capacity,
                 max_disjoint_headers: config.max_disjoint_headers,
@@ -850,7 +839,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         (
                             sync[inner_source_id].outer_source_id,
                             &src_user_data.user_data,
-                            all_forks_request_convert(rq_params, self.shared.is_full),
+                            all_forks_request_convert(rq_params, self.shared.full_mode),
                         )
                     },
                 );
@@ -862,7 +851,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     (
                         inner[rq_detail.source_id].outer_source_id,
                         &inner[rq_detail.source_id].user_data,
-                        optimistic_request_convert(rq_detail, self.shared.is_full),
+                        optimistic_request_convert(rq_detail, self.shared.full_mode),
                     )
                 });
 
@@ -2476,11 +2465,12 @@ impl<TRq, TSrc, TBl> HeaderBodyVerify<TRq, TSrc, TBl> {
     pub fn start(
         self,
         now_from_unix_epoch: Duration,
+        parent_runtime: host::HostVmPrototype,
         user_data: TBl,
     ) -> BlockVerification<TRq, TSrc, TBl> {
         match self.inner {
             HeaderBodyVerifyInner::Optimistic(verify) => BlockVerification::from_inner(
-                verify.start(now_from_unix_epoch),
+                verify.start(now_from_unix_epoch, Some(parent_runtime)),
                 self.shared,
                 user_data,
             ),
@@ -2502,6 +2492,11 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
         state_trie_version: TrieEntryVersion,
         /// List of changes to the off-chain storage that this block performs.
         offchain_storage_changes: storage_diff::TrieDiff,
+        /// Runtime of the parent, as was provided at the start of the verification.
+        parent_runtime: host::HostVmPrototype,
+        /// If `Some`, the block has modified the runtime compared to its parent. Contains the new
+        /// runtime.
+        new_runtime: Option<host::HostVmPrototype>,
         /// State machine yielded back. Use to continue the processing.
         sync: AllSync<TRq, TSrc, TBl>,
     },
@@ -2510,6 +2505,8 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
     Error {
         /// State machine yielded back. Use to continue the processing.
         sync: AllSync<TRq, TSrc, TBl>,
+        /// Runtime of the parent, as was provided at the start of the verification.
+        parent_runtime: host::HostVmPrototype,
         /// Error that happened.
         error: BlockVerificationError,
         /// User data that was passed to [`HeaderVerify::perform`] and is unused.
@@ -2563,6 +2560,8 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                         storage_main_trie_changes,
                         state_trie_version,
                         offchain_storage_changes,
+                        parent_runtime,
+                        new_runtime,
                     }),
                 ..
             } => {
@@ -2572,6 +2571,8 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     storage_main_trie_changes,
                     state_trie_version,
                     offchain_storage_changes,
+                    parent_runtime,
+                    new_runtime,
                     sync: AllSync {
                         inner: AllSyncInner::Optimistic { inner: sync },
                         shared,
@@ -2579,11 +2580,17 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                 }
             }
             optimistic::BlockVerification::NewBest { full: None, .. } => unreachable!(),
-            optimistic::BlockVerification::Reset { sync, reason, .. } => BlockVerification::Error {
+            optimistic::BlockVerification::Reset {
+                sync,
+                reason,
+                parent_runtime,
+                ..
+            } => BlockVerification::Error {
                 sync: AllSync {
                     inner: AllSyncInner::Optimistic { inner: sync },
                     shared,
                 },
+                parent_runtime: parent_runtime.unwrap(),
                 error: match reason {
                     optimistic::ResetCause::InvalidHeader(err) => {
                         BlockVerificationError::InvalidHeader(err)
@@ -2804,8 +2811,8 @@ struct Shared<TRq> {
     sources: slab::Slab<SourceMapping>,
     requests: slab::Slab<RequestMapping<TRq>>,
 
-    /// True if full mode.
-    is_full: bool,
+    /// See [`Config::full_mode`].
+    full_mode: bool,
 
     /// Value passed through [`Config::sources_capacity`].
     sources_capacity: usize,

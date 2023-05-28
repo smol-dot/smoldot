@@ -231,36 +231,36 @@ impl ConsensusService {
                 // the chain and the machine of the user.
                 NonZeroU32::new(2000).unwrap()
             },
-            full: Some(all::ConfigFull {
-                finalized_runtime: {
-                    // Builds the runtime of the finalized block.
-                    // Assumed to always be valid, otherwise the block wouldn't have been
-                    // saved in the database, hence the large number of unwraps here.
-                    let heap_pages = executor::storage_heap_pages_to_value(
-                        finalized_block_storage
-                            .node(bytes_to_nibbles(b":heappages".iter().copied()))
-                            .into_occupied()
-                            .and_then(|node| node.into_user_data().as_ref())
-                            .map(|(hp, _)| &hp[..]),
-                    )
-                    .unwrap();
-                    let (module, _) = finalized_block_storage
-                        .node(bytes_to_nibbles(b":code".iter().copied()))
-                        .into_occupied()
-                        .unwrap()
-                        .into_user_data()
-                        .as_ref()
-                        .unwrap();
-                    executor::host::HostVmPrototype::new(executor::host::Config {
-                        module,
-                        heap_pages,
-                        exec_hint: executor::vm::ExecHint::CompileAheadOfTime, // TODO: probably should be decided by the optimisticsync
-                        allow_unresolved_imports: false,
-                    })
-                    .unwrap()
-                },
-            }),
+            full_mode: true,
         });
+
+        let finalized_runtime = {
+            // Builds the runtime of the finalized block.
+            // Assumed to always be valid, otherwise the block wouldn't have been
+            // saved in the database, hence the large number of unwraps here.
+            let heap_pages = executor::storage_heap_pages_to_value(
+                finalized_block_storage
+                    .node(bytes_to_nibbles(b":heappages".iter().copied()))
+                    .into_occupied()
+                    .and_then(|node| node.into_user_data().as_ref())
+                    .map(|(hp, _)| &hp[..]),
+            )
+            .unwrap();
+            let (module, _) = finalized_block_storage
+                .node(bytes_to_nibbles(b":code".iter().copied()))
+                .into_occupied()
+                .unwrap()
+                .into_user_data()
+                .as_ref()
+                .unwrap();
+            executor::host::HostVmPrototype::new(executor::host::Config {
+                module,
+                heap_pages,
+                exec_hint: executor::vm::ExecHint::CompileAheadOfTime, // TODO: probably should be decided by the optimisticsync
+                allow_unresolved_imports: false,
+            })
+            .unwrap()
+        };
 
         let block_author_sync_source = sync.add_source(None, best_block_number, best_block_hash);
 
@@ -275,6 +275,7 @@ impl ConsensusService {
             slot_duration_author_ratio: config.slot_duration_author_ratio,
             keystore: config.keystore,
             finalized_block_storage,
+            finalized_runtime: Arc::new(Mutex::new(Some(finalized_runtime))),
             network_service: config.network_service.0,
             network_chain_index: config.network_service.1,
             to_background_rx,
@@ -318,8 +319,7 @@ struct SyncBackground {
     /// if this is the "special source" representing the local block authoring. Only one source
     /// must contain `None` and its id must be [`SyncBackground::block_author_sync_source`].
     ///
-    /// Each block holds the state of its storage, or `None` if the block hasn't been verified
-    /// yet.
+    /// Each block holds its runtime and the state of its storage if it has been verified.
     ///
     /// Some of the sources can represent networking peers that have already been disconnected. If
     /// that is the case, no new request is started against these sources but existing requests
@@ -330,11 +330,7 @@ struct SyncBackground {
     /// Each on-going request has a corresponding background task that sends its result to
     /// [`SyncBackground::block_requests_finished_rx`].
     // TODO: very unoptimized to have a copy of the storage for each block; store in db instead
-    sync: all::AllSync<
-        (),
-        Option<NetworkSourceInfo>,
-        Option<Arc<trie_structure::TrieStructure<Option<(Vec<u8>, TrieEntryVersion)>>>>,
-    >,
+    sync: all::AllSync<(), Option<NetworkSourceInfo>, NonFinalizedBlock>,
 
     /// Source within the [`SyncBackground::sync`] to use to import locally-authored blocks.
     block_author_sync_source: all::SourceId,
@@ -371,6 +367,13 @@ struct SyncBackground {
     /// the verification, and also makes it impossible to insert blocks in the database in
     /// parallel of this verification.
     finalized_block_storage: trie_structure::TrieStructure<Option<(Vec<u8>, TrieEntryVersion)>>,
+
+    /// Runtime of the latest finalized block.
+    ///
+    /// The runtime is extracted when necessary then put back it place.
+    ///
+    /// The `Arc` is shared with [`NonFinalizedBlock::Verified::runtime`].
+    finalized_runtime: Arc<Mutex<Option<executor::host::HostVmPrototype>>>,
 
     /// Used to receive messages from the frontend service, and to detect when it shuts down.
     to_background_rx: mpsc::Receiver<ToBackground>,
@@ -417,6 +420,20 @@ struct SyncBackground {
 
     /// How to report events about blocks.
     jaeger_service: Arc<jaeger_service::JaegerService>,
+}
+
+#[derive(Clone)]
+enum NonFinalizedBlock {
+    NotVerified,
+    Verified {
+        storage: Arc<trie_structure::TrieStructure<Option<(Vec<u8>, TrieEntryVersion)>>>,
+
+        /// Runtime of the block. Generally either identical to its parent's runtime, or a
+        /// different one.
+        ///
+        /// The `Arc` is shared with [`SyncBackground::finalized_runtime`].
+        runtime: Arc<Mutex<Option<executor::host::HostVmPrototype>>>,
+    },
 }
 
 /// Information about a source in the sync state machine.
@@ -658,7 +675,7 @@ impl SyncBackground {
                             .into_iter()
                             .map(|j| all::Justification { engine_id: j.engine_id, justification: j.justification })
                             .collect(),
-                        user_data: None,
+                        user_data: NonFinalizedBlock::NotVerified,
                     })));
 
                     match response_outcome {
@@ -1009,7 +1026,7 @@ impl SyncBackground {
                             scale_encoded_header,
                             scale_encoded_extrinsics,
                             scale_encoded_justifications: Vec::new(),
-                            user_data: None,
+                            user_data: NonFinalizedBlock::NotVerified,
                         })),
                     );
                 }
@@ -1104,23 +1121,26 @@ impl SyncBackground {
             all::ProcessOne::VerifyBodyHeader(verify) => {
                 let hash_to_verify = verify.hash();
                 let height_to_verify = verify.height();
-                let parent_block_storage_arc = verify
-                    .parent_user_data()
-                    .map(|storage| storage.as_ref().unwrap().clone());
+                let NonFinalizedBlock::Verified {
+                    storage: parent_block_storage_arc,
+                    runtime: parent_runtime_arc,
+                }= verify.parent_user_data().map(|b| b.clone()) else { unreachable!() };
                 let parent_block_storage = parent_block_storage_arc
                     .as_ref()
                     .map(|arc| &**arc)
                     .unwrap_or(&self.finalized_block_storage);
+                let parent_runtime = parent_runtime_arc.try_lock().unwrap().take().unwrap();
                 let scale_encoded_header_to_verify = verify.scale_encoded_header().to_owned(); // TODO: copy :-/
 
                 let _jaeger_span = self.jaeger_service.block_body_verify_span(&hash_to_verify);
 
-                let mut verify = verify.start(unix_time, None);
+                let mut verify = verify.start(unix_time, parent_runtime, None);
                 // TODO: check this block against the chain spec's badBlocks
                 loop {
                     match verify {
                         all::BlockVerification::Error {
                             sync: sync_out,
+                            parent_runtime,
                             error,
                             ..
                         } => {
@@ -1133,6 +1153,7 @@ impl SyncBackground {
                                 height_to_verify,
                                 error
                             );
+                            *parent_runtime_arc.try_lock().unwrap() = Some(parent_runtime);
                             self.sync = sync_out;
                             return (self, true);
                         }
@@ -1141,6 +1162,8 @@ impl SyncBackground {
                             sync: mut sync_out,
                             storage_main_trie_changes,
                             state_trie_version,
+                            parent_runtime,
+                            new_runtime,
                             ..
                         } => {
                             log::debug!(
@@ -1152,52 +1175,68 @@ impl SyncBackground {
 
                             // Processing has made a step forward.
 
-                            // Store the storage of the children.
-                            sync_out[(height_to_verify, &hash_to_verify)] = Some({
-                                let mut new_storage: trie_structure::TrieStructure<_> =
-                                    (*parent_block_storage).clone();
-                                for (key, value, ()) in
-                                    storage_main_trie_changes.diff_iter_unordered()
-                                {
-                                    if let Some(value) = value {
-                                        match new_storage
-                                            .node(bytes_to_nibbles(key.iter().copied()))
-                                        {
-                                            trie_structure::Entry::Occupied(mut node) => {
-                                                *node.user_data() =
-                                                    Some((value.to_owned(), state_trie_version));
+                            *parent_runtime_arc.try_lock().unwrap() = Some(parent_runtime);
 
-                                                if let trie_structure::NodeAccess::Branch(node) =
-                                                    node
+                            // Store the storage of the children.
+                            sync_out[(height_to_verify, &hash_to_verify)] =
+                                NonFinalizedBlock::Verified {
+                                    runtime: if let Some(new_runtime) = new_runtime {
+                                        Arc::new(Mutex::new(Some(new_runtime)))
+                                    } else {
+                                        parent_runtime_arc
+                                    },
+                                    storage: {
+                                        let mut new_storage: trie_structure::TrieStructure<_> =
+                                            (*parent_block_storage).clone();
+                                        for (key, value, ()) in
+                                            storage_main_trie_changes.diff_iter_unordered()
+                                        {
+                                            if let Some(value) = value {
+                                                match new_storage
+                                                    .node(bytes_to_nibbles(key.iter().copied()))
                                                 {
-                                                    node.insert_storage_value();
+                                                    trie_structure::Entry::Occupied(mut node) => {
+                                                        *node.user_data() = Some((
+                                                            value.to_owned(),
+                                                            state_trie_version,
+                                                        ));
+
+                                                        if let trie_structure::NodeAccess::Branch(
+                                                            node,
+                                                        ) = node
+                                                        {
+                                                            node.insert_storage_value();
+                                                        }
+                                                    }
+                                                    trie_structure::Entry::Vacant(node) => {
+                                                        node.insert_storage_value().insert(
+                                                            Some((
+                                                                value.to_owned(),
+                                                                state_trie_version,
+                                                            )),
+                                                            None,
+                                                        );
+                                                    }
+                                                }
+                                            } else {
+                                                // TODO: if a block inserts a new value then removes it, the key will remain in the diff anyway; either solve this or document this
+                                                if let trie_structure::Entry::Occupied(
+                                                    trie_structure::NodeAccess::Storage(node),
+                                                ) = new_storage
+                                                    .node(bytes_to_nibbles(key.iter().copied()))
+                                                {
+                                                    if let trie_structure::Remove::StorageToBranch(
+                                                        mut new_node,
+                                                    ) = node.remove()
+                                                    {
+                                                        *new_node.user_data() = None;
+                                                    }
                                                 }
                                             }
-                                            trie_structure::Entry::Vacant(node) => {
-                                                node.insert_storage_value().insert(
-                                                    Some((value.to_owned(), state_trie_version)),
-                                                    None,
-                                                );
-                                            }
                                         }
-                                    } else {
-                                        // TODO: if a block inserts a new value then removes it, the key will remain in the diff anyway; either solve this or document this
-                                        if let trie_structure::Entry::Occupied(
-                                            trie_structure::NodeAccess::Storage(node),
-                                        ) =
-                                            new_storage.node(bytes_to_nibbles(key.iter().copied()))
-                                        {
-                                            if let trie_structure::Remove::StorageToBranch(
-                                                mut new_node,
-                                            ) = node.remove()
-                                            {
-                                                *new_node.user_data() = None;
-                                            }
-                                        }
-                                    }
-                                }
-                                Arc::new(new_storage)
-                            });
+                                        Arc::new(new_storage)
+                                    },
+                                };
 
                             if is_new_best {
                                 // Update the networking.
@@ -1388,9 +1427,10 @@ impl SyncBackground {
                         }
 
                         let finalized_block = finalized_blocks.pop().unwrap();
+                        let NonFinalizedBlock::Verified { storage, runtime } = finalized_block.user_data else { unreachable!() };
                         self.finalized_block_storage =
-                            Arc::try_unwrap(finalized_block.user_data.unwrap())
-                                .unwrap_or_else(|_| unreachable!());
+                            Arc::try_unwrap(storage).unwrap_or_else(|_| unreachable!());
+                        self.finalized_runtime = runtime;
                         let new_finalized_hash =
                             finalized_block.header.hash(self.sync.block_number_bytes());
                         // TODO: what if best block changed?
@@ -1432,7 +1472,7 @@ impl SyncBackground {
                     .jaeger_service
                     .block_header_verify_span(&hash_to_verify);
 
-                match verify.perform(unix_time, None) {
+                match verify.perform(unix_time, NonFinalizedBlock::NotVerified) {
                     all::HeaderVerifyOutcome::Success { sync: sync_out, .. } => {
                         log::debug!(
                             "header-verification; hash={}; height={}; outcome=success",
