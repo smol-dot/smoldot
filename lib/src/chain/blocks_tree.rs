@@ -67,7 +67,7 @@ use crate::{
 };
 
 use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
-use core::{fmt, mem, num::NonZeroU64, time::Duration};
+use core::{fmt, mem, num::NonZeroU64, ops, time::Duration};
 use hashbrown::HashMap;
 
 mod best_block;
@@ -458,6 +458,40 @@ where
             )
             .field("non_finalized_blocks", &Blocks(inner))
             .finish()
+    }
+}
+
+impl<'a, T> ops::Index<&'a [u8; 32]> for NonFinalizedTree<T> {
+    type Output = T;
+
+    #[track_caller]
+    fn index(&self, block_hash: &'a [u8; 32]) -> &T {
+        let inner = self.inner.as_ref().unwrap();
+        let node_index = inner
+            .blocks_by_hash
+            .get(block_hash)
+            .unwrap_or_else(|| panic!("invalid block hash"));
+        &inner
+            .blocks
+            .get(*node_index)
+            .unwrap_or_else(|| unreachable!())
+            .user_data
+    }
+}
+
+impl<'a, T> ops::IndexMut<&'a [u8; 32]> for NonFinalizedTree<T> {
+    #[track_caller]
+    fn index_mut(&mut self, block_hash: &'a [u8; 32]) -> &mut T {
+        let inner = self.inner.as_mut().unwrap();
+        let node_index = inner
+            .blocks_by_hash
+            .get(block_hash)
+            .unwrap_or_else(|| panic!("invalid block hash"));
+        &mut inner
+            .blocks
+            .get_mut(*node_index)
+            .unwrap_or_else(|| unreachable!())
+            .user_data
     }
 }
 

@@ -737,6 +737,22 @@ impl<TRq, TSrc, TBl> ops::IndexMut<SourceId> for OptimisticSync<TRq, TSrc, TBl> 
     }
 }
 
+impl<'a, TRq, TSrc, TBl> ops::Index<&'a [u8; 32]> for OptimisticSync<TRq, TSrc, TBl> {
+    type Output = TBl;
+
+    #[track_caller]
+    fn index(&self, block_hash: &'a [u8; 32]) -> &TBl {
+        &self.chain[block_hash].user_data
+    }
+}
+
+impl<'a, TRq, TSrc, TBl> ops::IndexMut<&'a [u8; 32]> for OptimisticSync<TRq, TSrc, TBl> {
+    #[track_caller]
+    fn index_mut(&mut self, block_hash: &'a [u8; 32]) -> &mut TBl {
+        &mut self.chain[block_hash].user_data
+    }
+}
+
 pub struct RequestSuccessBlock<TBl> {
     pub scale_encoded_header: Vec<u8>,
     pub scale_encoded_justifications: Vec<([u8; 4], Vec<u8>)>,
@@ -787,6 +803,18 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
         *header::decode(self.scale_encoded_header(), self.chain.block_number_bytes())
             .unwrap()
             .parent_hash
+    }
+
+    /// Returns the user data of the parent of the block to be verified, or `None` if the parent
+    /// is the finalized block.
+    pub fn parent_user_data(&self) -> Option<&TBl> {
+        let parent_hash = self.parent_hash();
+        // TODO: optimize?
+        if self.chain.contains_non_finalized_block(&parent_hash) {
+            Some(&self.chain[&parent_hash].user_data)
+        } else {
+            None
+        }
     }
 
     /// Returns true if [`Config::full`] was `Some` at initialization.
@@ -915,6 +943,7 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
 pub enum BlockVerification<TRq, TSrc, TBl> {
     /// An issue happened when verifying the block or its justification, resulting in resetting
     /// the chain to the latest finalized block.
+    // TODO: unclear what happens to the block, are they kept? discarded?
     Reset {
         /// The state machine.
         /// The [`OptimisticSync::process_one`] method takes ownership of the

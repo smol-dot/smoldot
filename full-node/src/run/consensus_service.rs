@@ -318,6 +318,9 @@ struct SyncBackground {
     /// if this is the "special source" representing the local block authoring. Only one source
     /// must contain `None` and its id must be [`SyncBackground::block_author_sync_source`].
     ///
+    /// Each block holds the state of its storage, or `None` if the block hasn't been verified
+    /// yet.
+    ///
     /// Some of the sources can represent networking peers that have already been disconnected. If
     /// that is the case, no new request is started against these sources but existing requests
     /// are allowed to finish.
@@ -326,7 +329,12 @@ struct SyncBackground {
     ///
     /// Each on-going request has a corresponding background task that sends its result to
     /// [`SyncBackground::block_requests_finished_rx`].
-    sync: all::AllSync<(), Option<NetworkSourceInfo>, ()>,
+    // TODO: very unoptimized to have a copy of the storage for each block; store in db instead
+    sync: all::AllSync<
+        (),
+        Option<NetworkSourceInfo>,
+        Option<Arc<trie_structure::TrieStructure<Option<(Vec<u8>, TrieEntryVersion)>>>>,
+    >,
 
     /// Source within the [`SyncBackground::sync`] to use to import locally-authored blocks.
     block_author_sync_source: all::SourceId,
@@ -650,7 +658,7 @@ impl SyncBackground {
                             .into_iter()
                             .map(|j| all::Justification { engine_id: j.engine_id, justification: j.justification })
                             .collect(),
-                        user_data: (),
+                        user_data: None,
                     })));
 
                     match response_outcome {
@@ -732,9 +740,14 @@ impl SyncBackground {
 
         // Actual block production now happening.
         let block = {
+            // TODO: no, the best block could be the finalized block
+            let best_block_storage = self.sync
+                [(self.sync.best_block_number(), &self.sync.best_block_hash())]
+                .unwrap()
+                .clone();
+
             // Start the block authoring process.
             let mut block_authoring = {
-                let best_block_storage_access = self.sync.best_block_storage().unwrap();
                 let parent_runtime = best_block_storage_access.runtime().clone(); // TODO: overhead here with cloning, but solving it requires very tricky API changes in syncing code
 
                 authoring_start.start(author::build::AuthoringStartConfig {
@@ -815,28 +828,20 @@ impl SyncBackground {
 
                     // Access to the best block storage.
                     author::build::BuilderAuthoring::StorageGet(req) => {
-                        // Access the storage of the best block. Can return `̀None` if not syncing
-                        // in full mode, in which case we shouldn't have reached this code.
-                        let best_block_storage_access = self.sync.best_block_storage().unwrap();
-
-                        let value =
-                            best_block_storage_access.get(req.key().as_ref(), || {
-                                match self
-                                    .finalized_block_storage
-                                    .node(bytes_to_nibbles(req.key().as_ref().iter().copied()))
-                                {
-                                    trie_structure::Entry::Occupied(
-                                        trie_structure::NodeAccess::Storage(node),
-                                    ) => {
-                                        let (val, vers) = node.into_user_data().as_ref().unwrap();
-                                        Some((&val[..], *vers))
-                                    }
-                                    trie_structure::Entry::Occupied(
-                                        trie_structure::NodeAccess::Branch(_),
-                                    )
-                                    | trie_structure::Entry::Vacant(_) => None,
-                                }
-                            });
+                        let value = match best_block_storage
+                            .node(bytes_to_nibbles(req.key().as_ref().iter().copied()))
+                        {
+                            trie_structure::Entry::Occupied(
+                                trie_structure::NodeAccess::Storage(node),
+                            ) => {
+                                let (val, vers) = node.into_user_data().as_ref().unwrap();
+                                Some((&val[..], *vers))
+                            }
+                            trie_structure::Entry::Occupied(
+                                trie_structure::NodeAccess::Branch(_),
+                            )
+                            | trie_structure::Entry::Vacant(_) => None,
+                        };
 
                         block_authoring =
                             req.inject_value(value.map(|(val, vers)| (iter::once(val), vers)));
@@ -846,14 +851,9 @@ impl SyncBackground {
                         todo!() // TODO: implement
                     }
                     author::build::BuilderAuthoring::PrefixKeys(prefix_key) => {
-                        // Access the storage of the best block. Can return `̀None` if not syncing
-                        // in full mode, in which case we shouldn't have reached this code.
-                        let best_block_storage_access = self.sync.best_block_storage().unwrap();
-
                         // TODO: to_vec() :-/ range() immediately calculates the range of keys so there's no borrowing issue, but the take_while needs to keep req borrowed, which isn't possible
                         let prefix = prefix_key.prefix().as_ref().to_vec();
-                        let finalized_keys = self
-                            .finalized_block_storage
+                        let keys = best_block_storage
                             .range(ops::Bound::Included(&prefix), ops::Bound::Unbounded)
                             .filter(|node_index| {
                                 self.finalized_block_storage.is_storage(*node_index)
@@ -868,11 +868,6 @@ impl SyncBackground {
                                 .collect::<Vec<_>>()
                             })
                             .take_while(|k| k.starts_with(&prefix));
-
-                        let keys = best_block_storage_access
-                            .prefix_keys_ordered(prefix_key.prefix().as_ref(), finalized_keys)
-                            .map(|k| k.as_ref().to_vec()) // TODO: overhead
-                            .collect::<Vec<_>>();
 
                         block_authoring = prefix_key.inject_keys_ordered(keys.into_iter());
                         continue;
@@ -1013,7 +1008,7 @@ impl SyncBackground {
                             scale_encoded_header,
                             scale_encoded_extrinsics,
                             scale_encoded_justifications: Vec::new(),
-                            user_data: (),
+                            user_data: None,
                         })),
                     );
                 }
@@ -1108,11 +1103,17 @@ impl SyncBackground {
             all::ProcessOne::VerifyBodyHeader(verify) => {
                 let hash_to_verify = verify.hash();
                 let height_to_verify = verify.height();
+                let parent_block_storage_arc = verify
+                    .parent_user_data()
+                    .map(|storage| storage.unwrap().clone());
+                let parent_block_storage = parent_block_storage_arc
+                    .map(|arc| &*arc)
+                    .unwrap_or(&self.finalized_block_storage);
                 let scale_encoded_header_to_verify = verify.scale_encoded_header().to_owned(); // TODO: copy :-/
 
                 let _jaeger_span = self.jaeger_service.block_body_verify_span(&hash_to_verify);
 
-                let mut verify = verify.start(unix_time, ());
+                let mut verify = verify.start(unix_time, None);
                 // TODO: check this block against the chain spec's badBlocks
                 loop {
                     match verify {
@@ -1136,6 +1137,8 @@ impl SyncBackground {
                         all::BlockVerification::Success {
                             is_new_best,
                             sync: sync_out,
+                            storage_main_trie_changes,
+                            state_trie_version,
                             ..
                         } => {
                             log::debug!(
@@ -1146,6 +1149,53 @@ impl SyncBackground {
                             );
 
                             // Processing has made a step forward.
+
+                            // Store the storage of the children.
+                            sync_out[(height_to_verify, &hash_to_verify)] = Some({
+                                let mut new_storage: trie_structure::TrieStructure<_> =
+                                    (*parent_block_storage).clone();
+                                for (key, value, ()) in
+                                    storage_main_trie_changes.diff_iter_unordered()
+                                {
+                                    if let Some(value) = value {
+                                        match new_storage
+                                            .node(bytes_to_nibbles(key.iter().copied()))
+                                        {
+                                            trie_structure::Entry::Occupied(mut node) => {
+                                                *node.user_data() =
+                                                    Some((value.to_owned(), state_trie_version));
+
+                                                if let trie_structure::NodeAccess::Branch(node) =
+                                                    node
+                                                {
+                                                    node.insert_storage_value();
+                                                }
+                                            }
+                                            trie_structure::Entry::Vacant(node) => {
+                                                node.insert_storage_value().insert(
+                                                    Some((value.to_owned(), state_trie_version)),
+                                                    None,
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        // TODO: if a block inserts a new value then removes it, the key will remain in the diff anyway; either solve this or document this
+                                        if let trie_structure::Entry::Occupied(
+                                            trie_structure::NodeAccess::Storage(node),
+                                        ) =
+                                            new_storage.node(bytes_to_nibbles(key.iter().copied()))
+                                        {
+                                            if let trie_structure::Remove::StorageToBranch(
+                                                mut new_node,
+                                            ) = node.remove()
+                                            {
+                                                *new_node.user_data() = None;
+                                            }
+                                        }
+                                    }
+                                }
+                                Arc::new(new_storage)
+                            });
 
                             if is_new_best {
                                 // Update the networking.
@@ -1221,9 +1271,8 @@ impl SyncBackground {
                             return (self, true);
                         }
 
-                        all::BlockVerification::FinalizedStorageGet(req) => {
-                            let value = match self
-                                .finalized_block_storage
+                        all::BlockVerification::ParentStorageGet(req) => {
+                            let value = match parent_block_storage
                                 .node(bytes_to_nibbles(req.key().as_ref().iter().copied()))
                             {
                                 trie_structure::Entry::Occupied(
@@ -1240,11 +1289,10 @@ impl SyncBackground {
 
                             verify = req.inject_value(value);
                         }
-                        all::BlockVerification::FinalizedStorageNextKey(req) => {
+                        all::BlockVerification::ParentStorageNextKey(req) => {
                             let next_key = {
                                 let req_key = req.key();
-                                let out = self
-                                    .finalized_block_storage
+                                let out = parent_block_storage
                                     .range(
                                         if req.or_equal() {
                                             ops::Bound::Included(req_key.as_ref())
@@ -1254,13 +1302,13 @@ impl SyncBackground {
                                         ops::Bound::Unbounded,
                                     )
                                     .filter(|node_index| {
-                                        self.finalized_block_storage.is_storage(*node_index)
+                                        parent_block_storage.is_storage(*node_index)
                                     })
                                     .next()
                                     .map(|node_index| {
                                         // TODO: consider detecting if nibbles are uneven instead of ignoring the problem
                                         nibbles_to_bytes_suffix_extend(
-                                            self.finalized_block_storage
+                                            parent_block_storage
                                                 .node_full_key_by_index(node_index)
                                                 .unwrap(),
                                         )
@@ -1275,19 +1323,16 @@ impl SyncBackground {
                                 .map_or(true, |k| &**k > req.key().as_ref()));
                             verify = req.inject_key(next_key);
                         }
-                        all::BlockVerification::FinalizedStoragePrefixKeys(req) => {
+                        all::BlockVerification::ParentStoragePrefixKeys(req) => {
                             // TODO: to_vec() :-/ range() immediately calculates the range of keys so there's no borrowing issue, but the take_while needs to keep req borrowed, which isn't possible
                             let prefix = req.prefix().as_ref().to_vec();
-                            let keys = self
-                                .finalized_block_storage
+                            let keys = parent_block_storage
                                 .range(ops::Bound::Included(&prefix), ops::Bound::Unbounded)
-                                .filter(|node_index| {
-                                    self.finalized_block_storage.is_storage(*node_index)
-                                })
+                                .filter(|node_index| parent_block_storage.is_storage(*node_index))
                                 .map(|node_index| {
                                     // TODO: consider detecting if nibbles are uneven instead of ignoring the problem
                                     nibbles_to_bytes_suffix_extend(
-                                        self.finalized_block_storage
+                                        parent_block_storage
                                             .node_full_key_by_index(node_index)
                                             .unwrap(),
                                     )
@@ -1381,6 +1426,9 @@ impl SyncBackground {
                             }
                         }
 
+                        self.finalized_block_storage =
+                            Arc::try_unwrap(finalized_blocks.last().unwrap().user_data.unwrap())
+                                .unwrap_or_else(|_| unreachable!());
                         let new_finalized_hash = finalized_blocks
                             .last()
                             .map(|lf| lf.header.hash(self.sync.block_number_bytes()))
@@ -1421,7 +1469,7 @@ impl SyncBackground {
                     .jaeger_service
                     .block_header_verify_span(&hash_to_verify);
 
-                match verify.perform(unix_time, ()) {
+                match verify.perform(unix_time, None) {
                     all::HeaderVerifyOutcome::Success { sync: sync_out, .. } => {
                         log::debug!(
                             "header-verification; hash={}; height={}; outcome=success",

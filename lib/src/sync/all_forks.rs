@@ -1122,6 +1122,22 @@ impl<TBl, TRq, TSrc> ops::IndexMut<SourceId> for AllForksSync<TBl, TRq, TSrc> {
     }
 }
 
+impl<'a, TBl, TRq, TSrc> ops::Index<(u64, &'a [u8; 32])> for AllForksSync<TBl, TRq, TSrc> {
+    type Output = TBl;
+
+    #[track_caller]
+    fn index(&self, (block_height, block_hash): (u64, &'a [u8; 32])) -> &TBl {
+        self.block_user_data(block_height, block_hash)
+    }
+}
+
+impl<'a, TBl, TRq, TSrc> ops::IndexMut<(u64, &'a [u8; 32])> for AllForksSync<TBl, TRq, TSrc> {
+    #[track_caller]
+    fn index_mut(&mut self, (block_height, block_hash): (u64, &'a [u8; 32])) -> &mut TBl {
+        self.block_user_data_mut(block_height, block_hash)
+    }
+}
+
 /// See [`AllForksSync::finish_ancestry_search`].
 pub struct FinishAncestrySearch<TBl, TRq, TSrc> {
     inner: AllForksSync<TBl, TRq, TSrc>,

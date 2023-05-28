@@ -1769,6 +1769,20 @@ impl<TRq, TSrc, TBl> ops::IndexMut<SourceId> for AllSync<TRq, TSrc, TBl> {
     }
 }
 
+impl<'a, TRq, TSrc, TBl> ops::Index<(u64, &'a [u8; 32])> for AllSync<TRq, TSrc, TBl> {
+    type Output = TBl;
+
+    #[track_caller]
+    fn index(&self, (block_height, block_hash): (u64, &'a [u8; 32])) -> &TBl {
+        match &self.inner {
+            AllSyncInner::AllForks(inner) => inner[(block_height, block_hash)].as_ref().unwrap(),
+            AllSyncInner::Optimistic { inner, .. } => &inner[block_hash],
+            AllSyncInner::GrandpaWarpSync { .. } => panic!("unknown block"), // No block is ever stored during the warp syncing.
+            AllSyncInner::Poisoned => unreachable!(),
+        }
+    }
+}
+
 /// See [`AllSync::desired_requests`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
@@ -2428,6 +2442,14 @@ impl<TRq, TSrc, TBl> HeaderBodyVerify<TRq, TSrc, TBl> {
     pub fn parent_hash(&self) -> [u8; 32] {
         match &self.inner {
             HeaderBodyVerifyInner::Optimistic(verify) => verify.parent_hash(),
+        }
+    }
+
+    /// Returns the user data of the parent of the block to be verified, or `None` if the parent
+    /// is the finalized block.
+    pub fn parent_user_data(&self) -> Option<&TBl> {
+        match &self.inner {
+            HeaderBodyVerifyInner::Optimistic(verify) => verify.parent_user_data(),
         }
     }
 
