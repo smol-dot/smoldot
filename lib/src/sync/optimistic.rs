@@ -53,7 +53,6 @@ use crate::{
 };
 
 use alloc::{
-    borrow::ToOwned as _,
     boxed::Box,
     collections::BTreeSet,
     vec::{self, Vec},
@@ -100,16 +99,9 @@ pub struct Config {
     /// block requests.
     pub download_ahead_blocks: NonZeroU32,
 
-    /// If `Some`, the block bodies and storage are also synchronized. Contains the extra
-    /// configuration.
-    pub full: Option<ConfigFull>,
-}
-
-/// See [`Config::full`].
-#[derive(Debug)]
-pub struct ConfigFull {
-    /// Compiled runtime code of the finalized block.
-    pub finalized_runtime: host::HostVmPrototype,
+    /// If `true`, the block bodies and storage are also synchronized and the block bodies are
+    /// verified.
+    pub full_mode: bool,
 }
 
 /// Identifier for an ongoing request in the [`OptimisticSync`].
@@ -153,18 +145,8 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
     /// Used if the `chain` field needs to be recreated.
     finalized_chain_information: blocks_tree::Config,
 
-    /// See [`ConfigFull::finalized_runtime`]. `None` in non-full mode.
-    finalized_runtime: Option<host::HostVmPrototype>,
-
-    /// Changes in the storage of the best block compared to the finalized block.
-    /// The `BTreeMap`'s keys are storage keys, and its values are new values or `None` if the
-    /// value has been erased from the storage.
-    /// Each entry is associated with the state version of the runtime at the time of the write.
-    best_to_finalized_storage_diff: storage_diff::TrieDiff<TrieEntryVersion>,
-
-    /// Compiled runtime code of the best block. `None` if it is the same as
-    /// [`OptimisticSyncInner::finalized_runtime`].
-    best_runtime: Option<host::HostVmPrototype>,
+    /// See [`Config::full_mode`].
+    full_mode: bool,
 
     /// Cache of calculation for the storage trie of the best block.
     /// Providing this value when verifying a block considerably speeds up the verification.
@@ -265,16 +247,6 @@ pub struct Block<TBl> {
 pub struct BlockFull {
     /// List of SCALE-encoded extrinsics that form the block's body.
     pub body: Vec<Vec<u8>>,
-
-    /// Changes to the storage made by this block compared to its parent.
-    pub storage_main_trie_changes: storage_diff::TrieDiff,
-
-    /// State trie version indicated by the runtime. All the storage changes indicated by
-    /// [`BlockFull::storage_main_trie_changes`] should store this version alongside with them.
-    pub state_trie_version: TrieEntryVersion,
-
-    /// List of changes to the off-chain storage that this block performs.
-    pub offchain_storage_changes: storage_diff::TrieDiff,
 }
 
 impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
@@ -299,9 +271,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             chain,
             inner: Box::new(OptimisticSyncInner {
                 finalized_chain_information: blocks_tree_config,
-                finalized_runtime: config.full.map(|f| f.finalized_runtime),
-                best_to_finalized_storage_diff: storage_diff::TrieDiff::empty(),
-                best_runtime: None,
+                full_mode: config.full_mode,
                 main_trie_root_calculation_cache: None,
                 sources: HashMap::with_capacity_and_hasher(
                     config.sources_capacity,
@@ -367,17 +337,6 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     /// Returns consensus information about the current best block of the chain.
     pub fn best_block_consensus(&self) -> chain_information::ChainInformationConsensusRef {
         self.chain.best_block_consensus()
-    }
-
-    /// Returns access to the storage of the best block.
-    ///
-    /// Returns `None` if [`Config::full`] was `None`.
-    pub fn best_block_storage(&self) -> Option<BlockStorage<TRq, TSrc, TBl>> {
-        if self.inner.finalized_runtime.is_some() {
-            Some(BlockStorage { inner: self })
-        } else {
-            None
-        }
     }
 
     /// Returns the header of all known non-finalized blocks in the chain without any specific
@@ -618,11 +577,12 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     ///
     /// Returns the user data that was associated to that request.
     ///
-    /// If the state machine only handles light clients, that is if [`Config::full`] was `false`,
-    /// then the values of [`RequestSuccessBlock::scale_encoded_extrinsics`] are silently ignored.
+    /// If the state machine only handles light clients, that is if [`Config::full_mode`] was
+    /// `false`, then the values of [`RequestSuccessBlock::scale_encoded_extrinsics`] are
+    /// silently ignored.
     ///
-    /// > **Note**: If [`Config::full`] is `false`, you are encouraged to not request the block's
-    /// >           body from the source altogether, and to fill the
+    /// > **Note**: If [`Config::full_mode`] is `false`, you are encouraged to not request the
+    /// >           block's body from the source altogether, and to fill the
     /// >           [`RequestSuccessBlock::scale_encoded_extrinsics`] fields with `Vec::new()`.
     ///
     /// # Panic
@@ -765,6 +725,22 @@ impl<TRq, TSrc, TBl> ops::IndexMut<SourceId> for OptimisticSync<TRq, TSrc, TBl> 
     }
 }
 
+impl<'a, TRq, TSrc, TBl> ops::Index<&'a [u8; 32]> for OptimisticSync<TRq, TSrc, TBl> {
+    type Output = TBl;
+
+    #[track_caller]
+    fn index(&self, block_hash: &'a [u8; 32]) -> &TBl {
+        &self.chain[block_hash].user_data
+    }
+}
+
+impl<'a, TRq, TSrc, TBl> ops::IndexMut<&'a [u8; 32]> for OptimisticSync<TRq, TSrc, TBl> {
+    #[track_caller]
+    fn index_mut(&mut self, block_hash: &'a [u8; 32]) -> &mut TBl {
+        &mut self.chain[block_hash].user_data
+    }
+}
+
 pub struct RequestSuccessBlock<TBl> {
     pub scale_encoded_header: Vec<u8>,
     pub scale_encoded_justifications: Vec<([u8; 4], Vec<u8>)>,
@@ -789,51 +765,6 @@ pub enum ProcessOne<TRq, TSrc, TBl> {
     VerifyJustification(JustificationVerify<TRq, TSrc, TBl>),
 }
 
-/// See [`OptimisticSync::best_block_storage`].
-pub struct BlockStorage<'a, TRq, TSrc, TBl> {
-    inner: &'a OptimisticSync<TRq, TSrc, TBl>,
-}
-
-impl<'a, TRq, TSrc, TBl> BlockStorage<'a, TRq, TSrc, TBl> {
-    /// Returns the runtime built against this block.
-    pub fn runtime(&self) -> &host::HostVmPrototype {
-        self.inner
-            .inner
-            .best_runtime
-            .as_ref()
-            .unwrap_or_else(|| self.inner.inner.finalized_runtime.as_ref().unwrap())
-    }
-
-    /// Returns the storage value at the given key. `None` if this key doesn't have any value.
-    pub fn get<'val: 'a>(
-        &'val self, // TODO: unclear lifetime
-        key: &[u8],
-        or_finalized: impl FnOnce() -> Option<(&'val [u8], TrieEntryVersion)>,
-    ) -> Option<(&'val [u8], TrieEntryVersion)> {
-        match self
-            .inner
-            .inner
-            .best_to_finalized_storage_diff
-            .diff_get(key)
-        {
-            Some((None, _)) => None,
-            Some((Some(val), vers)) => Some((val, *vers)),
-            None => or_finalized(),
-        }
-    }
-
-    pub fn prefix_keys_ordered<'k: 'a>(
-        &'k self, // TODO: unclear lifetime
-        prefix: &'k [u8],
-        in_finalized_ordered: impl Iterator<Item = impl AsRef<[u8]> + 'k> + 'k,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + 'k> + 'k {
-        self.inner
-            .inner
-            .best_to_finalized_storage_diff
-            .storage_prefix_keys_ordered(prefix, in_finalized_ordered)
-    }
-}
-
 /// Start the processing of a block verification.
 pub struct BlockVerify<TRq, TSrc, TBl> {
     inner: Box<OptimisticSyncInner<TRq, TSrc, TBl>>,
@@ -854,9 +785,29 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
         header::hash_from_scale_encoded_header(self.scale_encoded_header())
     }
 
-    /// Returns true if [`Config::full`] was `Some` at initialization.
+    /// Returns the hash of the parent of the block about to be verified.
+    pub fn parent_hash(&self) -> [u8; 32] {
+        // TODO: unwrap?
+        *header::decode(self.scale_encoded_header(), self.chain.block_number_bytes())
+            .unwrap()
+            .parent_hash
+    }
+
+    /// Returns the user data of the parent of the block to be verified, or `None` if the parent
+    /// is the finalized block.
+    pub fn parent_user_data(&self) -> Option<&TBl> {
+        let parent_hash = self.parent_hash();
+        // TODO: optimize?
+        if self.chain.contains_non_finalized_block(&parent_hash) {
+            Some(&self.chain[&parent_hash].user_data)
+        } else {
+            None
+        }
+    }
+
+    /// Returns true if [`Config::full_mode`] was `true` at initialization.
     pub fn is_full_verification(&self) -> bool {
-        self.inner.finalized_runtime.is_some()
+        self.inner.full_mode
     }
 
     /// Returns the SCALE-encoded header of the block about to be verified.
@@ -873,7 +824,19 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
     ///
     /// Must be passed the current UNIX time in order to verify that the block doesn't pretend to
     /// come from the future.
-    pub fn start(mut self, now_from_unix_epoch: Duration) -> BlockVerification<TRq, TSrc, TBl> {
+    ///
+    /// If the syncing is in "full mode", then the rnutime of the parent must also be passed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `parent_runtime` is `None` while [`Config::full_mode`] was `true`, or
+    /// vice-versa.
+    ///
+    pub fn start(
+        mut self,
+        now_from_unix_epoch: Duration,
+        parent_runtime: Option<host::HostVmPrototype>,
+    ) -> BlockVerification<TRq, TSrc, TBl> {
         // Extract the block to process. We are guaranteed that a block is available because a
         // `Verify` is built only when that is the case.
         // Be aware that `source_id` might refer to an obsolete source.
@@ -892,11 +855,12 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
             .collect::<Vec<_>>()
             .into_iter();
 
-        if self.inner.finalized_runtime.is_some() {
+        if self.inner.full_mode {
             BlockVerification::from(
                 Inner::Step1(
                     self.chain
                         .verify_body(block.scale_encoded_header, now_from_unix_epoch),
+                    parent_runtime.unwrap(),
                 ),
                 BlockVerificationShared {
                     inner: self.inner,
@@ -906,6 +870,8 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                 },
             )
         } else {
+            assert!(parent_runtime.is_none());
+
             let error = match self
                 .chain
                 .verify_header(block.scale_encoded_header, now_from_unix_epoch)
@@ -946,8 +912,6 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                 }
 
                 self.inner.make_requests_obsolete(&self.chain);
-                self.inner.best_to_finalized_storage_diff = Default::default();
-                self.inner.best_runtime = None;
                 self.inner.main_trie_root_calculation_cache = None;
 
                 let previous_best_height = self.chain.best_block_header().number;
@@ -956,6 +920,7 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                         inner: self.inner,
                         chain: self.chain,
                     },
+                    parent_runtime: None,
                     previous_best_height,
                     reason,
                 }
@@ -970,6 +935,7 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                     },
                     new_best_hash,
                     new_best_number,
+                    full: None,
                 }
             }
         }
@@ -980,6 +946,7 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
 pub enum BlockVerification<TRq, TSrc, TBl> {
     /// An issue happened when verifying the block or its justification, resulting in resetting
     /// the chain to the latest finalized block.
+    // TODO: unclear what happens to the block, are they kept? discarded?
     Reset {
         /// The state machine.
         /// The [`OptimisticSync::process_one`] method takes ownership of the
@@ -988,6 +955,11 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
 
         /// Height of the best block before the reset.
         previous_best_height: u64,
+
+        /// Runtime of the parent, as was provided at the beginning of the verification.
+        ///
+        /// `Some` if and only if [`Config::full_mode`] was `true`.
+        parent_runtime: Option<host::HostVmPrototype>,
 
         /// Problem that happened and caused the reset.
         reason: ResetCause,
@@ -1004,25 +976,51 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
 
         new_best_number: u64,
         new_best_hash: [u8; 32],
+
+        /// `Some` if the verification is in full mode.
+        full: Option<BlockVerificationSuccessFull>,
     },
 
-    /// Loading a storage value of the finalized block is required in order to continue.
-    FinalizedStorageGet(StorageGet<TRq, TSrc, TBl>),
+    /// Loading a storage value of the parent block is required in order to continue.
+    ParentStorageGet(StorageGet<TRq, TSrc, TBl>),
 
-    /// Fetching the list of keys of the finalized block with a given prefix is required in order
+    /// Fetching the list of keys of the parent block with a given prefix is required in order
     /// to continue.
-    FinalizedStoragePrefixKeys(StoragePrefixKeys<TRq, TSrc, TBl>),
+    ParentStoragePrefixKeys(StoragePrefixKeys<TRq, TSrc, TBl>),
 
-    /// Fetching the key of the finalized block storage that follows a given one is required in
+    /// Fetching the key of the parent block storage that follows a given one is required in
     /// order to continue.
-    FinalizedStorageNextKey(StorageNextKey<TRq, TSrc, TBl>),
+    ParentStorageNextKey(StorageNextKey<TRq, TSrc, TBl>),
 
     /// Compiling a runtime is required in order to continue.
     RuntimeCompilation(RuntimeCompilation<TRq, TSrc, TBl>),
 }
 
+pub struct BlockVerificationSuccessFull {
+    /// Changes to the storage made by this block compared to its parent.
+    pub storage_main_trie_changes: storage_diff::TrieDiff,
+
+    /// State trie version indicated by the runtime. All the storage changes indicated by
+    /// [`BlockVerificationSuccessFull::storage_main_trie_changes`] should store this version
+    /// alongside with them.
+    pub state_trie_version: TrieEntryVersion,
+
+    /// List of changes to the off-chain storage that this block performs.
+    pub offchain_storage_changes: storage_diff::TrieDiff,
+
+    /// Runtime of the parent, as was provided at the beginning of the verification.
+    pub parent_runtime: host::HostVmPrototype,
+
+    /// If `Some`, the block has modified the runtime compared to its parent. Contains the new
+    /// runtime.
+    pub new_runtime: Option<host::HostVmPrototype>,
+}
+
 enum Inner<TBl> {
-    Step1(blocks_tree::BodyVerifyStep1<Block<TBl>>),
+    Step1(
+        blocks_tree::BodyVerifyStep1<Block<TBl>>,
+        host::HostVmPrototype,
+    ),
     Step2(blocks_tree::BodyVerifyStep2<Block<TBl>>),
 }
 
@@ -1042,22 +1040,14 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
         // This loop drives the process of the verification.
         // `inner` is updated at each iteration until a state that cannot be resolved internally
         // is found.
-        'verif_steps: loop {
+        loop {
             match inner {
-                Inner::Step1(blocks_tree::BodyVerifyStep1::ParentRuntimeRequired(req)) => {
+                Inner::Step1(
+                    blocks_tree::BodyVerifyStep1::ParentRuntimeRequired(req),
+                    parent_runtime,
+                ) => {
                     // The verification process is asking for a Wasm virtual machine containing
                     // the parent block's runtime.
-                    //
-                    // Since virtual machines are expensive to create, a re-usable virtual machine
-                    // is maintained for the best block.
-                    //
-                    // The code below extracts that re-usable virtual machine with the intention
-                    // to store it back after the verification is over.
-                    let parent_runtime = match shared.inner.best_runtime.take() {
-                        Some(r) => r,
-                        None => shared.inner.finalized_runtime.take().unwrap(),
-                    };
-
                     inner = Inner::Step2(req.resume(
                         parent_runtime,
                         shared.block_body.iter(),
@@ -1084,31 +1074,8 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                                 .is_some()
                     );
 
-                    // Before the verification, we extracted the runtime either from
-                    // `finalized_runtime` or `best_runtime`.
-                    if shared.inner.finalized_runtime.is_some() {
-                        // If `finalized_runtime` is still `Some` now, that means we have
-                        // extracted from `best_runtime`.
-                        shared.inner.best_runtime = if let Some(new_runtime) = new_runtime {
-                            Some(new_runtime)
-                        } else {
-                            Some(parent_runtime)
-                        };
-                    } else {
-                        shared.inner.finalized_runtime = Some(parent_runtime);
-
-                        debug_assert!(shared.inner.best_runtime.is_none());
-                        if let Some(new_runtime) = new_runtime {
-                            shared.inner.best_runtime = Some(new_runtime);
-                        }
-                    }
-
                     shared.inner.main_trie_root_calculation_cache =
                         Some(main_trie_root_calculation_cache);
-                    shared
-                        .inner
-                        .best_to_finalized_storage_diff
-                        .merge_map(&storage_main_trie_changes, |()| state_trie_version);
 
                     let chain = {
                         let header = insert.header().into();
@@ -1118,9 +1085,6 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                             user_data: shared.block_user_data.take().unwrap(),
                             full: Some(BlockFull {
                                 body: mem::take(&mut shared.block_body),
-                                storage_main_trie_changes,
-                                offchain_storage_changes,
-                                state_trie_version,
                             }),
                         })
                     };
@@ -1134,46 +1098,26 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                         },
                         new_best_hash,
                         new_best_number,
+                        full: Some(BlockVerificationSuccessFull {
+                            storage_main_trie_changes,
+                            offchain_storage_changes,
+                            state_trie_version,
+                            parent_runtime,
+                            new_runtime,
+                        }),
                     };
                 }
 
                 Inner::Step2(blocks_tree::BodyVerifyStep2::StorageGet(req)) => {
                     // The underlying verification process is asking for a storage entry in the
                     // parent block.
-                    //
-                    // The [`OptimisticSync`] stores the difference between the best block's
-                    // storage and the finalized block's storage.
-                    // As such, the requested value is either found in one of this diff, in which
-                    // case it can be returned immediately to continue the verification, or in
-                    // the finalized block, in which case the user needs to be queried.
-                    let value = shared
-                        .inner
-                        .best_to_finalized_storage_diff
-                        .diff_get(req.key().as_ref());
-                    if let Some((value, storage_trie_node_version)) = value {
-                        inner = Inner::Step2(
-                            req.inject_value(
-                                value
-                                    .as_ref()
-                                    .map(|v| (iter::once(&v[..]), *storage_trie_node_version)),
-                            ),
-                        );
-                        continue 'verif_steps;
-                    }
-
-                    // The value hasn't been found in any of the diffs, meaning that the storage
-                    // value of the parent is the same as the one of the finalized block. The
-                    // user needs to be queried.
-                    break BlockVerification::FinalizedStorageGet(StorageGet {
-                        inner: req,
-                        shared,
-                    });
+                    break BlockVerification::ParentStorageGet(StorageGet { inner: req, shared });
                 }
 
                 Inner::Step2(blocks_tree::BodyVerifyStep2::StorageNextKey(req)) => {
                     // The underlying verification process is asking for the key that follows
                     // the requested one.
-                    break BlockVerification::FinalizedStorageNextKey(StorageNextKey {
+                    break BlockVerification::ParentStorageNextKey(StorageNextKey {
                         inner: req,
                         shared,
                         key_overwrite: None,
@@ -1185,7 +1129,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     // with a certain prefix.
                     // The first step is to ask the user for that information when it comes to
                     // the finalized block.
-                    break BlockVerification::FinalizedStoragePrefixKeys(StoragePrefixKeys {
+                    break BlockVerification::ParentStoragePrefixKeys(StoragePrefixKeys {
                         inner: req,
                         shared,
                     });
@@ -1207,7 +1151,10 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                 // - `cancelling_requests` is set to true in order to cancel all ongoing requests.
                 // - `chain` is recreated using `finalized_chain_information`.
                 //
-                Inner::Step1(blocks_tree::BodyVerifyStep1::InvalidHeader(old_chain, error)) => {
+                Inner::Step1(
+                    blocks_tree::BodyVerifyStep1::InvalidHeader(old_chain, error),
+                    parent_runtime,
+                ) => {
                     if let Some(source) = shared.inner.sources.get_mut(&shared.source_id) {
                         source.banned = true;
                     }
@@ -1224,12 +1171,11 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     );
 
                     let mut inner = shared.inner.with_requests_obsoleted(&chain);
-                    inner.best_to_finalized_storage_diff = Default::default();
-                    inner.best_runtime = None;
                     inner.main_trie_root_calculation_cache = None;
 
                     break BlockVerification::Reset {
                         previous_best_height: old_chain.best_block_header().number,
+                        parent_runtime: Some(parent_runtime),
                         sync: OptimisticSync { chain, inner },
                         reason: ResetCause::InvalidHeader(error),
                     };
@@ -1239,6 +1185,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     | blocks_tree::BodyVerifyStep1::BadParent {
                         chain: old_chain, ..
                     },
+                    parent_runtime,
                 ) => {
                     if let Some(source) = shared.inner.sources.get_mut(&shared.source_id) {
                         source.banned = true;
@@ -1255,12 +1202,11 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     );
 
                     let mut inner = shared.inner.with_requests_obsoleted(&chain);
-                    inner.best_to_finalized_storage_diff = Default::default();
-                    inner.best_runtime = None;
                     inner.main_trie_root_calculation_cache = None;
 
                     break BlockVerification::Reset {
                         previous_best_height: old_chain.best_block_header().number,
+                        parent_runtime: Some(parent_runtime),
                         sync: OptimisticSync { chain, inner },
                         reason: ResetCause::NonCanonical,
                     };
@@ -1270,9 +1216,6 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     error,
                     parent_runtime,
                 }) => {
-                    if shared.inner.finalized_runtime.is_none() {
-                        shared.inner.finalized_runtime = Some(parent_runtime);
-                    }
                     if let Some(source) = shared.inner.sources.get_mut(&shared.source_id) {
                         source.banned = true;
                     }
@@ -1288,12 +1231,11 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     );
 
                     let mut inner = shared.inner.with_requests_obsoleted(&chain);
-                    inner.best_to_finalized_storage_diff = Default::default();
-                    inner.best_runtime = None;
                     inner.main_trie_root_calculation_cache = None;
 
                     break BlockVerification::Reset {
                         previous_best_height: old_chain.best_block_header().number,
+                        parent_runtime: Some(parent_runtime),
                         sync: OptimisticSync { chain, inner },
                         reason: ResetCause::HeaderBodyError(error),
                     };
@@ -1347,8 +1289,6 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
                 );
 
                 let mut inner = self.inner.with_requests_obsoleted(&chain);
-                inner.best_to_finalized_storage_diff = Default::default();
-                inner.best_runtime = None;
                 inner.main_trie_root_calculation_cache = None;
 
                 let previous_best_height = chain.best_block_header().number;
@@ -1387,11 +1327,6 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
         // Since the best block is now the finalized block, reset the storage
         // diff.
         debug_assert!(self.chain.is_empty());
-        self.inner.best_to_finalized_storage_diff.clear();
-
-        if let Some(runtime) = self.inner.best_runtime.take() {
-            self.inner.finalized_runtime = Some(runtime);
-        }
 
         self.inner.finalized_chain_information.chain_information =
             self.chain.as_chain_information().into();
@@ -1470,15 +1405,7 @@ impl<TRq, TSrc, TBl> StoragePrefixKeys<TRq, TSrc, TBl> {
         self,
         keys: impl Iterator<Item = impl AsRef<[u8]>>,
     ) -> BlockVerification<TRq, TSrc, TBl> {
-        // We need to turn the prefix into a Vec, as otherwise the iterator would borrow
-        // self.inner.
-        let owned_prefix = self.inner.prefix().as_ref().to_owned();
-        let list_after_diff = self
-            .shared
-            .inner
-            .best_to_finalized_storage_diff
-            .storage_prefix_keys_ordered(&owned_prefix, keys);
-        let inner = self.inner.inject_keys_ordered(list_after_diff);
+        let inner = self.inner.inject_keys_ordered(keys);
         BlockVerification::from(Inner::Step2(inner), self.shared)
     }
 }
@@ -1522,48 +1449,8 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
     pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> BlockVerification<TRq, TSrc, TBl> {
-        let key = key.as_ref().map(|k| k.as_ref());
-
-        // The key provided by the user as parameter is the next key in the storage of the
-        // finalized block.
-        // `best_to_finalized_storage_diff` needs to be taken into account in order to provide
-        // the next key in the best block instead.
-
-        let search = {
-            let inner_key = self.inner.key();
-            self.shared
-                .inner
-                .best_to_finalized_storage_diff
-                .storage_next_key(
-                    if let Some(key_overwrite) = &self.key_overwrite {
-                        key_overwrite
-                    } else {
-                        inner_key.as_ref()
-                    },
-                    key,
-                    self.inner.or_equal(),
-                )
-        };
-
-        match search {
-            storage_diff::StorageNextKey::Found(mut k) => {
-                // Because the storage diff doesn't check whether the next key conforms to the
-                // prefix, we have to do it here.
-                if k.map_or(false, |k| !k.starts_with(self.inner.prefix().as_ref())) {
-                    k = None;
-                }
-                let inner = self.inner.inject_key(k);
-                BlockVerification::from(Inner::Step2(inner), self.shared)
-            }
-            storage_diff::StorageNextKey::NextOf(next) => {
-                let key_overwrite = Some(next.to_owned());
-                BlockVerification::FinalizedStorageNextKey(StorageNextKey {
-                    inner: self.inner,
-                    shared: self.shared,
-                    key_overwrite,
-                })
-            }
-        }
+        let inner = self.inner.inject_key(key);
+        BlockVerification::from(Inner::Step2(inner), self.shared)
     }
 }
 

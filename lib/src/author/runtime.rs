@@ -136,10 +136,10 @@ pub struct Success {
 pub enum Error {
     /// Error while executing the Wasm virtual machine.
     #[display(fmt = "{_0}")]
-    WasmVm(runtime_host::Error),
+    WasmVm(runtime_host::ErrorDetail),
     /// Error while initializing the Wasm virtual machine.
     #[display(fmt = "{_0}")]
-    VmInit(host::StartErr, host::HostVmPrototype),
+    VmInit(host::StartErr),
     /// Overflow when incrementing block height.
     BlockHeightOverflow,
     /// `Core_initialize_block` has returned a non-empty output.
@@ -169,7 +169,6 @@ pub enum Error {
 /// Start a block building process.
 pub fn build_block(config: Config) -> BlockBuild {
     let init_result = runtime_host::run(runtime_host::Config {
-        virtual_machine: config.parent_runtime,
         function_to_call: "Core_initialize_block",
         parameter: {
             // The `Core_initialize_block` function expects a SCALE-encoded partially-initialized
@@ -178,7 +177,12 @@ pub fn build_block(config: Config) -> BlockBuild {
                 parent_hash: config.parent_hash,
                 number: match config.parent_number.checked_add(1) {
                     Some(n) => n,
-                    None => return BlockBuild::Finished(Err(Error::BlockHeightOverflow)),
+                    None => {
+                        return BlockBuild::Finished(Err((
+                            Error::BlockHeightOverflow,
+                            config.parent_runtime,
+                        )))
+                    }
                 },
                 extrinsics_root: &[0; 32],
                 state_root: &[0; 32],
@@ -190,6 +194,7 @@ pub fn build_block(config: Config) -> BlockBuild {
             }
             .scale_encoding(config.block_number_bytes)
         },
+        virtual_machine: config.parent_runtime,
         main_trie_root_calculation_cache: config.main_trie_root_calculation_cache,
         storage_main_trie_changes: Default::default(),
         offchain_storage_changes: Default::default(),
@@ -198,7 +203,7 @@ pub fn build_block(config: Config) -> BlockBuild {
 
     let vm = match init_result {
         Ok(vm) => vm,
-        Err((err, proto)) => return BlockBuild::Finished(Err(Error::VmInit(err, proto))),
+        Err((err, proto)) => return BlockBuild::Finished(Err((Error::VmInit(err), proto))),
     };
 
     let shared = Shared {
@@ -215,7 +220,7 @@ pub fn build_block(config: Config) -> BlockBuild {
 #[must_use]
 pub enum BlockBuild {
     /// Block generation is over.
-    Finished(Result<Success, Error>),
+    Finished(Result<Success, (Error, host::HostVmPrototype)>),
 
     /// The inherent extrinsics are required in order to continue.
     ///
@@ -269,7 +274,7 @@ impl BlockBuild {
         loop {
             match (inner, &mut shared.stage) {
                 (Inner::Runtime(runtime_host::RuntimeHostVm::Finished(Err(err))), _) => {
-                    return BlockBuild::Finished(Err(Error::WasmVm(err)))
+                    return BlockBuild::Finished(Err((Error::WasmVm(err.detail), err.prototype)));
                 }
                 (Inner::Runtime(runtime_host::RuntimeHostVm::StorageGet(inner)), _) => {
                     return BlockBuild::StorageGet(StorageGet(inner, shared))
@@ -286,7 +291,10 @@ impl BlockBuild {
                     Stage::InitializeBlock,
                 ) => {
                     if !success.virtual_machine.value().as_ref().is_empty() {
-                        return BlockBuild::Finished(Err(Error::InitializeBlockNonEmptyOutput));
+                        return BlockBuild::Finished(Err((
+                            Error::InitializeBlockNonEmptyOutput,
+                            success.virtual_machine.into_prototype(),
+                        )));
                     }
 
                     shared.logs.push_str(&success.logs);
@@ -305,11 +313,16 @@ impl BlockBuild {
                     Inner::Runtime(runtime_host::RuntimeHostVm::Finished(Ok(success))),
                     Stage::InherentExtrinsics,
                 ) => {
-                    let extrinsics = match parse_inherent_extrinsics_output(
-                        success.virtual_machine.value().as_ref(),
-                    ) {
+                    let parse_result =
+                        parse_inherent_extrinsics_output(success.virtual_machine.value().as_ref());
+                    let extrinsics = match parse_result {
                         Ok(extrinsics) => extrinsics,
-                        Err(err) => return BlockBuild::Finished(Err(err)),
+                        Err(err) => {
+                            return BlockBuild::Finished(Err((
+                                err,
+                                success.virtual_machine.into_prototype(),
+                            )))
+                        }
                     };
 
                     shared.block_body.reserve(extrinsics.len());
@@ -338,7 +351,7 @@ impl BlockBuild {
                     inner = Inner::Runtime(match init_result {
                         Ok(vm) => vm,
                         Err((err, proto)) => {
-                            return BlockBuild::Finished(Err(Error::VmInit(err, proto)))
+                            return BlockBuild::Finished(Err((Error::VmInit(err), proto)))
                         }
                     });
                 }
@@ -367,22 +380,31 @@ impl BlockBuild {
 
                     shared.stage = new_stage;
 
-                    match parse_apply_extrinsic_output(success.virtual_machine.value().as_ref()) {
+                    let parse_result =
+                        parse_apply_extrinsic_output(success.virtual_machine.value().as_ref());
+                    match parse_result {
                         Ok(Ok(Ok(()))) => {}
                         Ok(Ok(Err(error))) => {
-                            return BlockBuild::Finished(Err(
+                            return BlockBuild::Finished(Err((
                                 Error::InherentExtrinsicDispatchError { extrinsic, error },
-                            ))
+                                success.virtual_machine.into_prototype(),
+                            )))
                         }
                         Ok(Err(error)) => {
-                            return BlockBuild::Finished(Err(
+                            return BlockBuild::Finished(Err((
                                 Error::InherentExtrinsicTransactionValidityError {
                                     extrinsic,
                                     error,
                                 },
-                            ))
+                                success.virtual_machine.into_prototype(),
+                            )))
                         }
-                        Err(err) => return BlockBuild::Finished(Err(err)),
+                        Err(err) => {
+                            return BlockBuild::Finished(Err((
+                                err,
+                                success.virtual_machine.into_prototype(),
+                            )))
+                        }
                     }
 
                     shared.block_body.push(extrinsic);
@@ -394,11 +416,16 @@ impl BlockBuild {
                     Inner::Runtime(runtime_host::RuntimeHostVm::Finished(Ok(success))),
                     Stage::ApplyExtrinsic(_),
                 ) => {
-                    let result = match parse_apply_extrinsic_output(
-                        success.virtual_machine.value().as_ref(),
-                    ) {
+                    let parse_result =
+                        parse_apply_extrinsic_output(success.virtual_machine.value().as_ref());
+                    let result = match parse_result {
                         Ok(r) => r,
-                        Err(err) => return BlockBuild::Finished(Err(err)),
+                        Err(err) => {
+                            return BlockBuild::Finished(Err((
+                                err,
+                                success.virtual_machine.into_prototype(),
+                            )))
+                        }
                     };
 
                     if result.is_ok() {
@@ -533,7 +560,7 @@ impl InherentExtrinsics {
 
         let vm = match init_result {
             Ok(vm) => vm,
-            Err((err, proto)) => return BlockBuild::Finished(Err(Error::VmInit(err, proto))),
+            Err((err, proto)) => return BlockBuild::Finished(Err((Error::VmInit(err), proto))),
         };
 
         BlockBuild::from_inner(vm, self.shared)
@@ -569,7 +596,7 @@ impl ApplyExtrinsic {
 
         let vm = match init_result {
             Ok(vm) => vm,
-            Err((err, proto)) => return BlockBuild::Finished(Err(Error::VmInit(err, proto))),
+            Err((err, proto)) => return BlockBuild::Finished(Err((Error::VmInit(err), proto))),
         };
 
         BlockBuild::from_inner(vm, self.shared)
@@ -591,7 +618,7 @@ impl ApplyExtrinsic {
 
         let vm = match init_result {
             Ok(vm) => vm,
-            Err((err, proto)) => return BlockBuild::Finished(Err(Error::VmInit(err, proto))),
+            Err((err, proto)) => return BlockBuild::Finished(Err((Error::VmInit(err), proto))),
         };
 
         BlockBuild::from_inner(vm, self.shared)

@@ -74,7 +74,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 // is 5k.
                 NonZeroU32::new(5000).unwrap()
             },
-            full: None,
+            full_mode: false,
         }),
         network_up_to_date_best: true,
         network_up_to_date_finalized: true,

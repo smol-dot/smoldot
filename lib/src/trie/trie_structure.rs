@@ -285,6 +285,17 @@ impl<TUd> TrieStructure<TUd> {
         }
     }
 
+    /// Returns the [`NodeIndex`] of the node with the given full key, if any is found.
+    pub fn node_by_full_key<TKIter>(&self, key: TKIter) -> Option<NodeIndex>
+    where
+        TKIter: Iterator<Item = Nibble> + Clone,
+    {
+        match self.existing_node_inner(key) {
+            ExistingNodeInnerResult::Found { node_index, .. } => Some(NodeIndex(node_index)),
+            ExistingNodeInnerResult::NotFound { .. } => None,
+        }
+    }
+
     /// Returns `true` if the node with the given index is a storage node. Returns `false` if it
     /// is a branch node.
     ///
@@ -1135,6 +1146,22 @@ impl<TUd: fmt::Debug> fmt::Debug for TrieStructure<TUd> {
                     .map(|idx| (idx, self.nodes.get(idx).unwrap())),
             )
             .finish()
+    }
+}
+
+impl<TUd> ops::Index<NodeIndex> for TrieStructure<TUd> {
+    type Output = TUd;
+
+    #[track_caller]
+    fn index(&self, node_index: NodeIndex) -> &TUd {
+        &self.nodes[node_index.0].user_data
+    }
+}
+
+impl<TUd> ops::IndexMut<NodeIndex> for TrieStructure<TUd> {
+    #[track_caller]
+    fn index_mut(&mut self, node_index: NodeIndex) -> &mut TUd {
+        &mut self.nodes[node_index.0].user_data
     }
 }
 
