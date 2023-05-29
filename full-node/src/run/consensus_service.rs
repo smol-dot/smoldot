@@ -297,7 +297,7 @@ struct SyncBackground {
     /// if this is the "special source" representing the local block authoring. Only one source
     /// must contain `None` and its id must be [`SyncBackground::block_author_sync_source`].
     ///
-    /// Each block holds its runtime and the state of its storage if it has been verified.
+    /// Each block holds its runtime if it has been verified.
     ///
     /// Some of the sources can represent networking peers that have already been disconnected. If
     /// that is the case, no new request is started against these sources but existing requests
@@ -307,7 +307,6 @@ struct SyncBackground {
     ///
     /// Each on-going request has a corresponding background task that sends its result to
     /// [`SyncBackground::block_requests_finished_rx`].
-    // TODO: very unoptimized to have a copy of the storage for each block; store in db instead
     sync: all::AllSync<(), Option<NetworkSourceInfo>, NonFinalizedBlock>,
 
     /// Source within the [`SyncBackground::sync`] to use to import locally-authored blocks.
