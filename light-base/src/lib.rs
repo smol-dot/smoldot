@@ -73,7 +73,7 @@
 extern crate alloc;
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
-use core::{num::NonZeroU32, pin};
+use core::{num::NonZeroU32, ops, pin};
 use futures_channel::oneshot;
 use futures_util::{future, FutureExt as _};
 use hashbrown::{hash_map::Entry, HashMap};
@@ -100,7 +100,8 @@ pub use peer_id::PeerId;
 /// See [`Client::add_chain`].
 #[derive(Debug, Clone)]
 pub struct AddChainConfig<'a, TChain, TRelays> {
-    /// Opaque user data that the [`Client`] will hold for this chain.
+    /// Opaque user data that the [`Client`] will hold for this chain. Can later be accessed using
+    /// the `Index` and `IndexMut` trait implementations on the [`Client`].
     pub user_data: TChain,
 
     /// JSON text containing the specification of the chain (the so-called "chain spec").
@@ -946,20 +947,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         removed_chain.user_data
     }
 
-    /// Returns the user data associated to the given chain.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`ChainId`] is invalid.
-    ///
-    pub fn chain_user_data_mut(&mut self, chain_id: ChainId) -> &mut TChain {
-        &mut self
-            .public_api_chains
-            .get_mut(chain_id.0)
-            .unwrap()
-            .user_data
-    }
-
     /// Enqueues a JSON-RPC request towards the given chain.
     ///
     /// Since most JSON-RPC requests can only be answered asynchronously, the request is only
@@ -1001,6 +988,20 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         };
 
         json_rpc_sender.queue_rpc_request(json_rpc_request)
+    }
+}
+
+impl<TPlat: platform::PlatformRef, TChain> ops::Index<ChainId> for Client<TPlat, TChain> {
+    type Output = TChain;
+
+    fn index(&self, index: ChainId) -> &Self::Output {
+        &self.public_api_chains.get(index.0).unwrap().user_data
+    }
+}
+
+impl<TPlat: platform::PlatformRef, TChain> ops::IndexMut<ChainId> for Client<TPlat, TChain> {
+    fn index_mut(&mut self, index: ChainId) -> &mut Self::Output {
+        &mut self.public_api_chains.get_mut(index.0).unwrap().user_data
     }
 }
 
