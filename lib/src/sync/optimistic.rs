@@ -577,8 +577,9 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     ///
     /// Returns the user data that was associated to that request.
     ///
-    /// If the state machine only handles light clients, that is if [`Config::full`] was `false`,
-    /// then the values of [`RequestSuccessBlock::scale_encoded_extrinsics`] are silently ignored.
+    /// If the state machine only handles light clients, that is if [`Config::full_mode`] was
+    /// `false`, then the values of [`RequestSuccessBlock::scale_encoded_extrinsics`] are
+    /// silently ignored.
     ///
     /// > **Note**: If [`Config::full_mode`] is `false`, you are encouraged to not request the
     /// >           block's body from the source altogether, and to fill the
