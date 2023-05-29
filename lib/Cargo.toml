@@ -76,7 +76,7 @@ twox-hash = { version = "1.6.3", default-features = false }
 wasmi = { version = "0.29.0", default-features = false }
 
 # `database-sqlite` feature
-sqlite = { version = "0.27.3", optional = true, default-features = false, features = ["linkage"] }
+sqlite = { version = "0.30.4", optional = true, default-features = false, features = ["linkage"] }
 
 # `std` feature
 # Add here the crates that cannot function without the help of the operating system or environment.
