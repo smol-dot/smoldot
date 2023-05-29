@@ -875,13 +875,11 @@ impl SyncBackground {
                         let prefix = prefix_key.prefix().as_ref().to_vec();
                         let keys = parent_block_storage
                             .range(ops::Bound::Included(&prefix), ops::Bound::Unbounded)
-                            .filter(|node_index| {
-                                self.finalized_block_storage.is_storage(*node_index)
-                            })
+                            .filter(|node_index| parent_block_storage.is_storage(*node_index))
                             .map(|node_index| {
                                 // TODO: consider detecting if nibbles are uneven instead of ignoring the problem
                                 nibbles_to_bytes_suffix_extend(
-                                    self.finalized_block_storage
+                                    parent_block_storage
                                         .node_full_key_by_index(node_index)
                                         .unwrap(),
                                 )
