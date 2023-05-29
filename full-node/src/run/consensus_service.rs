@@ -724,12 +724,15 @@ impl SyncBackground {
         // Actual block production now happening.
         let (new_block_header, new_block_body, authoring_logs) = {
             let parent_hash = self.sync.best_block_hash();
-            let parent_runtime_arc = {
-                // TODO: no, best block could be equal to finalized block
+            let parent_runtime_arc = if self.sync.best_block_number()
+                != self.sync.finalized_block_header().number
+            {
                 let NonFinalizedBlock::Verified {
                     runtime: parent_runtime_arc,
                 } = &self.sync[(self.sync.best_block_number(), &self.sync.best_block_hash())] else { unreachable!() };
                 parent_runtime_arc.clone()
+            } else {
+                self.finalized_runtime.clone()
             };
             let parent_runtime = parent_runtime_arc.try_lock().unwrap().take().unwrap();
 
