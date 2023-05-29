@@ -1312,6 +1312,7 @@ where
                         .request_response_protocols
                         .iter()
                         .enumerate()
+                        .filter(|(_, p)| p.inbound_allowed)
                         .find(|(_, p)| p.name == protocol_name)
                     {
                         self.messages_to_connections.push_back((
