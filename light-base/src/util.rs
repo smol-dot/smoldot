@@ -94,3 +94,23 @@ impl<H> PartialEq for BuildHasherDefault<H> {
 }
 
 impl<H> Eq for BuildHasherDefault<H> {}
+
+/// Implementation of the `BuildHasher` trait for the sip hasher.
+///
+/// Contrary to the one in the standard library, a seed is explicitly passed here, making the
+/// hashing predictable. This is a good thing for tests and no-std compatibility.
+pub struct SipHasherBuild([u8; 16]);
+
+impl SipHasherBuild {
+    pub fn new(seed: [u8; 16]) -> SipHasherBuild {
+        SipHasherBuild(seed)
+    }
+}
+
+impl core::hash::BuildHasher for SipHasherBuild {
+    type Hasher = siphasher::sip::SipHasher;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        siphasher::sip::SipHasher::new_with_key(&self.0)
+    }
+}

@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::ToBackground;
-use crate::{network_service, platform::PlatformRef, runtime_service};
+use crate::{network_service, platform::PlatformRef, runtime_service, util};
 
 use alloc::{borrow::ToOwned as _, string::String, sync::Arc, vec::Vec};
 use core::{
@@ -73,7 +73,10 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                     .number,
             ),
             obsolete_finalized_parahead,
-            sync_sources_map: HashMap::with_capacity_and_hasher(0, fnv::FnvBuildHasher::default()),
+            sync_sources_map: HashMap::with_capacity_and_hasher(
+                0,
+                util::SipHasherBuild::new(rand::random()),
+            ),
             subscription_state: ParachainBackgroundState::NotSubscribed {
                 all_subscriptions: Vec::new(),
                 subscribe_future: {
@@ -139,8 +142,7 @@ struct ParachainBackgroundTask<TPlat: PlatformRef> {
     sync_sources: sources::AllForksSources<(PeerId, protocol::Role)>,
 
     /// Maps `PeerId`s to their indices within `sync_sources`.
-    // TODO: use SipHasher
-    sync_sources_map: HashMap<PeerId, sources::SourceId, fnv::FnvBuildHasher>,
+    sync_sources_map: HashMap<PeerId, sources::SourceId, util::SipHasherBuild>,
 
     /// Extra fields that are set after the subscription to the runtime service events has
     /// succeeded.

@@ -2457,6 +2457,7 @@ dependencies = [
  "rand",
  "serde",
  "serde_json",
+ "siphasher",
  "smol",
  "smoldot",
  "terminal_size",
@@ -2485,6 +2486,7 @@ dependencies = [
  "rand",
  "serde",
  "serde_json",
+ "siphasher",
  "slab",
  "smoldot",
 ]

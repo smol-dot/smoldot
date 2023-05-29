@@ -15,23 +15,22 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-#![deny(rustdoc::broken_intra_doc_links)]
-#![deny(unused_crate_dependencies)]
+/// Implementation of the `BuildHasher` trait for the sip hasher.
+///
+/// Contrary to the one in the standard library, a seed is explicitly passed here, making the
+/// hashing predictable. This is a good thing for tests and no-std compatibility.
+pub struct SipHasherBuild([u8; 16]);
 
-mod cli;
-mod run;
-mod util;
-
-fn main() {
-    smol::block_on(async_main())
+impl SipHasherBuild {
+    pub fn new(seed: [u8; 16]) -> SipHasherBuild {
+        SipHasherBuild(seed)
+    }
 }
 
-async fn async_main() {
-    match <cli::CliOptions as clap::Parser>::parse().command {
-        cli::CliOptionsCommand::Run(r) => run::run(*r).await,
-        cli::CliOptionsCommand::Blake264BitsHash(opt) => {
-            let hash = blake2_rfc::blake2b::blake2b(8, &[], opt.payload.as_bytes());
-            println!("0x{}", hex::encode(hash));
-        }
+impl core::hash::BuildHasher for SipHasherBuild {
+    type Hasher = siphasher::sip::SipHasher;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        siphasher::sip::SipHasher::new_with_key(&self.0)
     }
 }

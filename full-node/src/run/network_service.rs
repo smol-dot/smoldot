@@ -27,7 +27,10 @@
 // TODO: doc
 // TODO: re-review this once finished
 
-use crate::run::{database_thread, jaeger_service};
+use crate::{
+    run::{database_thread, jaeger_service},
+    util,
+};
 
 use core::{cmp, future::Future, mem, pin::Pin, task::Poll, time::Duration};
 use futures_channel::oneshot;
@@ -239,8 +242,7 @@ struct Inner {
     /// List of peer and chain index tuples for which no outbound slot should be assigned.
     ///
     /// The values are the moment when the ban expires.
-    // TODO: use SipHasher
-    slots_assign_backoff: HashMap<(PeerId, usize), Instant, fnv::FnvBuildHasher>,
+    slots_assign_backoff: HashMap<(PeerId, usize), Instant, util::SipHasherBuild>,
 
     process_network_service_events: bool,
 
@@ -338,7 +340,7 @@ impl NetworkService {
             network,
             slots_assign_backoff: hashbrown::HashMap::with_capacity_and_hasher(
                 50, // TODO: ?
-                Default::default(),
+                util::SipHasherBuild::new(rand::random()),
             ),
             active_connections: hashbrown::HashMap::with_capacity_and_hasher(
                 100, // TODO: ?
