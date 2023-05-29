@@ -115,7 +115,12 @@ impl Builder {
 #[must_use]
 pub enum BuilderAuthoring {
     /// Error happened during the generation.
-    Error(Error),
+    Error {
+        /// Runtime of the parent block, as provided at initialization.
+        parent_runtime: host::HostVmPrototype,
+        /// The error in question.
+        error: Error,
+    },
 
     /// Block building is ready to accept extrinsics.
     ///
@@ -472,14 +477,22 @@ impl Shared {
                         self.block_number_bytes,
                     ) {
                         Ok(h) => h,
-                        Err(_) => break BuilderAuthoring::Error(Error::InvalidHeaderGenerated),
+                        Err(_) => {
+                            break BuilderAuthoring::Error {
+                                parent_runtime: block.parent_runtime,
+                                error: Error::InvalidHeaderGenerated,
+                            }
+                        }
                     };
 
                     // The `Seal` object created below assumes that there is no existing seal.
                     if decoded_header.digest.aura_seal().is_some()
                         || decoded_header.digest.babe_seal().is_some()
                     {
-                        break BuilderAuthoring::Error(Error::InvalidHeaderGenerated);
+                        break BuilderAuthoring::Error {
+                            parent_runtime: block.parent_runtime,
+                            error: Error::InvalidHeaderGenerated,
+                        };
                     }
 
                     break BuilderAuthoring::Seal(Seal {
@@ -487,8 +500,11 @@ impl Shared {
                         block,
                     });
                 }
-                runtime::BlockBuild::Finished(Err(error)) => {
-                    break BuilderAuthoring::Error(Error::Runtime(error))
+                runtime::BlockBuild::Finished(Err((error, parent_runtime))) => {
+                    break BuilderAuthoring::Error {
+                        parent_runtime,
+                        error: Error::Runtime(error),
+                    }
                 }
                 runtime::BlockBuild::InherentExtrinsics(a) => {
                     // Injecting the inherent is guaranteed to be done only once per block.

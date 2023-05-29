@@ -1,6 +1,6 @@
 [package]
 name = "smoldot-light"
-version = "0.4.0"
+version = "0.5.0"
 description = "Browser bindings to a light client for Substrate-based blockchains"
 authors.workspace = true
 license.workspace = true
@@ -28,8 +28,9 @@ lru = { version = "0.10.0", default-features = false }  # TODO: there's no way t
 rand = "0.8.5"
 serde = { version = "1.0.163", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0.96", default-features = false, features = ["alloc"] }
+siphasher = { version = "0.3.10", default-features = false }
 slab = { version = "0.4.8", default-features = false }
-smoldot = { version = "0.6.0", path = "../lib", default-features = false }
+smoldot = { version = "0.7.0", path = "../lib", default-features = false }
 
 # `std` feature
 # Add here the crates that cannot function without the help of the operating system or environment.

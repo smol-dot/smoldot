@@ -99,16 +99,9 @@ pub struct Config {
     /// block requests.
     pub download_ahead_blocks: NonZeroU32,
 
-    /// If `Some`, the block bodies and storage are also synchronized. Contains the extra
-    /// configuration.
-    pub full: Option<ConfigFull>,
-}
-
-/// See [`Config::full`].
-#[derive(Debug)]
-pub struct ConfigFull {
-    /// Compiled runtime code of the finalized block.
-    pub finalized_runtime: host::HostVmPrototype,
+    /// If `true`, the block bodies and storage are also synchronized and the block bodies are
+    /// verified.
+    pub full_mode: bool,
 }
 
 /// Identifier for a source in the [`AllSync`].
@@ -167,10 +160,8 @@ pub struct AllSync<TRq, TSrc, TBl> {
 impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Initializes a new state machine.
     pub fn new(config: Config) -> Self {
-        let is_full = config.full.is_some();
-
         AllSync {
-            inner: if let Some(config_full) = config.full {
+            inner: if config.full_mode {
                 AllSyncInner::Optimistic {
                     inner: optimistic::OptimisticSync::new(optimistic::Config {
                         chain_information: config.chain_information,
@@ -178,9 +169,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         sources_capacity: config.sources_capacity,
                         blocks_capacity: config.blocks_capacity,
                         download_ahead_blocks: config.download_ahead_blocks,
-                        full: Some(optimistic::ConfigFull {
-                            finalized_runtime: config_full.finalized_runtime,
-                        }),
+                        full_mode: config.full_mode,
                     }),
                 }
             } else {
@@ -205,7 +194,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                                 sources_capacity: config.sources_capacity,
                                 blocks_capacity: config.blocks_capacity,
                                 download_ahead_blocks: config.download_ahead_blocks,
-                                full: None,
+                                full_mode: false,
                             }),
                         }
                     }
@@ -214,7 +203,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             shared: Shared {
                 sources: slab::Slab::with_capacity(config.sources_capacity),
                 requests: slab::Slab::with_capacity(config.sources_capacity),
-                is_full,
+                full_mode: config.full_mode,
                 sources_capacity: config.sources_capacity,
                 blocks_capacity: config.blocks_capacity,
                 max_disjoint_headers: config.max_disjoint_headers,
@@ -343,20 +332,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             AllSyncInner::AllForks(_) => todo!(), // TODO:
             AllSyncInner::Optimistic { inner } => inner.best_block_consensus(),
             AllSyncInner::GrandpaWarpSync { .. } => todo!(), // TODO: ?!
-            AllSyncInner::Poisoned => unreachable!(),
-        }
-    }
-
-    /// Returns access to the storage of the best block.
-    ///
-    /// Returns `None` if [`Config::full`] was `None`.
-    pub fn best_block_storage(&self) -> Option<BlockStorage<TRq, TSrc, TBl>> {
-        match &self.inner {
-            AllSyncInner::AllForks(_) => None, // TODO: not implemented
-            AllSyncInner::Optimistic { inner } => Some(BlockStorage {
-                inner: BlockStorageInner::Optimistic(inner.best_block_storage()?),
-            }),
-            AllSyncInner::GrandpaWarpSync { .. } => None, // TODO: unclear API
             AllSyncInner::Poisoned => unreachable!(),
         }
     }
@@ -864,7 +839,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         (
                             sync[inner_source_id].outer_source_id,
                             &src_user_data.user_data,
-                            all_forks_request_convert(rq_params, self.shared.is_full),
+                            all_forks_request_convert(rq_params, self.shared.full_mode),
                         )
                     },
                 );
@@ -876,7 +851,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     (
                         inner[rq_detail.source_id].outer_source_id,
                         &inner[rq_detail.source_id].user_data,
-                        optimistic_request_convert(rq_detail, self.shared.is_full),
+                        optimistic_request_convert(rq_detail, self.shared.full_mode),
                     )
                 });
 
@@ -1783,6 +1758,32 @@ impl<TRq, TSrc, TBl> ops::IndexMut<SourceId> for AllSync<TRq, TSrc, TBl> {
     }
 }
 
+impl<'a, TRq, TSrc, TBl> ops::Index<(u64, &'a [u8; 32])> for AllSync<TRq, TSrc, TBl> {
+    type Output = TBl;
+
+    #[track_caller]
+    fn index(&self, (block_height, block_hash): (u64, &'a [u8; 32])) -> &TBl {
+        match &self.inner {
+            AllSyncInner::AllForks(inner) => inner[(block_height, block_hash)].as_ref().unwrap(),
+            AllSyncInner::Optimistic { inner, .. } => &inner[block_hash],
+            AllSyncInner::GrandpaWarpSync { .. } => panic!("unknown block"), // No block is ever stored during the warp syncing.
+            AllSyncInner::Poisoned => unreachable!(),
+        }
+    }
+}
+
+impl<'a, TRq, TSrc, TBl> ops::IndexMut<(u64, &'a [u8; 32])> for AllSync<TRq, TSrc, TBl> {
+    #[track_caller]
+    fn index_mut(&mut self, (block_height, block_hash): (u64, &'a [u8; 32])) -> &mut TBl {
+        match &mut self.inner {
+            AllSyncInner::AllForks(inner) => inner[(block_height, block_hash)].as_mut().unwrap(),
+            AllSyncInner::Optimistic { inner, .. } => &mut inner[block_hash],
+            AllSyncInner::GrandpaWarpSync { .. } => panic!("unknown block"), // No block is ever stored during the warp syncing.
+            AllSyncInner::Poisoned => unreachable!(),
+        }
+    }
+}
+
 /// See [`AllSync::desired_requests`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
@@ -2027,49 +2028,6 @@ pub struct GrandpaWarpSyncResponseFragment<'a> {
     pub scale_encoded_justification: &'a [u8],
 }
 
-/// See [`AllSync::best_block_storage`].
-pub struct BlockStorage<'a, TRq, TSrc, TBl> {
-    inner: BlockStorageInner<'a, TRq, TSrc, TBl>,
-}
-
-enum BlockStorageInner<'a, TRq, TSrc, TBl> {
-    Optimistic(
-        optimistic::BlockStorage<'a, OptimisticRequestExtra<TRq>, OptimisticSourceExtra<TSrc>, TBl>,
-    ),
-}
-
-impl<'a, TRq, TSrc, TBl> BlockStorage<'a, TRq, TSrc, TBl> {
-    /// Returns the runtime built against this block.
-    pub fn runtime(&self) -> &host::HostVmPrototype {
-        match &self.inner {
-            BlockStorageInner::Optimistic(inner) => inner.runtime(),
-        }
-    }
-
-    /// Returns the storage value at the given key. `None` if this key doesn't have any value.
-    pub fn get<'val: 'a>(
-        &'val self, // TODO: unclear lifetime
-        key: &[u8],
-        or_finalized: impl FnOnce() -> Option<(&'val [u8], TrieEntryVersion)>,
-    ) -> Option<(&'val [u8], TrieEntryVersion)> {
-        match &self.inner {
-            BlockStorageInner::Optimistic(inner) => inner.get(key, or_finalized),
-        }
-    }
-
-    pub fn prefix_keys_ordered<'k: 'a>(
-        &'k self, // TODO: unclear lifetime
-        prefix: &'k [u8],
-        in_finalized_ordered: impl Iterator<Item = impl AsRef<[u8]> + 'k> + 'k,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + 'k> + 'k {
-        match &self.inner {
-            BlockStorageInner::Optimistic(inner) => {
-                inner.prefix_keys_ordered(prefix, in_finalized_ordered)
-            }
-        }
-    }
-}
-
 /// Outcome of calling [`AllSync::process_one`].
 pub enum ProcessOne<TRq, TSrc, TBl> {
     /// No block ready to be processed.
@@ -2169,16 +2127,6 @@ pub struct Block<TBl> {
 pub struct BlockFull {
     /// List of SCALE-encoded extrinsics that form the block's body.
     pub body: Vec<Vec<u8>>,
-
-    /// Changes to the storage made by this block compared to its parent.
-    pub storage_main_trie_changes: storage_diff::TrieDiff,
-
-    /// State trie version indicated by the runtime. All the storage changes indicated by
-    /// [`BlockFull::storage_main_trie_changes`] should store this version alongside with them.
-    pub state_trie_version: TrieEntryVersion,
-
-    /// List of changes to the off-chain storage that this block performs.
-    pub offchain_storage_changes: storage_diff::TrieDiff,
 }
 
 pub struct HeaderVerify<TRq, TSrc, TBl> {
@@ -2385,12 +2333,7 @@ impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
                                 header: b.header,
                                 justifications: b.justifications,
                                 user_data: b.user_data,
-                                full: b.full.map(|b| BlockFull {
-                                    body: b.body,
-                                    offchain_storage_changes: b.offchain_storage_changes,
-                                    storage_main_trie_changes: b.storage_main_trie_changes,
-                                    state_trie_version: b.state_trie_version,
-                                }),
+                                full: b.full.map(|b| BlockFull { body: b.body }),
                             })
                             .collect(),
                         updates_best_block: false,
@@ -2496,6 +2439,21 @@ impl<TRq, TSrc, TBl> HeaderBodyVerify<TRq, TSrc, TBl> {
         }
     }
 
+    /// Returns the hash of the parent of the block to be verified.
+    pub fn parent_hash(&self) -> [u8; 32] {
+        match &self.inner {
+            HeaderBodyVerifyInner::Optimistic(verify) => verify.parent_hash(),
+        }
+    }
+
+    /// Returns the user data of the parent of the block to be verified, or `None` if the parent
+    /// is the finalized block.
+    pub fn parent_user_data(&self) -> Option<&TBl> {
+        match &self.inner {
+            HeaderBodyVerifyInner::Optimistic(verify) => verify.parent_user_data(),
+        }
+    }
+
     /// Returns the SCALE-encoded header of the block about to be verified.
     pub fn scale_encoded_header(&self) -> &[u8] {
         match &self.inner {
@@ -2507,11 +2465,12 @@ impl<TRq, TSrc, TBl> HeaderBodyVerify<TRq, TSrc, TBl> {
     pub fn start(
         self,
         now_from_unix_epoch: Duration,
+        parent_runtime: host::HostVmPrototype,
         user_data: TBl,
     ) -> BlockVerification<TRq, TSrc, TBl> {
         match self.inner {
             HeaderBodyVerifyInner::Optimistic(verify) => BlockVerification::from_inner(
-                verify.start(now_from_unix_epoch),
+                verify.start(now_from_unix_epoch, Some(parent_runtime)),
                 self.shared,
                 user_data,
             ),
@@ -2525,6 +2484,19 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
     Success {
         /// True if the newly-verified block is considered the new best block.
         is_new_best: bool,
+        /// Changes to the storage made by this block compared to its parent.
+        storage_main_trie_changes: storage_diff::TrieDiff,
+        /// State trie version indicated by the runtime. All the storage changes indicated by
+        /// [`BlockVerification::Success::storage_main_trie_changes`] should store this version
+        /// alongside with them.
+        state_trie_version: TrieEntryVersion,
+        /// List of changes to the off-chain storage that this block performs.
+        offchain_storage_changes: storage_diff::TrieDiff,
+        /// Runtime of the parent, as was provided at the start of the verification.
+        parent_runtime: host::HostVmPrototype,
+        /// If `Some`, the block has modified the runtime compared to its parent. Contains the new
+        /// runtime.
+        new_runtime: Option<host::HostVmPrototype>,
         /// State machine yielded back. Use to continue the processing.
         sync: AllSync<TRq, TSrc, TBl>,
     },
@@ -2533,22 +2505,24 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
     Error {
         /// State machine yielded back. Use to continue the processing.
         sync: AllSync<TRq, TSrc, TBl>,
+        /// Runtime of the parent, as was provided at the start of the verification.
+        parent_runtime: host::HostVmPrototype,
         /// Error that happened.
         error: BlockVerificationError,
         /// User data that was passed to [`HeaderVerify::perform`] and is unused.
         user_data: TBl,
     },
 
-    /// Loading a storage value of the finalized block is required in order to continue.
-    FinalizedStorageGet(StorageGet<TRq, TSrc, TBl>),
+    /// Loading a storage value of the parent block is required in order to continue.
+    ParentStorageGet(StorageGet<TRq, TSrc, TBl>),
 
-    /// Fetching the list of keys of the finalized block with a given prefix is required in order
+    /// Fetching the list of keys of the parent block with a given prefix is required in order
     /// to continue.
-    FinalizedStoragePrefixKeys(StoragePrefixKeys<TRq, TSrc, TBl>),
+    ParentStoragePrefixKeys(StoragePrefixKeys<TRq, TSrc, TBl>),
 
-    /// Fetching the key of the finalized block storage that follows a given one is required in
+    /// Fetching the key of the parent block storage that follows a given one is required in
     /// order to continue.
-    FinalizedStorageNextKey(StorageNextKey<TRq, TSrc, TBl>),
+    ParentStorageNextKey(StorageNextKey<TRq, TSrc, TBl>),
 
     /// Compiling a runtime is required in order to continue.
     RuntimeCompilation(RuntimeCompilation<TRq, TSrc, TBl>),
@@ -2579,21 +2553,44 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
         user_data: TBl,
     ) -> Self {
         match inner {
-            optimistic::BlockVerification::NewBest { sync, .. } => {
+            optimistic::BlockVerification::NewBest {
+                sync,
+                full:
+                    Some(optimistic::BlockVerificationSuccessFull {
+                        storage_main_trie_changes,
+                        state_trie_version,
+                        offchain_storage_changes,
+                        parent_runtime,
+                        new_runtime,
+                    }),
+                ..
+            } => {
                 // TODO: transition to all_forks
                 BlockVerification::Success {
                     is_new_best: true,
+                    storage_main_trie_changes,
+                    state_trie_version,
+                    offchain_storage_changes,
+                    parent_runtime,
+                    new_runtime,
                     sync: AllSync {
                         inner: AllSyncInner::Optimistic { inner: sync },
                         shared,
                     },
                 }
             }
-            optimistic::BlockVerification::Reset { sync, reason, .. } => BlockVerification::Error {
+            optimistic::BlockVerification::NewBest { full: None, .. } => unreachable!(),
+            optimistic::BlockVerification::Reset {
+                sync,
+                reason,
+                parent_runtime,
+                ..
+            } => BlockVerification::Error {
                 sync: AllSync {
                     inner: AllSyncInner::Optimistic { inner: sync },
                     shared,
                 },
+                parent_runtime: parent_runtime.unwrap(),
                 error: match reason {
                     optimistic::ResetCause::InvalidHeader(err) => {
                         BlockVerificationError::InvalidHeader(err)
@@ -2613,22 +2610,22 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                 },
                 user_data,
             },
-            optimistic::BlockVerification::FinalizedStorageGet(inner) => {
-                BlockVerification::FinalizedStorageGet(StorageGet {
+            optimistic::BlockVerification::ParentStorageGet(inner) => {
+                BlockVerification::ParentStorageGet(StorageGet {
                     inner,
                     shared,
                     user_data,
                 })
             }
-            optimistic::BlockVerification::FinalizedStoragePrefixKeys(inner) => {
-                BlockVerification::FinalizedStoragePrefixKeys(StoragePrefixKeys {
+            optimistic::BlockVerification::ParentStoragePrefixKeys(inner) => {
+                BlockVerification::ParentStoragePrefixKeys(StoragePrefixKeys {
                     inner,
                     shared,
                     user_data,
                 })
             }
-            optimistic::BlockVerification::FinalizedStorageNextKey(inner) => {
-                BlockVerification::FinalizedStorageNextKey(StorageNextKey {
+            optimistic::BlockVerification::ParentStorageNextKey(inner) => {
+                BlockVerification::ParentStorageNextKey(StorageNextKey {
                     inner,
                     shared,
                     user_data,
@@ -2820,8 +2817,8 @@ struct Shared<TRq> {
     sources: slab::Slab<SourceMapping>,
     requests: slab::Slab<RequestMapping<TRq>>,
 
-    /// True if full mode.
-    is_full: bool,
+    /// See [`Config::full_mode`].
+    full_mode: bool,
 
     /// Value passed through [`Config::sources_capacity`].
     sources_capacity: usize,

@@ -811,8 +811,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 )
                 .await;
             }
-            methods::MethodCall::chainHead_unstable_follow { runtime_updates } => {
-                self.chain_head_follow((request_id, &state_machine_request_id), runtime_updates)
+            methods::MethodCall::chainHead_unstable_follow { with_runtime } => {
+                self.chain_head_follow((request_id, &state_machine_request_id), with_runtime)
                     .await;
             }
             methods::MethodCall::chainHead_unstable_genesisHash {} => {

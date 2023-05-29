@@ -1,6 +1,6 @@
 [package]
 name = "smoldot"
-version = "0.6.0"
+version = "0.7.0"
 description = "Primitives to build a client for Substrate-based blockchains"
 documentation = "https://docs.rs/smoldot"
 keywords = ["blockchain", "peer-to-peer"]
@@ -35,7 +35,7 @@ std = [
 arrayvec = { version = "0.7.2", default-features = false }
 async-lock = { version = "2.7.0", default-features = false }  # TODO: no-std-ize; this is has been done and is just waiting for a release: https://github.com/smol-rs/event-listener/pull/34
 atomic = { version = "0.5.3", default-features = false }
-base64 = { version = "0.21.1", default-features = false, features = ["alloc"] }
+base64 = { version = "0.21.2", default-features = false, features = ["alloc"] }
 bip39 = { version = "2.0.0", default-features = false }
 blake2-rfc = { version = "0.2.18", default-features = false }
 bs58 = { version = "0.4.0", default-features = false, features = ["alloc"] }
@@ -97,10 +97,10 @@ wasmtime = { version = "8.0.1", default-features = false, features = ["async", "
 
 [dev-dependencies]
 async-std = "1.12.0"
-criterion = "0.4.0"
+criterion = "0.5.1"
 futures-executor = { version = "0.3.28", default-features = false }
 tempfile = "3.5.0"
-wat = "1.0.65"
+wat = "1.0.66"
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]

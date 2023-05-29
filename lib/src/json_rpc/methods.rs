@@ -214,7 +214,7 @@ macro_rules! define_methods {
             /// Panics if the `id_json` isn't valid JSON.
             ///
             pub fn to_json_call_object_parameters(&self, id_json: Option<&str>) -> String {
-                parse::build_call(parse::Call {
+                parse::build_call(&parse::Call {
                     id_json,
                     method: self.name(),
                     // Note that we never skip the `params` field, even if empty. This is an
@@ -440,7 +440,7 @@ define_methods! {
         #[rename = "networkConfig"] network_config: Option<NetworkConfig>
     ) -> Cow<'a, str>,
     chainHead_unstable_follow(
-        #[rename = "runtimeUpdates"] runtime_updates: bool
+        #[rename = "withRuntime"] with_runtime: bool
     ) -> Cow<'a, str>,
     chainHead_unstable_genesisHash() -> HashHexString,
     chainHead_unstable_header(
@@ -679,7 +679,7 @@ pub enum FollowEvent<'a> {
         #[serde(rename = "parentBlockHash")]
         parent_block_hash: HashHexString,
         #[serde(rename = "newRuntime")]
-        // TODO: must not be present if runtime_updates: false
+        // TODO: must not be present if with_runtime: false
         new_runtime: Option<MaybeRuntimeSpec<'a>>,
     },
     #[serde(rename = "bestBlockChanged")]
