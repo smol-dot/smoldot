@@ -580,8 +580,8 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     /// If the state machine only handles light clients, that is if [`Config::full`] was `false`,
     /// then the values of [`RequestSuccessBlock::scale_encoded_extrinsics`] are silently ignored.
     ///
-    /// > **Note**: If [`Config::full`] is `false`, you are encouraged to not request the block's
-    /// >           body from the source altogether, and to fill the
+    /// > **Note**: If [`Config::full_mode`] is `false`, you are encouraged to not request the
+    /// >           block's body from the source altogether, and to fill the
     /// >           [`RequestSuccessBlock::scale_encoded_extrinsics`] fields with `Vec::new()`.
     ///
     /// # Panic
@@ -804,7 +804,7 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
         }
     }
 
-    /// Returns true if [`Config::full`] was `Some` at initialization.
+    /// Returns true if [`Config::full_mode`] was `true` at initialization.
     pub fn is_full_verification(&self) -> bool {
         self.inner.full_mode
     }
@@ -1000,7 +1000,7 @@ pub struct BlockVerificationSuccessFull {
     pub storage_main_trie_changes: storage_diff::TrieDiff,
 
     /// State trie version indicated by the runtime. All the storage changes indicated by
-    /// [`BlockVerification::NewBest::storage_main_trie_changes`] should store this version
+    /// [`BlockVerificationSuccessFull::storage_main_trie_changes`] should store this version
     /// alongside with them.
     pub state_trie_version: TrieEntryVersion,
 
