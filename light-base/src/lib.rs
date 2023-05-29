@@ -201,10 +201,9 @@ pub struct Client<TPlat: platform::PlatformRef, TChain = ()> {
     /// For each key, contains the services running for this chain plus the number of public API
     /// chains that correspond to it.
     ///
-    /// The [`ChainServices`] is within a `MaybeDone`. The variant will be `MaybeDone::Future` if
-    /// initialization is still in progress.
-    // TODO: use SipHasher
-    chains_by_key: HashMap<ChainKey, RunningChain<TPlat>, util::BuildHasherDefault<fnv::FnvHasher>>,
+    /// Because we use a `SipHasher`, this hashmap isn't created in the `new` function (as this
+    /// function is `const`) but lazily the first time it is needed.
+    chains_by_key: Option<HashMap<ChainKey, RunningChain<TPlat>, util::SipHasherBuild>>,
 }
 
 struct PublicApiChain<TChain> {
@@ -337,7 +336,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         Client {
             platform,
             public_api_chains: slab::Slab::new(),
-            chains_by_key: HashMap::with_hasher(util::BuildHasherDefault::new()),
+            chains_by_key: None,
         }
     }
 
@@ -348,6 +347,11 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         &mut self,
         config: AddChainConfig<'_, TChain, impl Iterator<Item = ChainId>>,
     ) -> Result<AddChainSuccess, AddChainError> {
+        // `chains_by_key` is created lazily whenever needed.
+        let chains_by_key = self
+            .chains_by_key
+            .get_or_insert_with(|| HashMap::with_hasher(util::SipHasherBuild::new(rand::random())));
+
         // Decode the chain specification.
         let chain_spec = match chain_spec::ChainSpec::from_json_bytes(config.specification) {
             Ok(cs) => cs,
@@ -586,8 +590,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         // This could in principle be done later on, but doing so raises borrow checker errors.
         let relay_chain_ready_future: Option<(future::MaybeDone<future::Shared<_>>, String)> =
             relay_chain_id.map(|relay_chain| {
-                let relay_chain = &self
-                    .chains_by_key
+                let relay_chain = &chains_by_key
                     .get(&self.public_api_chains.get(relay_chain.0).unwrap().key)
                     .unwrap();
 
@@ -627,7 +630,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     base.clone()
                 };
 
-                if !self.chains_by_key.values().any(|c| *c.log_name == attempt) {
+                if !chains_by_key.values().any(|c| *c.log_name == attempt) {
                     break attempt;
                 }
 
@@ -639,7 +642,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         };
 
         // Start the services of the chain to add, or grab the services if they already exist.
-        let (services_init, log_name) = match self.chains_by_key.entry(new_chain_key.clone()) {
+        let (services_init, log_name) = match chains_by_key.entry(new_chain_key.clone()) {
             Entry::Occupied(mut entry) => {
                 // The chain to add always has a corresponding chain running. Simply grab the
                 // existing services and existing log name.
@@ -933,10 +936,18 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
     pub fn remove_chain(&mut self, id: ChainId) -> TChain {
         let removed_chain = self.public_api_chains.remove(id.0);
 
-        let running_chain = self.chains_by_key.get_mut(&removed_chain.key).unwrap();
+        // `chains_by_key` is created lazily when `add_chain` is called.
+        // Since we're removing a chain that has been added with `add_chain`, it is guaranteed
+        // that `chains_by_key` is set.
+        let chains_by_key = self
+            .chains_by_key
+            .as_mut()
+            .unwrap_or_else(|| unreachable!());
+
+        let running_chain = chains_by_key.get_mut(&removed_chain.key).unwrap();
         if running_chain.num_references.get() == 1 {
             log::info!(target: "smoldot", "Shutting down chain {}", running_chain.log_name);
-            self.chains_by_key.remove(&removed_chain.key);
+            chains_by_key.remove(&removed_chain.key);
         } else {
             running_chain.num_references =
                 NonZeroU32::new(running_chain.num_references.get() - 1).unwrap();

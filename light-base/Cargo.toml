@@ -28,6 +28,7 @@ lru = { version = "0.10.0", default-features = false }  # TODO: there's no way t
 rand = "0.8.5"
 serde = { version = "1.0.163", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0.96", default-features = false, features = ["alloc"] }
+siphasher = { version = "0.3.10", default-features = false }
 slab = { version = "0.4.8", default-features = false }
 smoldot = { version = "0.7.0", path = "../lib", default-features = false }
 

@@ -36,7 +36,7 @@
 //! [`NetworkService::new`]. These channels inform the foreground about updates to the network
 //! connectivity.
 
-use crate::platform::PlatformRef;
+use crate::{platform::PlatformRef, util};
 
 use alloc::{
     boxed::Box,
@@ -156,8 +156,7 @@ struct SharedGuarded<TPlat: PlatformRef> {
     /// List of peer and chain index tuples for which no outbound slot should be assigned.
     ///
     /// The values are the moment when the ban expires.
-    // TODO: use SipHasher
-    slots_assign_backoff: HashMap<(PeerId, usize), TPlat::Instant, fnv::FnvBuildHasher>,
+    slots_assign_backoff: HashMap<(PeerId, usize), TPlat::Instant, util::SipHasherBuild>,
 
     messages_from_connections_tx:
         mpsc::Sender<(service::ConnectionId, service::ConnectionToCoordinator)>,
@@ -258,7 +257,10 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     handshake_timeout: Duration::from_secs(8),
                     randomness_seed: rand::random(),
                 }),
-                slots_assign_backoff: HashMap::with_capacity_and_hasher(32, Default::default()),
+                slots_assign_backoff: HashMap::with_capacity_and_hasher(
+                    32,
+                    util::SipHasherBuild::new(rand::random()),
+                ),
                 important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
                 active_connections: HashMap::with_capacity_and_hasher(32, Default::default()),
                 messages_from_connections_tx,

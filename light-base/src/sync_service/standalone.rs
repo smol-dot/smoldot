@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::{BlockNotification, FinalizedBlockRuntime, Notification, SubscribeAll, ToBackground};
-use crate::{network_service, platform::PlatformRef};
+use crate::{network_service, platform::PlatformRef, util};
 
 use alloc::{borrow::ToOwned as _, string::String, sync::Arc, vec::Vec};
 use core::{
@@ -88,7 +88,10 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         log_target,
         network_service,
         network_chain_index,
-        peers_source_id_map: HashMap::with_capacity_and_hasher(0, Default::default()),
+        peers_source_id_map: HashMap::with_capacity_and_hasher(
+            0,
+            util::SipHasherBuild::new(rand::random()),
+        ),
         platform,
     };
 
@@ -337,8 +340,7 @@ struct Task<TPlat: PlatformRef> {
     known_finalized_runtime: Option<FinalizedBlockRuntime>,
 
     /// For each networking peer, the index of the corresponding peer within the [`Task::sync`].
-    // TODO: use SipHasher
-    peers_source_id_map: HashMap<libp2p::PeerId, all::SourceId, fnv::FnvBuildHasher>,
+    peers_source_id_map: HashMap<libp2p::PeerId, all::SourceId, util::SipHasherBuild>,
 
     /// `false` after the best block in the [`Task::sync`] has changed. Set back to `true`
     /// after the networking has been notified of this change.

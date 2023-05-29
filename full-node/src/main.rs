@@ -20,6 +20,7 @@
 
 mod cli;
 mod run;
+mod util;
 
 fn main() {
     smol::block_on(async_main())
