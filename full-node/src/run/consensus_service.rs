@@ -844,8 +844,23 @@ impl SyncBackground {
                         }));
                         continue;
                     }
-                    author::build::BuilderAuthoring::NextKey(_) => {
-                        todo!() // TODO: implement
+                    author::build::BuilderAuthoring::NextKey(req) => {
+                        let key = req.key().as_ref().to_vec();
+                        let or_equal = req.or_equal();
+                        let next_key = self
+                            .database
+                            .with_database(move |db| {
+                                db.block_storage_main_trie_next_key(&parent_hash, &key, or_equal)
+                            })
+                            .await
+                            .expect("database access error")
+                            .filter(|k| k.starts_with(req.prefix().as_ref()));
+
+                        debug_assert!(next_key
+                            .as_ref()
+                            .map_or(true, |k| &**k > req.key().as_ref()));
+                        block_authoring = req.inject_key(next_key);
+                        continue;
                     }
                     author::build::BuilderAuthoring::PrefixKeys(req) => {
                         let prefix = req.prefix().as_ref().to_vec();
