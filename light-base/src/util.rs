@@ -15,11 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use core::{
-    fmt::{self, Write as _},
-    hash::{BuildHasher, Hasher},
-    marker,
-};
+use core::fmt::{self, Write as _};
 
 /// Returns an opaque object implementing the `fmt::Display` trait. Truncates the given `char`
 /// yielding iterator to the given number of elements, and if the limit is reached adds a `…` at
@@ -49,51 +45,6 @@ pub fn truncated_str<'a>(
 
     Iter(input, limit)
 }
-
-/// Exactly the same as `BuildHasherDefault` from the standard library, except without the missing
-/// `new` `const` function that somehow requires needs a new language construct or something.
-// TODO remove after https://github.com/rust-lang/rust/issues/87864
-pub struct BuildHasherDefault<H>(marker::PhantomData<fn() -> H>);
-
-impl<H> BuildHasherDefault<H> {
-    pub const fn new() -> Self {
-        BuildHasherDefault(marker::PhantomData)
-    }
-}
-
-impl<H> fmt::Debug for BuildHasherDefault<H> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("BuildHasherDefault").finish()
-    }
-}
-
-impl<H: Default + Hasher> BuildHasher for BuildHasherDefault<H> {
-    type Hasher = H;
-
-    fn build_hasher(&self) -> H {
-        H::default()
-    }
-}
-
-impl<H> Clone for BuildHasherDefault<H> {
-    fn clone(&self) -> BuildHasherDefault<H> {
-        BuildHasherDefault(marker::PhantomData)
-    }
-}
-
-impl<H> Default for BuildHasherDefault<H> {
-    fn default() -> BuildHasherDefault<H> {
-        BuildHasherDefault(marker::PhantomData)
-    }
-}
-
-impl<H> PartialEq for BuildHasherDefault<H> {
-    fn eq(&self, _other: &BuildHasherDefault<H>) -> bool {
-        true
-    }
-}
-
-impl<H> Eq for BuildHasherDefault<H> {}
 
 /// Implementation of the `BuildHasher` trait for the sip hasher.
 ///
