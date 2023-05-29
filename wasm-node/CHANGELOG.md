@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fix panic when receiving a networking request of a protocol not supported by smoldot.
+- Fix panic when receiving a networking request of a protocol not supported by smoldot. ([#635](https://github.com/smol-dot/smoldot/pull/635))
 
 ## 1.0.7 - 2023-05-25
 
