@@ -41,6 +41,7 @@ use smoldot::{
     libp2p,
     network::{self, protocol::BlockData},
     sync::all::{self, TrieEntryVersion},
+    trie,
 };
 use std::{
     iter, mem,
@@ -843,7 +844,9 @@ impl SyncBackground {
                         continue;
                     }
                     author::build::BuilderAuthoring::NextKey(req) => {
-                        let key = req.key().as_ref().to_vec();
+                        // TODO: restore
+                        todo!()
+                        /*let key = req.key().as_ref().to_vec();
                         let or_equal = req.or_equal();
                         let next_key = self
                             .database
@@ -858,7 +861,7 @@ impl SyncBackground {
                             .as_ref()
                             .map_or(true, |k| &**k > req.key().as_ref()));
                         block_authoring = req.inject_key(next_key);
-                        continue;
+                        continue;*/
                     }
                     author::build::BuilderAuthoring::PrefixKeys(req) => {
                         let prefix = req.prefix().as_ref().to_vec();
@@ -1287,25 +1290,85 @@ impl SyncBackground {
                             }));
                         }
                         all::BlockVerification::ParentStorageNextKey(req) => {
-                            let key = req.key().as_ref().to_vec();
+                            let key = req.key().collect::<Vec<_>>();
                             let or_equal = req.or_equal();
+                            let prefix = req.prefix().collect::<Vec<_>>();
+                            let branch_nodes = req.branch_nodes();
                             let next_key = self
                                 .database
                                 .with_database(move |db| {
-                                    db.block_storage_main_trie_next_key(
-                                        &parent_hash,
-                                        &key,
-                                        or_equal,
-                                    )
-                                })
-                                .await
-                                .expect("database access error")
-                                .filter(|k| k.starts_with(req.prefix().as_ref()));
+                                    let next_key = db
+                                        .block_storage_main_trie_next_key(
+                                            &parent_hash,
+                                            &trie::nibbles_to_bytes_suffix_extend(
+                                                key.iter().copied(),
+                                            )
+                                            .collect::<Vec<_>>(),
+                                            or_equal,
+                                        )
+                                        .expect("database access error");
+                                    let next_key = next_key.map(|k| {
+                                        trie::bytes_to_nibbles(k.into_iter()).collect::<Vec<_>>()
+                                    });
 
-                            debug_assert!(next_key
-                                .as_ref()
-                                .map_or(true, |k| &**k >= req.key().as_ref()));
-                            verify = req.inject_key(next_key);
+                                    let Some(mut next_key) = next_key else { return None };
+                                    if !next_key.starts_with(&prefix) {
+                                        return None;
+                                    }
+
+                                    if !branch_nodes {
+                                        return Some(next_key);
+                                    }
+
+                                    loop {
+                                        // We know that `next_key` is a node in the trie, but
+                                        // maybe there exists a branch node before it.
+                                        // To determine this, we try to find the first follow-up
+                                        // sibling, uncle, or nephew of `next_key`.
+                                        let mut first_possible_sibling = next_key.clone();
+                                        loop {
+                                            let Some(nibble) = first_possible_sibling.pop()
+                                            else {
+                                                // `next_key` is `0xffffff` or similar and so
+                                                // doesn't have any follow-up nephew/uncle/sibling.
+                                                return Some(next_key)
+                                            };
+                                            if let Some(next_nibble) = nibble.checked_add(1) {
+                                                first_possible_sibling.push(next_nibble);
+                                                break;
+                                            }
+                                        }
+
+                                        let Some(next_sibling) = db.block_storage_main_trie_next_key(
+                                            &parent_hash,
+                                            &trie::nibbles_to_bytes_suffix_extend(
+                                                first_possible_sibling.iter().copied(),
+                                            )
+                                            .collect::<Vec<_>>(),
+                                            true,
+                                        )
+                                        .expect("database access error")
+                                            else { return Some(next_key) };
+                                        let mut next_sibling = trie::bytes_to_nibbles(next_sibling.into_iter()).collect::<Vec<_>>();
+
+                                        let common_ancestor = {
+                                            let num_common = next_key.iter().zip(next_sibling.iter()).take_while(|(a, b)| a == b).count();
+                                            next_sibling.truncate(num_common);
+                                            next_sibling
+                                        };
+
+                                        // Discard the potential branch node if it is outside of
+                                        // the prefix.
+                                        if !common_ancestor.starts_with(&prefix) {
+                                            return Some(next_key);
+                                        }
+
+                                        next_key = common_ancestor;
+                                    }
+                                })
+                                .await;
+
+                            verify = req.inject_key(next_key.map(|nk| nk.into_iter()));
                         }
                         all::BlockVerification::ParentStoragePrefixKeys(req) => {
                             let prefix = req.prefix().as_ref().to_vec();
