@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { default as wasmBase64 } from './internals/bytecode/wasm.js';
-import { inflate } from 'pako';
+import { inflate } from 'pako';  // TODO: don't use `pako` here, so that we can remove the dependency entirely
 import { SmoldotBytecode } from './public-types.js';
 
 /**
