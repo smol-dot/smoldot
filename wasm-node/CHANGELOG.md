@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Within browsers, smoldot will now use the native `DecompressionStream` API in order to decompress the WebAssembly bytecode, instead of doing it manually in JavaScript. This should speed up the initialization and reduce the size of the package. The new `DecompressionStream` API has been stable since February 2020 on Chrome and Edge, since March 2023 on Safari, and since May 2023 on Firefox.
 - The parameter of `chainHead_unstable_follow` has been renamed from `runtimeUpdates` to `withRuntime` in accordance with the latest JSON-RPC specification changes. ([#624](https://github.com/smol-dot/smoldot/pull/624))
 
 ### Fixed
