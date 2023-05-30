@@ -365,7 +365,7 @@ impl MerkleValue {
     pub fn resume_unknown(self) -> InProgress {
         // The element currently being iterated was `Btcd`, and is now switched to being
         // `MaybeNodeKey`. Because a `MerkleValue` is only ever created if the diff doesn't
-        // contain any entry below the currently iterated node, we know for sure that
+        // contain any entry that descends the currently iterated node, we know for sure that
         // `MaybeNodeKey` is equal to `Btcd` and thus have nothing to do.
         self.0.next()
     }
