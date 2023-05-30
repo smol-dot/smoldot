@@ -53,6 +53,46 @@ fn empty_trie_works() {
     }
 }
 
+#[test]
+fn one_node_in_diff() {
+    let mut diff = TrieDiff::empty();
+    diff.diff_insert(vec![0xaa, 0xaa], b"foo".to_vec(), ());
+
+    let mut calculation = trie_root_calculator(Config {
+        diff,
+        diff_trie_entries_version: TrieEntryVersion::V0,
+        max_trie_recalculation_depth_hint: 8,
+    });
+
+    loop {
+        match calculation {
+            InProgress::Finished { trie_root_hash } => {
+                let expected = trie::trie_node::calculate_merkle_value(
+                    trie::trie_node::Decoded {
+                        children: [None::<&'static [u8]>; 16],
+                        partial_key: trie::bytes_to_nibbles(vec![0xaa, 0xaa].into_iter()),
+                        storage_value: trie::trie_node::StorageValue::Unhashed(b"foo"),
+                    },
+                    true,
+                )
+                .unwrap();
+
+                assert_eq!(trie_root_hash, expected.as_ref());
+                return;
+            }
+            InProgress::ClosestDescendant(req) => {
+                calculation = req.inject(None::<iter::Empty<_>>);
+            }
+            InProgress::MerkleValue(_) => {
+                unreachable!()
+            }
+            InProgress::StorageValue(req) => {
+                calculation = req.inject_value(None);
+            }
+        }
+    }
+}
+
 // TODO: finish
 /*#[test]
 fn fuzzing() {

@@ -444,6 +444,7 @@ struct Inner {
     diff_trie_entries_version: TrieEntryVersion,
 }
 
+#[derive(Debug)]
 struct InProgressNode {
     /// Partial key of the node currently being calculated.
     partial_key: Vec<Nibble>,
