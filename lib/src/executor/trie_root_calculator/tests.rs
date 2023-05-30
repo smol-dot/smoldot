@@ -54,7 +54,7 @@ fn empty_trie_works() {
 }
 
 #[test]
-fn one_node_in_diff() {
+fn one_inserted_node_in_diff() {
     let mut diff = TrieDiff::empty();
     diff.diff_insert(vec![0xaa, 0xaa], b"foo".to_vec(), ());
 
