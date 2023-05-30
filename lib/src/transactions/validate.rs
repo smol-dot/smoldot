@@ -25,7 +25,7 @@ use crate::{
 use alloc::{borrow::ToOwned as _, vec::Vec};
 use core::{iter, num::NonZeroU64};
 
-pub use runtime_host::TrieEntryVersion;
+pub use runtime_host::{Nibble, TrieEntryVersion};
 
 /// Configuration for a transaction validation process.
 pub struct Config<'a, TTx> {
@@ -607,7 +607,7 @@ enum NextKeyInner {
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         match &self.0 {
             NextKeyInner::Stage1(inner, _) => either::Left(inner.key()),
             NextKeyInner::Stage2(inner, _) => either::Right(inner.key()),
@@ -634,7 +634,7 @@ impl NextKey {
 
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         match &self.0 {
             NextKeyInner::Stage1(inner, _) => either::Left(inner.prefix()),
             NextKeyInner::Stage2(inner, _) => either::Right(inner.prefix()),
@@ -647,7 +647,7 @@ impl NextKey {
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
-    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> Query {
+    pub fn inject_key(self, key: Option<impl Iterator<Item = Nibble>>) -> Query {
         match self.0 {
             NextKeyInner::Stage1(inner, stage1) => Query::from_step1(inner.inject_key(key), stage1),
             NextKeyInner::Stage2(inner, stage2) => Query::from_step2(inner.inject_key(key), stage2),

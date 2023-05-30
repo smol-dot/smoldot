@@ -34,7 +34,7 @@ use super::{
 use alloc::boxed::Box;
 use core::cmp::Ordering;
 
-pub use verify::header_body::TrieEntryVersion;
+pub use verify::header_body::{Nibble, TrieEntryVersion};
 
 impl<T> NonFinalizedTree<T> {
     /// Verifies the given block.
@@ -1035,7 +1035,7 @@ pub struct StorageNextKey<T> {
 
 impl<T> StorageNextKey<T> {
     /// Returns the key whose next key must be passed back.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.key()
     }
 
@@ -1053,7 +1053,7 @@ impl<T> StorageNextKey<T> {
 
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.prefix()
     }
 
@@ -1099,7 +1099,7 @@ impl<T> StorageNextKey<T> {
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
-    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> BodyVerifyStep2<T> {
+    pub fn inject_key(self, key: Option<impl Iterator<Item = Nibble>>) -> BodyVerifyStep2<T> {
         let inner = self.inner.inject_key(key);
         self.context.with_body_verify(inner)
     }

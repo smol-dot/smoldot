@@ -66,7 +66,8 @@ fn block_building_works() {
             }
             super::BlockBuild::NextKey(next_key) => {
                 // TODO: doesn't take branch_nodes() into account
-                let result = genesis_storage.iter().fold(None, |iter, (key, _)| {
+                todo!()
+                /*let result = genesis_storage.iter().fold(None, |iter, (key, _)| {
                     if key < next_key.key().as_ref()
                         || (key == next_key.key().as_ref() && !next_key.or_equal())
                         || !key.starts_with(next_key.prefix().as_ref())
@@ -80,7 +81,7 @@ fn block_building_works() {
                         Some(key)
                     }
                 });
-                builder = next_key.inject_key(result);
+                builder = next_key.inject_key(result);*/
             }
             super::BlockBuild::PrefixKeys(prefix) => {
                 let p = prefix.prefix().as_ref().to_owned();

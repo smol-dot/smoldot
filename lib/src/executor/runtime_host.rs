@@ -43,9 +43,9 @@ use crate::{
 };
 
 use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
-use core::fmt;
+use core::{fmt, iter};
 
-pub use trie::TrieEntryVersion;
+pub use trie::{Nibble, TrieEntryVersion};
 
 /// Configuration for [`run`].
 pub struct Config<'a, TParams> {
@@ -346,29 +346,24 @@ pub struct NextKey {
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         if let Some(key_overwrite) = &self.key_overwrite {
-            return either::Left(key_overwrite);
+            return either::Left(trie::bytes_to_nibbles(key_overwrite.iter().copied()));
         }
 
         either::Right(match &self.inner.vm {
             host::HostVm::ExternalStorageNextKey(req) => match req.key() {
                 // TODO: child tries are not implemented correctly
-                host::StorageKey::MainTrie { key } => either::Left(key),
+                host::StorageKey::MainTrie { key } => {
+                    either::Left(trie::bytes_to_nibbles(util::as_ref_iter(key)))
+                }
                 _ => unreachable!(),
             },
 
             host::HostVm::ExternalStorageRoot(_) => {
                 let Some(trie_root_calculator::InProgress::ClosestDescendant(req)) = &self.inner.root_calculation
                     else { unreachable!() };
-                // TODO: optimize?
-                let key_as_nibbles = req.key().fold(Vec::new(), |mut a, b| {
-                    a.extend_from_slice(b.as_ref());
-                    a
-                });
-                let key = trie::nibbles_to_bytes_suffix_extend(key_as_nibbles.into_iter())
-                    .collect::<Vec<_>>();
-                either::Right(key)
+                either::Right(req.key().flat_map(util::as_ref_iter))
             }
 
             // Note that in the case `ExternalStorageClearPrefix`, `key_overwrite` is
@@ -394,11 +389,13 @@ impl NextKey {
 
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         match &self.inner.vm {
-            host::HostVm::ExternalStorageClearPrefix(req) => either::Left(req.prefix().into_key()),
+            host::HostVm::ExternalStorageClearPrefix(req) => either::Left(trie::bytes_to_nibbles(
+                util::as_ref_iter(req.prefix().into_key()),
+            )),
             host::HostVm::ExternalStorageRoot(_) => either::Right(either::Left(self.key())),
-            _ => either::Right(either::Right(&[][..])),
+            _ => either::Right(either::Right(iter::empty())),
         }
     }
 
@@ -409,11 +406,12 @@ impl NextKey {
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     /// Panics if the key passed as parameter doesn't start with the requested prefix.
     ///
-    pub fn inject_key(mut self, key: Option<impl AsRef<[u8]>>) -> RuntimeHostVm {
-        let key = key.as_ref().map(|k| k.as_ref());
-
+    pub fn inject_key(mut self, key: Option<impl Iterator<Item = Nibble>>) -> RuntimeHostVm {
         match self.inner.vm {
             host::HostVm::ExternalStorageNextKey(req) => {
+                let key =
+                    key.map(|key| trie::nibbles_to_bytes_suffix_extend(key).collect::<Vec<_>>());
+
                 let search = {
                     let req_key = match req.key() {
                         host::StorageKey::MainTrie { key } => key,
@@ -424,9 +422,11 @@ impl NextKey {
                     } else {
                         req_key.as_ref()
                     };
-                    self.inner
-                        .main_trie_changes
-                        .storage_next_key(requested_key, key, false)
+                    self.inner.main_trie_changes.storage_next_key(
+                        requested_key,
+                        key.as_deref(),
+                        false,
+                    )
                 };
 
                 match search {
@@ -449,6 +449,7 @@ impl NextKey {
                 // TODO: there's some trickiness regarding the behavior w.r.t keys only in the overlay; figure out
 
                 if let Some(key) = key {
+                    let key = trie::nibbles_to_bytes_suffix_extend(key).collect::<Vec<_>>();
                     assert!(key.starts_with(req.prefix().into_key().as_ref()));
 
                     // TODO: /!\ must clear keys from overlay as well
@@ -459,9 +460,11 @@ impl NextKey {
                     {
                         self.inner.vm = req.resume(self.keys_removed_so_far, true);
                     } else {
-                        self.inner.main_trie_changes.diff_insert_erase(key, ());
+                        self.inner
+                            .main_trie_changes
+                            .diff_insert_erase(key.clone(), ());
                         self.keys_removed_so_far += 1;
-                        self.key_overwrite = Some(key.to_owned()); // TODO: might be expensive if lots of keys
+                        self.key_overwrite = Some(key); // TODO: might be expensive if lots of keys
                         self.inner.vm = req.into();
 
                         return RuntimeHostVm::NextKey(self);
@@ -474,11 +477,7 @@ impl NextKey {
             host::HostVm::ExternalStorageRoot(_) => {
                 let Some(trie_root_calculator::InProgress::ClosestDescendant(req)) = self.inner.root_calculation.take()
                     else { unreachable!() };
-                // TODO: optimize?
-                let key_as_nibbles =
-                    key.map(|key| trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>());
-                let key_as_nibbles = key_as_nibbles.as_ref().map(|v| &v[..]);
-                self.inner.root_calculation = Some(req.inject(key_as_nibbles));
+                self.inner.root_calculation = Some(req.inject(key));
             }
 
             // We only create a `NextKey` if the state is one of the above.

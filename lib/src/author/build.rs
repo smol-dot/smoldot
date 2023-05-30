@@ -27,7 +27,7 @@ use crate::{
 use alloc::vec::Vec;
 use core::{num::NonZeroU64, time::Duration};
 
-pub use runtime::TrieEntryVersion;
+pub use runtime::{Nibble, TrieEntryVersion};
 
 /// Configuration for a block generation.
 pub struct Config<'a, TLocAuth> {
@@ -353,7 +353,7 @@ pub struct NextKey(runtime::NextKey, Shared);
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.0.key()
     }
 
@@ -371,7 +371,7 @@ impl NextKey {
 
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.0.prefix()
     }
 
@@ -381,7 +381,7 @@ impl NextKey {
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
-    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> BuilderAuthoring {
+    pub fn inject_key(self, key: Option<impl Iterator<Item = Nibble>>) -> BuilderAuthoring {
         self.1.with_runtime_inner(self.0.inject_key(key))
     }
 }

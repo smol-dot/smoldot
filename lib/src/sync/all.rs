@@ -46,7 +46,7 @@ use core::{
     time::Duration,
 };
 
-pub use optimistic::TrieEntryVersion;
+pub use optimistic::{Nibble, TrieEntryVersion};
 pub use warp_sync::{FragmentError as WarpSyncFragmentError, WarpSyncFragment};
 
 /// Configuration for the [`AllSync`].
@@ -2704,7 +2704,7 @@ pub struct StorageNextKey<TRq, TSrc, TBl> {
 }
 
 impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.key()
     }
 
@@ -2722,7 +2722,7 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
 
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.prefix()
     }
 
@@ -2732,7 +2732,10 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
-    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> BlockVerification<TRq, TSrc, TBl> {
+    pub fn inject_key(
+        self,
+        key: Option<impl Iterator<Item = Nibble>>,
+    ) -> BlockVerification<TRq, TSrc, TBl> {
         let inner = self.inner.inject_key(key);
         BlockVerification::from_inner(inner, self.shared, self.user_data)
     }

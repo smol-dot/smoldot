@@ -64,7 +64,7 @@ use core::{
 };
 use hashbrown::HashMap;
 
-pub use blocks_tree::TrieEntryVersion;
+pub use blocks_tree::{Nibble, TrieEntryVersion};
 
 mod verification_queue;
 
@@ -1105,7 +1105,6 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     break BlockVerification::ParentStorageNextKey(StorageNextKey {
                         inner: req,
                         shared,
-                        key_overwrite: None,
                     });
                 }
 
@@ -1392,19 +1391,11 @@ impl<TRq, TSrc, TBl> StoragePrefixKeys<TRq, TSrc, TBl> {
 pub struct StorageNextKey<TRq, TSrc, TBl> {
     inner: blocks_tree::StorageNextKey<Block<TBl>>,
     shared: BlockVerificationShared<TRq, TSrc, TBl>,
-
-    /// If `Some`, ask for the key inside of this field rather than the one of `inner`. Used in
-    /// corner-case situations where the key provided by the user has been erased from storage.
-    key_overwrite: Option<Vec<u8>>,
 }
 
 impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
-        if let Some(key_overwrite) = &self.key_overwrite {
-            either::Left(key_overwrite)
-        } else {
-            either::Right(self.inner.key())
-        }
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+        self.inner.key()
     }
 
     /// If `true`, then the provided value must the one superior or equal to the requested key.
@@ -1421,7 +1412,7 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
 
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.prefix()
     }
 
@@ -1431,7 +1422,10 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
-    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> BlockVerification<TRq, TSrc, TBl> {
+    pub fn inject_key(
+        self,
+        key: Option<impl Iterator<Item = Nibble>>,
+    ) -> BlockVerification<TRq, TSrc, TBl> {
         let inner = self.inner.inject_key(key);
         BlockVerification::from(Inner::Step2(inner), self.shared)
     }

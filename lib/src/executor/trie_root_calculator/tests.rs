@@ -19,6 +19,7 @@
 
 use super::{trie_root_calculator, Config, InProgress, TrieEntryVersion};
 use crate::{executor::storage_diff::TrieDiff, trie};
+use core::iter;
 
 use rand::{
     distributions::{Distribution as _, Uniform},
@@ -40,7 +41,7 @@ fn empty_trie_works() {
                 return;
             }
             InProgress::ClosestDescendant(req) => {
-                calculation = req.inject(None);
+                calculation = req.inject(None::<iter::Empty<_>>);
             }
             InProgress::MerkleValue(_) => {
                 unreachable!()

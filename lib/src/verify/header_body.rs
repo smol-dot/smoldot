@@ -25,7 +25,7 @@ use crate::{
 use alloc::{string::String, vec::Vec};
 use core::{iter, num::NonZeroU64, time::Duration};
 
-pub use runtime_host::TrieEntryVersion;
+pub use runtime_host::{Nibble, TrieEntryVersion};
 
 /// Configuration for a block verification.
 pub struct Config<'a, TBody> {
@@ -618,7 +618,7 @@ pub struct StorageNextKey {
 
 impl StorageNextKey {
     /// Returns the key whose next key must be passed back.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.key()
     }
 
@@ -636,7 +636,7 @@ impl StorageNextKey {
 
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.prefix()
     }
 
@@ -646,7 +646,7 @@ impl StorageNextKey {
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
-    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> Verify {
+    pub fn inject_key(self, key: Option<impl Iterator<Item = Nibble>>) -> Verify {
         VerifyInner {
             inner: self.inner.inject_key(key),
             execution_not_started: self.execution_not_started,

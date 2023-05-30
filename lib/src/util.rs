@@ -18,7 +18,7 @@
 //! Internal module. Contains functions that aren't Substrate/Polkadot-specific and should ideally
 //! be found in third party libraries, but that aren't worth a third-party library.
 
-use core::{cmp, str};
+use core::{cmp, iter, str};
 
 pub(crate) mod leb128;
 pub(crate) mod protobuf;
@@ -41,6 +41,21 @@ impl core::hash::BuildHasher for SipHasherBuild {
     fn build_hasher(&self) -> Self::Hasher {
         siphasher::sip::SipHasher::new_with_key(&self.0)
     }
+}
+
+/// Returns an iterator that yields the content of `container`.
+pub(crate) fn as_ref_iter<T: Clone>(container: impl AsRef<[T]>) -> impl Iterator<Item = T> {
+    let len = container.as_ref().len();
+    let mut i = 0;
+    iter::from_fn(move || {
+        if i == len {
+            return None;
+        }
+
+        let item = container.as_ref()[i].clone();
+        i += 1;
+        Some(item)
+    })
 }
 
 /// Returns a parser that decodes a SCALE-encoded `Option`.

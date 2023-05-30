@@ -120,7 +120,10 @@ impl ClosestDescendant {
 
     /// Indicates the key of the closest descendant to the key indicated by
     /// [`ClosestDescendant::key`] and resume the calculation.
-    pub fn inject(mut self, closest_descendant: Option<&[Nibble]>) -> InProgress {
+    pub fn inject(
+        mut self,
+        closest_descendant: Option<impl Iterator<Item = Nibble>>,
+    ) -> InProgress {
         // We are after a call to `BaseTrieClosestDescendant`.
         debug_assert!(self.0.stack.last().map_or(true, |n| n.children.len() != 16));
 
@@ -160,10 +163,10 @@ impl ClosestDescendant {
 
         // If the base trie contains a descendant but the diff doesn't contain any descendant,
         // jump to calling `BaseTrieMerkleValue`.
-        if let Some(closest_descendant) = closest_descendant {
-            if !diff_erases_a_descendant && diff_inserts_lcd_partial_key.is_none() {
+        if !diff_erases_a_descendant && diff_inserts_lcd_partial_key.is_none() {
+            if let Some(closest_descendant) = closest_descendant {
                 self.0.stack.push(InProgressNode {
-                    partial_key: closest_descendant[self_key_len..].to_vec(),
+                    partial_key: closest_descendant.skip(self_key_len).collect(),
                     children: arrayvec::ArrayVec::new(),
                 });
                 return InProgress::MerkleValue(MerkleValue(self.0));
@@ -172,12 +175,9 @@ impl ClosestDescendant {
 
         // Find the value of `MaybeNode`.
         let maybe_node_partial_key = match (diff_inserts_lcd_partial_key, closest_descendant) {
-            (Some(cpk), Some(d)) => {
-                let d = &d[self_key_len..];
-                d[..cmp::min(d.len(), cpk.len() * 2)].to_vec()
-            }
+            (Some(cpk), Some(d)) => d.skip(self_key_len).take(cpk.len() * 2).collect(),
             (Some(cpk), None) => trie::bytes_to_nibbles(cpk.iter().copied()).collect::<Vec<_>>(),
-            (None, Some(d)) => d[self_key_len..].to_vec(),
+            (None, Some(d)) => d.skip(self_key_len).collect(),
             (None, None) => {
                 // If neither the base trie nor the diff contain any descendant, then skip ahead.
                 return if let Some(parent_node) = self.0.stack.last_mut() {
