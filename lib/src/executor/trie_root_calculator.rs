@@ -56,7 +56,7 @@
 //!
 
 use alloc::{boxed::Box, vec::Vec};
-use core::{cmp, iter, ops};
+use core::{iter, ops};
 
 use super::storage_diff::TrieDiff;
 use crate::trie;
@@ -133,29 +133,36 @@ impl ClosestDescendant {
         // Now calculate `DiffContainsEntryWithPrefix` and
         // `LongestCommonDenominator(DiffInsertsNodesWithPrefix)`.
         let mut diff_erases_a_descendant = false;
-        let mut diff_inserts_lcd_partial_key = None::<&[u8]>;
+        let mut diff_inserts_lcd = None::<Vec<Nibble>>;
         {
             // TODO: could be optimized?
             let prefix_nibbles = self.key().fold(Vec::new(), |mut a, b| {
                 a.extend_from_slice(b.as_ref());
                 a
             });
-            let prefix = trie::nibbles_to_bytes_suffix_extend(prefix_nibbles.into_iter())
+            let prefix = trie::nibbles_to_bytes_suffix_extend(prefix_nibbles.iter().copied())
                 .collect::<Vec<_>>();
             for (key, erases) in self.0.diff.diff_range_ordered::<[u8]>((
                 ops::Bound::Included(&prefix[..]),
                 ops::Bound::Unbounded,
             )) {
-                if !key.starts_with(&prefix) {
+                let key = trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>();
+                if !key.starts_with(&prefix_nibbles) {
                     break;
                 }
+
                 if erases {
                     diff_erases_a_descendant = true;
                 } else {
-                    let key_adjusted = &key[(self_key_len / 2)..];
-                    diff_inserts_lcd_partial_key = match diff_inserts_lcd_partial_key.take() {
-                        Some(v) => Some(&key_adjusted[..cmp::min(key_adjusted.len(), v.len())]),
-                        None => Some(key_adjusted),
+                    diff_inserts_lcd = match diff_inserts_lcd.take() {
+                        Some(mut v) => {
+                            let lcd = key.iter().zip(v.iter()).take_while(|(a, b)| a == b).count();
+                            debug_assert!(lcd >= self_key_len);
+                            debug_assert_eq!(&key[..lcd], &v[..lcd]);
+                            v.truncate(lcd);
+                            Some(v)
+                        }
+                        None => Some(key),
                     };
                 }
             }
@@ -163,7 +170,7 @@ impl ClosestDescendant {
 
         // If the base trie contains a descendant but the diff doesn't contain any descendant,
         // jump to calling `BaseTrieMerkleValue`.
-        if !diff_erases_a_descendant && diff_inserts_lcd_partial_key.is_none() {
+        if !diff_erases_a_descendant && diff_inserts_lcd.is_none() {
             if let Some(closest_descendant) = closest_descendant {
                 self.0.stack.push(InProgressNode {
                     partial_key: closest_descendant.skip(self_key_len).collect(),
@@ -174,9 +181,15 @@ impl ClosestDescendant {
         }
 
         // Find the value of `MaybeNode`.
-        let maybe_node_partial_key = match (diff_inserts_lcd_partial_key, closest_descendant) {
-            (Some(cpk), Some(d)) => d.skip(self_key_len).take(cpk.len() * 2).collect(),
-            (Some(cpk), None) => trie::bytes_to_nibbles(cpk.iter().copied()).collect::<Vec<_>>(),
+        let maybe_node_partial_key = match (diff_inserts_lcd, closest_descendant) {
+            (Some(cpk), Some(d)) => cpk
+                .into_iter()
+                .zip(d)
+                .skip(self_key_len)
+                .take_while(|(a, b)| a == b)
+                .map(|(_, b)| b)
+                .collect(),
+            (Some(cpk), None) => cpk.into_iter().skip(self_key_len).collect::<Vec<_>>(),
             (None, Some(d)) => d.skip(self_key_len).collect(),
             (None, None) => {
                 // If neither the base trie nor the diff contain any descendant, then skip ahead.
