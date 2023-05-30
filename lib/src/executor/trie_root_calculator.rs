@@ -142,7 +142,7 @@ impl ClosestDescendant {
             });
             let prefix = trie::nibbles_to_bytes_suffix_extend(prefix_nibbles.iter().copied())
                 .collect::<Vec<_>>();
-            for (key, erases) in self.0.diff.diff_range_ordered::<[u8]>((
+            for (key, inserts_entry) in self.0.diff.diff_range_ordered::<[u8]>((
                 ops::Bound::Included(&prefix[..]),
                 ops::Bound::Unbounded,
             )) {
@@ -151,7 +151,7 @@ impl ClosestDescendant {
                     break;
                 }
 
-                if erases {
+                if !inserts_entry {
                     diff_erases_a_descendant = true;
                 } else {
                     diff_inserts_lcd = match diff_inserts_lcd.take() {
