@@ -179,7 +179,9 @@ impl<T> TrieDiff<T> {
         U: Ord,
         Vec<u8>: Borrow<U>,
     {
-        self.btree.range(range).map(|(k, erases)| (&k[..], *erases))
+        self.btree
+            .range(range)
+            .map(|(k, inserts)| (&k[..], *inserts))
     }
 
     /// Returns the storage key that immediately follows the provided `key`. Must be passed the

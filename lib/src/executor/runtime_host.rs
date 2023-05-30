@@ -240,6 +240,7 @@ impl StorageGet {
                         a.extend_from_slice(b.as_ref());
                         a
                     });
+                    debug_assert_eq!(!key_nibbles.len() % 2, 0);
                     Three::C(
                         trie::nibbles_to_bytes_suffix_extend(key_nibbles.into_iter())
                             .collect::<Vec<_>>(),
