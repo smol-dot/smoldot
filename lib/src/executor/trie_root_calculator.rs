@@ -236,6 +236,26 @@ impl StorageValue {
         // We have finished obtaining `BaseTrieStorageValue` and we are at the last step of
         // `ClosestDescendantMerkleValue` in the algorithm shown at the top.
 
+        // Adjust the storage value to take the diff into account.
+        // In other words, we calculate `MaybeStorageValue` from `BaseTrieStorageValue`.
+        let maybe_storage_value = if self.key().fold(0, |a, b| a + b.as_ref().len()) % 2 == 0 {
+            // TODO: could be optimized?
+            let key_nibbles = self.key().fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            });
+            debug_assert_eq!(key_nibbles.len() % 2, 0);
+            let key_as_u8 =
+                trie::nibbles_to_bytes_suffix_extend(key_nibbles.into_iter()).collect::<Vec<_>>();
+            if let Some((value, _)) = self.0.diff.diff_get(&key_as_u8) {
+                value.map(|v| (v, self.0.diff_trie_entries_version))
+            } else {
+                base_trie_storage_value
+            }
+        } else {
+            base_trie_storage_value
+        };
+
         // Remove the element that is being calculated from the stack, as we finish the
         // calculation down below.
         let calculated_elem = self.0.stack.pop().unwrap_or_else(|| panic!());
@@ -249,25 +269,6 @@ impl StorageValue {
 
         let parent_node = self.0.stack.last_mut();
         debug_assert!(parent_node.map_or(true, |p| p.children.len() != 16));
-
-        // Adjust the storage value to take the diff into account.
-        // In other words, we calculate `MaybeStorageValue` from `BaseTrieStorageValue`.
-        let maybe_storage_value = if self.key().fold(0, |a, b| a + b.as_ref().len()) % 2 == 0 {
-            // TODO: could be optimized?
-            let key_nibbles = self.key().fold(Vec::new(), |mut a, b| {
-                a.extend_from_slice(b.as_ref());
-                a
-            });
-            let key_as_u8 =
-                trie::nibbles_to_bytes_suffix_extend(key_nibbles.into_iter()).collect::<Vec<_>>();
-            if let Some((value, _)) = self.0.diff.diff_get(&key_as_u8) {
-                value.map(|v| (v, self.0.diff_trie_entries_version))
-            } else {
-                base_trie_storage_value
-            }
-        } else {
-            base_trie_storage_value
-        };
 
         match (
             maybe_storage_value,
