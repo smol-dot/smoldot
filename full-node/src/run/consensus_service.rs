@@ -1290,7 +1290,7 @@ impl SyncBackground {
                             }));
                         }
                         all::BlockVerification::ParentStorageNextKey(req) => {
-                            let key = req.key().collect::<Vec<_>>();
+                            let key_before = req.key().collect::<Vec<_>>();
                             let or_equal = req.or_equal();
                             let prefix = req.prefix().collect::<Vec<_>>();
                             let branch_nodes = req.branch_nodes();
@@ -1301,7 +1301,7 @@ impl SyncBackground {
                                         .block_storage_main_trie_next_key(
                                             &parent_hash,
                                             &trie::nibbles_to_bytes_suffix_extend(
-                                                key.iter().copied(),
+                                                key_before.iter().copied(),
                                             )
                                             .collect::<Vec<_>>(),
                                             or_equal,
@@ -1359,7 +1359,7 @@ impl SyncBackground {
 
                                         // Discard the potential branch node if it is outside of
                                         // the prefix.
-                                        if !common_ancestor.starts_with(&prefix) {
+                                        if !common_ancestor.starts_with(&prefix) || common_ancestor <= key_before {
                                             return Some(next_key);
                                         }
 
