@@ -93,6 +93,102 @@ fn one_inserted_node_in_diff() {
     }
 }
 
+#[test]
+fn new_branch_node() {
+    let mut diff = TrieDiff::empty();
+    diff.diff_insert(vec![0xaa, 0xaa], b"foo".to_vec(), ());
+
+    let mut calculation = trie_root_calculator(Config {
+        diff,
+        diff_trie_entries_version: TrieEntryVersion::V0,
+        max_trie_recalculation_depth_hint: 8,
+    });
+
+    let existing_node = trie::bytes_to_nibbles([0xaa, 0xbb].into_iter()).collect::<Vec<_>>();
+
+    loop {
+        match calculation {
+            InProgress::Finished { trie_root_hash } => {
+                let expected = trie::trie_node::calculate_merkle_value(
+                    trie::trie_node::Decoded {
+                        children: [
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            Some(
+                                trie::trie_node::calculate_merkle_value(
+                                    trie::trie_node::Decoded {
+                                        children: [None::<&'static [u8]>; 16],
+                                        partial_key: [trie::Nibble::try_from(0xau8).unwrap()]
+                                            .into_iter(),
+                                        storage_value: trie::trie_node::StorageValue::Unhashed(
+                                            b"foo",
+                                        ),
+                                    },
+                                    false,
+                                )
+                                .unwrap(),
+                            ),
+                            Some(
+                                trie::trie_node::calculate_merkle_value(
+                                    trie::trie_node::Decoded {
+                                        children: [None::<&'static [u8]>; 16],
+                                        partial_key: [trie::Nibble::try_from(0xbu8).unwrap()]
+                                            .into_iter(),
+                                        storage_value: trie::trie_node::StorageValue::Unhashed(
+                                            b"bar",
+                                        ),
+                                    },
+                                    false,
+                                )
+                                .unwrap(),
+                            ),
+                            None,
+                            None,
+                            None,
+                            None,
+                        ],
+                        partial_key: trie::bytes_to_nibbles(vec![0xaa].into_iter()),
+                        storage_value: trie::trie_node::StorageValue::None,
+                    },
+                    true,
+                )
+                .unwrap();
+
+                assert_eq!(trie_root_hash, expected.as_ref());
+                return;
+            }
+            InProgress::ClosestDescendant(req) => {
+                if existing_node.starts_with(&req.key_as_vec()) {
+                    calculation = req.inject(Some(existing_node.iter().copied()));
+                } else {
+                    calculation = req.inject(None::<iter::Empty<_>>);
+                }
+            }
+            InProgress::MerkleValue(req) => {
+                calculation = req.resume_unknown();
+            }
+            InProgress::StorageValue(req) => {
+                let value = if req.key_as_vec() == existing_node {
+                    Some(b"bar".to_vec())
+                } else {
+                    None
+                };
+
+                calculation =
+                    req.inject_value(value.as_ref().map(|v| (&v[..], trie::TrieEntryVersion::V0)));
+            }
+        }
+    }
+}
+
 // TODO: finish
 /*#[test]
 fn fuzzing() {

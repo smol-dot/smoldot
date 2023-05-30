@@ -118,6 +118,14 @@ impl ClosestDescendant {
         self.0.current_node_full_key()
     }
 
+    /// Returns the same value as [`ClosestDescendant`] but as a `Vec`.
+    pub fn key_as_vec(&self) -> Vec<Nibble> {
+        self.key().fold(Vec::new(), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        })
+    }
+
     /// Indicates the key of the closest descendant to the key indicated by
     /// [`ClosestDescendant::key`] and resume the calculation.
     pub fn inject(
@@ -225,6 +233,14 @@ impl StorageValue {
     /// node whose storage value must be fetched.
     pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[Nibble]> + '_> + '_ {
         self.0.current_node_full_key()
+    }
+
+    /// Returns the same value as [`ClosestDescendant`] but as a `Vec`.
+    pub fn key_as_vec(&self) -> Vec<Nibble> {
+        self.key().fold(Vec::new(), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        })
     }
 
     /// Indicate the storage value and trie entry version of the trie node indicated by
@@ -372,6 +388,14 @@ impl MerkleValue {
         self.0.current_node_full_key()
     }
 
+    /// Returns the same value as [`ClosestDescendant`] but as a `Vec`.
+    pub fn key_as_vec(&self) -> Vec<Nibble> {
+        self.key().fold(Vec::new(), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        })
+    }
+
     /// Indicate that the value is unknown and resume the calculation.
     ///
     /// This function be used if you are unaware of the Merkle value. The algorithm will perform
@@ -395,14 +419,11 @@ impl MerkleValue {
         // Check with a debug_assert! that this is a valid Merkle value. While this algorithm
         // doesn't actually care about the content, providing a wrong value clearly indicates a
         // bug somewhere in the API user's code.
-        debug_assert!(if merkle_value.len() < 32 {
-            trie::trie_node::decode(merkle_value).is_ok()
-        } else {
-            true
-        });
+        debug_assert!(merkle_value.len() == 32 || trie::trie_node::decode(merkle_value).is_ok());
 
         // Pop the element at the top of the stack, as we know its Merkle value.
-        self.0.stack.pop();
+        let _popped_elem = self.0.stack.pop();
+        debug_assert!(_popped_elem.map_or(false, |e| e.children.is_empty()));
 
         if let Some(parent_node) = self.0.stack.last_mut() {
             // If the element has a parent, add the Merkle value to its children and resume the
@@ -417,6 +438,7 @@ impl MerkleValue {
         } else {
             // If the element doesn't have a parent, then the Merkle value is the root of trie!
             // This should only ever happen if the diff is empty.
+            debug_assert_eq!(self.0.diff.diff_range_ordered::<Vec<u8>>(..).count(), 0);
 
             // The trie root hash is always 32 bytes. If not, it indicates a bug in the API user's
             // code.
