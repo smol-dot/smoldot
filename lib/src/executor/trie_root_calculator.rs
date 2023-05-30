@@ -252,7 +252,7 @@ impl StorageValue {
 
         // Adjust the storage value to take the diff into account.
         // In other words, we calculate `MaybeStorageValue` from `BaseTrieStorageValue`.
-        let maybe_storage_value = if self.key().count() % 2 == 0 {
+        let maybe_storage_value = if self.key().fold(0, |a, b| a + b.as_ref().len()) % 2 == 0 {
             // TODO: could be optimized?
             let key_nibbles = self.key().fold(Vec::new(), |mut a, b| {
                 a.extend_from_slice(b.as_ref());
