@@ -158,6 +158,7 @@ pub(super) enum SubscriptionMessage {
         network_config: methods::NetworkConfig,
         key: methods::HexString,
         child_trie: Option<methods::HexString>,
+        ty: methods::ChainHeadStorageType,
     },
     ChainHeadBody {
         hash: methods::HashHexString,
@@ -799,6 +800,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 hash,
                 key,
                 child_trie,
+                ty,
                 network_config,
             } => {
                 self.chain_head_storage(
@@ -807,6 +809,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     hash,
                     key,
                     child_trie,
+                    ty,
                     network_config,
                 )
                 .await;

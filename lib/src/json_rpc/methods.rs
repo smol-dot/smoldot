@@ -461,6 +461,7 @@ define_methods! {
         hash: HashHexString,
         key: HexString,
         #[rename = "childTrie"] child_trie: Option<HexString>,
+        #[rename = "type"] ty: ChainHeadStorageType,
         #[rename = "networkConfig"] network_config: Option<NetworkConfig>
     ) -> Cow<'a, str>,
     chainHead_unstable_unfollow(
@@ -723,10 +724,36 @@ pub enum ChainHeadCallEvent<'a> {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum ChainHeadStorageType {
+    #[serde(rename = "value")]
+    Value,
+    #[serde(rename = "hash")]
+    Hash,
+    #[serde(rename = "closest-ancestor-merkle-value")]
+    ClosestAncestorMerkleValue,
+    #[serde(rename = "descendants-values")]
+    DescendantsValues,
+    #[serde(rename = "descendants-hashes")]
+    DescendantsHashes,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event")]
 pub enum ChainHeadStorageEvent<'a> {
+    #[serde(rename = "item")]
+    Item {
+        key: HexString,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        value: Option<HexString>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<HexString>,
+        #[serde(rename = "merkle-value", skip_serializing_if = "Option::is_none")]
+        merkleValue: Option<HexString>
+    },
     #[serde(rename = "done")]
-    Done { value: Option<String> },
+    Done,
+    #[serde(rename = "waiting-for-continue")]
+    WaitingForContinue,
     #[serde(rename = "inaccessible")]
     Inaccessible {},
     #[serde(rename = "error")]

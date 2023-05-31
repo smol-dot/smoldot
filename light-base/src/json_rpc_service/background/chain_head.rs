@@ -340,6 +340,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         hash: methods::HashHexString,
         key: methods::HexString,
         child_trie: Option<methods::HexString>,
+        ty: methods::ChainHeadStorageType,
         network_config: Option<methods::NetworkConfig>,
     ) {
         let network_config = network_config.unwrap_or(methods::NetworkConfig {
@@ -361,6 +362,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     hash,
                     key,
                     child_trie,
+                    ty,
                     network_config,
                 },
             )
@@ -1052,6 +1054,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 network_config,
                 key,
                 child_trie,
+                ty,
             } => {
                 // Obtain the header of the requested block.
                 // Contains `None` if the subscription is disjoint.
@@ -1070,6 +1073,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     hash,
                     key,
                     child_trie,
+                    ty,
                     network_config,
                     block_scale_encoded_header,
                 )
@@ -1368,6 +1372,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         hash: methods::HashHexString,
         key: methods::HexString,
         child_trie: Option<methods::HexString>,
+        ty: methods::ChainHeadStorageType,
         network_config: methods::NetworkConfig,
         block_scale_encoded_header: Option<Vec<u8>>,
     ) {
@@ -1476,27 +1481,40 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                     // and as such the outcome only ever contains one element.
                                     debug_assert_eq!(values.len(), 1);
                                     let value = values.into_iter().next().unwrap();
-                                    let output = value.map(|v| methods::HexString(v).to_string());
+                                    let output = value.map(methods::HexString);
 
-                                    requests_subscriptions.set_queued_notification(
+                                    if let Some(output) = output {
+                                        requests_subscriptions.push_notification(
+                                            &request_id.1,
+                                            &subscription_id,
+                                            methods::ServerToClient::chainHead_unstable_storageEvent {
+                                                subscription: (&subscription_id).into(),
+                                                result: methods::ChainHeadStorageEvent::Item {
+                                                    key: todo!(),
+                                                    value: Some(output),
+                                                    hash: None,
+                                                    merkleValue: None,
+                                                },
+                                            }
+                                            .to_json_call_object_parameters(None)
+                                        ).await;
+                                    }
+
+                                    requests_subscriptions.push_notification(
                                         &request_id.1,
                                         &subscription_id,
-                                        0,
                                         methods::ServerToClient::chainHead_unstable_storageEvent {
                                             subscription: (&subscription_id).into(),
-                                            result: methods::ChainHeadStorageEvent::Done {
-                                                value: output,
-                                            },
+                                            result: methods::ChainHeadStorageEvent::Done,
                                         }
                                         .to_json_call_object_parameters(None)
                                     ).await;
                                     break;
                                 }
                                 either::Left(Err(_)) => {
-                                    requests_subscriptions.set_queued_notification(
+                                    requests_subscriptions.push_notification(
                                         &request_id.1,
                                         &subscription_id,
-                                        0,
                                         methods::ServerToClient::chainHead_unstable_storageEvent {
                                             subscription: (&subscription_id).into(),
                                             result: methods::ChainHeadStorageEvent::Inaccessible {},
@@ -1529,10 +1547,9 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     }
                     Some(Err(err)) => {
                         requests_subscriptions
-                            .set_queued_notification(
+                            .push_notification(
                                 &request_id.1,
                                 &subscription_id,
-                                0,
                                 methods::ServerToClient::chainHead_unstable_storageEvent {
                                     subscription: (&subscription_id).into(),
                                     result: methods::ChainHeadStorageEvent::Error {
@@ -1545,10 +1562,9 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     }
                     None => {
                         requests_subscriptions
-                            .set_queued_notification(
+                            .push_notification(
                                 &request_id.1,
                                 &subscription_id,
-                                0,
                                 methods::ServerToClient::chainHead_unstable_storageEvent {
                                     subscription: (&subscription_id).into(),
                                     result: methods::ChainHeadStorageEvent::Disjoint {},
