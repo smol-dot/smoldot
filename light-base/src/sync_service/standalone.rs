@@ -595,13 +595,35 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 return (self, false);
             }
 
-            all::ProcessOne::WarpSyncError { sync, error } => {
-                self.sync = sync;
-                log::warn!(
-                    target: &self.log_target,
-                    "Error during GrandPa warp syncing: {}",
-                    error
-                );
+            all::ProcessOne::WarpSyncBuildRuntime(req) => {
+                // Warp syncing compiles the runtime. The compiled runtime will later be yielded
+                // in the `WarpSyncFinished` variant, which is then provided as an event.
+                let (new_sync, error) = req.build(all::ExecHint::CompileAheadOfTime, true);
+                match error {
+                    Ok(()) => {
+                        log::debug!(target: &self.log_target, "Sync => WarpSyncRuntimeBuild(success=true)")
+                    }
+                    Err(err) => {
+                        log::debug!(target: &self.log_target, "Sync => WarpSyncRuntimeBuild(error={})", err);
+                        log::warn!(target: &self.log_target, "Failed to compile runtime during warp syncing process: {}", err);
+                    }
+                };
+                self.sync = new_sync;
+                return (self, true);
+            }
+
+            all::ProcessOne::WarpSyncBuildChainInformation(req) => {
+                let (new_sync, error) = req.build();
+                match error {
+                    Ok(()) => {
+                        log::debug!(target: &self.log_target, "Sync => WarpSyncBuildChainInformation(success=true)")
+                    }
+                    Err(err) => {
+                        log::debug!(target: &self.log_target, "Sync => WarpSyncBuildChainInformation(error={})", err);
+                        log::warn!(target: &self.log_target, "Failed to build the chain information during warp syncing process: {}", err);
+                    }
+                };
+                self.sync = new_sync;
                 return (self, true);
             }
 

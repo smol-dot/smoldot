@@ -1099,7 +1099,8 @@ impl SyncBackground {
                 (self, false)
             }
             all::ProcessOne::VerifyWarpSyncFragment(_)
-            | all::ProcessOne::WarpSyncError { .. }
+            | all::ProcessOne::WarpSyncBuildRuntime(_)
+            | all::ProcessOne::WarpSyncBuildChainInformation(_)
             | all::ProcessOne::WarpSyncFinished { .. } => unreachable!(),
             all::ProcessOne::VerifyBodyHeader(verify) => {
                 let hash_to_verify = verify.hash();
