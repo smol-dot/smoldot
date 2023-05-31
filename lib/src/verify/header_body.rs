@@ -318,7 +318,7 @@ pub fn verify(
     // The first parameter of these two runtime functions is the same: a SCALE-encoded
     // `(header, body)` where `body` is a `Vec<Extrinsic>`. We perform the encoding ahead of time
     // in order to re-use it later for the second call.
-    let block_parameter = {
+    let execute_block_parameters = {
         // Consensus engines add a seal at the end of the digest logs. This seal is guaranteed to
         // be the last item. We need to remove it before we can verify the unsealed header.
         let mut unsealed_header = config.block_header.clone();
@@ -364,7 +364,7 @@ pub fn verify(
                         .chain(value_and_len.map(either::Right))
                 });
 
-                [either::Left(&block_parameter), either::Right(len)]
+                [either::Left(&execute_block_parameters), either::Right(len)]
                     .into_iter()
                     .map(either::Left)
                     .chain(encoded_list.map(either::Right))
@@ -385,7 +385,9 @@ pub fn verify(
 
     VerifyInner {
         inner: check_inherents_process,
-        execution_not_started: Some(block_parameter),
+        phase: VerifyInnerPhase::CheckInherents {
+            execute_block_parameters,
+        },
         consensus_success,
     }
     .run()
@@ -414,23 +416,31 @@ pub enum Verify {
 
 struct VerifyInner {
     inner: runtime_host::RuntimeHostVm,
-    /// If `Some`, then we are currently checking inherents, and this field contains the parameter
-    /// to later pass when invoking `Core_execute_block`. If `None`, then we are currently
-    /// executing the block.
-    execution_not_started: Option<Vec<u8>>,
+    phase: VerifyInnerPhase,
     consensus_success: SuccessConsensus,
+}
+
+enum VerifyInnerPhase {
+    CheckInherents {
+        /// Parameter to later pass when invoking `Core_execute_block`.
+        execute_block_parameters: Vec<u8>,
+    },
+    ExecuteBlock,
 }
 
 impl VerifyInner {
     fn run(mut self) -> Verify {
         loop {
-            match self.inner {
-                runtime_host::RuntimeHostVm::Finished(Err(err)) => {
+            match (self.inner, &self.phase) {
+                (runtime_host::RuntimeHostVm::Finished(Err(err)), _) => {
                     break Verify::Finished(Err((Error::WasmVm(err.detail), err.prototype)))
                 }
-                runtime_host::RuntimeHostVm::Finished(Ok(success))
-                    if self.execution_not_started.is_some() =>
-                {
+                (
+                    runtime_host::RuntimeHostVm::Finished(Ok(success)),
+                    VerifyInnerPhase::CheckInherents {
+                        execute_block_parameters,
+                    },
+                ) => {
                     // Check the output of the `BlockBuilder_check_inherents` runtime call.
                     let check_inherents_result =
                         check_check_inherents_output(success.virtual_machine.value().as_ref());
@@ -446,7 +456,7 @@ impl VerifyInner {
                         let vm = runtime_host::run(runtime_host::Config {
                             virtual_machine: success.virtual_machine.into_prototype(),
                             function_to_call: "Core_execute_block",
-                            parameter: iter::once(&self.execution_not_started.as_ref().unwrap()),
+                            parameter: iter::once(execute_block_parameters),
                             main_trie_root_calculation_cache: Some(
                                 success.main_trie_root_calculation_cache,
                             ),
@@ -465,11 +475,15 @@ impl VerifyInner {
 
                     self = VerifyInner {
                         consensus_success: self.consensus_success,
-                        execution_not_started: None,
+                        phase: VerifyInnerPhase::ExecuteBlock,
                         inner: import_process,
                     };
                 }
-                runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+
+                (
+                    runtime_host::RuntimeHostVm::Finished(Ok(success)),
+                    VerifyInnerPhase::ExecuteBlock,
+                ) => {
                     if !success.virtual_machine.value().as_ref().is_empty() {
                         return Verify::Finished(Err((
                             Error::NonEmptyOutput,
@@ -539,28 +553,29 @@ impl VerifyInner {
                         logs: success.logs,
                     }));
                 }
-                runtime_host::RuntimeHostVm::StorageGet(inner) => {
+
+                (runtime_host::RuntimeHostVm::StorageGet(inner), _) => {
                     break Verify::StorageGet(StorageGet {
                         inner,
-                        execution_not_started: self.execution_not_started,
+                        phase: self.phase,
                         consensus_success: self.consensus_success,
                     })
                 }
-                runtime_host::RuntimeHostVm::PrefixKeys(inner) => {
+                (runtime_host::RuntimeHostVm::PrefixKeys(inner), _) => {
                     break Verify::StoragePrefixKeys(StoragePrefixKeys {
                         inner,
-                        execution_not_started: self.execution_not_started,
+                        phase: self.phase,
                         consensus_success: self.consensus_success,
                     })
                 }
-                runtime_host::RuntimeHostVm::NextKey(inner) => {
+                (runtime_host::RuntimeHostVm::NextKey(inner), _) => {
                     break Verify::StorageNextKey(StorageNextKey {
                         inner,
-                        execution_not_started: self.execution_not_started,
+                        phase: self.phase,
                         consensus_success: self.consensus_success,
                     })
                 }
-                runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
+                (runtime_host::RuntimeHostVm::SignatureVerification(sig), _) => {
                     self.inner = sig.verify_and_resume();
                 }
             }
@@ -572,8 +587,8 @@ impl VerifyInner {
 #[must_use]
 pub struct StorageGet {
     inner: runtime_host::StorageGet,
-    /// See [`VerifyInner::execution_not_started`].
-    execution_not_started: Option<Vec<u8>>,
+    /// See [`VerifyInner::phase`].
+    phase: VerifyInnerPhase,
     consensus_success: SuccessConsensus,
 }
 
@@ -590,7 +605,7 @@ impl StorageGet {
     ) -> Verify {
         VerifyInner {
             inner: self.inner.inject_value(value),
-            execution_not_started: self.execution_not_started,
+            phase: self.phase,
             consensus_success: self.consensus_success,
         }
         .run()
@@ -601,8 +616,8 @@ impl StorageGet {
 #[must_use]
 pub struct StoragePrefixKeys {
     inner: runtime_host::PrefixKeys,
-    /// See [`VerifyInner::execution_not_started`].
-    execution_not_started: Option<Vec<u8>>,
+    /// See [`VerifyInner::phase`].
+    phase: VerifyInnerPhase,
     consensus_success: SuccessConsensus,
 }
 
@@ -616,7 +631,7 @@ impl StoragePrefixKeys {
     pub fn inject_keys_ordered(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> Verify {
         VerifyInner {
             inner: self.inner.inject_keys_ordered(keys),
-            execution_not_started: self.execution_not_started,
+            phase: self.phase,
             consensus_success: self.consensus_success,
         }
         .run()
@@ -627,8 +642,8 @@ impl StoragePrefixKeys {
 #[must_use]
 pub struct StorageNextKey {
     inner: runtime_host::NextKey,
-    /// See [`VerifyInner::execution_not_started`].
-    execution_not_started: Option<Vec<u8>>,
+    /// See [`VerifyInner::phase`].
+    phase: VerifyInnerPhase,
     consensus_success: SuccessConsensus,
 }
 
@@ -659,7 +674,7 @@ impl StorageNextKey {
     pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> Verify {
         VerifyInner {
             inner: self.inner.inject_key(key),
-            execution_not_started: self.execution_not_started,
+            phase: self.phase,
             consensus_success: self.consensus_success,
         }
         .run()
