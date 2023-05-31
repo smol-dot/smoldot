@@ -339,7 +339,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         follow_subscription: &str,
         hash: methods::HashHexString,
         key: methods::HexString,
-        child_key: Option<methods::HexString>,
+        child_trie: Option<methods::HexString>,
         network_config: Option<methods::NetworkConfig>,
     ) {
         let network_config = network_config.unwrap_or(methods::NetworkConfig {
@@ -360,7 +360,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     get_request_id: (request_id.0.to_owned(), request_id.1.clone()),
                     hash,
                     key,
-                    child_key,
+                    child_trie,
                     network_config,
                 },
             )
@@ -1051,7 +1051,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 get_request_id,
                 network_config,
                 key,
-                child_key,
+                child_trie,
             } => {
                 // Obtain the header of the requested block.
                 // Contains `None` if the subscription is disjoint.
@@ -1069,7 +1069,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     (&get_request_id.0, &get_request_id.1),
                     hash,
                     key,
-                    child_key,
+                    child_trie,
                     network_config,
                     block_scale_encoded_header,
                 )
@@ -1367,11 +1367,12 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         request_id: (&str, &requests_subscriptions::RequestId),
         hash: methods::HashHexString,
         key: methods::HexString,
-        child_key: Option<methods::HexString>,
+        child_trie: Option<methods::HexString>,
         network_config: methods::NetworkConfig,
         block_scale_encoded_header: Option<Vec<u8>>,
     ) {
-        if child_key.is_some() {
+        if child_trie.is_some() {
+            // TODO: implement this
             requests_subscriptions
                 .respond(
                     request_id.1,
