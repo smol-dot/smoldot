@@ -605,6 +605,22 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 return (self, true);
             }
 
+            all::ProcessOne::WarpSyncBuildRuntime(req) => {
+                // Warp syncing compiles the runtime. The compiled runtime will later be yielded
+                // in the `WarpSyncFinished` variant, which is then provided as an event.
+                let (new_sync, error) = req.build(all::ExecHint::CompileAheadOfTime, true);
+                match error {
+                    Ok(()) => {
+                        log::debug!(target: &self.log_target, "Sync => WarpSyncRuntimeBuild(success=true)")
+                    }
+                    Err(err) => {
+                        log::debug!(target: &self.log_target, "Sync => WarpSyncRuntimeBuild(error={})", err)
+                    }
+                };
+                self.sync = new_sync;
+                return (self, true);
+            }
+
             all::ProcessOne::WarpSyncFinished {
                 sync,
                 finalized_block_runtime,
