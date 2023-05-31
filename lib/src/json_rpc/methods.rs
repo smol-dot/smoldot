@@ -748,7 +748,7 @@ pub enum ChainHeadStorageEvent<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         hash: Option<HexString>,
         #[serde(rename = "merkle-value", skip_serializing_if = "Option::is_none")]
-        merkleValue: Option<HexString>
+        merkleValue: Option<HexString>,
     },
     #[serde(rename = "done")]
     Done,

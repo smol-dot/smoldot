@@ -1393,11 +1393,40 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 .await;
             log::warn!(
                 target: &self.log_target,
-                "chainHead_unstable_storage with a non-null childKey has been called. \
+                "chainHead_unstable_storage has been called with a non-null childTrie. \
                 This isn't supported by smoldot yet."
             );
             return;
         }
+
+        let is_hash = match ty {
+            methods::ChainHeadStorageType::Value => false,
+            methods::ChainHeadStorageType::Hash => true,
+            methods::ChainHeadStorageType::DescendantsValues
+            | methods::ChainHeadStorageType::DescendantsHashes
+            | methods::ChainHeadStorageType::ClosestAncestorMerkleValue => {
+                // TODO: implement this
+                requests_subscriptions
+                    .respond(
+                        request_id.1,
+                        json_rpc::parse::build_error_response(
+                            request_id.0,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                "Child key storage queries not supported yet",
+                            ),
+                            None,
+                        ),
+                    )
+                    .await;
+                log::warn!(
+                    target: &self.log_target,
+                    "chainHead_unstable_storage has been called with a type other than value or hash. \
+                    This isn't supported by smoldot yet."
+                );
+                return;
+            }
+        };
 
         let (subscription_id, mut messages_rx, subscription_start) = match requests_subscriptions
             .start_subscription(request_id.1, 1)
@@ -1445,7 +1474,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             decoded_header.number,
                             &hash.0,
                             decoded_header.state_root,
-                            iter::once(&key.0),
+                            iter::once(key.0.clone()), // TODO: clone :-/
                             cmp::min(10, network_config.total_attempts),
                             Duration::from_millis(u64::from(cmp::min(
                                 20000,
@@ -1481,17 +1510,19 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                     // and as such the outcome only ever contains one element.
                                     debug_assert_eq!(values.len(), 1);
                                     let value = values.into_iter().next().unwrap();
-                                    let output = value.map(methods::HexString);
+                                    if let Some(mut value) = value {
+                                        if is_hash {
+                                            value = blake2_rfc::blake2b::blake2b(8, &[], &value).as_bytes().to_vec();
+                                        }
 
-                                    if let Some(output) = output {
                                         requests_subscriptions.push_notification(
                                             &request_id.1,
                                             &subscription_id,
                                             methods::ServerToClient::chainHead_unstable_storageEvent {
                                                 subscription: (&subscription_id).into(),
                                                 result: methods::ChainHeadStorageEvent::Item {
-                                                    key: todo!(),
-                                                    value: Some(output),
+                                                    key,
+                                                    value: Some(methods::HexString(value)),
                                                     hash: None,
                                                     merkleValue: None,
                                                 },
