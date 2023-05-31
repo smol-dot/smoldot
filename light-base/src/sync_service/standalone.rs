@@ -660,6 +660,12 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                             chain specification with a checkpoint past this forced change."
                         } else { "" }
                     );
+                } else {
+                    log::debug!(
+                        target: &self.log_target,
+                        "Sync => WarpSyncFragmentVerified(sender={})",
+                        sender_peer_id,
+                    );
                 }
             }
 
