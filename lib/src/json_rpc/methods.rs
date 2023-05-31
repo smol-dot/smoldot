@@ -464,6 +464,9 @@ define_methods! {
         #[rename = "type"] ty: ChainHeadStorageType,
         #[rename = "networkConfig"] network_config: Option<NetworkConfig>
     ) -> Cow<'a, str>,
+    chainHead_unstable_storageContinue(
+        #[rename = "subscription"] subscription: Cow<'a, str>
+    ) -> (),
     chainHead_unstable_unfollow(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>
     ) -> (),
@@ -748,7 +751,7 @@ pub enum ChainHeadStorageEvent<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         hash: Option<HexString>,
         #[serde(rename = "merkle-value", skip_serializing_if = "Option::is_none")]
-        merkleValue: Option<HexString>,
+        merkle_value: Option<HexString>,
     },
     #[serde(rename = "done")]
     Done,

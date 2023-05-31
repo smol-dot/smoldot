@@ -160,6 +160,9 @@ pub(super) enum SubscriptionMessage {
         child_trie: Option<methods::HexString>,
         ty: methods::ChainHeadStorageType,
     },
+    ChainHeadStorageContinue {
+        continue_request_id: (String, requests_subscriptions::RequestId),
+    },
     ChainHeadBody {
         hash: methods::HashHexString,
         get_request_id: (String, requests_subscriptions::RequestId),
@@ -525,6 +528,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::chainHead_unstable_stopCall { .. }
             | methods::MethodCall::chainHead_unstable_stopStorage { .. }
             | methods::MethodCall::chainHead_unstable_storage { .. }
+            | methods::MethodCall::chainHead_unstable_storageContinue { .. }
             | methods::MethodCall::chainHead_unstable_unfollow { .. }
             | methods::MethodCall::chainHead_unstable_unpin { .. }
             | methods::MethodCall::chainSpec_unstable_chainName { .. }
@@ -811,6 +815,13 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     child_trie,
                     ty,
                     network_config,
+                )
+                .await;
+            }
+            methods::MethodCall::chainHead_unstable_storageContinue { subscription } => {
+                self.chain_head_storage_continue(
+                    (request_id, &state_machine_request_id),
+                    &subscription,
                 )
                 .await;
             }

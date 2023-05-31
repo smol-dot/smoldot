@@ -384,6 +384,38 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         }
     }
 
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_storageContinue`].
+    pub(super) async fn chain_head_storage_continue(
+        self: &Arc<Self>,
+        request_id: (&str, &requests_subscriptions::RequestId),
+        subscription_id: &str,
+    ) {
+        // Resuming the subscription is done by sending a message to it.
+        let message_received = self
+            .requests_subscriptions
+            .subscription_send(
+                request_id.1,
+                subscription_id,
+                SubscriptionMessage::ChainHeadStorageContinue {
+                    continue_request_id: (request_id.0.to_owned(), request_id.1.clone()),
+                },
+            )
+            .await;
+
+        // If the subscription is dead, then manually send back a response.
+        // This could happen for example because there was a stop message earlier in its queue
+        // or because it was the wrong type of subscription.
+        if message_received.is_err() {
+            self.requests_subscriptions
+                .respond(
+                    request_id.1,
+                    methods::Response::chainHead_unstable_storageContinue(())
+                        .to_json_response(request_id.0),
+                )
+                .await;
+        }
+    }
+
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_body`].
     pub(super) async fn chain_head_unstable_body(
         self: &Arc<Self>,
@@ -1524,7 +1556,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                     key,
                                                     value: Some(methods::HexString(value)),
                                                     hash: None,
-                                                    merkleValue: None,
+                                                    merkle_value: None,
                                                 },
                                             }
                                             .to_json_call_object_parameters(None)
@@ -1553,6 +1585,26 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                         .to_json_call_object_parameters(None)
                                     ).await;
                                     break;
+                                }
+                                either::Right((
+                                    SubscriptionMessage::ChainHeadStorageContinue { continue_request_id },
+                                    confirmation_sender,
+                                )) => {
+                                    // Because we never emit a "waiting-for-continue" event, this
+                                    // is always erroneous.
+                                    requests_subscriptions
+                                        .respond(
+                                            &continue_request_id.1,
+                                            json_rpc::parse::build_error_response(
+                                                &continue_request_id.0,
+                                                json_rpc::parse::ErrorResponse::InvalidParams,
+                                                Some(&serde_json::to_string("storage subscription hasn't generated a waiting-for-continue").unwrap()),
+                                            ),
+                                        )
+                                        .await;
+
+                                    confirmation_sender.send();
+                                    return;
                                 }
                                 either::Right((
                                     SubscriptionMessage::StopIfChainHeadBody { stop_request_id },

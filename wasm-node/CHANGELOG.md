@@ -6,6 +6,7 @@
 
 - The parameter of `chainHead_unstable_follow` has been renamed from `runtimeUpdates` to `withRuntime` in accordance with the latest JSON-RPC specification changes. ([#624](https://github.com/smol-dot/smoldot/pull/624))
 - Errors while building the runtime and errors while building the consensus-related information that can happen during the warp syncing process are now printed in the logs. ([#644](https://github.com/smol-dot/smoldot/pull/644))
+- The `chainHead_unstable_storage` JSON-RPC method has been updated according to the latest changes to the JSON-RPC specification. These changes can be found [here](https://github.com/paritytech/json-rpc-interface-spec/pull/37).
 
 ### Fixed
 
