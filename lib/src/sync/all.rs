@@ -1263,56 +1263,35 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         match self.inner {
             AllSyncInner::GrandpaWarpSync {
                 inner: warp_sync::WarpSync::InProgress(inner),
-            } => {
-                match inner.process_one() {
-                    warp_sync::ProcessOne::Idle(inner) => {
-                        self.inner = AllSyncInner::GrandpaWarpSync {
-                            inner: warp_sync::WarpSync::InProgress(inner),
-                        };
-                        ProcessOne::AllSync(self)
-                    }
-                    warp_sync::ProcessOne::VerifyWarpSyncFragment(inner) => {
-                        ProcessOne::VerifyWarpSyncFragment(WarpSyncFragmentVerify {
-                            inner,
-                            shared: self.shared,
-                            marker: marker::PhantomData,
-                        })
-                    }
-                    warp_sync::ProcessOne::BuildRuntime(inner) => {
-                        ProcessOne::WarpSyncBuildRuntime(WarpSyncBuildRuntime {
-                            inner,
-                            shared: self.shared,
-                            marker: marker::PhantomData,
-                        })
-                    }
-                    warp_sync::ProcessOne::BuildChainInformation(inner) => {
-                        match inner.build().0 {
-                            // TODO: errors not reported to upper layer
-                            warp_sync::WarpSync::InProgress(inner) => {
-                                self.inner = AllSyncInner::GrandpaWarpSync {
-                                    inner: warp_sync::WarpSync::InProgress(inner),
-                                };
-                                ProcessOne::AllSync(self)
-                            }
-                            warp_sync::WarpSync::Finished(success) => {
-                                let (
-                                    new_inner,
-                                    finalized_block_runtime,
-                                    finalized_storage_code,
-                                    finalized_storage_heap_pages,
-                                ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
-                                self.inner = AllSyncInner::AllForks(new_inner);
-                                ProcessOne::WarpSyncFinished {
-                                    sync: self,
-                                    finalized_block_runtime,
-                                    finalized_storage_code,
-                                    finalized_storage_heap_pages,
-                                }
-                            }
-                        }
-                    }
+            } => match inner.process_one() {
+                warp_sync::ProcessOne::Idle(inner) => {
+                    self.inner = AllSyncInner::GrandpaWarpSync {
+                        inner: warp_sync::WarpSync::InProgress(inner),
+                    };
+                    ProcessOne::AllSync(self)
                 }
-            }
+                warp_sync::ProcessOne::VerifyWarpSyncFragment(inner) => {
+                    ProcessOne::VerifyWarpSyncFragment(WarpSyncFragmentVerify {
+                        inner,
+                        shared: self.shared,
+                        marker: marker::PhantomData,
+                    })
+                }
+                warp_sync::ProcessOne::BuildRuntime(inner) => {
+                    ProcessOne::WarpSyncBuildRuntime(WarpSyncBuildRuntime {
+                        inner,
+                        shared: self.shared,
+                        marker: marker::PhantomData,
+                    })
+                }
+                warp_sync::ProcessOne::BuildChainInformation(inner) => {
+                    ProcessOne::WarpSyncBuildChainInformation(WarpSyncBuildChainInformation {
+                        inner,
+                        shared: self.shared,
+                        marker: marker::PhantomData,
+                    })
+                }
+            },
             AllSyncInner::GrandpaWarpSync {
                 inner: warp_sync::WarpSync::Finished(success),
             } => {
@@ -2243,16 +2222,11 @@ pub enum ProcessOne<TRq, TSrc, TBl> {
     /// No block ready to be processed.
     AllSync(AllSync<TRq, TSrc, TBl>),
 
-    /// Content of the response is erroneous in the context of warp syncing.
-    WarpSyncError {
-        sync: AllSync<TRq, TSrc, TBl>,
-
-        /// Error that happened.
-        error: warp_sync::Error,
-    },
-
     /// Building the runtime is necessary in order for the warp syncing to continue.
     WarpSyncBuildRuntime(WarpSyncBuildRuntime<TRq, TSrc, TBl>),
+
+    /// Building the chain information is necessary in order for the warp syncing to continue.
+    WarpSyncBuildChainInformation(WarpSyncBuildChainInformation<TRq, TSrc, TBl>),
 
     /// Response has made it possible to finish warp syncing.
     WarpSyncFinished {
@@ -2649,6 +2623,37 @@ impl<TRq, TSrc, TBl> WarpSyncBuildRuntime<TRq, TSrc, TBl> {
     ) -> (AllSync<TRq, TSrc, TBl>, Result<(), warp_sync::Error>) {
         let (warp_sync_status, error) = self.inner.build(exec_hint, allow_unresolved_imports);
 
+        (
+            AllSync {
+                inner: AllSyncInner::GrandpaWarpSync {
+                    inner: warp_sync_status,
+                },
+                shared: self.shared,
+            },
+            match error {
+                Some(err) => Err(err),
+                None => Ok(()),
+            },
+        )
+    }
+}
+
+/// Building the chain information is necessary for the warp sync process.
+#[must_use]
+pub struct WarpSyncBuildChainInformation<TRq, TSrc, TBl> {
+    inner: warp_sync::BuildChainInformation<
+        GrandpaWarpSyncSourceExtra<TSrc>,
+        GrandpaWarpSyncRequestExtra<TRq>,
+    >,
+    shared: Shared<TRq>,
+    marker: marker::PhantomData<Vec<TBl>>,
+}
+
+impl<TRq, TSrc, TBl> WarpSyncBuildChainInformation<TRq, TSrc, TBl> {
+    /// Builds the chain information.
+    // TODO: better error type
+    pub fn build(self) -> (AllSync<TRq, TSrc, TBl>, Result<(), warp_sync::Error>) {
+        let (warp_sync_status, error) = self.inner.build();
         (
             AllSync {
                 inner: AllSyncInner::GrandpaWarpSync {
