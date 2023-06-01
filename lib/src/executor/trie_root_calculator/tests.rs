@@ -102,7 +102,7 @@ fn fuzzing() {
         // Each node contains a `Some` with the storage value or `None` for branch nodes, plus its
         // Merkle value as `Some` if already calculated.
         let mut trie_before_diff = trie::trie_structure::TrieStructure::<(
-            Option<Vec<u8>>,
+            Option<(Vec<u8>, TrieEntryVersion)>,
             Option<trie::trie_node::MerkleValueOutput>,
         )>::new();
 
@@ -122,15 +122,23 @@ fn fuzzing() {
                 storage_value.push(uniform_sample(0, 255));
             }
 
+            let trie_entry_version = if rand::random::<bool>() {
+                TrieEntryVersion::V1
+            } else {
+                TrieEntryVersion::V0
+            };
+
             match trie_before_diff.node(trie::bytes_to_nibbles(elem.iter().copied())) {
                 trie::trie_structure::Entry::Vacant(e) => {
-                    e.insert_storage_value()
-                        .insert((Some(storage_value), None), (None, None));
+                    e.insert_storage_value().insert(
+                        (Some((storage_value, trie_entry_version)), None),
+                        (None, None),
+                    );
                 }
                 trie::trie_structure::Entry::Occupied(
                     trie::trie_structure::NodeAccess::Branch(mut e),
                 ) => {
-                    *e.user_data() = (Some(storage_value), None);
+                    *e.user_data() = (Some((storage_value, trie_entry_version)), None);
                     e.insert_storage_value();
                 }
                 trie::trie_structure::Entry::Occupied(
@@ -143,6 +151,11 @@ fn fuzzing() {
         // in a diff.
         let mut trie_after_diff = trie_before_diff.clone();
         let mut diff = TrieDiff::empty();
+        let diff_trie_entries_version = if rand::random::<bool>() {
+            TrieEntryVersion::V1
+        } else {
+            TrieEntryVersion::V0
+        };
 
         for _ in 0..5 {
             let mut list = vec![Vec::new()];
@@ -165,20 +178,38 @@ fn fuzzing() {
                     trie::trie_structure::Entry::Occupied(
                         trie::trie_structure::NodeAccess::Storage(mut e),
                     ) => {
-                        e.user_data().0 = None;
-                        e.remove();
-                        diff.diff_insert_erase(elem, ());
+                        if rand::random::<bool>() {
+                            // Update storage value.
+                            *e.user_data() = (
+                                Some((storage_value.clone(), diff_trie_entries_version)),
+                                None,
+                            );
+                            diff.diff_insert(elem, storage_value, ());
+                        } else {
+                            // Erase node.
+                            e.user_data().0 = None;
+                            e.remove();
+                            diff.diff_insert_erase(elem, ());
+                        }
                     }
                     trie::trie_structure::Entry::Occupied(
                         trie::trie_structure::NodeAccess::Branch(mut e),
                     ) => {
-                        *e.user_data() = (Some(storage_value.clone()), None);
+                        *e.user_data() = (
+                            Some((storage_value.clone(), diff_trie_entries_version)),
+                            None,
+                        );
                         e.insert_storage_value();
                         diff.diff_insert(elem, storage_value, ());
                     }
                     trie::trie_structure::Entry::Vacant(e) => {
-                        e.insert_storage_value()
-                            .insert((Some(storage_value.clone()), None), (None, None));
+                        e.insert_storage_value().insert(
+                            (
+                                Some((storage_value.clone(), diff_trie_entries_version)),
+                                None,
+                            ),
+                            (None, None),
+                        );
                         diff.diff_insert(elem, storage_value, ());
                     }
                 }
@@ -189,7 +220,7 @@ fn fuzzing() {
         let obtained_hash = {
             let mut calculator = trie_root_calculator(Config {
                 diff: diff.clone(),
-                diff_trie_entries_version: TrieEntryVersion::V0, // TODO: test multiple trie versions?
+                diff_trie_entries_version,
                 max_trie_recalculation_depth_hint: 8,
             });
 
@@ -229,7 +260,7 @@ fn fuzzing() {
                         };
 
                         calculator =
-                            req.inject_value(value.as_deref().map(|v| (v, TrieEntryVersion::V0)));
+                            req.inject_value(value.as_ref().map(|(val, vers)| (&val[..], *vers)));
                     }
                 }
             }
@@ -254,8 +285,22 @@ fn fuzzing() {
                 let is_root_node = node_access.is_root_node();
                 let partial_key = node_access.partial_key().collect::<Vec<_>>().into_iter();
 
+                // We have to hash the storage value ahead of time if necessary due to borrow
+                // checking difficulties.
+                let storage_value_hashed = match node_access.user_data().0.as_ref() {
+                    Some((v, TrieEntryVersion::V1)) => {
+                        Some(blake2_rfc::blake2b::blake2b(32, &[], v))
+                    }
+                    _ => None,
+                };
                 let storage_value = match node_access.user_data().0.as_ref() {
-                    Some(v) => trie::trie_node::StorageValue::Unhashed(&v[..]),
+                    Some((v, TrieEntryVersion::V0)) => {
+                        trie::trie_node::StorageValue::Unhashed(&v[..])
+                    }
+                    Some((_, TrieEntryVersion::V1)) => trie::trie_node::StorageValue::Hashed(
+                        <&[u8; 32]>::try_from(storage_value_hashed.as_ref().unwrap().as_bytes())
+                            .unwrap(),
+                    ),
                     None => trie::trie_node::StorageValue::None,
                 };
 
