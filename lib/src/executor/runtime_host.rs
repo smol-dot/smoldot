@@ -383,7 +383,6 @@ impl NextKey {
 
     /// If `true`, then the search must include both branch nodes and storage nodes. If `false`,
     /// the search only covers storage nodes.
-    // TODO: the key should be as nibbles rather than &[u8]
     pub fn branch_nodes(&self) -> bool {
         matches!(self.inner.vm, host::HostVm::ExternalStorageRoot(_))
     }
