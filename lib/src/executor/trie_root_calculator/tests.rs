@@ -259,8 +259,9 @@ fn fuzzing() {
 
                 match trie_after_diff.node(trie::bytes_to_nibbles(elem.iter().copied())) {
                     trie::trie_structure::Entry::Occupied(
-                        trie::trie_structure::NodeAccess::Storage(e),
+                        trie::trie_structure::NodeAccess::Storage(mut e),
                     ) => {
+                        e.user_data().0 = None;
                         e.remove();
                         diff.diff_insert_erase(elem, ());
                     }
