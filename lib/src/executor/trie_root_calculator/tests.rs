@@ -110,7 +110,7 @@ fn fuzzing() {
         for elem in list.clone().into_iter() {
             for _ in 0..uniform_sample(0, 4) {
                 let mut elem = elem.clone();
-                for _ in 0..uniform_sample(1, 3) {
+                for _ in 0..uniform_sample(0, 3) {
                     elem.push(uniform_sample(0, 255));
                 }
                 list.push(elem);
@@ -135,7 +135,7 @@ fn fuzzing() {
                 }
                 trie::trie_structure::Entry::Occupied(
                     trie::trie_structure::NodeAccess::Storage(_),
-                ) => unreachable!(),
+                ) => {}
             }
         }
 
