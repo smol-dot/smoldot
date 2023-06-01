@@ -5,10 +5,13 @@
 ### Changed
 
 - The parameter of `chainHead_unstable_follow` has been renamed from `runtimeUpdates` to `withRuntime` in accordance with the latest JSON-RPC specification changes. ([#624](https://github.com/smol-dot/smoldot/pull/624))
+- Errors while building the runtime and errors while building the consensus-related information that can happen during the warp syncing process are now printed in the logs. ([#644](https://github.com/smol-dot/smoldot/pull/644))
+- The `chainHead_unstable_storage` JSON-RPC method has been updated according to the latest changes to the JSON-RPC specification. These changes can be found [here](https://github.com/paritytech/json-rpc-interface-spec/pull/37). The `descendants-values`, `descendants-hashes`, and `closest-ancestor-merkle-value` types aren't implemented yet and produce an error. ([#647](https://github.com/smol-dot/smoldot/pull/647))
 
 ### Fixed
 
 - Fix panic when receiving a networking request of a protocol not supported by smoldot. ([#635](https://github.com/smol-dot/smoldot/pull/635))
+- Fix `chainHead_unstable_stopStorage` and `chainHead_unstable_stopBody` being mixed. In other words, storage requests were interrupted by `chainHead_unstable_stopBody` and body requests were interrupted by `chainHead_unstable_stopStorage` ([#648](https://github.com/smol-dot/smoldot/pull/648))
 
 ## 1.0.7 - 2023-05-25
 

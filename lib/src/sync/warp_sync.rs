@@ -209,6 +209,17 @@ pub enum WarpSyncInitError {
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct SourceId(usize);
 
+impl SourceId {
+    /// Returns the smallest possible [`SourceId`]. It is always inferior or equal to any other.
+    pub fn min_value() -> Self {
+        SourceId(usize::min_value())
+    }
+
+    pub fn checked_add(&self, n: u8) -> Option<Self> {
+        Some(SourceId(self.0.checked_add(usize::from(n))?))
+    }
+}
+
 /// The result of a successful warp sync.
 pub struct Success<TSrc, TRq> {
     /// The synced chain information.
@@ -225,7 +236,8 @@ pub struct Success<TSrc, TRq> {
     pub finalized_storage_heap_pages: Option<Vec<u8>>,
 
     /// The list of sources that were added to the state machine.
-    pub sources: Vec<TSrc>,
+    /// The list is ordered by [`SourceId`].
+    pub sources_ordered: Vec<(SourceId, TSrc)>,
 
     /// The list of requests that were added to the state machine.
     pub in_progress_requests: Vec<(SourceId, RequestId, TRq, RequestDetail)>,
@@ -1319,11 +1331,9 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                             finalized_storage_code: Some(finalized_storage_code.to_owned()),
                             finalized_storage_heap_pages: finalized_storage_heappages
                                 .map(|v| v.to_vec()),
-                            sources: self
-                                .inner
-                                .sources
-                                .drain()
-                                .map(|source| source.user_data)
+                            sources_ordered: mem::take(&mut self.inner.sources)
+                                .into_iter()
+                                .map(|(id, source)| (SourceId(id), source.user_data))
                                 .collect(),
                             in_progress_requests: mem::take(&mut self.inner.in_progress_requests)
                                 .into_iter()
@@ -1470,11 +1480,9 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                         finalized_storage_code: downloaded_runtime.storage_code,
                                         finalized_storage_heap_pages: downloaded_runtime
                                             .storage_heap_pages,
-                                        sources: self
-                                            .inner
-                                            .sources
-                                            .drain()
-                                            .map(|source| source.user_data)
+                                        sources_ordered: mem::take(&mut self.inner.sources)
+                                            .into_iter()
+                                            .map(|(id, source)| (SourceId(id), source.user_data))
                                             .collect(),
                                         in_progress_requests: mem::take(
                                             &mut self.inner.in_progress_requests,
