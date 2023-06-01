@@ -97,7 +97,7 @@ fn fuzzing() {
     }
 
     // We run the test multiple times because of randomness.
-    for _ in 0..4096 {
+    for _ in 0..32768 {
         // Create a random trie.
         // Each node contains a `Some` with the storage value or `None` for branch nodes, plus its
         // Merkle value as `Some` if already calculated.
@@ -118,7 +118,7 @@ fn fuzzing() {
         }
         for elem in list {
             let mut storage_value = Vec::new();
-            for _ in 0..uniform_sample(0, 3) {
+            for _ in 0..uniform_sample(0, 24) {
                 storage_value.push(uniform_sample(0, 255));
             }
 
@@ -170,7 +170,7 @@ fn fuzzing() {
             }
             for elem in list {
                 let mut storage_value = Vec::new();
-                for _ in 0..uniform_sample(0, 3) {
+                for _ in 0..uniform_sample(0, 24) {
                     storage_value.push(uniform_sample(0, 255));
                 }
 
