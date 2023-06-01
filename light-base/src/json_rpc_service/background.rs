@@ -157,7 +157,11 @@ pub(super) enum SubscriptionMessage {
         get_request_id: (String, requests_subscriptions::RequestId),
         network_config: methods::NetworkConfig,
         key: methods::HexString,
-        child_key: Option<methods::HexString>,
+        child_trie: Option<methods::HexString>,
+        ty: methods::ChainHeadStorageType,
+    },
+    ChainHeadStorageContinue {
+        continue_request_id: (String, requests_subscriptions::RequestId),
     },
     ChainHeadBody {
         hash: methods::HashHexString,
@@ -524,6 +528,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::chainHead_unstable_stopCall { .. }
             | methods::MethodCall::chainHead_unstable_stopStorage { .. }
             | methods::MethodCall::chainHead_unstable_storage { .. }
+            | methods::MethodCall::chainHead_unstable_storageContinue { .. }
             | methods::MethodCall::chainHead_unstable_unfollow { .. }
             | methods::MethodCall::chainHead_unstable_unpin { .. }
             | methods::MethodCall::chainSpec_unstable_chainName { .. }
@@ -798,7 +803,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 follow_subscription,
                 hash,
                 key,
-                child_key,
+                child_trie,
+                ty,
                 network_config,
             } => {
                 self.chain_head_storage(
@@ -806,8 +812,16 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     &follow_subscription,
                     hash,
                     key,
-                    child_key,
+                    child_trie,
+                    ty,
                     network_config,
+                )
+                .await;
+            }
+            methods::MethodCall::chainHead_unstable_storageContinue { subscription } => {
+                self.chain_head_storage_continue(
+                    (request_id, &state_machine_request_id),
+                    &subscription,
                 )
                 .await;
             }
