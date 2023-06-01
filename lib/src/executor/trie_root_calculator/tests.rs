@@ -97,7 +97,7 @@ fn fuzzing() {
     }
 
     // We run the test multiple times because of randomness.
-    for _ in 0..256 {
+    for _ in 0..4096 {
         // Create a random trie.
         // Each node contains a `Some` with the storage value or `None` for branch nodes, plus its
         // Merkle value as `Some` if already calculated.
