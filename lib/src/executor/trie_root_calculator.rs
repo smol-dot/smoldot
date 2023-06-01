@@ -183,11 +183,10 @@ impl ClosestDescendant {
         // jump to calling `BaseTrieMerkleValue`.
         if !diff_erases_a_descendant && diff_inserts_lcd.is_none() {
             if let Some(closest_descendant) = closest_descendant {
-                self.0.stack.push(InProgressNode {
-                    partial_key: closest_descendant.skip(self_key_len).collect(),
-                    children: arrayvec::ArrayVec::new(),
+                return InProgress::MerkleValue(MerkleValue {
+                    inner: self.0,
+                    descendant_partial_key: closest_descendant.skip(self_key_len).collect(),
                 });
-                return InProgress::MerkleValue(MerkleValue(self.0));
             }
         }
 
@@ -435,7 +434,10 @@ impl StorageValue {
 ///
 /// It is possible to continue the calculation even if the Merkle value is unknown, in which case
 /// the calculation will walk down the trie in order to calculate the Merkle value manually.
-pub struct MerkleValue(Box<Inner>);
+pub struct MerkleValue {
+    inner: Box<Inner>,
+    descendant_partial_key: Vec<Nibble>,
+}
 
 impl MerkleValue {
     /// Returns an iterator of slices, which, when joined together, form the full key of the trie
@@ -443,7 +445,12 @@ impl MerkleValue {
     ///
     /// The key is guaranteed to have been injected through [`ClosestDescendant::inject`] earlier.
     pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[Nibble]> + '_> + '_ {
-        self.0.current_node_full_key()
+        // A `MerkleValue` is created directly in response to a `ClosestAncestor` without
+        // updating the `Inner`.
+        self.inner
+            .current_node_full_key()
+            .map(either::Left)
+            .chain(iter::once(either::Right(&self.descendant_partial_key)))
     }
 
     /// Returns the same value as [`ClosestDescendant`] but as a `Vec`.
@@ -458,12 +465,16 @@ impl MerkleValue {
     ///
     /// This function be used if you are unaware of the Merkle value. The algorithm will perform
     /// the calculation of this Merkle value manually, which takes more time.
-    pub fn resume_unknown(self) -> InProgress {
+    pub fn resume_unknown(mut self) -> InProgress {
         // The element currently being iterated was `Btcd`, and is now switched to being
         // `MaybeNodeKey`. Because a `MerkleValue` is only ever created if the diff doesn't
         // contain any entry that descends the currently iterated node, we know for sure that
-        // `MaybeNodeKey` is equal to `Btcd` and thus have nothing to do.
-        self.0.next()
+        // `MaybeNodeKey` is equal to `Btcd`.
+        self.inner.stack.push(InProgressNode {
+            partial_key: self.descendant_partial_key,
+            children: arrayvec::ArrayVec::new(),
+        });
+        self.inner.next()
     }
 
     /// Indicate the Merkle value of the trie node indicated by [`MerkleValue::key`] and resume
@@ -479,23 +490,19 @@ impl MerkleValue {
         // bug somewhere in the API user's code.
         debug_assert!(merkle_value.len() == 32 || trie::trie_node::decode(merkle_value).is_ok());
 
-        // Pop the element at the top of the stack, as we know its Merkle value.
-        let calculated_elem = self.0.stack.pop().unwrap_or_else(|| panic!());
-        debug_assert!(calculated_elem.children.is_empty());
-
-        if let Some(parent_node) = self.0.stack.last_mut() {
+        if let Some(parent_node) = self.inner.stack.last_mut() {
             // If the element has a parent, add the Merkle value to its children and resume the
             // algorithm.
             debug_assert_ne!(parent_node.children.len(), 16);
             parent_node.children.push(Some((
-                calculated_elem.partial_key,
+                self.descendant_partial_key,
                 trie::trie_node::MerkleValueOutput::from_bytes(merkle_value),
             )));
-            self.0.next()
+            self.inner.next()
         } else {
             // If the element doesn't have a parent, then the Merkle value is the root of trie!
             // This should only ever happen if the diff is empty.
-            debug_assert_eq!(self.0.diff.diff_range_ordered::<Vec<u8>>(..).count(), 0);
+            debug_assert_eq!(self.inner.diff.diff_range_ordered::<Vec<u8>>(..).count(), 0);
 
             // The trie root hash is always 32 bytes. If not, it indicates a bug in the API user's
             // code.
