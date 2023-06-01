@@ -316,8 +316,11 @@ impl StorageValue {
                     // No more node in the stack means that this was the root node. The child is
                     // the trie root.
                     InProgress::Finished {
-                        // Guaranteed to never panic for the root node.
-                        trie_root_hash: child_merkle_value.try_into().unwrap_or_else(|_| panic!()),
+                        // When the child's Merkle value was calculated, we were passing
+                        // `is_root_node: false`, but it turns out that this child *is* the root
+                        // node. In order to solve that problem, we hash the child's Merkle value
+                        // if necessary.
+                        trie_root_hash: child_merkle_value.force_hash(),
                     }
                 }
             }

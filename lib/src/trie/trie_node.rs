@@ -255,6 +255,16 @@ impl MerkleValueOutput {
             }),
         }
     }
+
+    /// If the Merkle value is a hash, return it as is. If it isn't, turn it into a hash..
+    pub fn force_hash(&self) -> [u8; 32] {
+        let value = self.as_ref();
+        if let Ok(v) = <&[u8; 32]>::try_from(value) {
+            *v
+        } else {
+            *<&[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(8, &[], value).as_bytes()).unwrap()
+        }
+    }
 }
 
 impl AsRef<[u8]> for MerkleValueOutput {
