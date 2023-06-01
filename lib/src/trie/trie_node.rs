@@ -262,7 +262,7 @@ impl MerkleValueOutput {
         if let Ok(v) = <&[u8; 32]>::try_from(value) {
             *v
         } else {
-            *<&[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(8, &[], value).as_bytes()).unwrap()
+            *<&[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], value).as_bytes()).unwrap()
         }
     }
 }

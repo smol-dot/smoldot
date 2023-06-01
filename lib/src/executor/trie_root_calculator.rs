@@ -331,7 +331,7 @@ impl StorageValue {
                 // hash ahead of time if relevant.
                 let storage_value_hash =
                     if let Some((value, TrieEntryVersion::V1)) = maybe_storage_value {
-                        Some(blake2_rfc::blake2b::blake2b(8, &[], value))
+                        Some(blake2_rfc::blake2b::blake2b(32, &[], value))
                     } else {
                         None
                     };
