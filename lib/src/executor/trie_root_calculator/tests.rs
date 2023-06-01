@@ -216,65 +216,10 @@ fn fuzzing() {
             }
         }
 
-        // Use the trie_root_calculator to calculate the root of `trie_after_diff`.
-        let obtained_hash = {
-            let mut calculator = trie_root_calculator(Config {
-                diff: diff.clone(),
-                diff_trie_entries_version,
-                max_trie_recalculation_depth_hint: 8,
-            });
-
-            loop {
-                match calculator {
-                    InProgress::Finished { trie_root_hash } => break trie_root_hash,
-                    InProgress::ClosestDescendant(req) => {
-                        let mut next_node = trie_before_diff
-                            .range_iter(
-                                ops::Bound::Included(req.key_as_vec().into_iter()),
-                                ops::Bound::Unbounded::<iter::Empty<trie::Nibble>>,
-                            )
-                            .next();
-                        // Set `next_node` to `None` if it isn't a descendant of the demanded key.
-                        if next_node.map_or(false, |n| {
-                            !trie_before_diff
-                                .node_full_key_by_index(n)
-                                .unwrap()
-                                .collect::<Vec<_>>()
-                                .starts_with(&req.key_as_vec())
-                        }) {
-                            next_node = None;
-                        }
-                        calculator = req.inject(
-                            next_node.map(|n| trie_before_diff.node_full_key_by_index(n).unwrap()),
-                        );
-                    }
-                    InProgress::MerkleValue(req) => calculator = req.resume_unknown(), // TODO: maybe test this as well?
-                    InProgress::StorageValue(req) => {
-                        let value = if let trie::trie_structure::Entry::Occupied(
-                            trie::trie_structure::NodeAccess::Storage(e),
-                        ) = trie_before_diff.node(req.key_as_vec().into_iter())
-                        {
-                            Some(e.into_user_data().0.as_ref().unwrap().clone())
-                        } else {
-                            None
-                        };
-
-                        calculator =
-                            req.inject_value(value.as_ref().map(|(val, vers)| (&val[..], *vers)));
-                    }
-                }
-            }
-        };
-
-        // Calculate the root of `trie_after_diff` separately through the `TrieStructure`.
-        let expected_hash = {
-            for node_index in trie_after_diff
-                .iter_ordered()
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-            {
-                let mut node_access = trie_after_diff.node_by_index(node_index).unwrap();
+        // Calculate the Merkle values of the nodes of `trie_before_diff` and `trie_after_diff`.
+        for trie in [&mut trie_before_diff, &mut trie_after_diff] {
+            for node_index in trie.iter_ordered().collect::<Vec<_>>().into_iter().rev() {
+                let mut node_access = trie.node_by_index(node_index).unwrap();
 
                 let children = core::array::from_fn::<_, 16, _>(|n| {
                     node_access
@@ -316,14 +261,76 @@ fn fuzzing() {
 
                 node_access.into_user_data().1 = Some(merkle_value);
             }
+        }
 
-            trie_after_diff
-                .root_user_data()
-                .map(|n| *<&[u8; 32]>::try_from(n.1.as_ref().unwrap().as_ref()).unwrap())
-                .unwrap_or(trie::empty_trie_merkle_value())
+        // Use the trie_root_calculator to calculate the root of `trie_after_diff`.
+        let obtained_hash = {
+            let mut calculator = trie_root_calculator(Config {
+                diff: diff.clone(),
+                diff_trie_entries_version,
+                max_trie_recalculation_depth_hint: 8,
+            });
+
+            loop {
+                match calculator {
+                    InProgress::Finished { trie_root_hash } => break trie_root_hash,
+                    InProgress::ClosestDescendant(req) => {
+                        let mut next_node = trie_before_diff
+                            .range_iter(
+                                ops::Bound::Included(req.key_as_vec().into_iter()),
+                                ops::Bound::Unbounded::<iter::Empty<trie::Nibble>>,
+                            )
+                            .next();
+                        // Set `next_node` to `None` if it isn't a descendant of the demanded key.
+                        if next_node.map_or(false, |n| {
+                            !trie_before_diff
+                                .node_full_key_by_index(n)
+                                .unwrap()
+                                .collect::<Vec<_>>()
+                                .starts_with(&req.key_as_vec())
+                        }) {
+                            next_node = None;
+                        }
+                        calculator = req.inject(
+                            next_node.map(|n| trie_before_diff.node_full_key_by_index(n).unwrap()),
+                        );
+                    }
+                    InProgress::MerkleValue(req) => {
+                        if rand::random::<bool>() {
+                            let merkle_value = if let trie::trie_structure::Entry::Occupied(e) =
+                                trie_before_diff.node(req.key_as_vec().into_iter())
+                            {
+                                e.into_user_data().1.as_ref().unwrap().clone()
+                            } else {
+                                unreachable!()
+                            };
+                            calculator = req.inject_merkle_value(merkle_value.as_ref());
+                        } else {
+                            calculator = req.resume_unknown()
+                        }
+                    }
+                    InProgress::StorageValue(req) => {
+                        let value = if let trie::trie_structure::Entry::Occupied(
+                            trie::trie_structure::NodeAccess::Storage(e),
+                        ) = trie_before_diff.node(req.key_as_vec().into_iter())
+                        {
+                            Some(e.into_user_data().0.as_ref().unwrap().clone())
+                        } else {
+                            None
+                        };
+
+                        calculator =
+                            req.inject_value(value.as_ref().map(|(val, vers)| (&val[..], *vers)));
+                    }
+                }
+            }
         };
 
         // Actual test is here.
+        let expected_hash = trie_after_diff
+            .root_user_data()
+            .map(|n| *<&[u8; 32]>::try_from(n.1.as_ref().unwrap().as_ref()).unwrap())
+            .unwrap_or(trie::empty_trie_merkle_value());
         if obtained_hash != expected_hash {
             panic!(
                 "\nexpected = {:?}\ncalculated = {:?}\ntrie_before = {:?}\ndiff = {:?}",
