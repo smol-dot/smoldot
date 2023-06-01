@@ -193,20 +193,22 @@ impl ClosestDescendant {
         // Find the value of `MaybeNode`.
         let (maybe_node_partial_key, children_partial_key_changed) =
             match (diff_inserts_lcd, closest_descendant) {
-                (Some(ck), Some(d)) => {
+                (Some(ck), Some(mut d)) => {
+                    // `children_partial_key_changed` is `true` if
+                    // `diff_inserts_lcd < closest_descendant`.
                     let cpk = ck
                         .iter()
                         .copied()
-                        .zip(d)
+                        .zip(&mut d)
                         .skip(self_key_len)
                         .take_while(|(a, b)| a == b)
                         .map(|(_, b)| b)
                         .collect::<Vec<_>>();
-                    let ccpkc = cpk.len() + self_key_len != ck.len();
+                    let ccpkc = d.next().is_some();
                     (cpk, ccpkc)
                 }
-                (Some(ck), None) => (ck.into_iter().skip(self_key_len).collect::<Vec<_>>(), false),
-                (None, Some(d)) => (d.skip(self_key_len).collect(), true),
+                (Some(ck), None) => (ck.into_iter().skip(self_key_len).collect::<Vec<_>>(), true),
+                (None, Some(d)) => (d.skip(self_key_len).collect(), false),
                 (None, None) => {
                     // If neither the base trie nor the diff contain any descendant, then skip ahead.
                     return if let Some(parent_node) = self.0.stack.last_mut() {
