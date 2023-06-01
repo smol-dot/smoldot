@@ -183,6 +183,10 @@ impl ClosestDescendant {
         // jump to calling `BaseTrieMerkleValue`.
         if !diff_erases_a_descendant && diff_inserts_lcd.is_none() {
             if let Some(closest_descendant) = closest_descendant {
+                // Note that if the current node's `children_partial_key_changed` is set to true,
+                // we could in principle not ask for the Merkle value. However we do it anyway
+                // with the hope that the Merkle value is < 32 bytes and its partial key can be
+                // adjusted without having to recalculate the entire sub-tree.
                 return InProgress::MerkleValue(MerkleValue {
                     inner: self.0,
                     descendant_partial_key: closest_descendant.skip(self_key_len).collect(),
