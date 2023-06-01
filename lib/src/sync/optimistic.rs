@@ -1154,7 +1154,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                         shared.inner.finalized_chain_information.clone(),
                     );
 
-                    let mut inner = shared.inner.with_requests_obsoleted(&chain);
+                    let inner = shared.inner.with_requests_obsoleted(&chain);
                     break BlockVerification::Reset {
                         previous_best_height: old_chain.best_block_header().number,
                         parent_runtime: Some(parent_runtime),
@@ -1183,7 +1183,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                         shared.inner.finalized_chain_information.clone(),
                     );
 
-                    let mut inner = shared.inner.with_requests_obsoleted(&chain);
+                    let inner = shared.inner.with_requests_obsoleted(&chain);
                     break BlockVerification::Reset {
                         previous_best_height: old_chain.best_block_header().number,
                         parent_runtime: Some(parent_runtime),
@@ -1210,7 +1210,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                         shared.inner.finalized_chain_information.clone(),
                     );
 
-                    let mut inner = shared.inner.with_requests_obsoleted(&chain);
+                    let inner = shared.inner.with_requests_obsoleted(&chain);
                     break BlockVerification::Reset {
                         previous_best_height: old_chain.best_block_header().number,
                         parent_runtime: Some(parent_runtime),
@@ -1266,7 +1266,7 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
                     self.inner.finalized_chain_information.clone(),
                 );
 
-                let mut inner = self.inner.with_requests_obsoleted(&chain);
+                let inner = self.inner.with_requests_obsoleted(&chain);
                 let previous_best_height = chain.best_block_header().number;
                 return (
                     OptimisticSync { chain, inner },

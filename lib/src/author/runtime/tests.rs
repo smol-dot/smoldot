@@ -64,7 +64,7 @@ fn block_building_works() {
                     .map(|(_, v)| iter::once(v));
                 builder = get.inject_value(value.map(|v| (v, super::TrieEntryVersion::V0)));
             }
-            super::BlockBuild::NextKey(next_key) => {
+            super::BlockBuild::NextKey(_next_key) => {
                 // TODO: doesn't take branch_nodes() into account
                 todo!()
                 /*let result = genesis_storage.iter().fold(None, |iter, (key, _)| {
