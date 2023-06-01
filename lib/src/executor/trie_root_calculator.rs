@@ -22,18 +22,21 @@
 //! The algorithm for calculating the trie root is roughly:
 //!
 //! ```notrust
-//! TrieRoot = ClosestDescendantMerkleValue(∅) || EmptyTrieRootHash
+//! TrieRoot = ClosestDescendantMerkleValue(∅, False) || EmptyTrieRootHash
 //!
-//! ClosestDescendantMerkleValue(Key) =
+//! ClosestDescendantMerkleValue(Key, ForceRecalculate) =
 //!     Btcd := BaseTrieClosestDescendant(Key)
-//!     If DiffContainsEntryWithPrefix(Key)
+//!     If ForceRecalculate || DiffContainsEntryWithPrefix(Key)
 //!         MaybeNodeKey := LongestCommonDenominator(Btcd, ...DiffInsertsNodesWithPrefix(Key))
 //!         MaybeChildren := Array(ClosestDescendantMerkleValue(Concat(MaybeNodeKey, 0)), ..., ClosestDescendantMerkleValue(Concat(MaybeNodeKey, 15)))
 //!         MaybeStorageValue := DiffInserts(MaybeNodeKey) || (BaseTrieStorageValue(MaybeNodeKey) - DiffErases(MaybeNodeKey))
 //!
 //!         If MaybeStorageValue = ∅ AND NumChildren(MaybeChildren) == 0
 //!             ∅
-//!         ElseIf MaybeStorageValue = ∅ AND NumChildren(MaybeChildren) == 1
+//!         ElseIf NumChildren(MaybeChildren) == 1 AND BaseTrieStorageValue(MaybeNodeKey) != ∅ AND MaybeStorageValue = ∅
+//!             # Because the partial key of the child has changed, we have to recalculate it.
+//!             ClosestDescendantMerkleValue(ChildThatExists(MaybeChildren), True)
+//!         ElseIf NumChildren(MaybeChildren) == 1 AND BaseTrieStorageValue(MaybeNodeKey) = ∅ AND MaybeStorageValue = ∅
 //!             ChildThatExists(MaybeChildren)
 //!         Else
 //!             Encode(MaybeStorageValue, MaybeChildren)
@@ -56,7 +59,7 @@
 //!
 
 use alloc::{boxed::Box, vec::Vec};
-use core::{iter, ops};
+use core::{array, iter, ops};
 
 use super::storage_diff::TrieDiff;
 use crate::trie;
@@ -298,32 +301,82 @@ impl StorageValue {
                 parent_node.children.push(None);
                 self.0.next()
             }
+
             (None, 1, parent_node) => {
                 // Trie node no longer exists after the diff has been applied, but it has exactly
                 // one child.
-                let child_merkle_value = calculated_elem
+                // Unfortunately, the child Merkle value is wrong as its partial key has changed.
+                let child_index = calculated_elem
                     .children
-                    .into_iter()
-                    .find_map(|c| c)
+                    .iter()
+                    .position(|c| c.is_some())
                     .unwrap_or_else(|| panic!());
+                let child_nibble =
+                    Nibble::try_from(u8::try_from(child_index).unwrap_or_else(|_| panic!()))
+                        .unwrap_or_else(|_| panic!());
+                let (child_partial_key, child_wrong_merkle_value) =
+                    calculated_elem.children[child_index].as_ref().unwrap();
+
+                // If the child Merkle value is decodable, we can directly adjust its partial key.
+                // If not, we have to force a recalculation.
+
+                let mut new_partial_key = calculated_elem.partial_key;
+                new_partial_key.reserve(1 + child_partial_key.len());
+                new_partial_key.push(child_nibble);
+                new_partial_key.extend_from_slice(child_partial_key);
+
+                // First, handle the forced recalculation path as it is more simple.
+                // We do so by replacing `calculated_elem` in the stack with its one child.
+                // Note that this seems slightly inefficient because we will retraverse the
+                // children of the element we're pushing even though we might have traversed
+                // them earlier. However, solving this inefficiency would be extremely complicated
+                // and probably not worth it.
+                if child_wrong_merkle_value.as_ref().len() == 32 {
+                    self.0.stack.push(InProgressNode {
+                        partial_key: new_partial_key,
+                        children: arrayvec::ArrayVec::new(),
+                    });
+                    return self.0.next();
+                }
+
+                // Recalculate the child's value so that it becomes the calculated_elem's Merkle
+                // value.
+                let calculated_elem_merkle_value = {
+                    let decoded = trie::trie_node::decode(child_wrong_merkle_value.as_ref())
+                        .unwrap_or_else(|err| panic!("invalid node value provided: {:?}", err));
+                    debug_assert_eq!(decoded.partial_key.collect::<Vec<_>>(), *child_partial_key);
+                    trie::trie_node::calculate_merkle_value(
+                        trie::trie_node::Decoded {
+                            children: decoded.children,
+                            partial_key: new_partial_key.iter().copied(),
+                            storage_value: decoded.storage_value,
+                        },
+                        parent_node.is_none(),
+                    )
+                    .unwrap_or_else(|_| panic!())
+                };
 
                 if let Some(parent_node) = parent_node {
                     // Trie node no longer exists, but from its parent's point of view it has been
                     // replaced in the trie with that one single child.
-                    parent_node.children.push(Some(child_merkle_value));
+                    parent_node
+                        .children
+                        .push(Some((new_partial_key, calculated_elem_merkle_value)));
                     self.0.next()
                 } else {
                     // No more node in the stack means that this was the root node. The child is
                     // the trie root.
                     InProgress::Finished {
-                        // When the child's Merkle value was calculated, we were passing
-                        // `is_root_node: false`, but it turns out that this child *is* the root
-                        // node. In order to solve that problem, we hash the child's Merkle value
-                        // if necessary.
-                        trie_root_hash: child_merkle_value.force_hash(),
+                        // Never panics given that we passed `is_root_node: true` in the
+                        // calculation above.
+                        trie_root_hash: *<&[u8; 32]>::try_from(
+                            calculated_elem_merkle_value.as_ref(),
+                        )
+                        .unwrap_or_else(|_| panic!()),
                     }
                 }
             }
+
             (_, _, parent_node) => {
                 // Trie node still exists. Calculate its Merkle value.
 
@@ -337,9 +390,9 @@ impl StorageValue {
                     };
                 let merkle_value = trie::trie_node::calculate_merkle_value(
                     trie::trie_node::Decoded {
-                        children: <&[_; 16]>::try_from(calculated_elem.children.as_ref())
-                            .unwrap_or_else(|_| panic!())
-                            .clone(),
+                        children: array::from_fn(|n| {
+                            calculated_elem.children[n].as_ref().map(|(_, mkv)| mkv)
+                        }),
                         partial_key: calculated_elem.partial_key.iter().copied(),
                         storage_value: match maybe_storage_value {
                             Some((value, TrieEntryVersion::V0)) => {
@@ -361,7 +414,9 @@ impl StorageValue {
                 .unwrap_or_else(|_| panic!());
 
                 if let Some(parent_node) = parent_node {
-                    parent_node.children.push(Some(merkle_value));
+                    parent_node
+                        .children
+                        .push(Some((calculated_elem.partial_key, merkle_value)));
                     self.0.next()
                 } else {
                     // No more node in the stack means that this was the root node. The calculated
@@ -425,18 +480,17 @@ impl MerkleValue {
         debug_assert!(merkle_value.len() == 32 || trie::trie_node::decode(merkle_value).is_ok());
 
         // Pop the element at the top of the stack, as we know its Merkle value.
-        let _popped_elem = self.0.stack.pop();
-        debug_assert!(_popped_elem.map_or(false, |e| e.children.is_empty()));
+        let calculated_elem = self.0.stack.pop().unwrap_or_else(|| panic!());
+        debug_assert!(calculated_elem.children.is_empty());
 
         if let Some(parent_node) = self.0.stack.last_mut() {
             // If the element has a parent, add the Merkle value to its children and resume the
             // algorithm.
             debug_assert_ne!(parent_node.children.len(), 16);
-            parent_node
-                .children
-                .push(Some(trie::trie_node::MerkleValueOutput::from_bytes(
-                    merkle_value,
-                )));
+            parent_node.children.push(Some((
+                calculated_elem.partial_key,
+                trie::trie_node::MerkleValueOutput::from_bytes(merkle_value),
+            )));
             self.0.next()
         } else {
             // If the element doesn't have a parent, then the Merkle value is the root of trie!
@@ -475,9 +529,10 @@ struct InProgressNode {
     /// Partial key of the node currently being calculated.
     partial_key: Vec<Nibble>,
 
-    /// Merkle values of the children of the node. Filled up to 16 elements, then the storage
-    /// value is requested. Each element is `Some` or `None` depending on whether a child exists.
-    children: arrayvec::ArrayVec<Option<trie::trie_node::MerkleValueOutput>, 16>,
+    /// Partial keys and merkle values of the children of the node. Filled up to 16 elements,
+    /// then the storage value is requested. Each element is `Some` or `None` depending on whether
+    /// a child exists.
+    children: arrayvec::ArrayVec<Option<(Vec<Nibble>, trie::trie_node::MerkleValueOutput)>, 16>,
 }
 
 impl Inner {
