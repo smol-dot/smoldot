@@ -58,7 +58,7 @@
 //! nodes that are currently being calculated.
 //!
 
-use alloc::{borrow::Cow, boxed::Box, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 use core::{array, iter, ops};
 
 use super::storage_diff::TrieDiff;
