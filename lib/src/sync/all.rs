@@ -1722,6 +1722,20 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 (user_data.user_data, ResponseOutcome::Queued)
             }
+            (
+                AllSyncInner::GrandpaWarpSync {
+                    inner: warp_sync::WarpSync::Finished(sync),
+                },
+                RequestMapping::WarpSync(request_id),
+            ) => {
+                let pos = sync
+                    .in_progress_requests
+                    .iter()
+                    .position(|(_, id, ..)| *id == request_id)
+                    .unwrap();
+                let (_, _, user_data, _) = sync.in_progress_requests.remove(pos);
+                (user_data.user_data, ResponseOutcome::Outdated)
+            }
 
             // Only the GrandPa warp syncing ever starts GrandPa warp sync requests.
             (_, RequestMapping::Inline(_, _, user_data)) => {
@@ -1780,6 +1794,21 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     inner: warp_sync::WarpSync::InProgress(sync),
                 };
                 (user_data, ResponseOutcome::Queued)
+            }
+            (
+                AllSyncInner::GrandpaWarpSync {
+                    inner: warp_sync::WarpSync::Finished(mut sync),
+                },
+                _,
+                RequestMapping::WarpSync(request_id),
+            ) => {
+                let pos = sync
+                    .in_progress_requests
+                    .iter()
+                    .position(|(_, id, ..)| *id == request_id)
+                    .unwrap();
+                let (_, _, user_data, _) = sync.in_progress_requests.remove(pos);
+                (user_data.user_data, ResponseOutcome::Outdated)
             }
             // Only the GrandPa warp syncing ever starts GrandPa warp sync requests.
             (other, _, RequestMapping::Inline(_, _, user_data)) => {
@@ -1842,6 +1871,21 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     inner: warp_sync::WarpSync::InProgress(sync),
                 };
                 (user_data.user_data, ResponseOutcome::Queued)
+            }
+            (
+                AllSyncInner::GrandpaWarpSync {
+                    inner: warp_sync::WarpSync::Finished(mut sync),
+                },
+                _,
+                RequestMapping::WarpSync(request_id),
+            ) => {
+                let pos = sync
+                    .in_progress_requests
+                    .iter()
+                    .position(|(_, id, ..)| *id == request_id)
+                    .unwrap();
+                let (_, _, user_data, _) = sync.in_progress_requests.remove(pos);
+                (user_data.user_data, ResponseOutcome::Outdated)
             }
             // Only the GrandPa warp syncing ever starts call proof requests.
             (other, _, RequestMapping::Inline(_, _, user_data)) => {
