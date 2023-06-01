@@ -18,7 +18,7 @@
 //! Internal module. Contains functions that aren't Substrate/Polkadot-specific and should ideally
 //! be found in third party libraries, but that aren't worth a third-party library.
 
-use core::{cmp, iter, str};
+use core::{cmp, iter, str, marker};
 
 pub(crate) mod leb128;
 pub(crate) mod protobuf;
@@ -44,18 +44,37 @@ impl core::hash::BuildHasher for SipHasherBuild {
 }
 
 /// Returns an iterator that yields the content of `container`.
-pub(crate) fn as_ref_iter<T: Clone>(container: impl AsRef<[T]>) -> impl Iterator<Item = T> {
-    let len = container.as_ref().len();
-    let mut i = 0;
-    iter::from_fn(move || {
-        if i == len {
-            return None;
+pub(crate) fn as_ref_iter<T: Clone>(
+    container: impl AsRef<[T]>,
+) -> impl ExactSizeIterator<Item = T> + iter::FusedIterator {
+    struct Iter<C, T>(C, usize, marker::PhantomData<T>);
+
+    impl<T: Clone, C: AsRef<[T]>> Iterator for Iter<C, T> {
+        type Item = T;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            let as_ref = self.0.as_ref();
+
+            if self.1 == as_ref.len() {
+                return None;
+            }
+
+            let item = as_ref[self.1].clone();
+            self.1 += 1;
+            Some(item)
         }
 
-        let item = container.as_ref()[i].clone();
-        i += 1;
-        Some(item)
-    })
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let as_ref = self.0.as_ref();
+            let len = as_ref.len() - self.1;
+            (len, Some(len))
+        }
+    }
+
+    impl<T: Clone, C: AsRef<[T]>> ExactSizeIterator for Iter<C, T> {}
+    impl<T: Clone, C: AsRef<[T]>> iter::FusedIterator for Iter<C, T> {}
+
+    Iter(container, 0, marker::PhantomData::<T>)
 }
 
 /// Returns a parser that decodes a SCALE-encoded `Option`.
