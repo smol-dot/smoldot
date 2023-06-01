@@ -197,22 +197,34 @@ impl ClosestDescendant {
         // Find the value of `MaybeNode`.
         let (maybe_node_partial_key, children_partial_key_changed) =
             match (diff_inserts_lcd, closest_descendant) {
-                (Some(ck), Some(mut d)) => {
+                (Some(inserted_key), Some(base_trie_key)) => {
                     // `children_partial_key_changed` is `true` if
                     // `diff_inserts_lcd < closest_descendant`.
-                    let cpk = ck
-                        .iter()
-                        .copied()
-                        .zip(&mut d)
-                        .skip(self_key_len)
-                        .take_while(|(a, b)| a == b)
-                        .map(|(_, b)| b)
-                        .collect::<Vec<_>>();
-                    let ccpkc = d.next().is_some();
-                    (cpk, ccpkc)
+                    let mut inserted_key_iter = inserted_key.iter().copied().skip(self_key_len);
+                    let mut base_trie_key = base_trie_key.skip(self_key_len);
+                    let mut maybe_node_pk =
+                        Vec::with_capacity(inserted_key.len() - self_key_len + 8);
+                    let mut children_pk_changed = false;
+                    loop {
+                        match (inserted_key_iter.next(), base_trie_key.next()) {
+                            (Some(inib), Some(bnib)) if inib == bnib => maybe_node_pk.push(inib),
+                            (Some(_), Some(_)) | (None, Some(_)) => {
+                                children_pk_changed = true;
+                                break;
+                            }
+                            (Some(_), None) | (None, None) => break,
+                        }
+                    }
+                    (maybe_node_pk, children_pk_changed)
                 }
-                (Some(ck), None) => (ck.into_iter().skip(self_key_len).collect::<Vec<_>>(), true),
-                (None, Some(d)) => (d.skip(self_key_len).collect(), false),
+                (Some(inserted_key), None) => (
+                    inserted_key
+                        .into_iter()
+                        .skip(self_key_len)
+                        .collect::<Vec<_>>(),
+                    true,
+                ),
+                (None, Some(base_trie_key)) => (base_trie_key.skip(self_key_len).collect(), false),
                 (None, None) => {
                     // If neither the base trie nor the diff contain any descendant, then skip ahead.
                     return if let Some(parent_node) = self.0.stack.last_mut() {
