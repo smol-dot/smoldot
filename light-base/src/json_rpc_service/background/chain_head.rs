@@ -1357,7 +1357,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                 break;
                             }
                             either::Right((
-                                SubscriptionMessage::StopIfChainHeadStorage { stop_request_id },
+                                SubscriptionMessage::StopIfChainHeadBody { stop_request_id },
                                 confirmation_sender,
                             )) => {
                                 requests_subscriptions
@@ -1607,7 +1607,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                     return;
                                 }
                                 either::Right((
-                                    SubscriptionMessage::StopIfChainHeadBody { stop_request_id },
+                                    SubscriptionMessage::StopIfChainHeadStorage { stop_request_id },
                                     confirmation_sender,
                                 )) => {
                                     requests_subscriptions

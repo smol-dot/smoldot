@@ -598,10 +598,16 @@ impl<TPlat: PlatformRef> Task<TPlat> {
             all::ProcessOne::WarpSyncBuildRuntime(req) => {
                 // Warp syncing compiles the runtime. The compiled runtime will later be yielded
                 // in the `WarpSyncFinished` variant, which is then provided as an event.
+                let before_instant = self.platform.now();
                 let (new_sync, error) = req.build(all::ExecHint::CompileAheadOfTime, true);
+                let elapsed = self.platform.now() - before_instant;
                 match error {
                     Ok(()) => {
-                        log::debug!(target: &self.log_target, "Sync => WarpSyncRuntimeBuild(success=true)")
+                        log::debug!(
+                            target: &self.log_target,
+                            "Sync => WarpSyncRuntimeBuild(success=true, duration={:?})",
+                            elapsed
+                        );
                     }
                     Err(err) => {
                         log::debug!(target: &self.log_target, "Sync => WarpSyncRuntimeBuild(error={})", err);
@@ -609,7 +615,6 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     }
                 };
                 self.sync = new_sync;
-                return (self, true);
             }
 
             all::ProcessOne::WarpSyncBuildChainInformation(req) => {
@@ -624,7 +629,6 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     }
                 };
                 self.sync = new_sync;
-                return (self, true);
             }
 
             all::ProcessOne::WarpSyncFinished {
@@ -658,8 +662,6 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 // Since there is a gap in the blocks, all active notifications to all blocks
                 // must be cleared.
                 self.all_notifications.clear();
-
-                return (self, true);
             }
 
             all::ProcessOne::VerifyWarpSyncFragment(verify) => {
