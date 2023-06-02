@@ -39,7 +39,7 @@
 // TODO: more docs
 
 use alloc::{collections::BTreeMap, vec::Vec};
-use core::{borrow::Borrow, cmp, fmt, iter, ops};
+use core::{borrow::Borrow, cmp, fmt, ops};
 use hashbrown::HashMap;
 
 #[derive(Clone)]
@@ -254,47 +254,6 @@ impl<T> TrieDiff<T> {
             }
             (None, None) => StorageNextKey::Found(None),
         }
-    }
-
-    /// Takes as parameter a list (`in_parent_ordered`) of all the keys that are present in the
-    /// storage this diff is based upon and that start with the given `prefix`.
-    ///
-    /// Returns another iterator that provides the list of all keys that start with the given
-    /// `prefix` after this diff has been applied.
-    ///
-    /// The list must be lexicographically ordered. The returned list is ordered
-    /// lexicographically as well.
-    pub fn storage_prefix_keys_ordered<'a>(
-        &'a self, // TODO: unclear lifetime
-        prefix: &'a [u8],
-        in_parent_ordered: impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
-        let mut in_finalized_filtered = in_parent_ordered
-            .filter(|k| !self.btree.contains_key(k.as_ref()))
-            .peekable();
-
-        let mut diff_inserted = self
-            .btree
-            .range::<[u8], _>((ops::Bound::Included(prefix), ops::Bound::Unbounded))
-            .take_while(|(k, _)| k.starts_with(prefix))
-            .filter(|(_, v)| **v)
-            .map(|(k, _)| &k[..])
-            .peekable();
-
-        iter::from_fn(
-            move || match (in_finalized_filtered.peek(), diff_inserted.peek()) {
-                (Some(_), None) => in_finalized_filtered.next().map(either::Left),
-                (Some(a), Some(b)) if a.as_ref() < *b => {
-                    in_finalized_filtered.next().map(either::Left)
-                }
-                (Some(a), Some(b)) => {
-                    debug_assert_ne!(a.as_ref(), *b);
-                    diff_inserted.next().map(either::Right)
-                }
-                (None, Some(_)) => diff_inserted.next().map(either::Right),
-                (None, None) => None,
-            },
-        )
     }
 
     /// Applies the given diff on top of the current one.
