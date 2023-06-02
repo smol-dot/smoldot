@@ -401,8 +401,6 @@ pub enum Verify {
     RuntimeCompilation(RuntimeCompilation),
     /// Loading a storage value is required in order to continue.
     StorageGet(StorageGet),
-    /// Fetching the list of keys with a given prefix is required in order to continue.
-    StoragePrefixKeys(StoragePrefixKeys),
     /// Fetching the key that follows a given one is required in order to continue.
     StorageNextKey(StorageNextKey),
 }
@@ -561,13 +559,6 @@ impl VerifyInner {
                         consensus_success: self.consensus_success,
                     })
                 }
-                (runtime_host::RuntimeHostVm::PrefixKeys(inner), phase) => {
-                    break Verify::StoragePrefixKeys(StoragePrefixKeys {
-                        inner,
-                        phase,
-                        consensus_success: self.consensus_success,
-                    })
-                }
                 (runtime_host::RuntimeHostVm::NextKey(inner), phase) => {
                     break Verify::StorageNextKey(StorageNextKey {
                         inner,
@@ -637,32 +628,6 @@ impl StorageGet {
             }
             .run(),
         }
-    }
-}
-
-/// Fetching the list of keys with a given prefix is required in order to continue.
-#[must_use]
-pub struct StoragePrefixKeys {
-    inner: runtime_host::PrefixKeys,
-    /// See [`VerifyInner::phase`].
-    phase: VerifyInnerPhase,
-    consensus_success: SuccessConsensus,
-}
-
-impl StoragePrefixKeys {
-    /// Returns the prefix whose keys to load.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.inner.prefix()
-    }
-
-    /// Injects the list of keys ordered lexicographically.
-    pub fn inject_keys_ordered(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> Verify {
-        VerifyInner {
-            inner: self.inner.inject_keys_ordered(keys),
-            phase: self.phase,
-            consensus_success: self.consensus_success,
-        }
-        .run()
     }
 }
 

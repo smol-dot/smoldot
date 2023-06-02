@@ -83,14 +83,6 @@ fn block_building_works() {
                 });
                 builder = next_key.inject_key(result);*/
             }
-            super::BlockBuild::PrefixKeys(prefix) => {
-                let p = prefix.prefix().as_ref().to_owned();
-                let list = genesis_storage
-                    .iter()
-                    .filter(move |(k, _)| k.starts_with(&p))
-                    .map(|(k, _)| k);
-                builder = prefix.inject_keys_ordered(list);
-            }
         }
     }
 }

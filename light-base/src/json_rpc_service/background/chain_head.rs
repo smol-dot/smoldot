@@ -1857,20 +1857,6 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                 }
                                                 .to_json_call_object_parameters(None);
                                         }
-                                        runtime_host::RuntimeHostVm::PrefixKeys(nk) => {
-                                            // TODO: implement somehow
-                                            runtime_call_lock.unlock(
-                                                runtime_host::RuntimeHostVm::PrefixKeys(nk)
-                                                    .into_prototype(),
-                                            );
-                                            break methods::ServerToClient::chainHead_unstable_callEvent {
-                                                    subscription: (&subscription_id).into(),
-                                                    result: methods::ChainHeadCallEvent::Inaccessible {
-                                                        error: "getting prefix keys not implemented".into(),
-                                                    },
-                                                }
-                                                .to_json_call_object_parameters(None);
-                                        }
                                         runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
                                             runtime_call = sig.verify_and_resume();
                                         }

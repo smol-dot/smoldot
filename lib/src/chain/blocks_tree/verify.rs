@@ -652,12 +652,6 @@ impl<T> VerifyContext<T> {
                     inner,
                 })
             }
-            verify::header_body::Verify::StoragePrefixKeys(inner) => {
-                BodyVerifyStep2::StoragePrefixKeys(StoragePrefixKeys {
-                    context: self,
-                    inner,
-                })
-            }
             verify::header_body::Verify::RuntimeCompilation(inner) => {
                 BodyVerifyStep2::RuntimeCompilation(RuntimeCompilation {
                     context: self,
@@ -885,8 +879,6 @@ pub enum BodyVerifyStep2<T> {
     },
     /// Loading a storage value is required in order to continue.
     StorageGet(StorageGet<T>),
-    /// Fetching the list of keys with a given prefix is required in order to continue.
-    StoragePrefixKeys(StoragePrefixKeys<T>),
     /// Fetching the key that follows a given one is required in order to continue.
     StorageNextKey(StorageNextKey<T>),
     /// A new runtime must be compiled.
@@ -963,65 +955,6 @@ impl<T> StorageGet<T> {
         value: Option<(impl Iterator<Item = impl AsRef<[u8]>>, TrieEntryVersion)>,
     ) -> BodyVerifyStep2<T> {
         let inner = self.inner.inject_value(value);
-        self.context.with_body_verify(inner)
-    }
-}
-
-/// Fetching the list of keys with a given prefix is required in order to continue.
-#[must_use]
-pub struct StoragePrefixKeys<T> {
-    inner: verify::header_body::StoragePrefixKeys,
-    context: Box<VerifyContext<T>>,
-}
-
-impl<T> StoragePrefixKeys<T> {
-    /// Returns the prefix whose keys to load.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.inner.prefix()
-    }
-
-    /// Access to the Nth ancestor's information and hierarchy. Returns `None` if `n` is too
-    /// large. A value of `0` for `n` corresponds to the parent block. A value of `1` corresponds
-    /// to the parent's parent. And so on.
-    pub fn nth_ancestor(&mut self, n: u64) -> Option<BlockAccess<T>> {
-        let parent_index = self.context.parent_tree_index?;
-        let n = usize::try_from(n).ok()?;
-        let ret = self
-            .context
-            .chain
-            .blocks
-            .node_to_root_path(parent_index)
-            .nth(n)?;
-        Some(BlockAccess {
-            tree: &mut self.context.chain,
-            node_index: ret,
-        })
-    }
-
-    /// Returns the number of non-finalized blocks in the tree that are ancestors to the block
-    /// being verified.
-    pub fn num_non_finalized_ancestors(&self) -> u64 {
-        let parent_index = match self.context.parent_tree_index {
-            Some(p) => p,
-            None => return 0,
-        };
-
-        u64::try_from(
-            self.context
-                .chain
-                .blocks
-                .node_to_root_path(parent_index)
-                .count(),
-        )
-        .unwrap()
-    }
-
-    /// Injects the list of keys ordered lexicographically.
-    pub fn inject_keys_ordered(
-        self,
-        keys: impl Iterator<Item = impl AsRef<[u8]>>,
-    ) -> BodyVerifyStep2<T> {
-        let inner = self.inner.inject_keys_ordered(keys);
         self.context.with_body_verify(inner)
     }
 }

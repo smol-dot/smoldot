@@ -244,10 +244,6 @@ pub enum BlockBuild {
     /// Loading a storage value from the parent storage is required in order to continue.
     StorageGet(StorageGet),
 
-    /// Fetching the list of keys with a given prefix from the parent storage is required in order
-    /// to continue.
-    PrefixKeys(PrefixKeys),
-
     /// Fetching the key that follows a given one in the parent storage is required in order to
     /// continue.
     NextKey(NextKey),
@@ -269,9 +265,6 @@ impl BlockBuild {
                 }
                 (Inner::Runtime(runtime_host::RuntimeHostVm::StorageGet(inner)), _) => {
                     return BlockBuild::StorageGet(StorageGet(inner, shared))
-                }
-                (Inner::Runtime(runtime_host::RuntimeHostVm::PrefixKeys(inner)), _) => {
-                    return BlockBuild::PrefixKeys(PrefixKeys(inner, shared))
                 }
                 (Inner::Runtime(runtime_host::RuntimeHostVm::NextKey(inner)), _) => {
                     return BlockBuild::NextKey(NextKey(inner, shared))
@@ -619,23 +612,6 @@ impl StorageGet {
         value: Option<(impl Iterator<Item = impl AsRef<[u8]>>, TrieEntryVersion)>,
     ) -> BlockBuild {
         BlockBuild::from_inner(self.0.inject_value(value), self.1)
-    }
-}
-
-/// Fetching the list of keys with a given prefix from the parent storage is required in order to
-/// continue.
-#[must_use]
-pub struct PrefixKeys(runtime_host::PrefixKeys, Shared);
-
-impl PrefixKeys {
-    /// Returns the prefix whose keys to load.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.0.prefix()
-    }
-
-    /// Injects the list of keys ordered lexicographically.
-    pub fn inject_keys_ordered(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> BlockBuild {
-        BlockBuild::from_inner(self.0.inject_keys_ordered(keys), self.1)
     }
 }
 

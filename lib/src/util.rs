@@ -18,7 +18,7 @@
 //! Internal module. Contains functions that aren't Substrate/Polkadot-specific and should ideally
 //! be found in third party libraries, but that aren't worth a third-party library.
 
-use core::{cmp, iter, str, marker};
+use core::{cmp, iter, marker, str};
 
 pub(crate) mod leb128;
 pub(crate) mod protobuf;

@@ -2772,10 +2772,6 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
     /// Loading a storage value of the parent block is required in order to continue.
     ParentStorageGet(StorageGet<TRq, TSrc, TBl>),
 
-    /// Fetching the list of keys of the parent block with a given prefix is required in order
-    /// to continue.
-    ParentStoragePrefixKeys(StoragePrefixKeys<TRq, TSrc, TBl>),
-
     /// Fetching the key of the parent block storage that follows a given one is required in
     /// order to continue.
     ParentStorageNextKey(StorageNextKey<TRq, TSrc, TBl>),
@@ -2873,13 +2869,6 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     user_data,
                 })
             }
-            optimistic::BlockVerification::ParentStoragePrefixKeys(inner) => {
-                BlockVerification::ParentStoragePrefixKeys(StoragePrefixKeys {
-                    inner,
-                    shared,
-                    user_data,
-                })
-            }
             optimistic::BlockVerification::ParentStorageNextKey(inner) => {
                 BlockVerification::ParentStorageNextKey(StorageNextKey {
                     inner,
@@ -2918,34 +2907,6 @@ impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
         value: Option<(&[u8], TrieEntryVersion)>,
     ) -> BlockVerification<TRq, TSrc, TBl> {
         let inner = self.inner.inject_value(value);
-        BlockVerification::from_inner(inner, self.shared, self.user_data)
-    }
-}
-
-/// Fetching the list of keys with a given prefix is required in order to continue.
-#[must_use]
-pub struct StoragePrefixKeys<TRq, TSrc, TBl> {
-    inner: optimistic::StoragePrefixKeys<
-        OptimisticRequestExtra<TRq>,
-        OptimisticSourceExtra<TSrc>,
-        TBl,
-    >,
-    shared: Shared<TRq>,
-    user_data: TBl,
-}
-
-impl<TRq, TSrc, TBl> StoragePrefixKeys<TRq, TSrc, TBl> {
-    /// Returns the prefix whose keys to load.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.inner.prefix()
-    }
-
-    /// Injects the list of keys ordered lexicographically.
-    pub fn inject_keys_ordered(
-        self,
-        keys: impl Iterator<Item = impl AsRef<[u8]>>,
-    ) -> BlockVerification<TRq, TSrc, TBl> {
-        let inner = self.inner.inject_keys_ordered(keys);
         BlockVerification::from_inner(inner, self.shared, self.user_data)
     }
 }

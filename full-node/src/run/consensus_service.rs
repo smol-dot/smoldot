@@ -863,18 +863,6 @@ impl SyncBackground {
                         block_authoring = req.inject_key(next_key);
                         continue;*/
                     }
-                    author::build::BuilderAuthoring::PrefixKeys(req) => {
-                        let prefix = req.prefix().as_ref().to_vec();
-                        let keys = self
-                            .database
-                            .with_database(move |db| {
-                                db.block_storage_main_trie_keys_ordered(&parent_hash, &prefix)
-                            })
-                            .await
-                            .expect("database access error");
-                        block_authoring = req.inject_keys_ordered(keys.into_iter());
-                        continue;
-                    }
                 }
             }
         };
@@ -1370,17 +1358,6 @@ impl SyncBackground {
                                 .await;
 
                             verify = req.inject_key(next_key.map(|nk| nk.into_iter()));
-                        }
-                        all::BlockVerification::ParentStoragePrefixKeys(req) => {
-                            let prefix = req.prefix().as_ref().to_vec();
-                            let keys = self
-                                .database
-                                .with_database(move |db| {
-                                    db.block_storage_main_trie_keys_ordered(&parent_hash, &prefix)
-                                })
-                                .await
-                                .expect("database access error");
-                            verify = req.inject_keys_ordered(keys.into_iter());
                         }
                         all::BlockVerification::RuntimeCompilation(rt) => {
                             verify = rt.build();

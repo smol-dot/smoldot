@@ -173,8 +173,6 @@ pub enum RuntimeHostVm {
     Finished(Result<Success, Error>),
     /// Loading a storage value is required in order to continue.
     StorageGet(StorageGet),
-    /// Fetching the list of keys with a given prefix is required in order to continue.
-    PrefixKeys(PrefixKeys),
     /// Fetching the key that follows a given one is required in order to continue.
     NextKey(NextKey),
     /// Verifying whether a signature is correct is required in order to continue.
@@ -188,7 +186,6 @@ impl RuntimeHostVm {
             RuntimeHostVm::Finished(Ok(inner)) => inner.virtual_machine.into_prototype(),
             RuntimeHostVm::Finished(Err(inner)) => inner.prototype,
             RuntimeHostVm::StorageGet(inner) => inner.inner.vm.into_prototype(),
-            RuntimeHostVm::PrefixKeys(inner) => inner.inner.vm.into_prototype(),
             RuntimeHostVm::NextKey(inner) => inner.inner.vm.into_prototype(),
             RuntimeHostVm::SignatureVerification(inner) => inner.inner.vm.into_prototype(),
         }
@@ -308,28 +305,6 @@ impl StorageGet {
         };
 
         self.inner.run()
-    }
-}
-
-/// Fetching the list of keys with a given prefix is required in order to continue.
-// // TODO: unused, remove entirely
-#[must_use]
-pub struct PrefixKeys {
-    inner: Inner,
-}
-
-impl PrefixKeys {
-    /// Returns the prefix whose keys to load.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
-        &[]
-    }
-
-    /// Injects the list of keys ordered lexicographically.
-    pub fn inject_keys_ordered(
-        self,
-        _keys: impl Iterator<Item = impl AsRef<[u8]>>,
-    ) -> RuntimeHostVm {
-        unreachable!()
     }
 }
 

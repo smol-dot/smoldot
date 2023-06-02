@@ -977,10 +977,6 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
     /// Loading a storage value of the parent block is required in order to continue.
     ParentStorageGet(StorageGet<TRq, TSrc, TBl>),
 
-    /// Fetching the list of keys of the parent block with a given prefix is required in order
-    /// to continue.
-    ParentStoragePrefixKeys(StoragePrefixKeys<TRq, TSrc, TBl>),
-
     /// Fetching the key of the parent block storage that follows a given one is required in
     /// order to continue.
     ParentStorageNextKey(StorageNextKey<TRq, TSrc, TBl>),
@@ -1103,17 +1099,6 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     // The underlying verification process is asking for the key that follows
                     // the requested one.
                     break BlockVerification::ParentStorageNextKey(StorageNextKey {
-                        inner: req,
-                        shared,
-                    });
-                }
-
-                Inner::Step2(blocks_tree::BodyVerifyStep2::StoragePrefixKeys(req)) => {
-                    // The underlying verification process is asking for all the keys that start
-                    // with a certain prefix.
-                    // The first step is to ask the user for that information when it comes to
-                    // the finalized block.
-                    break BlockVerification::ParentStoragePrefixKeys(StoragePrefixKeys {
                         inner: req,
                         shared,
                     });
@@ -1359,29 +1344,6 @@ impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
         let inner = self.inner.inject_value(
             value.map(|(v, storage_trie_node_version)| (iter::once(v), storage_trie_node_version)),
         );
-        BlockVerification::from(Inner::Step2(inner), self.shared)
-    }
-}
-
-/// Fetching the list of keys with a given prefix is required in order to continue.
-#[must_use]
-pub struct StoragePrefixKeys<TRq, TSrc, TBl> {
-    inner: blocks_tree::StoragePrefixKeys<Block<TBl>>,
-    shared: BlockVerificationShared<TRq, TSrc, TBl>,
-}
-
-impl<TRq, TSrc, TBl> StoragePrefixKeys<TRq, TSrc, TBl> {
-    /// Returns the prefix whose keys to load.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.inner.prefix()
-    }
-
-    /// Injects the list of keys ordered lexicographically.
-    pub fn inject_keys_ordered(
-        self,
-        keys: impl Iterator<Item = impl AsRef<[u8]>>,
-    ) -> BlockVerification<TRq, TSrc, TBl> {
-        let inner = self.inner.inject_keys_ordered(keys);
         BlockVerification::from(Inner::Step2(inner), self.shared)
     }
 }

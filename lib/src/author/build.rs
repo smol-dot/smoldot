@@ -144,10 +144,6 @@ pub enum BuilderAuthoring {
     /// Loading a storage value from the parent storage is required in order to continue.
     StorageGet(StorageGet),
 
-    /// Fetching the list of keys with a given prefix from the parent storage is required in order
-    /// to continue.
-    PrefixKeys(PrefixKeys),
-
     /// Fetching the key that follows a given one in the parent storage is required in order to
     /// continue.
     NextKey(NextKey),
@@ -323,26 +319,6 @@ impl StorageGet {
         value: Option<(impl Iterator<Item = impl AsRef<[u8]>>, TrieEntryVersion)>,
     ) -> BuilderAuthoring {
         self.1.with_runtime_inner(self.0.inject_value(value))
-    }
-}
-
-/// Fetching the list of keys with a given prefix from the parent storage is required in order to
-/// continue.
-#[must_use]
-pub struct PrefixKeys(runtime::PrefixKeys, Shared);
-
-impl PrefixKeys {
-    /// Returns the prefix whose keys to load.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.0.prefix()
-    }
-
-    /// Injects the list of keys ordered lexicographically.
-    pub fn inject_keys_ordered(
-        self,
-        keys: impl Iterator<Item = impl AsRef<[u8]>>,
-    ) -> BuilderAuthoring {
-        self.1.with_runtime_inner(self.0.inject_keys_ordered(keys))
     }
 }
 
@@ -524,9 +500,6 @@ impl Shared {
                 }
                 runtime::BlockBuild::StorageGet(inner) => {
                     break BuilderAuthoring::StorageGet(StorageGet(inner, self))
-                }
-                runtime::BlockBuild::PrefixKeys(inner) => {
-                    break BuilderAuthoring::PrefixKeys(PrefixKeys(inner, self))
                 }
                 runtime::BlockBuild::NextKey(inner) => {
                     break BuilderAuthoring::NextKey(NextKey(inner, self))

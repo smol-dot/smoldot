@@ -406,9 +406,6 @@ pub enum Query {
     StorageGet(StorageGet),
     /// Fetching the key that follows a given one is required in order to continue.
     NextKey(NextKey),
-    /// Fetching the list of keys with a given prefix from the storage is required in order to
-    /// continue.
-    PrefixKeys(PrefixKeys),
 }
 
 impl Query {
@@ -429,12 +426,6 @@ impl Query {
             }
             Query::NextKey(NextKey(NextKeyInner::Stage2(inner, _))) => {
                 runtime_host::RuntimeHostVm::NextKey(inner).into_prototype()
-            }
-            Query::PrefixKeys(PrefixKeys(PrefixKeysInner::Stage1(inner, _))) => {
-                runtime_host::RuntimeHostVm::PrefixKeys(inner).into_prototype()
-            }
-            Query::PrefixKeys(PrefixKeys(PrefixKeysInner::Stage2(inner, _))) => {
-                runtime_host::RuntimeHostVm::PrefixKeys(inner).into_prototype()
             }
         }
     }
@@ -477,9 +468,6 @@ impl Query {
                 },
                 runtime_host::RuntimeHostVm::StorageGet(i) => {
                     Query::StorageGet(StorageGet(StorageGetInner::Stage1(i, info)))
-                }
-                runtime_host::RuntimeHostVm::PrefixKeys(i) => {
-                    Query::PrefixKeys(PrefixKeys(PrefixKeysInner::Stage1(i, info)))
                 }
                 runtime_host::RuntimeHostVm::NextKey(inner) => {
                     Query::NextKey(NextKey(NextKeyInner::Stage1(inner, info)))
@@ -535,9 +523,6 @@ impl Query {
                 },
                 runtime_host::RuntimeHostVm::StorageGet(i) => {
                     Query::StorageGet(StorageGet(StorageGetInner::Stage2(i, info)))
-                }
-                runtime_host::RuntimeHostVm::PrefixKeys(i) => {
-                    Query::PrefixKeys(PrefixKeys(PrefixKeysInner::Stage2(i, info)))
                 }
                 runtime_host::RuntimeHostVm::NextKey(inner) => {
                     Query::NextKey(NextKey(NextKeyInner::Stage2(inner, info)))
@@ -651,38 +636,6 @@ impl NextKey {
         match self.0 {
             NextKeyInner::Stage1(inner, stage1) => Query::from_step1(inner.inject_key(key), stage1),
             NextKeyInner::Stage2(inner, stage2) => Query::from_step2(inner.inject_key(key), stage2),
-        }
-    }
-}
-
-/// Fetching the list of keys with a given prefix from the parent storage is required in order to
-/// continue.
-#[must_use]
-pub struct PrefixKeys(PrefixKeysInner);
-
-enum PrefixKeysInner {
-    Stage1(runtime_host::PrefixKeys, Stage1),
-    Stage2(runtime_host::PrefixKeys, Stage2),
-}
-
-impl PrefixKeys {
-    /// Returns the prefix whose keys to load.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
-        match &self.0 {
-            PrefixKeysInner::Stage1(inner, _) => either::Left(inner.prefix()),
-            PrefixKeysInner::Stage2(inner, _) => either::Right(inner.prefix()),
-        }
-    }
-
-    /// Injects the list of keys ordered lexicographically.
-    pub fn inject_keys_ordered(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> Query {
-        match self.0 {
-            PrefixKeysInner::Stage1(inner, stage1) => {
-                Query::from_step1(inner.inject_keys_ordered(keys), stage1)
-            }
-            PrefixKeysInner::Stage2(inner, stage2) => {
-                Query::from_step2(inner.inject_keys_ordered(keys), stage2)
-            }
         }
     }
 }

@@ -1371,12 +1371,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
                     runtime_call = sig.verify_and_resume();
                 }
-                runtime_host::RuntimeHostVm::PrefixKeys(pk) => {
-                    // TODO:
-                    runtime_call_lock
-                        .unlock(runtime_host::RuntimeHostVm::PrefixKeys(pk).into_prototype());
-                    break Err(RuntimeCallError::PrefixKeysForbidden);
-                }
             }
         }
     }
@@ -1406,8 +1400,6 @@ enum RuntimeCallError {
     RuntimeError(runtime_host::ErrorDetail),
     #[display(fmt = "Getting all the next key isn't supported")]
     NextKeyForbidden,
-    #[display(fmt = "Getting all the keys of a certain prefix isn't supported")]
-    PrefixKeysForbidden,
     /// Required runtime API isn't supported by the runtime.
     #[display(fmt = "Required runtime API isn't supported by the runtime")]
     ApiNotFound,
