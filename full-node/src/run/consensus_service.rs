@@ -1279,80 +1279,43 @@ impl SyncBackground {
                             }));
                         }
                         all::BlockVerification::ParentStorageNextKey(req) => {
-                            let key_before = req.key().collect::<Vec<_>>();
-                            let or_equal = req.or_equal();
-                            let prefix = req.prefix().collect::<Vec<_>>();
-                            let branch_nodes = req.branch_nodes();
+                            let search_params = trie::branch_search::Config {
+                                key_before: req.key().collect::<Vec<_>>().into_iter(),
+                                or_equal: req.or_equal(),
+                                prefix: req.prefix().collect::<Vec<_>>().into_iter(),
+                                no_branch_search: !req.branch_nodes(),
+                            };
+
                             let next_key = self
                                 .database
                                 .with_database(move |db| {
-                                    let next_key = db
-                                        .block_storage_main_trie_next_key(
-                                            &parent_hash,
-                                            &trie::nibbles_to_bytes_suffix_extend(
-                                                key_before.iter().copied(),
-                                            )
-                                            .collect::<Vec<_>>(),
-                                            or_equal,
-                                        )
-                                        .expect("database access error");
-                                    let next_key = next_key.map(|k| {
-                                        trie::bytes_to_nibbles(k.into_iter()).collect::<Vec<_>>()
-                                    });
-
-                                    let Some(mut next_key) = next_key else { return None };
-                                    if !next_key.starts_with(&prefix) {
-                                        return None;
-                                    }
-
-                                    if !branch_nodes {
-                                        return Some(next_key);
-                                    }
+                                    let mut search =
+                                        trie::branch_search::start_branch_search(search_params);
 
                                     loop {
-                                        // We know that `next_key` is a node in the trie, but
-                                        // maybe there exists a branch node before it.
-                                        // To determine this, we try to find the first follow-up
-                                        // sibling, uncle, or nephew of `next_key`.
-                                        let mut first_possible_sibling = next_key.clone();
-                                        loop {
-                                            let Some(nibble) = first_possible_sibling.pop()
-                                            else {
-                                                // `next_key` is `0xffffff` or similar and so
-                                                // doesn't have any follow-up nephew/uncle/sibling.
-                                                return Some(next_key)
-                                            };
-                                            if let Some(next_nibble) = nibble.checked_add(1) {
-                                                first_possible_sibling.push(next_nibble);
-                                                break;
+                                        match search {
+                                            trie::branch_search::BranchSearch::Found {
+                                                branch_trie_node_key,
+                                            } => break branch_trie_node_key,
+                                            trie::branch_search::BranchSearch::NextKey(req) => {
+                                                let mut next_key = db
+                                                    .block_storage_main_trie_next_key(
+                                                        &parent_hash,
+                                                        &req.key_before().collect::<Vec<_>>(),
+                                                        req.or_equal(),
+                                                    )
+                                                    .expect("database access error");
+                                                if next_key.as_ref().map_or(false, |nk| {
+                                                    !nk.starts_with(
+                                                        &req.prefix().collect::<Vec<_>>(),
+                                                    )
+                                                }) {
+                                                    next_key = None;
+                                                }
+                                                search =
+                                                    req.inject(next_key.map(|k| k.into_iter()));
                                             }
                                         }
-
-                                        let Some(next_sibling) = db.block_storage_main_trie_next_key(
-                                            &parent_hash,
-                                            &trie::nibbles_to_bytes_suffix_extend(
-                                                first_possible_sibling.iter().copied(),
-                                            )
-                                            .collect::<Vec<_>>(),
-                                            true,
-                                        )
-                                        .expect("database access error")
-                                            else { return Some(next_key) };
-                                        let mut next_sibling = trie::bytes_to_nibbles(next_sibling.into_iter()).collect::<Vec<_>>();
-
-                                        let common_ancestor = {
-                                            let num_common = next_key.iter().zip(next_sibling.iter()).take_while(|(a, b)| a == b).count();
-                                            next_sibling.truncate(num_common);
-                                            next_sibling
-                                        };
-
-                                        // Discard the potential branch node if it is outside of
-                                        // the prefix.
-                                        if !common_ancestor.starts_with(&prefix) || common_ancestor <= key_before {
-                                            return Some(next_key);
-                                        }
-
-                                        next_key = common_ancestor;
                                     }
                                 })
                                 .await;
