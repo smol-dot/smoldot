@@ -17,7 +17,7 @@
 
 #![cfg(test)]
 
-use crate::verify::inherents;
+use crate::{trie, verify::inherents};
 use core::iter;
 
 #[test]
@@ -64,24 +64,43 @@ fn block_building_works() {
                     .map(|(_, v)| iter::once(v));
                 builder = get.inject_value(value.map(|v| (v, super::TrieEntryVersion::V0)));
             }
-            super::BlockBuild::NextKey(_next_key) => {
-                // TODO: doesn't take branch_nodes() into account
-                todo!()
-                /*let result = genesis_storage.iter().fold(None, |iter, (key, _)| {
-                    if key < next_key.key().as_ref()
-                        || (key == next_key.key().as_ref() && !next_key.or_equal())
-                        || !key.starts_with(next_key.prefix().as_ref())
-                    {
-                        return iter;
-                    }
+            super::BlockBuild::NextKey(req) => {
+                let mut search =
+                    trie::branch_search::start_branch_search(trie::branch_search::Config {
+                        key_before: req.key().collect::<Vec<_>>().into_iter(),
+                        or_equal: req.or_equal(),
+                        prefix: req.prefix().collect::<Vec<_>>().into_iter(),
+                        no_branch_search: !req.branch_nodes(),
+                    });
 
-                    if iter.map_or(false, |iter| iter < key) {
-                        iter
-                    } else {
-                        Some(key)
+                let next_key = loop {
+                    match search {
+                        trie::branch_search::BranchSearch::Found {
+                            branch_trie_node_key,
+                        } => break branch_trie_node_key,
+                        trie::branch_search::BranchSearch::NextKey(req) => {
+                            let result = genesis_storage.iter().fold(None, |iter, (key, _)| {
+                                if key < &req.key_before().collect::<Vec<_>>()[..]
+                                    || (key == req.key_before().collect::<Vec<_>>()
+                                        && !req.or_equal())
+                                    || !key.starts_with(&req.prefix().collect::<Vec<_>>())
+                                {
+                                    return iter;
+                                }
+
+                                if iter.map_or(false, |iter| iter < key) {
+                                    iter
+                                } else {
+                                    Some(key)
+                                }
+                            });
+
+                            search = req.inject(result.map(|k| k.iter().copied()));
+                        }
                     }
-                });
-                builder = next_key.inject_key(result);*/
+                };
+
+                builder = req.inject_key(next_key.map(|nk| nk.into_iter()));
             }
         }
     }
