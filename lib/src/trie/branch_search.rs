@@ -15,6 +15,12 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+//! Allows searching for the closest branch node in a trie when only the storage trie nodes are
+//! known.
+//!
+//! This module can be used in situations where only the list of trie nodes with a storage value
+//! is known, such as in the form of a `BTreeMap`, and allows finding the list of branch nodes.
+
 use core::iter;
 
 use crate::trie;
@@ -24,14 +30,28 @@ pub use crate::trie::Nibble;
 
 mod tests;
 
+/// Configuration for [`start_branch_search`].
 #[derive(Debug, Clone)]
 pub struct Config<K, P> {
+    /// The search will try to find the closest node whose key is strictly superior or superior
+    /// or equal (see [`Config::or_equal`]) to the value in this field.
     pub key_before: K,
+
+    /// If `true`, also include the node whose key is equal to [`Config::key_before`] (if any).
+    /// If `false`, only nodes whose key is strictly superior will be searched.
     pub or_equal: bool,
+
+    /// Only search nodes whose key starts with the list of nibbles given in this field.
     pub prefix: P,
+
+    /// If `true`, only return nodes that have a storage value associated to them.
+    ///
+    /// > **Note**: This option is provided as a convenience. The entire point of this search
+    /// >           is to find branch nodes when only storage nodes are known.
     pub no_branch_search: bool,
 }
 
+/// Start the search algorithm.
 pub fn start_branch_search(
     config: Config<impl Iterator<Item = Nibble>, impl Iterator<Item = Nibble>>,
 ) -> BranchSearch {
@@ -45,13 +65,20 @@ pub fn start_branch_search(
     })
 }
 
+/// Progress in the search algorithm.
 pub enum BranchSearch {
+    /// In order to continue, the API user must indicate the trie node with a storage value that
+    /// immediately follows a given one.
     NextKey(NextKey),
+    /// Search has finished successfully.
     Found {
+        /// Result of the search. `None` if there is no branch/storage node after
+        /// [`Config::key_before`] in the trie.
         branch_trie_node_key: Option<BranchTrieNodeKeyIter>,
     },
 }
 
+/// Implementation of `Iterator<Item = Nibble>`. See [`BranchSearch::Found::branch_trie_node_key`].
 pub struct BranchTrieNodeKeyIter {
     inner: IntoIter<Nibble>,
 }
@@ -70,6 +97,8 @@ impl Iterator for BranchTrieNodeKeyIter {
 
 impl ExactSizeIterator for BranchTrieNodeKeyIter {}
 
+/// In order to continue, the API user must indicate the trie node with a storage value that
+/// immediately follows a given one.
 pub struct NextKey {
     inner: NextKeyInner,
     /// Value passed as [`Config::key_before`].
@@ -92,6 +121,8 @@ enum NextKeyInner {
 }
 
 impl NextKey {
+    /// The API user must provide the trie node with a storage value whose key is the first one
+    /// that is strictly superior or superior or equal to the key returned by this function.
     pub fn key_before(&'_ self) -> impl Iterator<Item = u8> + '_ {
         trie::nibbles_to_bytes_suffix_extend(match &self.inner {
             NextKeyInner::FirstFound { .. } => either::Left(self.key_before.iter().copied()),
@@ -121,6 +152,9 @@ impl NextKey {
         })
     }
 
+    /// If `true`, if the key returned by [`NextKey::key_before`] corresponds to a trie node with
+    /// a storage value, then the API user must indicate it. If `false`, it must indicate the key
+    /// strictly superior.
     pub fn or_equal(&self) -> bool {
         match self.inner {
             NextKeyInner::FirstFound { .. } => {
@@ -133,10 +167,14 @@ impl NextKey {
         }
     }
 
+    /// The API user must indicate a key that starts with the bytes returned by this function.
+    /// If the first key doesn't start with these bytes, then the API user must indicate `None`.
     pub fn prefix(&'_ self) -> impl Iterator<Item = u8> + '_ {
         trie::nibbles_to_bytes_truncate(self.prefix.iter().copied())
     }
 
+    /// Indicate the key. `None` must be passed if [`NextKey::key_before`] is the last key of
+    /// the sub-trie that starts with [`NextKey::prefix`].
     pub fn inject(
         mut self,
         storage_trie_node_key: Option<impl Iterator<Item = u8>>,
