@@ -225,6 +225,9 @@ impl NextKey {
                     .take_while(|(a, b)| a == *b)
                     .count();
 
+                // Check against infinite loops.
+                debug_assert!(num_common < current_found_branch.len());
+
                 if !current_found_branch[..num_common].starts_with(&self.prefix)
                     || &current_found_branch[..num_common] < &self.key_before
                     || (!self.or_equal && current_found_branch[..num_common] == self.key_before)
