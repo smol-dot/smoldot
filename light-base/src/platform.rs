@@ -87,6 +87,7 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// The first parameter is the name of the task, which can be useful for debugging purposes.
     ///
     /// The `Future` must be run until it yields a value.
+    // TODO: accept plain futures, not boxed
     fn spawn_task(&self, task_name: Cow<str>, task: future::BoxFuture<'static, ()>);
 
     /// Value returned when a JSON-RPC client requests the name of the client, or when a peer

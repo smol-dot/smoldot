@@ -20,10 +20,12 @@
 //!
 //! See the [`TrieStructure`] struct.
 
-use super::nibble::Nibble;
+// TODO: the API of `TrieStructure` is rather wonky and could be simplified
+
+use super::nibble::{bytes_to_nibbles, Nibble};
 
 use alloc::{borrow::ToOwned as _, vec, vec::Vec};
-use core::{fmt, iter, mem};
+use core::{cmp, fmt, iter, mem, ops};
 use either::Either;
 use slab::Slab;
 
@@ -166,6 +168,11 @@ impl<TUd> TrieStructure<TUd> {
         self.nodes.iter().map(|(k, _)| NodeIndex(k))
     }
 
+    /// Returns a list of all nodes in the structure in lexicographic order of keys.
+    pub fn iter_ordered(&'_ self) -> impl Iterator<Item = NodeIndex> + '_ {
+        self.all_node_lexicographic_ordered().map(NodeIndex)
+    }
+
     /// Returns the root node of the trie, or `None` if the trie is empty.
     ///
     /// # Examples
@@ -278,6 +285,28 @@ impl<TUd> TrieStructure<TUd> {
         }
     }
 
+    /// Returns the [`NodeIndex`] of the node with the given full key, if any is found.
+    pub fn node_by_full_key<TKIter>(&self, key: TKIter) -> Option<NodeIndex>
+    where
+        TKIter: Iterator<Item = Nibble> + Clone,
+    {
+        match self.existing_node_inner(key) {
+            ExistingNodeInnerResult::Found { node_index, .. } => Some(NodeIndex(node_index)),
+            ExistingNodeInnerResult::NotFound { .. } => None,
+        }
+    }
+
+    /// Returns `true` if the node with the given index is a storage node. Returns `false` if it
+    /// is a branch node.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`NodeIndex`] is invalid.
+    ///
+    pub fn is_storage(&self, node: NodeIndex) -> bool {
+        self.nodes[node.0].has_storage_value
+    }
+
     /// Returns the node with the given key, or `None` if no such node exists.
     ///
     /// This method is a shortcut for calling [`TrieStructure::node`] followed with
@@ -310,7 +339,7 @@ impl<TUd> TrieStructure<TUd> {
     /// Inner implementation of [`TrieStructure::existing_node`]. Traverses the tree, trying to
     /// find a node whose key is `key`.
     fn existing_node_inner<I: Iterator<Item = Nibble> + Clone>(
-        &mut self,
+        &self,
         mut key: I,
     ) -> ExistingNodeInnerResult<I> {
         let mut current_index = match self.root_index {
@@ -566,8 +595,8 @@ impl<TUd> TrieStructure<TUd> {
             return false;
         }
 
-        let mut me_iter = self.all_nodes_ordered();
-        let mut other_iter = other.all_nodes_ordered();
+        let mut me_iter = self.all_node_lexicographic_ordered();
+        let mut other_iter = other.all_node_lexicographic_ordered();
 
         loop {
             let (me_node_idx, other_node_idx) = match (me_iter.next(), other_iter.next()) {
@@ -595,8 +624,341 @@ impl<TUd> TrieStructure<TUd> {
         }
     }
 
-    /// Iterates over all nodes of the trie, in a specific but unspecified order.
-    fn all_nodes_ordered(&'_ self) -> impl Iterator<Item = usize> + '_ {
+    /// Returns all nodes whose full key is within the given range, in lexicographic order.
+    // TODO: change API to accept the range trait?
+    #[inline]
+    pub fn range<'a>(
+        &'a self,
+        start_bound: ops::Bound<&'a [u8]>, // TODO: why does this require a `'a` lifetime? I don't get it
+        end_bound: ops::Bound<&'a [u8]>,
+    ) -> impl Iterator<Item = NodeIndex> + 'a {
+        let start_bound = match start_bound {
+            ops::Bound::Included(key) => {
+                ops::Bound::Included(bytes_to_nibbles(key.iter().copied()))
+            }
+            ops::Bound::Excluded(key) => {
+                ops::Bound::Excluded(bytes_to_nibbles(key.iter().copied()))
+            }
+            ops::Bound::Unbounded => ops::Bound::Unbounded,
+        };
+
+        let end_bound = match end_bound {
+            ops::Bound::Included(key) => {
+                ops::Bound::Included(bytes_to_nibbles(key.iter().copied()))
+            }
+            ops::Bound::Excluded(key) => {
+                ops::Bound::Excluded(bytes_to_nibbles(key.iter().copied()))
+            }
+            ops::Bound::Unbounded => ops::Bound::Unbounded,
+        };
+
+        self.range_inner(start_bound, end_bound).map(NodeIndex)
+    }
+
+    /// Returns all nodes whose full key is within the given range, in lexicographic order.
+    pub fn range_iter<'a>(
+        &'a self,
+        start_bound: ops::Bound<impl Iterator<Item = Nibble>>,
+        end_bound: ops::Bound<impl Iterator<Item = Nibble> + 'a>,
+    ) -> impl Iterator<Item = NodeIndex> + 'a {
+        self.range_inner(start_bound, end_bound).map(NodeIndex)
+    }
+
+    /// Returns all nodes whose full key is within the given range, in lexicographic order.
+    fn range_inner<'a>(
+        &'a self,
+        start_bound: ops::Bound<impl Iterator<Item = Nibble>>,
+        end_bound: ops::Bound<impl Iterator<Item = Nibble> + 'a>,
+    ) -> impl Iterator<Item = usize> + 'a {
+        // Start by processing the end bound to obtain an "end key".
+        // This end key is always assumed to be excluded. In other words, only keys strictly
+        // inferior to the end key are returned. If the user provides `Included`, we modify the key
+        // and append a dummy `0` nibble at the end of it. If the user provides `Unbounded`, we use
+        // an infinite-sized key so that every finite key is always inferior to it.
+        //
+        // The algorithm later down this function will pop nibbles from the start of `end_key`.
+        // Because `end_key` is always excluded, this iterator must always contain at least one
+        // nibble, otherwise the iteration should have ended.
+        let mut end_key = match end_bound {
+            ops::Bound::Unbounded => either::Left(iter::repeat(Nibble::max())),
+            ops::Bound::Excluded(end_key) => either::Right(end_key.chain(None.into_iter())),
+            ops::Bound::Included(end_key) => {
+                either::Right(end_key.chain(Some(Nibble::zero()).into_iter()))
+            }
+        }
+        .peekable();
+
+        // The user passed `Excluded(&[])`. Return an empty range.
+        if end_key.peek().is_none() {
+            return either::Right(iter::empty());
+        }
+
+        // The code below creates a variable named `iter`. This `iter` represents the cursor
+        // where the iterator is.
+        // `iter` also contains an optional nibble. If this optional nibble is `None`, the
+        // iteration is currently at the node itself. If it is `Some`, the iteration isn't at the
+        // node itself but at its child of the given nibble (which potentially doesn't exist).
+        // If it is `Some(None)`, then the iteration is right after the last children of the node.
+        // In other words, `Some(None)` represents an overflow.
+        let mut iter: (usize, Option<Option<Nibble>>) = match self.root_index {
+            Some(idx) => (idx, None),
+            None => {
+                // Trie is empty. Special case.
+                return either::Right(iter::empty());
+            }
+        };
+
+        // Equal to `len(key(iter)) - len(key(iter) ∩ end_key)`. In other words, the number of
+        // nibbles at the end of `iter`'s key that do not match the end key. This also includes
+        // the optional nibble within `iter` if any.
+        let mut iter_key_nibbles_extra: usize = 0;
+
+        // Transform `start_bound` into something more simple to process.
+        let (mut start_key, start_key_is_inclusive) = match start_bound {
+            ops::Bound::Unbounded => (either::Right(iter::empty()), true),
+            ops::Bound::Included(k) => (either::Left(k), true),
+            ops::Bound::Excluded(k) => (either::Left(k), false),
+        };
+
+        // Iterate down the tree, updating the variables above. At each iteration, one of the
+        // three following is true:
+        //
+        // - `iter` is inferior or inferior or equal (depending on `start_key_is_inclusive`) to
+        //   `start_key`.
+        // - `iter` is the first node that is superior or strictly superior (depending on
+        //   `start_key_is_inclusive`) to `start_key`.
+        // - `iter` points to a non-existing node that is inferior/inferior-or-equal to
+        //   `start_key`, but is right before the first node that is superior/strictly superior to
+        //   `start_key`.
+        //
+        // As soon as we reach one of the last two conditions, we stop iterating, as it means
+        // that `iter` is at the correct position.
+        'start_search: loop {
+            debug_assert!(iter.1.is_none());
+            let iter_node = self.nodes.get(iter.0).unwrap();
+
+            // Compare the nibbles at the front of `start_key` with the ones of `iter_node`.
+            // Consumes the nibbles at the start of `start_key`.
+            let pk_compare = {
+                let mut result = cmp::Ordering::Equal;
+                for iter_node_pk_nibble in iter_node.partial_key.iter() {
+                    match start_key
+                        .next()
+                        .map(|nibble| nibble.cmp(iter_node_pk_nibble))
+                    {
+                        None | Some(cmp::Ordering::Less) => {
+                            result = cmp::Ordering::Less;
+                            break;
+                        }
+                        Some(cmp::Ordering::Equal) => {}
+                        Some(cmp::Ordering::Greater) => {
+                            result = cmp::Ordering::Greater;
+                            break;
+                        }
+                    }
+                }
+                result
+            };
+
+            match pk_compare {
+                cmp::Ordering::Less | cmp::Ordering::Equal => {
+                    // Update the value of `iter_key_nibbles_extra` to take the current value
+                    // of `iter` into account, as it hasn't been done yet.
+                    for iter_node_pk_nibble in iter_node.partial_key.iter().cloned() {
+                        if iter_key_nibbles_extra == 0
+                            && iter_node_pk_nibble == *end_key.peek().unwrap()
+                        {
+                            let _ = end_key.next();
+                            // `iter` is already past the end bound. Return an empty range.
+                            if end_key.peek().is_none() {
+                                return either::Right(iter::empty());
+                            }
+                        } else if iter_key_nibbles_extra == 0
+                            && iter_node_pk_nibble > *end_key.peek().unwrap()
+                        {
+                            return either::Right(iter::empty());
+                        } else {
+                            iter_key_nibbles_extra += 1;
+                        }
+                    }
+
+                    if pk_compare == cmp::Ordering::Less {
+                        // `iter` is strictly superior to `start_key`. `iter` is now at the
+                        // correct position.
+                        break 'start_search;
+                    }
+                }
+                cmp::Ordering::Greater => {
+                    // `iter` is strictly inferior to `start_key`, and all of its children will
+                    // also be strictly inferior to `start_key`.
+                    // Stop the search immediately after the current node in the parent.
+                    let Some((parent, parent_nibble)) = iter_node.parent
+                        else { return either::Right(iter::empty()); };
+                    let next_nibble = parent_nibble.checked_add(1);
+                    if iter_key_nibbles_extra == 0 {
+                        return either::Right(iter::empty());
+                    }
+                    iter_key_nibbles_extra -= 1;
+                    if iter_key_nibbles_extra == 0 && next_nibble == Some(*end_key.peek().unwrap())
+                    {
+                        let _ = end_key.next();
+                        // `iter` is already past the end bound. Return an empty range.
+                        if end_key.peek().is_none() {
+                            return either::Right(iter::empty());
+                        }
+                    } else {
+                        iter_key_nibbles_extra += 1;
+                    }
+                    iter = (parent, Some(next_nibble));
+                    break 'start_search;
+                }
+            }
+
+            // Remove the next nibble from `start_key` and update `iter` based on it.
+            if let Some(next_nibble) = start_key.next() {
+                if iter_key_nibbles_extra == 0 && next_nibble == *end_key.peek().unwrap() {
+                    let _ = end_key.next();
+                    // `iter` is already past the end bound. Return an empty range.
+                    if end_key.peek().is_none() {
+                        return either::Right(iter::empty());
+                    }
+                } else if iter_key_nibbles_extra == 0 && next_nibble > *end_key.peek().unwrap() {
+                    return either::Right(iter::empty());
+                } else {
+                    iter_key_nibbles_extra += 1;
+                }
+
+                if let Some(child) = iter_node.children[usize::from(u8::from(next_nibble))] {
+                    // Update `iter` and continue searching.
+                    iter = (child, None);
+                } else {
+                    // `iter` is strictly inferior to `start_key`.
+                    iter.1 = Some(Some(next_nibble));
+                    break 'start_search;
+                }
+            } else {
+                // `iter.0` is an exact match with `start_key`. If the starting bound is
+                // `Excluded`, we don't want to start iterating at `iter` but at `next(iter)`,
+                // which we do by adding a zero nibble afterwards.
+                debug_assert!(iter.1.is_none());
+                if !start_key_is_inclusive {
+                    iter.1 = Some(Some(Nibble::zero()));
+                    if iter_key_nibbles_extra == 0 && *end_key.peek().unwrap() == Nibble::zero() {
+                        let _ = end_key.next();
+                        // `iter` is already past the end bound. Return an empty range.
+                        if end_key.peek().is_none() {
+                            return either::Right(iter::empty());
+                        }
+                    } else {
+                        iter_key_nibbles_extra += 1;
+                    }
+                }
+
+                break 'start_search;
+            }
+        }
+
+        // `iter` is now at the correct position and we can start yielding nodes until we reach
+        // the end. This is done in the iterator that is returned from the function.
+
+        either::Left(iter::from_fn(move || {
+            loop {
+                // `end_key` must never be empty, as otherwise the iteration has ended.
+                // We return `None` instead of panicking, as it is legitimately possible to reach
+                // this situation through some code paths.
+                let _ = end_key.peek()?;
+
+                // If `iter` points to an actual node, yield it and jump to the position right
+                // after.
+                let Some(iter_1) = iter.1 else {
+                    iter.1 = Some(Some(Nibble::zero()));
+                    if iter_key_nibbles_extra == 0 && *end_key.peek().unwrap() == Nibble::zero() {
+                        let _ = end_key.next();
+                    } else {
+                        iter_key_nibbles_extra += 1;
+                    }
+                    return Some(iter.0);
+                };
+
+                let node = self.nodes.get(iter.0).unwrap();
+
+                if let Some(child) =
+                    iter_1.and_then(|iter_1| node.children[usize::from(u8::from(iter_1))])
+                {
+                    // `child` might be after the end bound if its partial key is superior or
+                    // equal to the `end_key`.
+                    for child_pk_nibble in self.nodes.get(child).unwrap().partial_key.iter() {
+                        match child_pk_nibble.cmp(end_key.peek().unwrap()) {
+                            cmp::Ordering::Greater if iter_key_nibbles_extra == 0 => return None,
+                            cmp::Ordering::Greater | cmp::Ordering::Less => {
+                                iter_key_nibbles_extra += 1;
+                            }
+                            cmp::Ordering::Equal if iter_key_nibbles_extra != 0 => {
+                                iter_key_nibbles_extra += 1;
+                            }
+                            cmp::Ordering::Equal => {
+                                debug_assert_eq!(iter_key_nibbles_extra, 0);
+                                let _ = end_key.next();
+                                let _ = end_key.peek()?;
+                            }
+                        }
+                    }
+
+                    iter = (child, None);
+                } else if iter_key_nibbles_extra == 0
+                    || (iter_key_nibbles_extra == 1
+                        && iter_1.map_or(true, |iter_1| iter_1 > *end_key.peek().unwrap()))
+                {
+                    return None;
+                } else if let Some(child_index) = iter_1.and_then(|iter_1| {
+                    node.children[(usize::from(u8::from(iter_1)))
+                        ..=usize::from(u8::from(if iter_key_nibbles_extra == 1 {
+                            *end_key.peek().unwrap()
+                        } else {
+                            Nibble::max()
+                        }))]
+                        .iter()
+                        .position(|c| c.is_some())
+                }) {
+                    let child_nibble = Nibble::try_from(
+                        u8::try_from(usize::from(u8::from(iter_1.unwrap())) + child_index).unwrap(),
+                    )
+                    .unwrap();
+
+                    if iter_key_nibbles_extra == 1 && child_nibble == *end_key.peek().unwrap() {
+                        iter_key_nibbles_extra = 0;
+                        let _ = end_key.next();
+                    }
+
+                    iter.1 = Some(Some(child_nibble));
+                } else {
+                    // `iter` has no child. Go to the parent.
+                    let node = self.nodes.get(iter.0).unwrap();
+
+                    // End the iterator if we were about to jump out of the end bound.
+                    if iter_key_nibbles_extra < 2 + node.partial_key.len() {
+                        return None;
+                    }
+
+                    let Some((parent_node_index, parent_nibble_direction)) = node.parent else { return None; };
+                    iter_key_nibbles_extra -= 2;
+                    iter_key_nibbles_extra -= node.partial_key.len();
+                    let next_sibling_nibble = parent_nibble_direction.checked_add(1);
+                    if iter_key_nibbles_extra == 0
+                        && next_sibling_nibble == Some(*end_key.peek().unwrap())
+                    {
+                        let _ = end_key.next();
+                    } else {
+                        iter_key_nibbles_extra += 1;
+                    }
+                    iter = (parent_node_index, Some(next_sibling_nibble));
+                }
+            }
+        }))
+    }
+
+    /// Iterates over all nodes of the trie in a lexicographic order.
+    fn all_node_lexicographic_ordered(&'_ self) -> impl Iterator<Item = usize> + '_ {
         fn ancestry_order_next<TUd>(tree: &TrieStructure<TUd>, node_index: usize) -> Option<usize> {
             if let Some(first_child) = tree
                 .nodes
@@ -780,10 +1142,26 @@ impl<TUd: fmt::Debug> fmt::Debug for TrieStructure<TUd> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_list()
             .entries(
-                self.all_nodes_ordered()
+                self.all_node_lexicographic_ordered()
                     .map(|idx| (idx, self.nodes.get(idx).unwrap())),
             )
             .finish()
+    }
+}
+
+impl<TUd> ops::Index<NodeIndex> for TrieStructure<TUd> {
+    type Output = TUd;
+
+    #[track_caller]
+    fn index(&self, node_index: NodeIndex) -> &TUd {
+        &self.nodes[node_index.0].user_data
+    }
+}
+
+impl<TUd> ops::IndexMut<NodeIndex> for TrieStructure<TUd> {
+    #[track_caller]
+    fn index_mut(&mut self, node_index: NodeIndex) -> &mut TUd {
+        &mut self.nodes[node_index.0].user_data
     }
 }
 
@@ -958,6 +1336,14 @@ impl<'a, TUd> NodeAccess<'a, TUd> {
         }
     }
 
+    /// Returns the user data stored in the node.
+    pub fn into_user_data(self) -> &'a mut TUd {
+        match self {
+            NodeAccess::Storage(n) => n.into_user_data(),
+            NodeAccess::Branch(n) => n.into_user_data(),
+        }
+    }
+
     /// Returns true if the node has a storage value associated to it.
     pub fn has_storage_value(&self) -> bool {
         match self {
@@ -1079,6 +1465,11 @@ impl<'a, TUd> StorageNodeAccess<'a, TUd> {
             .partial_key
             .iter()
             .cloned()
+    }
+
+    /// Returns the user data associated to this node.
+    pub fn into_user_data(self) -> &'a mut TUd {
+        &mut self.trie.nodes.get_mut(self.node_index).unwrap().user_data
     }
 
     /// Returns the user data associated to this node.
@@ -1463,6 +1854,11 @@ impl<'a, TUd> BranchNodeAccess<'a, TUd> {
             trie: self.trie,
             node_index: self.node_index,
         }
+    }
+
+    /// Returns the user data associated to this node.
+    pub fn into_user_data(self) -> &'a mut TUd {
+        &mut self.trie.nodes.get_mut(self.node_index).unwrap().user_data
     }
 
     /// Returns the user data associated to this node.

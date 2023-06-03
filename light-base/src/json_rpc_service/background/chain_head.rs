@@ -100,7 +100,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
     pub(super) async fn chain_head_follow(
         self: &Arc<Self>,
         request_id: (&str, &requests_subscriptions::RequestId),
-        runtime_updates: bool,
+        with_runtime: bool,
     ) {
         let (subscription_id, messages_rx, subscription_start) = match self
             .requests_subscriptions
@@ -126,7 +126,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             }
         };
 
-        let subscription = if runtime_updates {
+        let subscription = if with_runtime {
             let subscribe_all = self
                 .runtime_service
                 .subscribe_all("chainHead_follow", 32, NonZeroUsize::new(32).unwrap())
@@ -202,11 +202,10 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                 subscription: (&subscription_id).into(),
                                 result: methods::FollowEvent::NewBlock {
                                     block_hash: methods::HashHexString(hash),
-                                    new_runtime: if let Some(new_runtime) = &block.new_runtime {
-                                        Some(convert_runtime_spec(new_runtime))
-                                    } else {
-                                        None
-                                    },
+                                    new_runtime: block
+                                        .new_runtime
+                                        .as_ref()
+                                        .map(convert_runtime_spec),
                                     parent_block_hash: methods::HashHexString(block.parent_hash),
                                 },
                             }
@@ -313,11 +312,11 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 non_finalized_blocks,
                 pinned_blocks_headers,
                 subscription: match subscription {
-                    either::Left((sub, id)) => Subscription::RuntimeUpdates {
+                    either::Left((sub, id)) => Subscription::WithRuntime {
                         notifications: sub.new_blocks,
                         subscription_id: id,
                     },
-                    either::Right(sub) => Subscription::NoRuntimeUpdates(sub.new_blocks),
+                    either::Right(sub) => Subscription::WithoutRuntime(sub.new_blocks),
                 },
                 log_target,
                 runtime_service,
@@ -340,7 +339,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         follow_subscription: &str,
         hash: methods::HashHexString,
         key: methods::HexString,
-        child_key: Option<methods::HexString>,
+        child_trie: Option<methods::HexString>,
+        ty: methods::ChainHeadStorageType,
         network_config: Option<methods::NetworkConfig>,
     ) {
         let network_config = network_config.unwrap_or(methods::NetworkConfig {
@@ -361,7 +361,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     get_request_id: (request_id.0.to_owned(), request_id.1.clone()),
                     hash,
                     key,
-                    child_key,
+                    child_trie,
+                    ty,
                     network_config,
                 },
             )
@@ -378,6 +379,38 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         json_rpc::parse::ErrorResponse::InvalidParams,
                         None,
                     ),
+                )
+                .await;
+        }
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_storageContinue`].
+    pub(super) async fn chain_head_storage_continue(
+        self: &Arc<Self>,
+        request_id: (&str, &requests_subscriptions::RequestId),
+        subscription_id: &str,
+    ) {
+        // Resuming the subscription is done by sending a message to it.
+        let message_received = self
+            .requests_subscriptions
+            .subscription_send(
+                request_id.1,
+                subscription_id,
+                SubscriptionMessage::ChainHeadStorageContinue {
+                    continue_request_id: (request_id.0.to_owned(), request_id.1.clone()),
+                },
+            )
+            .await;
+
+        // If the subscription is dead, then manually send back a response.
+        // This could happen for example because there was a stop message earlier in its queue
+        // or because it was the wrong type of subscription.
+        if message_received.is_err() {
+            self.requests_subscriptions
+                .respond(
+                    request_id.1,
+                    methods::Response::chainHead_unstable_storageContinue(())
+                        .to_json_response(request_id.0),
                 )
                 .await;
         }
@@ -708,12 +741,12 @@ struct ChainHeadFollowTask<TPlat: PlatformRef> {
 }
 
 enum Subscription<TPlat: PlatformRef> {
-    RuntimeUpdates {
+    WithRuntime {
         notifications: runtime_service::Subscription<TPlat>,
         subscription_id: runtime_service::SubscriptionId,
     },
     // TODO: better typing?
-    NoRuntimeUpdates(mpsc::Receiver<sync_service::Notification>),
+    WithoutRuntime(mpsc::Receiver<sync_service::Notification>),
 }
 
 impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
@@ -751,10 +784,10 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         loop {
             let outcome = {
                 let next_block = pin::pin!(match &mut self.subscription {
-                    Subscription::RuntimeUpdates { notifications, .. } => {
+                    Subscription::WithRuntime { notifications, .. } => {
                         future::Either::Left(notifications.next().map(either::Left))
                     }
-                    Subscription::NoRuntimeUpdates(notifications) => {
+                    Subscription::WithoutRuntime(notifications) => {
                         future::Either::Right(notifications.next().map(either::Right))
                     }
                 });
@@ -879,11 +912,10 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                 result: methods::FollowEvent::NewBlock {
                                     block_hash: methods::HashHexString(hash),
                                     parent_block_hash: methods::HashHexString(block.parent_hash),
-                                    new_runtime: if let Some(new_runtime) = &block.new_runtime {
-                                        Some(convert_runtime_spec(new_runtime))
-                                    } else {
-                                        None
-                                    },
+                                    new_runtime: block
+                                        .new_runtime
+                                        .as_ref()
+                                        .map(convert_runtime_spec),
                                 },
                             }
                             .to_json_call_object_parameters(None),
@@ -1038,7 +1070,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 };
 
                 self.start_chain_head_body(
-                    &requests_subscriptions,
+                    requests_subscriptions,
                     (&get_request_id.0, &get_request_id.1),
                     hash,
                     network_config,
@@ -1053,7 +1085,8 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 get_request_id,
                 network_config,
                 key,
-                child_key,
+                child_trie,
+                ty,
             } => {
                 // Obtain the header of the requested block.
                 // Contains `None` if the subscription is disjoint.
@@ -1067,11 +1100,12 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 };
 
                 self.start_chain_head_storage(
-                    &requests_subscriptions,
+                    requests_subscriptions,
                     (&get_request_id.0, &get_request_id.1),
                     hash,
                     key,
-                    child_key,
+                    child_trie,
+                    ty,
                     network_config,
                     block_scale_encoded_header,
                 )
@@ -1088,7 +1122,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             } => {
                 // Determine whether the requested block hash is valid and start the call.
                 let pre_runtime_call = match self.subscription {
-                    Subscription::RuntimeUpdates {
+                    Subscription::WithRuntime {
                         subscription_id, ..
                     } => {
                         if !self.pinned_blocks_headers.contains_key(&hash.0) {
@@ -1107,11 +1141,11 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         }
 
                         self.runtime_service
-                            .pinned_block_runtime_lock(subscription_id, &hash.0)
+                            .pinned_block_runtime_access(subscription_id, &hash.0)
                             .await
                             .ok()
                     }
-                    Subscription::NoRuntimeUpdates(_) => {
+                    Subscription::WithoutRuntime(_) => {
                         requests_subscriptions
                             .respond(
                                 &get_request_id.1,
@@ -1128,7 +1162,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 };
 
                 self.start_chain_head_call(
-                    &requests_subscriptions,
+                    requests_subscriptions,
                     (&get_request_id.0, &get_request_id.1),
                     &function_to_call,
                     call_parameters,
@@ -1164,7 +1198,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             } => {
                 let valid = {
                     if self.pinned_blocks_headers.remove(&hash.0).is_some() {
-                        if let Subscription::RuntimeUpdates {
+                        if let Subscription::WithRuntime {
                             subscription_id, ..
                         } = self.subscription
                         {
@@ -1323,7 +1357,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                 break;
                             }
                             either::Right((
-                                SubscriptionMessage::StopIfChainHeadStorage { stop_request_id },
+                                SubscriptionMessage::StopIfChainHeadBody { stop_request_id },
                                 confirmation_sender,
                             )) => {
                                 requests_subscriptions
@@ -1369,11 +1403,13 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         request_id: (&str, &requests_subscriptions::RequestId),
         hash: methods::HashHexString,
         key: methods::HexString,
-        child_key: Option<methods::HexString>,
+        child_trie: Option<methods::HexString>,
+        ty: methods::ChainHeadStorageType,
         network_config: methods::NetworkConfig,
         block_scale_encoded_header: Option<Vec<u8>>,
     ) {
-        if child_key.is_some() {
+        if child_trie.is_some() {
+            // TODO: implement this
             requests_subscriptions
                 .respond(
                     request_id.1,
@@ -1389,11 +1425,40 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 .await;
             log::warn!(
                 target: &self.log_target,
-                "chainHead_unstable_storage with a non-null childKey has been called. \
+                "chainHead_unstable_storage has been called with a non-null childTrie. \
                 This isn't supported by smoldot yet."
             );
             return;
         }
+
+        let is_hash = match ty {
+            methods::ChainHeadStorageType::Value => false,
+            methods::ChainHeadStorageType::Hash => true,
+            methods::ChainHeadStorageType::DescendantsValues
+            | methods::ChainHeadStorageType::DescendantsHashes
+            | methods::ChainHeadStorageType::ClosestAncestorMerkleValue => {
+                // TODO: implement this
+                requests_subscriptions
+                    .respond(
+                        request_id.1,
+                        json_rpc::parse::build_error_response(
+                            request_id.0,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                "Child key storage queries not supported yet",
+                            ),
+                            None,
+                        ),
+                    )
+                    .await;
+                log::warn!(
+                    target: &self.log_target,
+                    "chainHead_unstable_storage has been called with a type other than value or hash. \
+                    This isn't supported by smoldot yet."
+                );
+                return;
+            }
+        };
 
         let (subscription_id, mut messages_rx, subscription_start) = match requests_subscriptions
             .start_subscription(request_id.1, 1)
@@ -1441,7 +1506,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             decoded_header.number,
                             &hash.0,
                             decoded_header.state_root,
-                            iter::once(&key.0),
+                            iter::once(key.0.clone()), // TODO: clone :-/
                             cmp::min(10, network_config.total_attempts),
                             Duration::from_millis(u64::from(cmp::min(
                                 20000,
@@ -1477,27 +1542,42 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                     // and as such the outcome only ever contains one element.
                                     debug_assert_eq!(values.len(), 1);
                                     let value = values.into_iter().next().unwrap();
-                                    let output = value.map(|v| methods::HexString(v).to_string());
+                                    if let Some(mut value) = value {
+                                        if is_hash {
+                                            value = blake2_rfc::blake2b::blake2b(8, &[], &value).as_bytes().to_vec();
+                                        }
 
-                                    requests_subscriptions.set_queued_notification(
+                                        requests_subscriptions.push_notification(
+                                            &request_id.1,
+                                            &subscription_id,
+                                            methods::ServerToClient::chainHead_unstable_storageEvent {
+                                                subscription: (&subscription_id).into(),
+                                                result: methods::ChainHeadStorageEvent::Item {
+                                                    key,
+                                                    value: Some(methods::HexString(value)),
+                                                    hash: None,
+                                                    merkle_value: None,
+                                                },
+                                            }
+                                            .to_json_call_object_parameters(None)
+                                        ).await;
+                                    }
+
+                                    requests_subscriptions.push_notification(
                                         &request_id.1,
                                         &subscription_id,
-                                        0,
                                         methods::ServerToClient::chainHead_unstable_storageEvent {
                                             subscription: (&subscription_id).into(),
-                                            result: methods::ChainHeadStorageEvent::Done {
-                                                value: output,
-                                            },
+                                            result: methods::ChainHeadStorageEvent::Done,
                                         }
                                         .to_json_call_object_parameters(None)
                                     ).await;
                                     break;
                                 }
                                 either::Left(Err(_)) => {
-                                    requests_subscriptions.set_queued_notification(
+                                    requests_subscriptions.push_notification(
                                         &request_id.1,
                                         &subscription_id,
-                                        0,
                                         methods::ServerToClient::chainHead_unstable_storageEvent {
                                             subscription: (&subscription_id).into(),
                                             result: methods::ChainHeadStorageEvent::Inaccessible {},
@@ -1507,7 +1587,27 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                     break;
                                 }
                                 either::Right((
-                                    SubscriptionMessage::StopIfChainHeadBody { stop_request_id },
+                                    SubscriptionMessage::ChainHeadStorageContinue { continue_request_id },
+                                    confirmation_sender,
+                                )) => {
+                                    // Because we never emit a "waiting-for-continue" event, this
+                                    // is always erroneous.
+                                    requests_subscriptions
+                                        .respond(
+                                            &continue_request_id.1,
+                                            json_rpc::parse::build_error_response(
+                                                &continue_request_id.0,
+                                                json_rpc::parse::ErrorResponse::InvalidParams,
+                                                Some(&serde_json::to_string("storage subscription hasn't generated a waiting-for-continue").unwrap()),
+                                            ),
+                                        )
+                                        .await;
+
+                                    confirmation_sender.send();
+                                    return;
+                                }
+                                either::Right((
+                                    SubscriptionMessage::StopIfChainHeadStorage { stop_request_id },
                                     confirmation_sender,
                                 )) => {
                                     requests_subscriptions
@@ -1530,10 +1630,9 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     }
                     Some(Err(err)) => {
                         requests_subscriptions
-                            .set_queued_notification(
+                            .push_notification(
                                 &request_id.1,
                                 &subscription_id,
-                                0,
                                 methods::ServerToClient::chainHead_unstable_storageEvent {
                                     subscription: (&subscription_id).into(),
                                     result: methods::ChainHeadStorageEvent::Error {
@@ -1546,10 +1645,9 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     }
                     None => {
                         requests_subscriptions
-                            .set_queued_notification(
+                            .push_notification(
                                 &request_id.1,
                                 &subscription_id,
-                                0,
                                 methods::ServerToClient::chainHead_unstable_storageEvent {
                                     subscription: (&subscription_id).into(),
                                     result: methods::ChainHeadStorageEvent::Disjoint {},
@@ -1571,7 +1669,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         request_id: (&str, &requests_subscriptions::RequestId),
         function_to_call: &str,
         call_parameters: methods::HexString,
-        pre_runtime_call: Option<runtime_service::RuntimeLock<TPlat>>,
+        pre_runtime_call: Option<runtime_service::RuntimeAccess<TPlat>>,
         network_config: methods::NetworkConfig,
     ) {
         let (subscription_id, mut messages_rx, subscription_start) = match requests_subscriptions

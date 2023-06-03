@@ -214,7 +214,7 @@ macro_rules! define_methods {
             /// Panics if the `id_json` isn't valid JSON.
             ///
             pub fn to_json_call_object_parameters(&self, id_json: Option<&str>) -> String {
-                parse::build_call(parse::Call {
+                parse::build_call(&parse::Call {
                     id_json,
                     method: self.name(),
                     // Note that we never skip the `params` field, even if empty. This is an
@@ -440,7 +440,7 @@ define_methods! {
         #[rename = "networkConfig"] network_config: Option<NetworkConfig>
     ) -> Cow<'a, str>,
     chainHead_unstable_follow(
-        #[rename = "runtimeUpdates"] runtime_updates: bool
+        #[rename = "withRuntime"] with_runtime: bool
     ) -> Cow<'a, str>,
     chainHead_unstable_genesisHash() -> HashHexString,
     chainHead_unstable_header(
@@ -460,9 +460,13 @@ define_methods! {
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString,
         key: HexString,
-        #[rename = "childKey"] child_key: Option<HexString>,
+        #[rename = "childTrie"] child_trie: Option<HexString>,
+        #[rename = "type"] ty: ChainHeadStorageType,
         #[rename = "networkConfig"] network_config: Option<NetworkConfig>
     ) -> Cow<'a, str>,
+    chainHead_unstable_storageContinue(
+        #[rename = "subscription"] subscription: Cow<'a, str>
+    ) -> (),
     chainHead_unstable_unfollow(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>
     ) -> (),
@@ -679,7 +683,7 @@ pub enum FollowEvent<'a> {
         #[serde(rename = "parentBlockHash")]
         parent_block_hash: HashHexString,
         #[serde(rename = "newRuntime")]
-        // TODO: must not be present if runtime_updates: false
+        // TODO: must not be present if with_runtime: false
         new_runtime: Option<MaybeRuntimeSpec<'a>>,
     },
     #[serde(rename = "bestBlockChanged")]
@@ -723,10 +727,36 @@ pub enum ChainHeadCallEvent<'a> {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum ChainHeadStorageType {
+    #[serde(rename = "value")]
+    Value,
+    #[serde(rename = "hash")]
+    Hash,
+    #[serde(rename = "closest-ancestor-merkle-value")]
+    ClosestAncestorMerkleValue,
+    #[serde(rename = "descendants-values")]
+    DescendantsValues,
+    #[serde(rename = "descendants-hashes")]
+    DescendantsHashes,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event")]
 pub enum ChainHeadStorageEvent<'a> {
+    #[serde(rename = "item")]
+    Item {
+        key: HexString,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        value: Option<HexString>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<HexString>,
+        #[serde(rename = "merkle-value", skip_serializing_if = "Option::is_none")]
+        merkle_value: Option<HexString>,
+    },
     #[serde(rename = "done")]
-    Done { value: Option<String> },
+    Done,
+    #[serde(rename = "waiting-for-continue")]
+    WaitingForContinue,
     #[serde(rename = "inaccessible")]
     Inaccessible {},
     #[serde(rename = "error")]
@@ -1062,15 +1092,25 @@ pub enum SystemPeerRole {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum TransactionStatus {
+    #[serde(rename = "future")]
     Future,
+    #[serde(rename = "ready")]
     Ready,
+    #[serde(rename = "broadcast")]
     Broadcast(Vec<String>), // Base58 PeerIds  // TODO: stronger typing
+    #[serde(rename = "inBlock")]
     InBlock(HashHexString),
+    #[serde(rename = "retracted")]
     Retracted(HashHexString),
+    #[serde(rename = "finalityTimeout")]
     FinalityTimeout(HashHexString),
+    #[serde(rename = "finalized")]
     Finalized(HashHexString),
+    #[serde(rename = "usurped")]
     Usurped(HashHexString),
+    #[serde(rename = "dropped")]
     Dropped,
+    #[serde(rename = "invalid")]
     Invalid,
 }
 

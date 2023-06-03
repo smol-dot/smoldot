@@ -157,7 +157,11 @@ pub(super) enum SubscriptionMessage {
         get_request_id: (String, requests_subscriptions::RequestId),
         network_config: methods::NetworkConfig,
         key: methods::HexString,
-        child_key: Option<methods::HexString>,
+        child_trie: Option<methods::HexString>,
+        ty: methods::ChainHeadStorageType,
+    },
+    ChainHeadStorageContinue {
+        continue_request_id: (String, requests_subscriptions::RequestId),
     },
     ChainHeadBody {
         hash: methods::HashHexString,
@@ -524,6 +528,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::chainHead_unstable_stopCall { .. }
             | methods::MethodCall::chainHead_unstable_stopStorage { .. }
             | methods::MethodCall::chainHead_unstable_storage { .. }
+            | methods::MethodCall::chainHead_unstable_storageContinue { .. }
             | methods::MethodCall::chainHead_unstable_unfollow { .. }
             | methods::MethodCall::chainHead_unstable_unpin { .. }
             | methods::MethodCall::chainSpec_unstable_chainName { .. }
@@ -798,7 +803,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 follow_subscription,
                 hash,
                 key,
-                child_key,
+                child_trie,
+                ty,
                 network_config,
             } => {
                 self.chain_head_storage(
@@ -806,13 +812,21 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     &follow_subscription,
                     hash,
                     key,
-                    child_key,
+                    child_trie,
+                    ty,
                     network_config,
                 )
                 .await;
             }
-            methods::MethodCall::chainHead_unstable_follow { runtime_updates } => {
-                self.chain_head_follow((request_id, &state_machine_request_id), runtime_updates)
+            methods::MethodCall::chainHead_unstable_storageContinue { subscription } => {
+                self.chain_head_storage_continue(
+                    (request_id, &state_machine_request_id),
+                    &subscription,
+                )
+                .await;
+            }
+            methods::MethodCall::chainHead_unstable_follow { with_runtime } => {
+                self.chain_head_follow((request_id, &state_machine_request_id), with_runtime)
                     .await;
             }
             methods::MethodCall::chainHead_unstable_genesisHash {} => {
@@ -1116,10 +1130,10 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
     /// Obtain a lock to the runtime of the given block against the runtime service.
     // TODO: return better error?
-    async fn runtime_lock(
+    async fn runtime_access(
         self: &Arc<Self>,
         block_hash: &[u8; 32],
-    ) -> Result<runtime_service::RuntimeLock<TPlat>, RuntimeCallError> {
+    ) -> Result<runtime_service::RuntimeAccess<TPlat>, RuntimeCallError> {
         let cache_lock = self.cache.lock().await;
 
         // Try to find the block in the cache of recent blocks. Most of the time, the call target
@@ -1128,7 +1142,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             // The runtime service has the block pinned, meaning that we can ask the runtime
             // service to perform the call.
             self.runtime_service
-                .pinned_block_runtime_lock(cache_lock.subscription_id.unwrap(), block_hash)
+                .pinned_block_runtime_access(cache_lock.subscription_id.unwrap(), block_hash)
                 .await
                 .ok()
         } else {
@@ -1184,7 +1198,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
             let precall = self
                 .runtime_service
-                .pinned_runtime_lock(
+                .pinned_runtime_access(
                     pinned_runtime_id.clone(),
                     *block_hash,
                     block_number,
@@ -1268,7 +1282,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
     ) -> Result<(Vec<u8>, Option<u32>), RuntimeCallError> {
         // This function contains two steps: obtaining the runtime of the block in question,
         // then performing the actual call. The first step is the longest and most difficult.
-        let precall = self.runtime_lock(block_hash).await?;
+        let precall = self.runtime_access(block_hash).await?;
 
         let (runtime_call_lock, virtual_machine) = precall
             .start(
@@ -1289,9 +1303,15 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 .apis
                 .find_version(api_name);
             match version {
-                None => return Err(RuntimeCallError::ApiNotFound),
+                None => {
+                    runtime_call_lock.unlock(virtual_machine);
+                    return Err(RuntimeCallError::ApiNotFound);
+                }
                 Some(v) if version_range.contains(&v) => Some(v),
-                Some(v) => return Err(RuntimeCallError::ApiVersionUnknown { actual_version: v }),
+                Some(v) => {
+                    runtime_call_lock.unlock(virtual_machine);
+                    return Err(RuntimeCallError::ApiVersionUnknown { actual_version: v });
+                }
             }
         } else {
             None
@@ -1379,14 +1399,21 @@ enum RuntimeCallError {
     /// Error while finding the storage root hash of the requested block.
     #[display(fmt = "Failed to obtain block state trie root: {_0}")]
     FindStorageRootHashError(StateTrieRootHashError),
+    #[display(fmt = "{_0}")]
     Call(runtime_service::RuntimeCallError),
+    #[display(fmt = "{_0}")]
     StartError(host::StartErr),
+    #[display(fmt = "{_0}")]
     RuntimeError(runtime_host::ErrorDetail),
+    #[display(fmt = "Getting all the next key isn't supported")]
     NextKeyForbidden,
+    #[display(fmt = "Getting all the keys of a certain prefix isn't supported")]
     PrefixKeysForbidden,
     /// Required runtime API isn't supported by the runtime.
+    #[display(fmt = "Required runtime API isn't supported by the runtime")]
     ApiNotFound,
     /// Version requirement of runtime API isn't supported.
+    #[display(fmt = "Version {actual_version} of the runtime API not supported")]
     ApiVersionUnknown {
         /// Version that the runtime supports.
         actual_version: u32,

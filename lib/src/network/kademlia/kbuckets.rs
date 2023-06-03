@@ -232,7 +232,7 @@ where
         match self {
             Entry::LocalKey => Err(OrInsertError::LocalKey),
             Entry::Vacant(v) => match v.insert(value, now, state) {
-                Ok((entry, _)) => Ok(entry),
+                Ok(InsertResult { entry, .. }) => Ok(entry),
                 Err(InsertError::Full) => Err(OrInsertError::Full),
             },
             Entry::Occupied(e) => Ok(e),
@@ -255,6 +255,15 @@ pub struct VacantEntry<'a, K, V, TNow, const ENTRIES_PER_BUCKET: usize> {
     distance: u8,
 }
 
+/// See [`VacantEntry::insert`].
+pub struct InsertResult<'a, K, V, TNow, const ENTRIES_PER_BUCKET: usize> {
+    /// Entry that was just inserted.
+    pub entry: OccupiedEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>,
+    /// Entry that had to be removed in order to make space for the newly-inserted element, if
+    /// any. This removed entry was always in a disconnected state.
+    pub removed_entry: Option<(K, V)>,
+}
+
 impl<'a, K, V, TNow, const ENTRIES_PER_BUCKET: usize>
     VacantEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>
 where
@@ -262,24 +271,15 @@ where
     TNow: Clone + Add<Duration, Output = TNow> + Ord,
 {
     /// Inserts the entry in the vacant slot. Returns an error if the k-buckets are full.
-    ///
-    /// On success, optionally returns the entry that had to be removed in order to make space
-    /// for the newly-inserted element. This removed entry was always in a disconnected state.
     pub fn insert(
         self,
         value: V,
         now: &TNow,
         state: PeerState,
-    ) -> Result<
-        (
-            OccupiedEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>,
-            Option<(K, V)>,
-        ),
-        InsertError,
-    > {
+    ) -> Result<InsertResult<'a, K, V, TNow, ENTRIES_PER_BUCKET>, InsertError> {
         let bucket = &mut self.inner.buckets[usize::from(self.distance)];
 
-        let previous_entry = match state {
+        let removed_entry = match state {
             PeerState::Connected if bucket.num_connected_entries < ENTRIES_PER_BUCKET => {
                 let mut previous_entry = None;
 
@@ -333,14 +333,14 @@ where
             }
         };
 
-        Ok((
-            OccupiedEntry {
+        Ok(InsertResult {
+            entry: OccupiedEntry {
                 inner: self.inner,
                 key: self.key,
                 distance: self.distance,
             },
-            previous_entry,
-        ))
+            removed_entry,
+        })
     }
 }
 
@@ -558,7 +558,7 @@ mod tests {
             let local_key_hash = Sha256::digest(&local_key);
             (0..).map(move |_| loop {
                 let other_key: [u8; 32] = rand::random();
-                let other_key_hashed = Sha256::digest(&other_key);
+                let other_key_hashed = Sha256::digest(other_key);
                 if ((local_key_hash[0] ^ other_key_hashed[0]) & 0x80) != 0 {
                     break other_key.to_vec();
                 }
@@ -582,10 +582,9 @@ mod tests {
         // Inserting another node in that bucket. Since it's full, the insertion must fail.
         match buckets.entry(&max_bucket_keys.next().unwrap()) {
             super::Entry::Vacant(e) => {
-                match e.insert((), &Duration::new(0, 0), super::PeerState::Disconnected) {
-                    Ok(_) => panic!(),
-                    Err(_) => {}
-                }
+                assert!(e
+                    .insert((), &Duration::new(0, 0), super::PeerState::Disconnected)
+                    .is_err());
             }
             _ => panic!(),
         }
@@ -594,10 +593,9 @@ mod tests {
         // the insertion must succeed.
         match buckets.entry(&max_bucket_keys.next().unwrap()) {
             super::Entry::Vacant(e) => {
-                match e.insert((), &Duration::new(2, 0), super::PeerState::Disconnected) {
-                    Ok(_) => {}
-                    Err(_) => panic!(),
-                }
+                assert!(e
+                    .insert((), &Duration::new(2, 0), super::PeerState::Disconnected)
+                    .is_ok());
             }
             _ => panic!(),
         }

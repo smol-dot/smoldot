@@ -302,7 +302,7 @@ enum OutgoingGoAway {
     Sent,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 enum OutgoingSubstreamData {
     /// Data is coming from the given substream.
     ///
@@ -411,7 +411,7 @@ impl<T> Yamux<T> {
             return Err(OpenSubstreamError::GoAwayReceived);
         }
 
-        let substream_id = self.inner.next_outbound_substream.clone();
+        let substream_id = self.inner.next_outbound_substream;
 
         self.inner.next_outbound_substream = match self.inner.next_outbound_substream.checked_add(2)
         {
@@ -751,7 +751,7 @@ impl<T> Yamux<T> {
                     ..
                 },
                 SubstreamState::Healthy { write_queue, .. },
-            ) if *data == OutgoingSubstreamData::Healthy(substream_id) => {
+            ) if matches!(*data, OutgoingSubstreamData::Healthy(i) if i == substream_id) => {
                 *data = OutgoingSubstreamData::Obsolete { write_queue };
             }
             _ => {}
@@ -1151,10 +1151,7 @@ impl<T> Yamux<T> {
                                             ..
                                         },
                                         SubstreamState::Healthy { write_queue, .. },
-                                    ) if *data
-                                        == OutgoingSubstreamData::Healthy(SubstreamId(
-                                            *substream_id,
-                                        )) =>
+                                    ) if matches!(*data, OutgoingSubstreamData::Healthy(SubstreamId(i)) if i == *substream_id) =>
                                     {
                                         *data = OutgoingSubstreamData::Obsolete { write_queue };
                                     }
@@ -1242,8 +1239,8 @@ impl<T> Yamux<T> {
                                         ..
                                     },
                                     SubstreamState::Healthy { write_queue, .. },
-                                ) if *data
-                                    == OutgoingSubstreamData::Healthy(SubstreamId(stream_id)) =>
+                                ) if matches!(*data,
+                                    OutgoingSubstreamData::Healthy(SubstreamId(i)) if i == stream_id) =>
                                 {
                                     *data = OutgoingSubstreamData::Obsolete { write_queue };
                                 }

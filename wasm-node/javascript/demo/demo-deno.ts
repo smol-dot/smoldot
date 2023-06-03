@@ -51,7 +51,7 @@ client.addChain({ chainSpec, disableJsonRpc: true });
 
 // Now spawn a WebSocket server in order to handle JSON-RPC clients.
 console.log('JSON-RPC server now listening on port 9944');
-console.log('Please visit: https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944');
+console.log('Please visit: https://cloudflare-ipfs.com/ipns/dotapps.io/?rpc=ws%3A%2F%2F127.0.0.1%3A9944');
 
 const conn = Deno.listen({ port: 9944 });
 const httpConn = Deno.serveHttp(await conn.accept());

@@ -38,12 +38,7 @@
 //!
 //! The Rust code is expected to be compiled for the `wasm32-wasi` target, and not just
 //! `wasm32-unknown-unknown`. The `wasi` platform is used in order for example to obtain a source
-//! of randomness.
-//!
-//! > **Note**: While wasi could theoretically also be used in order to obtain the current time,
-//! >           the Wasi syscall cannot be implemented in pure JavaScript code at the moment, due
-//! >           to `u64`s being unusable in JavaScript. As such, alternatives are present in the
-//! >           `extern` block below.
+//! of randomness and time.
 //!
 //! Consequently, the exports found in the `extern` block below are not the only functions that
 //! must be implemented. Several functions required by the Wasi ABI are also used. The best place
@@ -113,12 +108,10 @@ extern "C" {
 
     /// The queue of JSON-RPC responses of the given chain is no longer empty.
     ///
-    /// Use [`json_rpc_responses_peek`] in order to obtain information about the responses in the
-    /// queue.
+    /// This function is only ever called after [`json_rpc_responses_peek`] has returned a `len`
+    /// of 0.
     ///
-    /// This function might be called even when the queue wasn't empty before, however this
-    /// behavior must not be relied upon. The queue must be emptied by calling
-    /// [`json_rpc_responses_pop`] in order to have the guarantee that this function gets called.
+    /// This function might be called spuriously, however this behavior must not be relied upon.
     pub fn json_rpc_responses_non_empty(chain_id: u32);
 
     /// Client is emitting a log entry.
@@ -130,52 +123,25 @@ extern "C" {
     /// virtual machine at offset `ptr` and with length `len`.
     pub fn log(level: u32, target_ptr: u32, target_len: u32, message_ptr: u32, message_len: u32);
 
-    /// Must return the number of milliseconds that have passed since the UNIX epoch, ignoring
-    /// leap seconds.
+    /// Called when [`advance_execution`] should be executed again.
     ///
-    /// Must never return `NaN` or infinite.
-    ///
-    /// This is typically implemented by calling `Date.now()`.
-    ///
-    /// See <https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/now>
-    ///
-    /// > **Note**: Ideally this function isn't needed. The wasi target supports clocks through
-    /// >           the `clock_time_get` syscall. However, since `clock_time_get` uses `u64s`, and
-    /// >           browsers don't support `u64s`, using it causes an unbypassable exception. See
-    /// >           also <https://github.com/dcodeIO/webassembly/issues/26#issuecomment-410157370>.
-    pub fn unix_time_ms() -> f64;
+    /// This function might be called from within [`advance_execution`], in which case
+    /// [`advance_execution`] should be called again immediately after it returns.
+    pub fn advance_execution_ready();
 
-    /// Must return the number of milliseconds that have passed since an arbitrary point in time.
-    ///
-    /// Must never return `NaN` or infinite.
-    ///
-    /// Contrary to [`unix_time_ms`], the returned value must never be inferior to a value
-    /// previously returned. Consequently, this must not be implemented using `Date.now()`, whose
-    /// value can decrease if the user adjusts their machine's clock, but rather with
-    /// `Performance.now()` or similar.
-    ///
-    /// See <https://developer.mozilla.org/fr/docs/Web/API/Performance/now>
-    ///
-    /// > **Note**: Ideally this function isn't needed. The wasi target supports clocks through
-    /// >           the `clock_time_get` syscall. However, since `clock_time_get` uses `u64s`, and
-    /// >           browsers don't support `u64s`, using it causes an unbypassable exception. See
-    /// >           also <https://github.com/dcodeIO/webassembly/issues/26#issuecomment-410157370>.
-    pub fn monotonic_clock_ms() -> f64;
-
-    /// After at least `milliseconds` milliseconds have passed, must call [`timer_finished`] with
-    /// the `id` passed as parameter.
+    /// After at least `milliseconds` milliseconds have passed, [`timer_finished`] must be called.
     ///
     /// It is not a logic error to call [`timer_finished`] *before* `milliseconds` milliseconds
     /// have passed, and this will likely cause smoldot to restart a new timer for the remainder
     /// of the duration.
     ///
-    /// When [`timer_finished`] is called, the value of [`monotonic_clock_ms`] must have increased
-    /// by at least the given number of `milliseconds`.
+    /// When [`timer_finished`] is called, the value of the monotonic clock (in the WASI bindings)
+    /// must have increased by at least the given number of `milliseconds`.
     ///
     /// If `milliseconds` is 0, [`timer_finished`] should be called as soon as possible.
     ///
     /// `milliseconds` never contains a negative number, `NaN` or infinite.
-    pub fn start_timer(id: u32, milliseconds: f64);
+    pub fn start_timer(milliseconds: f64);
 
     /// Must initialize a new connection that tries to connect to the given multiaddress.
     ///
@@ -301,16 +267,12 @@ extern "C" {
     ///
     /// The name of the task is a UTF-8 string found in the memory of the WebAssembly virtual
     /// machine at offset `ptr` and with length `len`.
-    ///
-    /// This function is called only if `enable_current_task` was non-zero when calling [`init`].
     pub fn current_task_entered(ptr: u32, len: u32);
 
     /// Called when the Wasm execution leave the context of a certain task. This is useful for
     /// debugging purposes.
     ///
     /// Only one task can be currently executing at any time.
-    ///
-    /// This function is called only if `enable_current_task` was non-zero when calling [`init`].
     pub fn current_task_exit();
 }
 
@@ -322,61 +284,20 @@ extern "C" {
 ///
 /// The client will emit log messages by calling the [`log()`] function, provided the log level is
 /// inferior or equal to the value of `max_log_level` passed here.
-///
-/// If `enbable_current_task` is non-zero, smoldot will call the [`current_task_entered`] and
-/// [`current_task_exit`] functions to report when it enters and leaves tasks. This slightly
-/// slows everything down, but is useful for debugging purposes.
-///
-/// `cpu_rate_limit` can be used to limit the amount of CPU that smoldot will use on average.
-/// `u32::max_value()` represents "one CPU". For example passing `rate_limit / 2` represents
-/// "`50%` of one CPU".
-///
-/// `periodically_yield` represents the initial value of the setting described in the
-/// documentation of [`set_periodically_yield`].
 #[no_mangle]
-pub extern "C" fn init(
-    max_log_level: u32,
-    enable_current_task: u32,
-    cpu_rate_limit: u32,
-    periodically_yield: u32,
-) {
-    crate::init(
-        max_log_level,
-        enable_current_task,
-        cpu_rate_limit,
-        periodically_yield,
-    );
-    super::advance_execution();
+pub extern "C" fn init(max_log_level: u32) {
+    crate::init(max_log_level);
 }
 
-/// Sets whether the smoldot client must periodically yield back control by setting up a timer
-/// using [`start_timer`] with a delay of 0.
+/// Advances the execution of the client, performing CPU-heavy tasks.
 ///
-/// A value of 0 means "no", and any other value means "yes".
+/// This function **must** be called regularly, otherwise nothing will happen.
 ///
-/// This setting is important when smoldot is used from within a web page. When the web page is in
-/// the foreground, it should be set to `true` so that the web browser can render the page often
-/// enough to not cause any discomfort. When the web page is in the background, it should be set
-/// to `false` because `setTimeout` gets a minimum delay of 1 second making [`start_timer`]
-/// unreliable.
-/// See also <https://developer.mozilla.org/en-US/docs/Web/API/setTimeout#timeouts_in_inactive_tabs>.
+/// After this function is called or during a call to this function, [`advance_execution_ready`]
+/// might be called, indicating that [`advance_execution`] should be called again.
 #[no_mangle]
-pub extern "C" fn set_periodically_yield(periodically_yield: u32) {
-    crate::set_periodically_yield(periodically_yield);
-    super::advance_execution();
-}
-
-/// Instructs the client to start shutting down.
-///
-/// Later, the client will use `exit` to stop.
-///
-/// It is still legal to call all the other functions of these bindings. The client continues to
-/// operate normally until the call to `exit`, which happens at some point in the future.
-// TODO: can this be called multiple times?
-#[no_mangle]
-pub extern "C" fn start_shutdown() {
-    crate::start_shutdown();
-    super::advance_execution();
+pub extern "C" fn advance_execution() {
+    super::advance_execution()
 }
 
 /// Adds a chain to the client. The client will try to stay connected and synchronize this chain.
@@ -411,14 +332,12 @@ pub extern "C" fn add_chain(
     json_rpc_running: u32,
     potential_relay_chains_buffer_index: u32,
 ) -> u32 {
-    let success_code = super::add_chain(
+    super::add_chain(
         get_buffer(chain_spec_buffer_index),
         get_buffer(database_content_buffer_index),
         json_rpc_running,
         get_buffer(potential_relay_chains_buffer_index),
-    );
-    super::advance_execution();
-    success_code
+    )
 }
 
 /// Removes a chain previously added using [`add_chain`]. Instantly unsubscribes all the JSON-RPC
@@ -429,7 +348,6 @@ pub extern "C" fn add_chain(
 #[no_mangle]
 pub extern "C" fn remove_chain(chain_id: u32) {
     super::remove_chain(chain_id);
-    super::advance_execution();
 }
 
 /// Returns `1` if creating this chain was successful. Otherwise, returns `0`.
@@ -487,9 +405,7 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 ///
 #[no_mangle]
 pub extern "C" fn json_rpc_send(text_buffer_index: u32, chain_id: u32) -> u32 {
-    let success_code = super::json_rpc_send(get_buffer(text_buffer_index), chain_id);
-    super::advance_execution();
-    success_code
+    super::json_rpc_send(get_buffer(text_buffer_index), chain_id)
 }
 
 /// Obtains information about the first response in the queue of JSON-RPC responses.
@@ -503,6 +419,8 @@ pub extern "C" fn json_rpc_send(text_buffer_index: u32, chain_id: u32) -> u32 {
 /// [`JsonRpcResponseInfo`].
 ///
 /// If `len` is equal to 0, this indicates that the queue of JSON-RPC responses is empty.
+/// When a `len` of 0 is returned, [`json_rpc_responses_non_empty`] will later be called to
+/// indicate that it is no longer empty.
 ///
 /// After having read the response or notification, use [`json_rpc_responses_pop`] to remove it
 /// from the queue. You can then call [`json_rpc_responses_peek`] again to read the next response.
@@ -531,14 +449,12 @@ pub struct JsonRpcResponseInfo {
 #[no_mangle]
 pub extern "C" fn json_rpc_responses_pop(chain_id: u32) {
     super::json_rpc_responses_pop(chain_id);
-    super::advance_execution();
 }
 
 /// Must be called in response to [`start_timer`] after the given duration has passed.
 #[no_mangle]
-pub extern "C" fn timer_finished(timer_id: u32) {
-    crate::timers::timer_finished(timer_id);
-    super::advance_execution();
+pub extern "C" fn timer_finished() {
+    crate::timers::timer_finished();
 }
 
 /// Called by the JavaScript code if the connection switches to the `Open` state. The connection
@@ -569,7 +485,6 @@ pub extern "C" fn connection_open_single_stream(
         initial_writable_bytes,
         write_closable,
     );
-    super::advance_execution();
 }
 
 /// Called by the JavaScript code if the connection switches to the `Open` state. The connection
@@ -593,7 +508,6 @@ pub extern "C" fn connection_open_multi_stream(connection_id: u32, handshake_ty_
         connection_id,
         get_buffer(handshake_ty_buffer_index),
     );
-    super::advance_execution();
 }
 
 /// Notify of a message being received on the stream. The connection associated with that stream
@@ -612,7 +526,6 @@ pub extern "C" fn connection_open_multi_stream(connection_id: u32, handshake_ty_
 #[no_mangle]
 pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, buffer_index: u32) {
     crate::platform::stream_message(connection_id, stream_id, get_buffer(buffer_index));
-    super::advance_execution();
 }
 
 /// Notify that extra bytes can be written onto the stream. The connection associated with that
@@ -633,7 +546,6 @@ pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, buffer_inde
 #[no_mangle]
 pub extern "C" fn stream_writable_bytes(connection_id: u32, stream_id: u32, num_bytes: u32) {
     crate::platform::stream_writable_bytes(connection_id, stream_id, num_bytes);
-    super::advance_execution();
 }
 
 /// Called by the JavaScript code when the given multi-stream connection has a new substream.
@@ -659,7 +571,6 @@ pub extern "C" fn connection_stream_opened(
         outbound,
         initial_writable_bytes,
     );
-    super::advance_execution();
 }
 
 /// Can be called at any point by the JavaScript code if the connection switches to the `Reset`
@@ -677,7 +588,6 @@ pub extern "C" fn connection_stream_opened(
 #[no_mangle]
 pub extern "C" fn connection_reset(connection_id: u32, buffer_index: u32) {
     crate::platform::connection_reset(connection_id, get_buffer(buffer_index));
-    super::advance_execution();
 }
 
 /// Can be called at any point by the JavaScript code if the stream switches to the `Reset`
@@ -694,7 +604,6 @@ pub extern "C" fn connection_reset(connection_id: u32, buffer_index: u32) {
 #[no_mangle]
 pub extern "C" fn stream_reset(connection_id: u32, stream_id: u32) {
     crate::platform::stream_reset(connection_id, stream_id);
-    super::advance_execution();
 }
 
 pub(crate) fn get_buffer(buffer_index: u32) -> Vec<u8> {

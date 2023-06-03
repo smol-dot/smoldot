@@ -43,11 +43,7 @@
 
 #![allow(dead_code)] // TODO: remove this after `all.rs` implements full node; right now many methods here are useless because expected to be used only for full node code
 
-use alloc::{
-    collections::{btree_map::Entry, BTreeMap},
-    vec,
-    vec::Vec,
-};
+use alloc::collections::{btree_map::Entry, BTreeMap};
 use core::{fmt, iter, mem};
 
 /// Collection of pending blocks.
@@ -254,33 +250,40 @@ impl<TBl> DisjointBlocks<TBl> {
     /// Panics if the block with the given height and hash hasn't been inserted before.
     ///
     #[track_caller]
-    pub fn set_block_bad(&mut self, height: u64, hash: &[u8; 32]) {
-        // The implementation of this method is far from being optimized, but it is by far the
-        // easiest way to implement it, and this operation is expected to happen rarely.
-
+    pub fn set_block_bad(&mut self, mut height: u64, hash: &[u8; 32]) {
         // Initially contains the concerned block, then will contain the children of the concerned
         // block, then the grand-children, then the grand-grand-children, and so on.
-        let mut blocks = vec![(height, *hash)];
+        let mut blocks =
+            hashbrown::HashSet::with_capacity_and_hasher(1, fnv::FnvBuildHasher::default());
+        blocks.insert(*hash);
 
         while !blocks.is_empty() {
-            let mut children = Vec::new();
+            let mut children = hashbrown::HashSet::with_capacity_and_hasher(
+                blocks.len() * 4,
+                fnv::FnvBuildHasher::default(),
+            );
 
-            for (height, hash) in blocks {
-                self.blocks.get_mut(&(height, hash)).unwrap().bad = true;
-
-                // Iterate over all blocks whose height is `height + 1` to try find children.
-                for ((_maybe_child_height, maybe_child_hash), maybe_child) in self
-                    .blocks
-                    .range((height + 1, [0; 32])..=(height + 1, [0xff; 32]))
+            // Iterate over all blocks whose height is `height + 1` to try find children.
+            for ((_maybe_child_height, maybe_child_hash), maybe_child) in self
+                .blocks
+                .range((height + 1, [0; 32])..=(height + 1, [0xff; 32]))
+            {
+                debug_assert_eq!(*_maybe_child_height, height + 1);
+                if maybe_child
+                    .parent_hash
+                    .as_ref()
+                    .map_or(false, |p| blocks.contains(p))
                 {
-                    debug_assert_eq!(*_maybe_child_height, height + 1);
-                    if maybe_child.parent_hash.as_ref() == Some(&hash) {
-                        children.push((height + 1, *maybe_child_hash));
-                    }
+                    children.insert(*maybe_child_hash);
                 }
             }
 
+            for hash in blocks {
+                self.blocks.get_mut(&(height, hash)).unwrap().bad = true;
+            }
+
             blocks = children;
+            height += 1;
         }
     }
 

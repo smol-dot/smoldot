@@ -20,9 +20,7 @@ use crate::{bindings, timers::Delay};
 use smoldot::libp2p::multihash;
 use smoldot_light::platform::{ConnectError, PlatformSubstreamDirection};
 
-use core::{future::Future, mem, pin, str, task, time::Duration};
-use futures_channel::mpsc;
-use futures_util::{future, FutureExt as _};
+use core::{future, mem, pin, str, task, time::Duration};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, VecDeque},
@@ -30,6 +28,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Mutex,
     },
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 /// Total number of bytes that all the connections created through [`Platform`] combined have
@@ -40,16 +39,11 @@ pub static TOTAL_BYTES_RECEIVED: AtomicU64 = AtomicU64::new(0);
 pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
-pub(crate) struct Platform {
-    new_task_tx: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
-}
+pub(crate) struct Platform {}
 
 impl Platform {
-    // TODO: consider doing the spawning entirely here, instead of providing a channel
-    pub fn new(
-        new_task_tx: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
-    ) -> Self {
-        Self { new_task_tx }
+    pub const fn new() -> Self {
+        Self {}
     }
 }
 
@@ -57,39 +51,42 @@ impl Platform {
 impl smoldot_light::platform::PlatformRef for Platform {
     type Delay = Delay;
     type Yield = Yield;
-    type Instant = crate::Instant;
+    type Instant = Instant;
     type Connection = ConnectionWrapper; // Entry in the ̀`CONNECTIONS` map.
     type Stream = StreamWrapper; // Entry in the ̀`STREAMS` map and a read buffer.
-    type ConnectFuture = future::BoxFuture<
-        'static,
-        Result<
-            smoldot_light::platform::PlatformConnection<Self::Stream, Self::Connection>,
-            ConnectError,
+    type ConnectFuture = pin::Pin<
+        Box<
+            dyn future::Future<
+                    Output = Result<
+                        smoldot_light::platform::PlatformConnection<Self::Stream, Self::Connection>,
+                        ConnectError,
+                    >,
+                > + Send,
         >,
     >;
-    type StreamUpdateFuture<'a> = future::BoxFuture<'a, ()>;
-    type NextSubstreamFuture<'a> = future::BoxFuture<
-        'a,
-        Option<(
-            Self::Stream,
-            smoldot_light::platform::PlatformSubstreamDirection,
-        )>,
+    type StreamUpdateFuture<'a> = pin::Pin<Box<dyn future::Future<Output = ()> + Send + 'a>>;
+    type NextSubstreamFuture<'a> = pin::Pin<
+        Box<
+            dyn future::Future<
+                    Output = Option<(
+                        Self::Stream,
+                        smoldot_light::platform::PlatformSubstreamDirection,
+                    )>,
+                > + Send
+                + 'a,
+        >,
     >;
 
     fn now_from_unix_epoch(&self) -> Duration {
-        let value = unsafe { bindings::unix_time_ms() };
-        debug_assert!(value.is_finite());
         // The documentation of `now_from_unix_epoch()` mentions that it's ok to panic if we're
         // before the UNIX epoch.
-        assert!(
-            value >= 0.0,
-            "running before the UNIX epoch isn't supported"
-        );
-        Duration::from_secs_f64(value / 1000.0)
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|_| panic!())
     }
 
     fn now(&self) -> Self::Instant {
-        crate::Instant::now()
+        Instant::now()
     }
 
     fn sleep(&self, duration: Duration) -> Self::Delay {
@@ -100,10 +97,43 @@ impl smoldot_light::platform::PlatformRef for Platform {
         Delay::new_at(when)
     }
 
-    fn spawn_task(&self, task_name: Cow<str>, task: future::BoxFuture<'static, ()>) {
-        self.new_task_tx
-            .unbounded_send((task_name.into_owned(), task))
-            .unwrap()
+    fn spawn_task(
+        &self,
+        task_name: Cow<str>,
+        task: pin::Pin<Box<dyn future::Future<Output = ()> + Send>>,
+    ) {
+        // The code below processes tasks that have names.
+        #[pin_project::pin_project]
+        struct FutureAdapter<F> {
+            name: String,
+            #[pin]
+            future: F,
+        }
+
+        impl<F: future::Future> future::Future for FutureAdapter<F> {
+            type Output = F::Output;
+            fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
+                let this = self.project();
+                unsafe {
+                    bindings::current_task_entered(
+                        u32::try_from(this.name.as_bytes().as_ptr() as usize).unwrap(),
+                        u32::try_from(this.name.as_bytes().len()).unwrap(),
+                    )
+                }
+                let out = this.future.poll(cx);
+                unsafe {
+                    bindings::current_task_exit();
+                }
+                out
+            }
+        }
+
+        let task = FutureAdapter {
+            name: task_name.into_owned(),
+            future: task,
+        };
+
+        super::EXECUTOR.spawn(task).detach();
     }
 
     fn client_name(&self) -> Cow<str> {
@@ -115,17 +145,7 @@ impl smoldot_light::platform::PlatformRef for Platform {
     }
 
     fn yield_after_cpu_intensive(&self) -> Self::Yield {
-        // We do not yield once, but twice.
-        // The reason is that, at the time of writing, `FuturesUnordered` yields to the outside
-        // after one of its futures has yielded twice.
-        // Yielding to the outside is important in the context of the browser node because it
-        // gives time to the browser to run its own events loop.
-        // See <https://github.com/rust-lang/futures-rs/blob/7a98cf0bbeb397dcfaf5f020b371ab9e836d33d4/futures-util/src/stream/futures_unordered/mod.rs#L531>
-        // See <https://github.com/rust-lang/futures-rs/issues/2053> for a discussion about a proper
-        // solution.
-        Yield {
-            num_pending_remain: 2,
-        }
+        Yield { has_yielded: false }
     }
 
     fn connect(&self, url: &str) -> Self::ConnectFuture {
@@ -166,7 +186,7 @@ impl smoldot_light::platform::PlatformRef for Platform {
             Ok(())
         };
 
-        async move {
+        Box::pin(async move {
             result?;
 
             // Wait until the connection state is no longer `ConnectionInner::NotOpen`.
@@ -205,14 +225,19 @@ impl smoldot_light::platform::PlatformRef for Platform {
                 ConnectionInner::MultiStreamWebRtc {
                     connection_handles_alive,
                     local_tls_certificate_multihash,
-                    remote_tls_certificate_multihash, ..
+                    remote_tls_certificate_multihash,
+                    ..
                 } => {
                     *connection_handles_alive += 1;
-                    Ok(smoldot_light::platform::PlatformConnection::MultiStreamWebRtc {
-                        connection: ConnectionWrapper(connection_id),
-                        local_tls_certificate_multihash: local_tls_certificate_multihash.clone(),
-                        remote_tls_certificate_multihash: remote_tls_certificate_multihash.clone(),
-                    })
+                    Ok(
+                        smoldot_light::platform::PlatformConnection::MultiStreamWebRtc {
+                            connection: ConnectionWrapper(connection_id),
+                            local_tls_certificate_multihash: local_tls_certificate_multihash
+                                .clone(),
+                            remote_tls_certificate_multihash: remote_tls_certificate_multihash
+                                .clone(),
+                        },
+                    )
                 }
                 ConnectionInner::Reset {
                     message,
@@ -230,8 +255,7 @@ impl smoldot_light::platform::PlatformRef for Platform {
                     })
                 }
             }
-        }
-        .boxed()
+        })
     }
 
     fn next_substream<'a>(
@@ -240,7 +264,7 @@ impl smoldot_light::platform::PlatformRef for Platform {
     ) -> Self::NextSubstreamFuture<'a> {
         let connection_id = *connection_id;
 
-        async move {
+        Box::pin(async move {
             let (stream_id, direction, initial_writable_bytes) = loop {
                 let something_happened = {
                     let mut lock = STATE.try_lock().unwrap();
@@ -287,8 +311,7 @@ impl smoldot_light::platform::PlatformRef for Platform {
                 },
                 direction,
             ))
-        }
-        .boxed()
+        })
     }
 
     fn open_out_substream(&self, ConnectionWrapper(connection_id): &mut Self::Connection) {
@@ -485,15 +508,15 @@ impl smoldot_light::platform::PlatformRef for Platform {
 }
 
 pub(crate) struct Yield {
-    num_pending_remain: u32,
+    has_yielded: bool,
 }
 
-impl Future for Yield {
+impl future::Future for Yield {
     type Output = ();
 
     fn poll(mut self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
-        if self.num_pending_remain > 0 {
-            self.num_pending_remain -= 1;
+        if !self.has_yielded {
+            self.has_yielded = true;
             cx.waker().wake_by_ref();
             task::Poll::Pending
         } else {

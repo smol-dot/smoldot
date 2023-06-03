@@ -64,14 +64,14 @@ impl<T> NonFinalizedTree<T> {
                 Ok(HeaderVerifySuccess::Insert {
                     block_height,
                     is_new_best,
-                    insert: HeaderInsert {
+                    insert: HeaderInsert(Box::new(HeaderInsertInner {
                         chain: self,
                         context: Some(context),
                         is_new_best,
                         hash,
                         consensus: Some(consensus),
                         finality: Some(finality),
-                    },
+                    })),
                 })
             }
             VerifyOut::HeaderDuplicate(self_inner) => {
@@ -223,13 +223,13 @@ impl<T> NonFinalizedTreeInner<T> {
             (consensus, finality)
         };
 
-        let mut context = VerifyContext {
+        let mut context = Box::new(VerifyContext {
             chain: self,
             header: scale_encoded_header,
             parent_tree_index,
             consensus,
             finality,
-        };
+        });
 
         if full {
             VerifyOut::Body(BodyVerifyStep1::ParentRuntimeRequired(
@@ -293,7 +293,7 @@ impl<T> NonFinalizedTreeInner<T> {
                     .unwrap(), // TODO: inefficiency ; in case of header only verify we do an extra allocation to build the context above
                 block_number_bytes: context.chain.block_number_bytes,
                 parent_block_header: header::decode(
-                    &parent_block_header,
+                    parent_block_header,
                     context.chain.block_number_bytes,
                 )
                 .unwrap(),
@@ -320,7 +320,7 @@ impl<T> NonFinalizedTreeInner<T> {
 
 enum VerifyOut<T> {
     HeaderOk(
-        VerifyContext<T>,
+        Box<VerifyContext<T>>,
         bool,
         BlockConsensus,
         BlockFinality,
@@ -537,30 +537,28 @@ impl<T> VerifyContext<T> {
                     header::DigestItemRef::GrandpaConsensus(gp) => Some(gp),
                     _ => None,
                 }) {
-                    match grandpa_digest_item {
-                        header::GrandpaConsensusLogRef::ScheduledChange(change) => {
-                            let trigger_block_height =
-                                decoded_header.number.checked_add(change.delay).unwrap();
+                    // TODO: implement items other than ScheduledChange
+                    // TODO: when it comes to forced change, they take precedence over scheduled changes but only sheduled changes within the same block
+                    if let header::GrandpaConsensusLogRef::ScheduledChange(change) =
+                        grandpa_digest_item
+                    {
+                        let trigger_block_height =
+                            decoded_header.number.checked_add(change.delay).unwrap();
 
-                            // It is forbidden to schedule a change while a change is already
-                            // scheduled, otherwise the block is invalid. This is verified during
-                            // the block verification.
-                            match scheduled_change {
-                                Some(_) => {
-                                    // Ignore any new change if a change is already in progress.
-                                    // Matches the behaviour here: <https://github.com/paritytech/substrate/blob/a357c29ebabb075235977edd5e3901c66575f995/client/finality-grandpa/src/authorities.rs#L479>
-                                }
-                                None => {
-                                    scheduled_change = Some((
-                                        trigger_block_height,
-                                        change.next_authorities.map(|a| a.into()).collect(),
-                                    ));
-                                }
+                        // It is forbidden to schedule a change while a change is already
+                        // scheduled, otherwise the block is invalid. This is verified during
+                        // the block verification.
+                        match scheduled_change {
+                            Some(_) => {
+                                // Ignore any new change if a change is already in progress.
+                                // Matches the behaviour here: <https://github.com/paritytech/substrate/blob/a357c29ebabb075235977edd5e3901c66575f995/client/finality-grandpa/src/authorities.rs#L479>
                             }
-                        }
-                        _ => {
-                            // TODO: unimplemented
-                            // TODO: when it comes to forced change, they take precedence over scheduled changes but only sheduled changes within the same block
+                            None => {
+                                scheduled_change = Some((
+                                    trigger_block_height,
+                                    change.next_authorities.map(|a| a.into()).collect(),
+                                ));
+                            }
                         }
                     }
                 }
@@ -608,7 +606,10 @@ impl<T> VerifyContext<T> {
         (is_new_best, consensus, finality)
     }
 
-    fn with_body_verify(mut self, inner: verify::header_body::Verify) -> BodyVerifyStep2<T> {
+    fn with_body_verify(
+        mut self: Box<Self>,
+        inner: verify::header_body::Verify,
+    ) -> BodyVerifyStep2<T> {
         match inner {
             verify::header_body::Verify::Finished(Ok(success)) => {
                 // TODO: lots of code in common with header verification
@@ -624,13 +625,13 @@ impl<T> VerifyContext<T> {
                     state_trie_version: success.state_trie_version,
                     offchain_storage_changes: success.offchain_storage_changes,
                     main_trie_root_calculation_cache: success.main_trie_root_calculation_cache,
-                    insert: BodyInsert {
+                    insert: BodyInsert(Box::new(BodyInsertInner {
                         context: self,
                         is_new_best,
                         hash,
                         consensus,
                         finality,
-                    },
+                    })),
                 }
             }
             verify::header_body::Verify::Finished(Err((error, parent_runtime))) => {
@@ -698,7 +699,7 @@ pub enum BodyVerifyStep1<T> {
 /// of the parent block must be provided.
 #[must_use]
 pub struct BodyVerifyRuntimeRequired<T> {
-    context: VerifyContext<T>,
+    context: Box<VerifyContext<T>>,
     now_from_unix_epoch: Duration,
 }
 
@@ -833,7 +834,7 @@ impl<T> BodyVerifyRuntimeRequired<T> {
             .unwrap(),
             block_number_bytes: self.context.chain.block_number_bytes,
             parent_block_header: header::decode(
-                &parent_block_header,
+                parent_block_header,
                 self.context.chain.block_number_bytes,
             )
             .unwrap(),
@@ -927,7 +928,7 @@ pub enum BodyVerifyError {
 #[must_use]
 pub struct StorageGet<T> {
     inner: verify::header_body::StorageGet,
-    context: VerifyContext<T>,
+    context: Box<VerifyContext<T>>,
 }
 
 impl<T> StorageGet<T> {
@@ -986,7 +987,7 @@ impl<T> StorageGet<T> {
 #[must_use]
 pub struct StoragePrefixKeys<T> {
     inner: verify::header_body::StoragePrefixKeys,
-    context: VerifyContext<T>,
+    context: Box<VerifyContext<T>>,
 }
 
 impl<T> StoragePrefixKeys<T> {
@@ -1045,7 +1046,7 @@ impl<T> StoragePrefixKeys<T> {
 #[must_use]
 pub struct StorageNextKey<T> {
     inner: verify::header_body::StorageNextKey,
-    context: VerifyContext<T>,
+    context: Box<VerifyContext<T>>,
 }
 
 impl<T> StorageNextKey<T> {
@@ -1121,7 +1122,7 @@ impl<T> StorageNextKey<T> {
 #[must_use]
 pub struct RuntimeCompilation<T> {
     inner: verify::header_body::RuntimeCompilation,
-    context: VerifyContext<T>,
+    context: Box<VerifyContext<T>>,
 }
 
 impl<T> RuntimeCompilation<T> {
@@ -1151,9 +1152,11 @@ pub enum HeaderVerifySuccess<'c, T> {
 /// Mutably borrows the [`NonFinalizedTree`] and allows insert a successfully-verified block
 /// into it.
 #[must_use]
-pub struct HeaderInsert<'c, T> {
+pub struct HeaderInsert<'c, T>(Box<HeaderInsertInner<'c, T>>);
+
+struct HeaderInsertInner<'c, T> {
     chain: &'c mut NonFinalizedTree<T>,
-    context: Option<VerifyContext<T>>,
+    context: Option<Box<VerifyContext<T>>>,
     hash: [u8; 32],
     is_new_best: bool,
     consensus: Option<BlockConsensus>,
@@ -1163,7 +1166,7 @@ pub struct HeaderInsert<'c, T> {
 impl<'c, T> HeaderInsert<'c, T> {
     /// Inserts the block with the given user data.
     pub fn insert(mut self, user_data: T) {
-        let mut context = self.context.take().unwrap();
+        let mut context = self.0.context.take().unwrap();
 
         debug_assert_eq!(
             context.chain.blocks.len(),
@@ -1174,9 +1177,9 @@ impl<'c, T> HeaderInsert<'c, T> {
             context.parent_tree_index,
             Block {
                 header: context.header,
-                hash: self.hash,
-                consensus: self.consensus.take().unwrap(),
-                finality: self.finality.take().unwrap(),
+                hash: self.0.hash,
+                consensus: self.0.consensus.take().unwrap(),
+                finality: self.0.finality.take().unwrap(),
                 user_data,
             },
         );
@@ -1184,27 +1187,27 @@ impl<'c, T> HeaderInsert<'c, T> {
         let _prev_value = context
             .chain
             .blocks_by_hash
-            .insert(self.hash, new_node_index);
+            .insert(self.0.hash, new_node_index);
         // A bug here would be serious enough that it is worth being an `assert!`
         assert!(_prev_value.is_none());
 
-        if self.is_new_best {
+        if self.0.is_new_best {
             context.chain.current_best = Some(new_node_index);
         }
 
-        self.chain.inner = Some(context.chain);
+        self.0.chain.inner = Some(context.chain);
     }
 
     /// Returns the block header about to be inserted.
     pub fn header(&self) -> header::HeaderRef {
-        let context = self.context.as_ref().unwrap();
+        let context = self.0.context.as_ref().unwrap();
         header::decode(&context.header, context.chain.block_number_bytes).unwrap()
     }
 
     /// Destroys the object without inserting the block in the chain. Returns the block header.
     pub fn into_scale_encoded_header(mut self) -> Vec<u8> {
-        let context = self.context.take().unwrap();
-        self.chain.inner = Some(context.chain);
+        let context = self.0.context.take().unwrap();
+        self.0.chain.inner = Some(context.chain);
         context.header
     }
 }
@@ -1212,17 +1215,17 @@ impl<'c, T> HeaderInsert<'c, T> {
 impl<'c, T> fmt::Debug for HeaderInsert<'c, T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("HeaderInsert")
-            .field(&self.context.as_ref().unwrap().header)
+            .field(&self.0.context.as_ref().unwrap().header)
             .finish()
     }
 }
 
 impl<'c, T> Drop for HeaderInsert<'c, T> {
     fn drop(&mut self) {
-        if let Some(context) = self.context.take() {
-            self.chain.inner = Some(context.chain);
+        if let Some(context) = self.0.context.take() {
+            self.0.chain.inner = Some(context.chain);
         } else {
-            debug_assert!(self.chain.inner.is_some());
+            debug_assert!(self.0.chain.inner.is_some());
         }
     }
 }
@@ -1250,8 +1253,10 @@ pub enum HeaderVerifyError {
 
 /// Holds the [`NonFinalizedTree`] and allows insert a successfully-verified block into it.
 #[must_use]
-pub struct BodyInsert<T> {
-    context: VerifyContext<T>,
+pub struct BodyInsert<T>(Box<BodyInsertInner<T>>);
+
+struct BodyInsertInner<T> {
+    context: Box<VerifyContext<T>>,
     hash: [u8; 32],
     is_new_best: bool,
     consensus: BlockConsensus,
@@ -1261,48 +1266,53 @@ pub struct BodyInsert<T> {
 impl<T> BodyInsert<T> {
     /// Returns the header of the block about to be inserted.
     pub fn header(&self) -> header::HeaderRef {
-        header::decode(&self.context.header, self.context.chain.block_number_bytes).unwrap()
+        header::decode(
+            &self.0.context.header,
+            self.0.context.chain.block_number_bytes,
+        )
+        .unwrap()
     }
 
     /// Inserts the block with the given user data.
     pub fn insert(mut self, user_data: T) -> NonFinalizedTree<T> {
         debug_assert_eq!(
-            self.context.chain.blocks.len(),
-            self.context.chain.blocks_by_hash.len()
+            self.0.context.chain.blocks.len(),
+            self.0.context.chain.blocks_by_hash.len()
         );
 
-        let new_node_index = self.context.chain.blocks.insert(
-            self.context.parent_tree_index,
+        let new_node_index = self.0.context.chain.blocks.insert(
+            self.0.context.parent_tree_index,
             Block {
-                header: self.context.header,
-                hash: self.hash,
-                consensus: self.consensus,
-                finality: self.finality,
+                header: self.0.context.header,
+                hash: self.0.hash,
+                consensus: self.0.consensus,
+                finality: self.0.finality,
                 user_data,
             },
         );
 
         let _prev_value = self
+            .0
             .context
             .chain
             .blocks_by_hash
-            .insert(self.hash, new_node_index);
+            .insert(self.0.hash, new_node_index);
         // A bug here would be serious enough that it is worth being an `assert!`
         assert!(_prev_value.is_none());
 
-        if self.is_new_best {
-            self.context.chain.current_best = Some(new_node_index);
+        if self.0.is_new_best {
+            self.0.context.chain.current_best = Some(new_node_index);
         }
 
         NonFinalizedTree {
-            inner: Some(self.context.chain),
+            inner: Some(self.0.context.chain),
         }
     }
 
     /// Destroys the object without inserting the block in the chain.
     pub fn abort(self) -> NonFinalizedTree<T> {
         NonFinalizedTree {
-            inner: Some(self.context.chain),
+            inner: Some(self.0.context.chain),
         }
     }
 }
@@ -1310,7 +1320,7 @@ impl<T> BodyInsert<T> {
 impl<T> fmt::Debug for BodyInsert<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("BodyInsert")
-            .field(&self.context.header)
+            .field(&self.0.context.header)
             .finish()
     }
 }

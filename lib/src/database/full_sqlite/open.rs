@@ -113,6 +113,7 @@ List of all known blocks, indexed by their hash or number.
 */
 CREATE TABLE IF NOT EXISTS blocks(
     hash BLOB NOT NULL PRIMARY KEY,
+    parent_hash BLOB,  -- NULL only for the genesis block
     number INTEGER NOT NULL,
     header BLOB NOT NULL,
     justification BLOB,
@@ -312,21 +313,44 @@ impl DatabaseEmpty {
         }
 
         {
-            let mut statement = self
-                .database
-                .prepare(
-                    "INSERT INTO blocks(hash, number, header, justification) VALUES(?, ?, ?, ?)",
-                )
-                .unwrap()
-                .bind(1, &finalized_block_hash[..])
-                .unwrap()
-                .bind(
-                    2,
-                    i64::try_from(chain_information.finalized_block_header.number).unwrap(),
-                )
-                .unwrap()
-                .bind(3, &scale_encoded_finalized_block_header[..])
-                .unwrap();
+            let mut statement = if chain_information.finalized_block_header.number != 0 {
+                self
+                    .database
+                    .prepare(
+                        "INSERT INTO blocks(hash, parent_hash, number, header, justification) VALUES(?, ?, ?, ?, ?)",
+                    )
+                    .unwrap()
+                    .bind(1, &finalized_block_hash[..])
+                    .unwrap()
+                    .bind(
+                        2,
+                        &chain_information.finalized_block_header.parent_hash[..]
+                    )
+                    .unwrap()
+                    .bind(
+                        3,
+                        i64::try_from(chain_information.finalized_block_header.number).unwrap(),
+                    )
+                    .unwrap()
+                    .bind(4, &scale_encoded_finalized_block_header[..])
+                    .unwrap()
+            } else {
+                self
+                    .database
+                    .prepare(
+                        "INSERT INTO blocks(hash, parent_hash, number, header, justification) VALUES(?, NULL, ?, ?, ?)",
+                    )
+                    .unwrap()
+                    .bind(1, &finalized_block_hash[..])
+                    .unwrap()
+                    .bind(
+                        2,
+                        i64::try_from(chain_information.finalized_block_header.number).unwrap(),
+                    )
+                    .unwrap()
+                    .bind(3, &scale_encoded_finalized_block_header[..])
+                    .unwrap()
+            };
             if let Some(finalized_block_justification) = &finalized_block_justification {
                 statement = statement
                     .bind(4, &finalized_block_justification[..])

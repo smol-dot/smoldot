@@ -79,13 +79,13 @@ child_process.execSync(
     { 'stdio': 'inherit', 'env': { 'RUSTFLAGS': '-C target-feature=+bulk-memory,+sign-ext,+simd128', ...process.env } }
 );
 
-// The code below will write a variable number of files to the `src/instance/autogen` directory.
+// The code below will write a variable number of files to the `src/internals/bytecode` directory.
 // Start by clearing all existing files from this directory in case there are some left from past
 // builds.
-const filesToRemove = fs.readdirSync('./src/instance/autogen');
+const filesToRemove = fs.readdirSync('./src/internals/bytecode');
 for (const file of filesToRemove) {
     if (!file.startsWith('.')) // Don't want to remove the `.gitignore` or `.npmignore` or similar
-        fs.unlinkSync(path.join("./src/instance/autogen", file));
+        fs.unlinkSync(path.join("./src/internals/bytecode", file));
 }
 
 // We then do an optimization pass on the Wasm file, using `wasm-opt`.
@@ -124,14 +124,14 @@ try {
         const chunk = base64Data.slice(0, 1024 * 1024);
         // We could simply export the chunk instead of a function that returns the chunk, but that
         // would cause TypeScript to generate a definitions file containing a copy of the entire chunk.
-        fs.writeFileSync('./src/instance/autogen/wasm' + fileNum + '.ts', 'export default function(): string { return "' + chunk + '"; }');
+        fs.writeFileSync('./src/internals/bytecode/wasm' + fileNum + '.ts', 'export default function(): string { return "' + chunk + '"; }');
         imports += 'import { default as wasm' + fileNum + ' } from \'./wasm' + fileNum + '.js\';\n';
         chunksSum += ' + wasm' + fileNum + '()';
         fileNum += 1;
         base64Data = base64Data.slice(1024 * 1024);
     }
     fs.writeFileSync(
-        './src/instance/autogen/wasm.ts',
+        './src/internals/bytecode/wasm.ts',
         imports +
         'export default ' + chunksSum
     );

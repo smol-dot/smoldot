@@ -28,7 +28,7 @@ fn block_building_works() {
     .unwrap();
     let genesis_storage = chain_specs.genesis_storage().into_genesis_items().unwrap();
 
-    let (chain_info, genesis_runtime) = chain_specs.as_chain_information().unwrap();
+    let (chain_info, genesis_runtime) = chain_specs.to_chain_information().unwrap();
     let genesis_hash = chain_info.as_ref().finalized_block_header.hash(4);
 
     let mut builder = super::build_block(super::Config {
@@ -52,7 +52,7 @@ fn block_building_works() {
                 assert_eq!(*decoded.parent_hash, genesis_hash);
                 break;
             }
-            super::BlockBuild::Finished(Err(err)) => panic!("{}", err),
+            super::BlockBuild::Finished(Err((err, _))) => panic!("{}", err),
             super::BlockBuild::ApplyExtrinsic(ext) => builder = ext.finish(),
             super::BlockBuild::ApplyExtrinsicResult { .. } => unreachable!(),
             super::BlockBuild::InherentExtrinsics(ext) => {

@@ -505,7 +505,7 @@ where
             self.request_response_protocols.len() + self.notification_protocols.len() * 2 + 2;
 
         let handshake = noise::HandshakeInProgress::new(noise::Config {
-            key: &noise_key,
+            key: noise_key,
             // It's the "server" that initiates the Noise handshake.
             is_initiator: !is_initiator,
             prologue: &noise_prologue,
@@ -925,6 +925,7 @@ where
             CoordinatorToConnectionInner::AcceptInNotifications {
                 substream_id: *inner_substream_id,
                 handshake,
+                max_notification_size: 16 * 1024 * 1024, // TODO: obtain from protocol configuration
             },
         ));
 
@@ -1311,6 +1312,7 @@ where
                         .request_response_protocols
                         .iter()
                         .enumerate()
+                        .filter(|(_, p)| p.inbound_allowed)
                         .find(|(_, p)| p.name == protocol_name)
                     {
                         self.messages_to_connections.push_back((
@@ -1344,7 +1346,7 @@ where
                                 },
                             },
                         ));
-                    } else if &*self.ping_protocol == &*protocol_name {
+                    } else if *self.ping_protocol == *protocol_name {
                         self.messages_to_connections.push_back((
                             connection_id,
                             CoordinatorToConnectionInner::AcceptInbound {
@@ -1859,6 +1861,7 @@ enum CoordinatorToConnectionInner<TNow> {
     AcceptInNotifications {
         substream_id: established::SubstreamId,
         handshake: Vec<u8>,
+        max_notification_size: usize,
     },
     RejectInNotifications {
         substream_id: established::SubstreamId,

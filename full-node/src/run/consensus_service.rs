@@ -26,10 +26,11 @@
 
 use crate::run::{database_thread, jaeger_service, network_service};
 
-use async_lock::Mutex;
-use core::{num::NonZeroU32, ops};
-use futures_util::{future, stream, FutureExt as _, StreamExt as _};
+use core::num::NonZeroU32;
+use futures_channel::{mpsc, oneshot};
+use futures_util::{future, stream, FutureExt as _, SinkExt as _, StreamExt as _};
 use hashbrown::HashSet;
+use smol::lock::Mutex;
 use smoldot::{
     author,
     chain::chain_information,
@@ -42,17 +43,16 @@ use smoldot::{
     sync::all::{self, TrieEntryVersion},
 };
 use std::{
-    collections::BTreeMap,
-    iter,
+    iter, mem,
     num::NonZeroU64,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 /// Configuration for a [`ConsensusService`].
-pub struct Config<'a> {
+pub struct Config {
     /// Closure that spawns background tasks.
-    pub tasks_executor: &'a mut dyn FnMut(future::BoxFuture<'static, ()>),
+    pub tasks_executor: Box<dyn FnMut(future::BoxFuture<'static, ()>) + Send>,
 
     /// Database to use to read and write information about the chain.
     pub database: Arc<database_thread::DatabaseThread>,
@@ -114,28 +114,28 @@ pub struct SyncState {
 
 /// Background task that verifies blocks and emits requests.
 pub struct ConsensusService {
-    /// State kept up-to-date with the background task.
-    sync_state: Arc<Mutex<SyncState>>,
+    /// Used to communicate with the background task. Also used for the background task to detect
+    /// a shutdown.
+    to_background_tx: Mutex<mpsc::Sender<ToBackground>>,
+}
+
+enum ToBackground {
+    GetSyncState {
+        result_tx: oneshot::Sender<SyncState>,
+    },
 }
 
 impl ConsensusService {
     /// Initializes the [`ConsensusService`] with the given configuration.
-    pub async fn new(config: Config<'_>) -> Arc<Self> {
+    pub async fn new(config: Config) -> Arc<Self> {
         // Perform the initial access to the database to load a bunch of information.
         let (
-            finalized_block_hash,
             finalized_block_number,
+            finalized_heap_pages,
+            finalized_code,
             best_block_hash,
             best_block_number,
-            finalized_block_storage,
             finalized_chain_information,
-        ): (
-            _,
-            _,
-            _,
-            _,
-            BTreeMap<Vec<u8>, (Vec<u8>, TrieEntryVersion)>,
-            _,
         ) = config
             .database
             .with_database({
@@ -161,26 +161,24 @@ impl ConsensusService {
                     )
                     .unwrap()
                     .number;
-                    let finalized_block_storage: Vec<(Vec<u8>, Vec<u8>, u8)> = database
-                        .finalized_block_storage_main_trie(&finalized_block_hash)
-                        .unwrap();
-                    // TODO: we copy all entries; it could be more optimal to have a custom implementation of FromIterator that directly does the conversion?
-                    let finalized_block_storage = finalized_block_storage
-                        .into_iter()
-                        .map(|(k, val, vers)| {
-                            let vers = TrieEntryVersion::try_from(vers).unwrap(); // TODO: don't unwrap
-                            (k, (val, vers))
-                        })
-                        .collect();
                     let finalized_chain_information = database
                         .to_chain_information(&finalized_block_hash)
                         .unwrap();
+                    let finalized_code = database
+                        .block_storage_main_trie_get(&finalized_block_hash, b":code")
+                        .unwrap()
+                        .unwrap() // TODO: better error?
+                        .0;
+                    let finalized_heap_pages = database
+                        .block_storage_main_trie_get(&finalized_block_hash, b":heappages")
+                        .unwrap() // TODO: better error?
+                        .map(|(hp, _)| hp);
                     (
-                        finalized_block_hash,
                         finalized_block_number,
+                        finalized_heap_pages,
+                        finalized_code,
                         best_block_hash,
                         best_block_number,
-                        finalized_block_storage,
                         finalized_chain_information,
                     )
                 }
@@ -206,82 +204,73 @@ impl ConsensusService {
             );
         }
 
-        let sync_state = Arc::new(Mutex::new(SyncState {
-            best_block_number,
-            best_block_hash,
-            finalized_block_number,
-            finalized_block_hash,
-        }));
-
-        // Spawn the background task that synchronizes blocks and updates the database.
-        (config.tasks_executor)({
-            let mut sync = all::AllSync::new(all::Config {
-                chain_information: finalized_chain_information,
-                block_number_bytes: config.block_number_bytes,
-                allow_unknown_consensus_engines: false,
-                sources_capacity: 32,
-                blocks_capacity: {
-                    // This is the maximum number of blocks between two consecutive justifications.
-                    1024
-                },
-                max_disjoint_headers: 1024,
-                max_requests_per_block: NonZeroU32::new(3).unwrap(),
-                download_ahead_blocks: {
-                    // Assuming a verification speed of 1k blocks/sec and a 99th download time
-                    // percentile of two second, the number of blocks to download ahead of time
-                    // in order to not block is 2000.
-                    // In practice, however, the verification speed and download speed depend on
-                    // the chain and the machine of the user.
-                    NonZeroU32::new(2000).unwrap()
-                },
-                full: Some(all::ConfigFull {
-                    finalized_runtime: {
-                        // Builds the runtime of the finalized block.
-                        // Assumed to always be valid, otherwise the block wouldn't have been saved in the
-                        // database, hence the large number of unwraps here.
-                        let (module, _) = finalized_block_storage.get(&b":code"[..]).unwrap();
-                        let heap_pages = executor::storage_heap_pages_to_value(
-                            finalized_block_storage
-                                .get(&b":heappages"[..])
-                                .map(|(v, _)| &v[..]),
-                        )
-                        .unwrap();
-                        executor::host::HostVmPrototype::new(executor::host::Config {
-                            module,
-                            heap_pages,
-                            exec_hint: executor::vm::ExecHint::CompileAheadOfTime, // TODO: probably should be decided by the optimisticsync
-                            allow_unresolved_imports: false,
-                        })
-                        .unwrap()
-                    },
-                }),
-            });
-
-            let block_author_sync_source =
-                sync.add_source(None, best_block_number, best_block_hash);
-
-            let background_sync = SyncBackground {
-                sync,
-                block_author_sync_source,
-                block_authoring: None,
-                authored_block: None,
-                slot_duration_author_ratio: config.slot_duration_author_ratio,
-                keystore: config.keystore,
-                finalized_block_storage,
-                sync_state: sync_state.clone(),
-                network_service: config.network_service.0,
-                network_chain_index: config.network_service.1,
-                from_network_service: config.network_events_receiver,
-                database: config.database,
-                peers_source_id_map: Default::default(),
-                block_requests_finished: stream::FuturesUnordered::new(),
-                jaeger_service: config.jaeger_service,
-            };
-
-            Box::pin(background_sync.run())
+        let mut sync = all::AllSync::new(all::Config {
+            chain_information: finalized_chain_information,
+            block_number_bytes: config.block_number_bytes,
+            allow_unknown_consensus_engines: false,
+            sources_capacity: 32,
+            blocks_capacity: {
+                // This is the maximum number of blocks between two consecutive justifications.
+                1024
+            },
+            max_disjoint_headers: 1024,
+            max_requests_per_block: NonZeroU32::new(3).unwrap(),
+            download_ahead_blocks: {
+                // Assuming a verification speed of 1k blocks/sec and a 99th download time
+                // percentile of two second, the number of blocks to download ahead of time
+                // in order to not block is 2000.
+                // In practice, however, the verification speed and download speed depend on
+                // the chain and the machine of the user.
+                NonZeroU32::new(2000).unwrap()
+            },
+            full_mode: true,
         });
 
-        Arc::new(ConsensusService { sync_state })
+        let finalized_runtime = {
+            // Builds the runtime of the finalized block.
+            // Assumed to always be valid, otherwise the block wouldn't have been
+            // saved in the database, hence the large number of unwraps here.
+            let heap_pages =
+                executor::storage_heap_pages_to_value(finalized_heap_pages.as_deref()).unwrap(); // TODO: better error message?
+            executor::host::HostVmPrototype::new(executor::host::Config {
+                module: finalized_code,
+                heap_pages,
+                exec_hint: executor::vm::ExecHint::CompileAheadOfTime, // TODO: probably should be decided by the optimisticsync
+                allow_unresolved_imports: false,
+            })
+            .unwrap() // TODO: better error message?
+        };
+
+        let block_author_sync_source = sync.add_source(None, best_block_number, best_block_hash);
+
+        let (block_requests_finished_tx, block_requests_finished_rx) = mpsc::channel(0);
+        let (to_background_tx, to_background_rx) = mpsc::channel(4);
+
+        let background_sync = SyncBackground {
+            sync,
+            block_author_sync_source,
+            block_authoring: None,
+            authored_block: None,
+            slot_duration_author_ratio: config.slot_duration_author_ratio,
+            keystore: config.keystore,
+            finalized_runtime: Arc::new(Mutex::new(Some(finalized_runtime))),
+            network_service: config.network_service.0,
+            network_chain_index: config.network_service.1,
+            to_background_rx,
+            from_network_service: config.network_events_receiver,
+            database: config.database,
+            peers_source_id_map: Default::default(),
+            tasks_executor: config.tasks_executor,
+            block_requests_finished_tx,
+            block_requests_finished_rx,
+            jaeger_service: config.jaeger_service,
+        };
+
+        background_sync.start();
+
+        Arc::new(ConsensusService {
+            to_background_tx: Mutex::new(to_background_tx),
+        })
     }
 
     /// Returns a summary of the state of the service.
@@ -289,7 +278,14 @@ impl ConsensusService {
     /// > **Important**: This doesn't represent the content of the database.
     // TODO: maybe remove this in favour of the database; seems like a better idea
     pub async fn sync_state(&self) -> SyncState {
-        self.sync_state.lock().await.clone()
+        let (result_tx, result_rx) = oneshot::channel();
+        let _ = self
+            .to_background_tx
+            .lock()
+            .await
+            .send(ToBackground::GetSyncState { result_tx })
+            .await;
+        result_rx.await.unwrap()
     }
 }
 
@@ -301,17 +297,17 @@ struct SyncBackground {
     /// if this is the "special source" representing the local block authoring. Only one source
     /// must contain `None` and its id must be [`SyncBackground::block_author_sync_source`].
     ///
+    /// Each block holds its runtime if it has been verified.
+    ///
     /// Some of the sources can represent networking peers that have already been disconnected. If
     /// that is the case, no new request is started against these sources but existing requests
     /// are allowed to finish.
     /// This "trick" is necessary in order to not cancel requests that have already been started
     /// against a peer when it disconnects and that might already have a response.
     ///
-    /// Each on-going request has a corresponding future within
-    /// [`SyncBackground::block_requests_finished`]. This future is wrapped within an aborter, and
-    /// the an `AbortHandle` is held within this state machine. It can be used to abort the
-    /// request if necessary.
-    sync: all::AllSync<future::AbortHandle, Option<NetworkSourceInfo>, ()>,
+    /// Each on-going request has a corresponding background task that sends its result to
+    /// [`SyncBackground::block_requests_finished_rx`].
+    sync: all::AllSync<(), Option<NetworkSourceInfo>, NonFinalizedBlock>,
 
     /// Source within the [`SyncBackground::sync`] to use to import locally-authored blocks.
     block_author_sync_source: all::SourceId,
@@ -339,15 +335,15 @@ struct SyncBackground {
     /// See [`Config::keystore`].
     keystore: Arc<keystore::Keystore>,
 
-    /// Holds, in parallel of the database, the storage of the latest finalized block.
-    /// At the time of writing, this state is stable around `~3MiB` for Polkadot, meaning that it is
-    /// completely acceptable to hold it entirely in memory.
-    // While reading the storage from the database is an option, doing so considerably slows down
-    /// the verification, and also makes it impossible to insert blocks in the database in
-    /// parallel of this verification.
-    finalized_block_storage: BTreeMap<Vec<u8>, (Vec<u8>, TrieEntryVersion)>,
+    /// Runtime of the latest finalized block.
+    ///
+    /// The runtime is extracted when necessary then put back it place.
+    ///
+    /// The `Arc` is shared with [`NonFinalizedBlock::Verified::runtime`].
+    finalized_runtime: Arc<Mutex<Option<executor::host::HostVmPrototype>>>,
 
-    sync_state: Arc<Mutex<SyncState>>,
+    /// Used to receive messages from the frontend service, and to detect when it shuts down.
+    to_background_rx: mpsc::Receiver<ToBackground>,
 
     /// Service managing the connections to the networking peers.
     network_service: Arc<network_service::NetworkService>,
@@ -368,27 +364,41 @@ struct SyncBackground {
     /// source are removed.
     peers_source_id_map: hashbrown::HashMap<libp2p::PeerId, all::SourceId, fnv::FnvBuildHasher>,
 
+    /// See [`Config::tasks_executor`].
+    tasks_executor: Box<dyn FnMut(future::BoxFuture<'static, ()>) + Send>,
+
     /// Block requests that have been emitted on the networking service and that are still in
     /// progress. Each entry in this field also has an entry in [`SyncBackground::sync`].
-    block_requests_finished: stream::FuturesUnordered<
-        future::BoxFuture<
-            'static,
-            (
-                all::RequestId,
-                all::SourceId,
-                Result<
-                    Result<Vec<BlockData>, network_service::BlocksRequestError>,
-                    future::Aborted,
-                >,
-            ),
-        >,
-    >,
+    block_requests_finished_rx: mpsc::Receiver<(
+        all::RequestId,
+        all::SourceId,
+        Result<Vec<BlockData>, network_service::BlocksRequestError>,
+    )>,
+
+    /// Sending side of [`SyncBackground::block_requests_finished_rx`].
+    block_requests_finished_tx: mpsc::Sender<(
+        all::RequestId,
+        all::SourceId,
+        Result<Vec<BlockData>, network_service::BlocksRequestError>,
+    )>,
 
     /// See [`Config::database`].
     database: Arc<database_thread::DatabaseThread>,
 
     /// How to report events about blocks.
     jaeger_service: Arc<jaeger_service::JaegerService>,
+}
+
+#[derive(Clone)]
+enum NonFinalizedBlock {
+    NotVerified,
+    Verified {
+        /// Runtime of the block. Generally either identical to its parent's runtime, or a
+        /// different one.
+        ///
+        /// The `Arc` is shared with [`SyncBackground::finalized_runtime`].
+        runtime: Arc<Mutex<Option<executor::host::HostVmPrototype>>>,
+    },
 }
 
 /// Information about a source in the sync state machine.
@@ -402,20 +412,30 @@ struct NetworkSourceInfo {
 }
 
 impl SyncBackground {
+    fn start(mut self) {
+        // This function is a small hack because I didn't find a better way to store the executor
+        // within `Background` while at the same time spawning the `Background` using said
+        // executor.
+        let mut actual_executor =
+            mem::replace(&mut self.tasks_executor, Box::new(|_| unreachable!()));
+        let (tx, rx) = oneshot::channel();
+        actual_executor(Box::pin(async move {
+            let actual_executor = rx.await.unwrap();
+            self.tasks_executor = actual_executor;
+            self.run().await;
+        }));
+        tx.send(actual_executor).unwrap_or_else(|_| panic!());
+    }
+
     async fn run(mut self) {
         loop {
             self.start_network_requests().await;
-            self = self.process_blocks().await;
-
-            // Update the current best block, used for CLI-related purposes.
-            {
-                let mut lock = self.sync_state.lock().await;
-                lock.best_block_hash = self.sync.best_block_hash();
-                lock.best_block_number = self.sync.best_block_number();
-            }
+            let (new_self, must_loop_again_asap) = self.process_blocks().await;
+            self = new_self;
 
             // Creating the block authoring state and prepare a future that is ready when something
             // related to the block authoring is ready.
+            // TODO: refactor as a separate task?
             let mut authoring_ready_future = {
                 // TODO: overhead to call best_block_consensus() multiple times
                 let local_authorities = {
@@ -476,28 +496,28 @@ impl SyncBackground {
 
                 match &block_authoring {
                     Some((author::build::Builder::Ready(_), _)) => {
-                        future::Either::Left(future::Either::Left(future::ready(())))
+                        future::Either::Left(future::Either::Left(future::ready(Instant::now())))
                     }
                     Some((author::build::Builder::WaitSlot(when), _)) => {
                         let delay = (UNIX_EPOCH + when.when())
                             .duration_since(SystemTime::now())
                             .unwrap_or_else(|_| Duration::new(0, 0));
-                        future::Either::Right(futures_timer::Delay::new(delay).fuse())
+                        future::Either::Right(future::FutureExt::fuse(smol::Timer::after(delay)))
                     }
-                    None => future::Either::Left(future::Either::Right(future::pending::<()>())),
+                    None => future::Either::Left(future::Either::Right(future::pending())),
                     Some((author::build::Builder::Idle, _)) => {
                         // If the block authoring is idle, which happens in case of error,
                         // sleep for an arbitrary duration before resetting it.
                         // This prevents the authoring from trying over and over again to generate
                         // a bad block.
                         let delay = Duration::from_secs(2);
-                        future::Either::Right(futures_timer::Delay::new(delay).fuse())
+                        future::Either::Right(future::FutureExt::fuse(smol::Timer::after(delay)))
                     }
                 }
             };
 
             futures_util::select! {
-                () = authoring_ready_future => {
+                _ = authoring_ready_future => {
                     // Ready to author a block. Call `author_block()`.
                     // While a block is being authored, the whole syncing state machine is
                     // deliberately frozen.
@@ -518,6 +538,24 @@ impl SyncBackground {
                         None => {
                             unreachable!()
                         }
+                    }
+                },
+
+                frontend_event = self.to_background_rx.next().fuse() => {
+                    // TODO: this isn't processed quickly enough when under load
+                    match frontend_event {
+                        Some(ToBackground::GetSyncState { result_tx }) => {
+                            let _ = result_tx.send(SyncState {
+                                best_block_hash: self.sync.best_block_hash(),
+                                best_block_number: self.sync.best_block_number(),
+                                finalized_block_hash: self.sync.finalized_block_header().hash(self.sync.block_number_bytes()),
+                                finalized_block_number: self.sync.finalized_block_header().number,
+                            });
+                        },
+                        None => {
+                            // Shutdown.
+                            return
+                        },
                     }
                 },
 
@@ -566,16 +604,16 @@ impl SyncBackground {
                                 *is_disconnected = true;
                             }
                         },
-                        network_service::Event::BlockAnnounce { chain_index, peer_id, header, is_best }
+                        network_service::Event::BlockAnnounce { chain_index, peer_id, scale_encoded_header, is_best }
                             if chain_index == self.network_chain_index =>
                         {
                             let _jaeger_span = self
                                 .jaeger_service
-                                .block_announce_process_span(&header.hash(self.sync.block_number_bytes()));
+                                .block_announce_process_span(&header::hash_from_scale_encoded_header(&scale_encoded_header));
 
                             let id = *self.peers_source_id_map.get(&peer_id).unwrap();
                             // TODO: log the outcome
-                            match self.sync.block_announce(id, header.scale_encoding_vec(self.sync.block_number_bytes()), is_best) {
+                            match self.sync.block_announce(id, scale_encoded_header, is_best) {
                                 all::BlockAnnounceOutcome::HeaderVerify => {},
                                 all::BlockAnnounceOutcome::TooOld { .. } => {},
                                 all::BlockAnnounceOutcome::AlreadyInChain => {},
@@ -591,38 +629,43 @@ impl SyncBackground {
                     }
                 },
 
-                (request_id, source_id, result) = self.block_requests_finished.select_next_some() => {
-                    // `result` is an error if the block request got cancelled by the sync state
-                    // machine.
+                (request_id, source_id, result) = self.block_requests_finished_rx.select_next_some() => {
                     // TODO: clarify this piece of code
-                    if let Ok(result) = result {
-                        let result = result.map_err(|_| ());
-                        let (_, response_outcome) = self.sync.blocks_request_response(request_id, result.map(|v| v.into_iter().map(|block| all::BlockRequestSuccessBlock {
-                            scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
-                            scale_encoded_extrinsics: block.body.unwrap(), // TODO: don't unwrap
-                            scale_encoded_justifications: block.justifications.unwrap_or_default(),
-                            user_data: (),
-                        })));
+                    let result = result.map_err(|_| ());
+                    let (_, response_outcome) = self.sync.blocks_request_response(request_id, result.map(|v| v.into_iter().map(|block| all::BlockRequestSuccessBlock {
+                        scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
+                        scale_encoded_extrinsics: block.body.unwrap(), // TODO: don't unwrap
+                        scale_encoded_justifications: block.justifications
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|j| all::Justification { engine_id: j.engine_id, justification: j.justification })
+                            .collect(),
+                        user_data: NonFinalizedBlock::NotVerified,
+                    })));
 
-                        match response_outcome {
-                            all::ResponseOutcome::Outdated
-                            | all::ResponseOutcome::Queued
-                            | all::ResponseOutcome::NotFinalizedChain { .. }
-                            | all::ResponseOutcome::AllAlreadyInChain { .. } => {
-                            }
-                        }
-
-                        // If the source was actually disconnected and has no other request in
-                        // progress, we clean it up.
-                        if self.sync[source_id].as_ref().map_or(false, |info| info.is_disconnected)
-                            && self.sync.source_num_ongoing_requests(source_id) == 0
-                        {
-                            let (info, mut _requests) = self.sync.remove_source(source_id);
-                            debug_assert!(_requests.next().is_none());
-                            self.peers_source_id_map.remove(&info.unwrap().peer_id).unwrap();
+                    match response_outcome {
+                        all::ResponseOutcome::Outdated
+                        | all::ResponseOutcome::Queued
+                        | all::ResponseOutcome::NotFinalizedChain { .. }
+                        | all::ResponseOutcome::AllAlreadyInChain { .. } => {
                         }
                     }
+
+                    // If the source was actually disconnected and has no other request in
+                    // progress, we clean it up.
+                    if self.sync[source_id].as_ref().map_or(false, |info| info.is_disconnected)
+                        && self.sync.source_num_ongoing_requests(source_id) == 0
+                    {
+                        let (info, mut _requests) = self.sync.remove_source(source_id);
+                        debug_assert!(_requests.next().is_none());
+                        self.peers_source_id_map.remove(&info.unwrap().peer_id).unwrap();
+                    }
                 },
+
+                () = if must_loop_again_asap { either::Left(future::ready(())) } else { either::Right(future::pending()) }.fuse() => {
+                    // This block exists just so that we continue looping if `must_loop_again_asap`
+                    // is `true`.
+                }
             }
         }
     }
@@ -678,12 +721,22 @@ impl SyncBackground {
         };
 
         // Actual block production now happening.
-        let block = {
+        let (new_block_header, new_block_body, authoring_logs) = {
+            let parent_hash = self.sync.best_block_hash();
+            let parent_runtime_arc = if self.sync.best_block_number()
+                != self.sync.finalized_block_header().number
+            {
+                let NonFinalizedBlock::Verified {
+                    runtime: parent_runtime_arc,
+                } = &self.sync[(self.sync.best_block_number(), &self.sync.best_block_hash())] else { unreachable!() };
+                parent_runtime_arc.clone()
+            } else {
+                self.finalized_runtime.clone()
+            };
+            let parent_runtime = parent_runtime_arc.try_lock().unwrap().take().unwrap();
+
             // Start the block authoring process.
             let mut block_authoring = {
-                let best_block_storage_access = self.sync.best_block_storage().unwrap();
-                let parent_runtime = best_block_storage_access.runtime().clone(); // TODO: overhead here with cloning, but solving it requires very tricky API changes in syncing code
-
                 authoring_start.start(author::build::AuthoringStartConfig {
                     block_number_bytes: self.sync.block_number_bytes(),
                     parent_hash: &self.sync.best_block_hash(),
@@ -715,8 +768,8 @@ impl SyncBackground {
                             &data_to_sign,
                         );
 
-                        match sign_future.await {
-                            Ok(signature) => break seal.inject_sr25519_signature(signature),
+                        let success = match sign_future.await {
+                            Ok(signature) => seal.inject_sr25519_signature(signature),
                             Err(error) => {
                                 // Because the keystore is subject to race conditions, it is
                                 // possible for this situation to happen if the key has been
@@ -727,11 +780,22 @@ impl SyncBackground {
                                 self.block_authoring = None;
                                 return;
                             }
-                        }
+                        };
+
+                        // Put back the parent runtime that we extracted.
+                        *parent_runtime_arc.try_lock().unwrap() = Some(success.parent_runtime);
+
+                        break (success.scale_encoded_header, success.body, success.logs);
                     }
 
-                    author::build::BuilderAuthoring::Error(error) => {
+                    author::build::BuilderAuthoring::Error {
+                        error,
+                        parent_runtime,
+                    } => {
                         // Block authoring process stopped because of an error.
+
+                        // Put back the parent runtime that we extracted.
+                        *parent_runtime_arc.try_lock().unwrap() = Some(parent_runtime);
 
                         // In order to prevent the block authoring from restarting immediately
                         // after and failing again repeatedly, we switch the block authoring to
@@ -761,48 +825,52 @@ impl SyncBackground {
                     }
 
                     // Access to the best block storage.
-                    author::build::BuilderAuthoring::StorageGet(get) => {
-                        // Access the storage of the best block. Can return `̀None` if not syncing
-                        // in full mode, in which case we shouldn't have reached this code.
-                        let best_block_storage_access = self.sync.best_block_storage().unwrap();
-
-                        let value = {
-                            let key = get.key();
-                            best_block_storage_access.get(key.as_ref(), || {
-                                self.finalized_block_storage
-                                    .get(key.as_ref())
-                                    .map(|(val, vers)| (&val[..], *vers))
+                    author::build::BuilderAuthoring::StorageGet(req) => {
+                        let key = req.key().as_ref().to_vec();
+                        let value = self
+                            .database
+                            .with_database(move |db| {
+                                db.block_storage_main_trie_get(&parent_hash, &key)
                             })
-                        };
-                        block_authoring =
-                            get.inject_value(value.map(|(val, vers)| (iter::once(val), vers)));
+                            .await
+                            .expect("database access error");
+
+                        block_authoring = req.inject_value(value.as_ref().map(|(val, vers)| {
+                            (
+                                iter::once(&val[..]),
+                                TrieEntryVersion::try_from(*vers).expect("corrupted database"),
+                            )
+                        }));
                         continue;
                     }
-                    author::build::BuilderAuthoring::NextKey(_) => {
-                        todo!() // TODO: implement
+                    author::build::BuilderAuthoring::NextKey(req) => {
+                        let key = req.key().as_ref().to_vec();
+                        let or_equal = req.or_equal();
+                        let next_key = self
+                            .database
+                            .with_database(move |db| {
+                                db.block_storage_main_trie_next_key(&parent_hash, &key, or_equal)
+                            })
+                            .await
+                            .expect("database access error")
+                            .filter(|k| k.starts_with(req.prefix().as_ref()));
+
+                        debug_assert!(next_key
+                            .as_ref()
+                            .map_or(true, |k| &**k > req.key().as_ref()));
+                        block_authoring = req.inject_key(next_key);
+                        continue;
                     }
-                    author::build::BuilderAuthoring::PrefixKeys(prefix_key) => {
-                        // Access the storage of the best block. Can return `̀None` if not syncing
-                        // in full mode, in which case we shouldn't have reached this code.
-                        let best_block_storage_access = self.sync.best_block_storage().unwrap();
-
-                        let keys = best_block_storage_access
-                            .prefix_keys_ordered(
-                                prefix_key.prefix().as_ref(),
-                                self.finalized_block_storage
-                                    .range::<[u8], _>((
-                                        ops::Bound::Included(prefix_key.prefix().as_ref()),
-                                        ops::Bound::Unbounded,
-                                    ))
-                                    .take_while(|(k, _)| {
-                                        k.starts_with(prefix_key.prefix().as_ref())
-                                    })
-                                    .map(|(k, _)| &k[..]),
-                            )
-                            .map(|k| k.as_ref().to_vec()) // TODO: overhead
-                            .collect::<Vec<_>>();
-
-                        block_authoring = prefix_key.inject_keys_ordered(keys.into_iter());
+                    author::build::BuilderAuthoring::PrefixKeys(req) => {
+                        let prefix = req.prefix().as_ref().to_vec();
+                        let keys = self
+                            .database
+                            .with_database(move |db| {
+                                db.block_storage_main_trie_keys_ordered(&parent_hash, &prefix)
+                            })
+                            .await
+                            .expect("database access error");
+                        block_authoring = req.inject_keys_ordered(keys.into_iter());
                         continue;
                     }
                 }
@@ -810,12 +878,12 @@ impl SyncBackground {
         };
 
         // Block has now finished being generated.
-        let new_block_hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+        let new_block_hash = header::hash_from_scale_encoded_header(&new_block_header);
         log::info!(
             "block-generated; hash={}; body_len={}; runtime_logs={:?}",
             HashDisplay(&new_block_hash),
-            block.body.len(),
-            block.logs
+            new_block_body.len(),
+            authoring_logs
         );
         let _jaeger_span = self
             .jaeger_service
@@ -845,7 +913,7 @@ impl SyncBackground {
         // the local node is a source of block similar to networking peers.
         match self.sync.block_announce(
             self.block_author_sync_source,
-            block.scale_encoded_header.clone(),
+            new_block_header.clone(),
             true, // Since the new block is a child of the current best block, it always becomes the new best.
         ) {
             all::BlockAnnounceOutcome::HeaderVerify
@@ -861,8 +929,8 @@ impl SyncBackground {
         self.authored_block = Some((
             parent_number + 1,
             new_block_hash,
-            block.scale_encoded_header,
-            block.body,
+            new_block_header,
+            new_block_body,
         ));
     }
 
@@ -932,11 +1000,7 @@ impl SyncBackground {
                     let _jaeger_span = self.jaeger_service.block_import_queue_span(&block_hash);
 
                     // Create a request that is immediately answered right below.
-                    let request_id = self.sync.add_request(
-                        source_id,
-                        request_info.into(),
-                        future::AbortHandle::new_pair().0, // Temporary dummy.
-                    );
+                    let request_id = self.sync.add_request(source_id, request_info.into(), ());
 
                     // TODO: announce the block on the network, but only after it's been imported
                     self.sync.blocks_request_response(
@@ -945,7 +1009,7 @@ impl SyncBackground {
                             scale_encoded_header,
                             scale_encoded_extrinsics,
                             scale_encoded_justifications: Vec::new(),
-                            user_data: (),
+                            user_data: NonFinalizedBlock::NotVerified,
                         })),
                     );
                 }
@@ -996,11 +1060,18 @@ impl SyncBackground {
                         },
                     );
 
-                    let (request, abort) = future::abortable(request);
-                    let request_id = self.sync.add_request(source_id, request_info.into(), abort);
+                    let request_id = self.sync.add_request(source_id, request_info.into(), ());
 
-                    self.block_requests_finished
-                        .push(request.map(move |r| (request_id, source_id, r)).boxed());
+                    (self.tasks_executor)(Box::pin({
+                        let mut block_requests_finished_tx =
+                            self.block_requests_finished_tx.clone();
+                        async move {
+                            let result = request.await;
+                            let _ = block_requests_finished_tx
+                                .send((request_id, source_id, result))
+                                .await;
+                        }
+                    }));
                 }
                 all::DesiredRequest::GrandpaWarpSync { .. }
                 | all::DesiredRequest::StorageGetMerkleProof { .. }
@@ -1012,207 +1083,105 @@ impl SyncBackground {
         }
     }
 
-    async fn process_blocks(mut self) -> Self {
+    async fn process_blocks(mut self) -> (Self, bool) {
         // The sync state machine can be in a few various states. At the time of writing:
         // idle, verifying header, verifying block, verifying grandpa warp sync proof,
         // verifying storage proof.
         // If the state is one of the "verifying" states, perform the actual verification and
         // loop again until the sync is in an idle state.
-        loop {
-            let unix_time = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap();
+        let unix_time = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap();
 
-            match self.sync.process_one() {
-                all::ProcessOne::AllSync(idle) => {
-                    self.sync = idle;
-                    break;
-                }
-                all::ProcessOne::VerifyWarpSyncFragment(_)
-                | all::ProcessOne::WarpSyncError { .. }
-                | all::ProcessOne::WarpSyncFinished { .. } => unreachable!(),
-                all::ProcessOne::VerifyBodyHeader(verify) => {
-                    let hash_to_verify = verify.hash();
-                    let height_to_verify = verify.height();
-                    let scale_encoded_header_to_verify = verify.scale_encoded_header().to_owned(); // TODO: copy :-/
+        match self.sync.process_one() {
+            all::ProcessOne::AllSync(idle) => {
+                self.sync = idle;
+                (self, false)
+            }
+            all::ProcessOne::VerifyWarpSyncFragment(_)
+            | all::ProcessOne::WarpSyncBuildRuntime(_)
+            | all::ProcessOne::WarpSyncBuildChainInformation(_)
+            | all::ProcessOne::WarpSyncFinished { .. } => unreachable!(),
+            all::ProcessOne::VerifyBodyHeader(verify) => {
+                let hash_to_verify = verify.hash();
+                let height_to_verify = verify.height();
+                let parent_hash = verify.parent_hash();
+                let parent_info = verify.parent_user_data().map(|b| {
+                    let NonFinalizedBlock::Verified {
+                        runtime,
+                    } = b else { unreachable!() };
+                    runtime.clone()
+                });
+                let parent_runtime_arc = parent_info
+                    .as_ref()
+                    .map(|i| i.clone())
+                    .unwrap_or_else(|| self.finalized_runtime.clone());
+                let parent_runtime = parent_runtime_arc.try_lock().unwrap().take().unwrap();
+                let scale_encoded_header_to_verify = verify.scale_encoded_header().to_owned(); // TODO: copy :-/
 
-                    let _jaeger_span = self.jaeger_service.block_body_verify_span(&hash_to_verify);
+                let _jaeger_span = self.jaeger_service.block_body_verify_span(&hash_to_verify);
 
-                    let mut verify = verify.start(unix_time, ());
-                    // TODO: check this block against the chain spec's badBlocks
-                    loop {
-                        match verify {
-                            all::BlockVerification::Error {
-                                sync: sync_out,
-                                error,
-                                ..
-                            } => {
-                                // Print a separate warning because it is important for the user
-                                // to be aware of the verification failure.
-                                // `error` is last because it's quite big.
-                                log::warn!(
-                                    "failed-block-verification; hash={}; height={}; error={}",
-                                    HashDisplay(&hash_to_verify),
-                                    height_to_verify,
-                                    error
-                                );
-                                self.sync = sync_out;
-                                break;
-                            }
-                            all::BlockVerification::Success {
-                                is_new_best,
-                                sync: sync_out,
-                                ..
-                            } => {
-                                log::debug!(
-                                    "block-verification-success; hash={}; height={}; is_new_best={:?}",
-                                    HashDisplay(&hash_to_verify), height_to_verify, is_new_best
-                                );
+                let mut verify =
+                    verify.start(unix_time, parent_runtime, NonFinalizedBlock::NotVerified);
 
-                                // Processing has made a step forward.
-
-                                if is_new_best {
-                                    // Update the networking.
-                                    let fut = self.network_service.set_local_best_block(
-                                        self.network_chain_index,
-                                        sync_out.best_block_hash(),
-                                        sync_out.best_block_number(),
-                                    );
-                                    fut.await;
-
-                                    // Reset the block authoring, in order to potentially build a
-                                    // block on top of this new best.
-                                    self.block_authoring = None;
-
-                                    // Update the externally visible best block state.
-                                    let mut lock = self.sync_state.lock().await;
-                                    lock.best_block_hash = sync_out.best_block_hash();
-                                    lock.best_block_number = sync_out.best_block_number();
-                                    drop(lock);
-                                }
-
-                                self.sync = sync_out;
-
-                                // Announce the newly-verified block to all the sources that might
-                                // not be aware of it. We can never be guaranteed that a certain
-                                // source does *not* know about a block, however it is not a big
-                                // problem to send a block announce to a source that already knows
-                                // about that block. For this reason, the list of sources we send
-                                // the block announce to is `all_sources - sources_that_know_it`.
-                                //
-                                // Note that not sending block announces to sources that already
-                                // know that block means that these sources might also miss the
-                                // fact that our local best block has been updated. This is in
-                                // practice not a problem either.
-                                let sources_to_announce_to = {
-                                    let mut all_sources =
-                                        self.sync
-                                            .sources()
-                                            .collect::<HashSet<_, fnv::FnvBuildHasher>>();
-                                    for knows in self.sync.knows_non_finalized_block(
-                                        height_to_verify,
-                                        &hash_to_verify,
-                                    ) {
-                                        all_sources.remove(&knows);
-                                    }
-                                    all_sources
-                                };
-
-                                for source_id in sources_to_announce_to {
-                                    let peer_id = match &self.sync[source_id] {
-                                        Some(info) if !info.is_disconnected => &info.peer_id,
-                                        _ => continue,
-                                    };
-
-                                    if self
-                                        .network_service
-                                        .clone()
-                                        .send_block_announce(
-                                            peer_id,
-                                            0,
-                                            &scale_encoded_header_to_verify,
-                                            is_new_best,
-                                        )
-                                        .await
-                                        .is_ok()
-                                    {
-                                        // Note that `try_add_known_block_to_source` might have
-                                        // no effect, which is not a problem considering that this
-                                        // block tracking is mostly about optimizations and
-                                        // politeness.
-                                        self.sync.try_add_known_block_to_source(
-                                            source_id,
-                                            height_to_verify,
-                                            hash_to_verify,
-                                        );
-                                    }
-                                }
-
-                                break;
-                            }
-
-                            all::BlockVerification::FinalizedStorageGet(req) => {
-                                let value = self
-                                    .finalized_block_storage
-                                    .get(req.key().as_ref())
-                                    .map(|(val, vers)| (&val[..], *vers));
-                                verify = req.inject_value(value);
-                            }
-                            all::BlockVerification::FinalizedStorageNextKey(req) => {
-                                let next_key = {
-                                    let key = req.key();
-                                    self.finalized_block_storage
-                                        .range::<[u8], _>((
-                                            if req.or_equal() {
-                                                ops::Bound::Included(key.as_ref())
-                                            } else {
-                                                ops::Bound::Excluded(key.as_ref())
-                                            },
-                                            ops::Bound::Unbounded,
-                                        ))
-                                        .next()
-                                        .filter(|(k, _)| k.starts_with(req.prefix().as_ref()))
-                                        .map(|(k, _)| k)
-                                };
-                                verify = req.inject_key(next_key);
-                            }
-                            all::BlockVerification::FinalizedStoragePrefixKeys(req) => {
-                                // TODO: to_vec() :-/ range() immediately calculates the range of keys so there's no borrowing issue, but the take_while needs to keep req borrowed, which isn't possible
-                                let prefix = req.prefix().as_ref().to_vec();
-                                let keys = self
-                                    .finalized_block_storage
-                                    .range::<[u8], _>((
-                                        ops::Bound::Included(req.prefix().as_ref()),
-                                        ops::Bound::Unbounded,
-                                    ))
-                                    .take_while(|(k, _)| k.starts_with(&prefix))
-                                    .map(|(k, _)| k);
-                                verify = req.inject_keys_ordered(keys);
-                            }
-                            all::BlockVerification::RuntimeCompilation(rt) => {
-                                verify = rt.build();
-                            }
-                        }
-                    }
-                }
-
-                all::ProcessOne::VerifyFinalityProof(verify) => {
-                    match verify.perform(rand::random()) {
-                        (
-                            sync_out,
-                            all::FinalityProofVerifyOutcome::NewFinalized {
-                                finalized_blocks,
-                                updates_best_block,
-                            },
-                        ) => {
-                            log::debug!("finality-proof-verification; outcome=success");
+                // TODO: check this block against the chain spec's badBlocks
+                loop {
+                    match verify {
+                        all::BlockVerification::Error {
+                            sync: sync_out,
+                            parent_runtime,
+                            error,
+                            ..
+                        } => {
+                            // Print a separate warning because it is important for the user
+                            // to be aware of the verification failure.
+                            // `error` is last because it's quite big.
+                            log::warn!(
+                                "failed-block-verification; hash={}; height={}; error={}",
+                                HashDisplay(&hash_to_verify),
+                                height_to_verify,
+                                error
+                            );
+                            *parent_runtime_arc.try_lock().unwrap() = Some(parent_runtime);
                             self.sync = sync_out;
+                            return (self, true);
+                        }
+                        all::BlockVerification::Success {
+                            is_new_best,
+                            sync: mut sync_out,
+                            storage_main_trie_changes,
+                            state_trie_version,
+                            parent_runtime,
+                            new_runtime,
+                            ..
+                        } => {
+                            log::debug!(
+                                "block-verification-success; hash={}; height={}; is_new_best={:?}",
+                                HashDisplay(&hash_to_verify),
+                                height_to_verify,
+                                is_new_best
+                            );
 
-                            if updates_best_block {
+                            // Processing has made a step forward.
+
+                            *parent_runtime_arc.try_lock().unwrap() = Some(parent_runtime);
+
+                            // Store the storage of the children.
+                            sync_out[(height_to_verify, &hash_to_verify)] =
+                                NonFinalizedBlock::Verified {
+                                    runtime: if let Some(new_runtime) = new_runtime {
+                                        Arc::new(Mutex::new(Some(new_runtime)))
+                                    } else {
+                                        parent_runtime_arc
+                                    },
+                                };
+
+                            if is_new_best {
+                                // Update the networking.
                                 let fut = self.network_service.set_local_best_block(
                                     self.network_chain_index,
-                                    self.sync.best_block_hash(),
-                                    self.sync.best_block_number(),
+                                    sync_out.best_block_hash(),
+                                    sync_out.best_block_number(),
                                 );
                                 fut.await;
 
@@ -1221,164 +1190,238 @@ impl SyncBackground {
                                 self.block_authoring = None;
                             }
 
-                            let mut lock = self.sync_state.lock().await;
-                            lock.best_block_hash = self.sync.best_block_hash();
-                            lock.best_block_number = self.sync.best_block_number();
-                            drop(lock);
+                            self.sync = sync_out;
 
-                            if let Some(last_finalized) = finalized_blocks.last() {
-                                let mut lock = self.sync_state.lock().await;
-                                lock.finalized_block_hash =
-                                    last_finalized.header.hash(self.sync.block_number_bytes());
-                                lock.finalized_block_number = last_finalized.header.number;
-                            }
-
-                            // TODO: maybe write in a separate task? but then we can't access the finalized storage immediately after?
-                            for block in &finalized_blocks {
-                                for (key, value, ()) in block
-                                    .full
-                                    .as_ref()
-                                    .unwrap()
-                                    .storage_main_trie_changes
-                                    .diff_iter_unordered()
+                            // Announce the newly-verified block to all the sources that might
+                            // not be aware of it. We can never be guaranteed that a certain
+                            // source does *not* know about a block, however it is not a big
+                            // problem to send a block announce to a source that already knows
+                            // about that block. For this reason, the list of sources we send
+                            // the block announce to is `all_sources - sources_that_know_it`.
+                            //
+                            // Note that not sending block announces to sources that already
+                            // know that block means that these sources might also miss the
+                            // fact that our local best block has been updated. This is in
+                            // practice not a problem either.
+                            let sources_to_announce_to = {
+                                let mut all_sources =
+                                    self.sync
+                                        .sources()
+                                        .collect::<HashSet<_, fnv::FnvBuildHasher>>();
+                                for knows in self
+                                    .sync
+                                    .knows_non_finalized_block(height_to_verify, &hash_to_verify)
                                 {
-                                    if let Some(value) = value {
-                                        self.finalized_block_storage.insert(
-                                            key.to_owned(),
-                                            (
-                                                value.to_owned(),
-                                                block.full.as_ref().unwrap().state_trie_version,
-                                            ),
-                                        );
-                                    } else {
-                                        let _was_there = self.finalized_block_storage.remove(key);
-                                        // TODO: if a block inserts a new value, then removes it in the next block, the key will remain in `finalized_block_storage`; either solve this or document this
-                                        // assert!(_was_there.is_some());
-                                    }
+                                    all_sources.remove(&knows);
+                                }
+                                all_sources
+                            };
+
+                            for source_id in sources_to_announce_to {
+                                let peer_id = match &self.sync[source_id] {
+                                    Some(info) if !info.is_disconnected => &info.peer_id,
+                                    _ => continue,
+                                };
+
+                                if self
+                                    .network_service
+                                    .clone()
+                                    .send_block_announce(
+                                        peer_id.clone(),
+                                        0,
+                                        scale_encoded_header_to_verify.clone(),
+                                        is_new_best,
+                                    )
+                                    .await
+                                    .is_ok()
+                                {
+                                    // Note that `try_add_known_block_to_source` might have
+                                    // no effect, which is not a problem considering that this
+                                    // block tracking is mostly about optimizations and
+                                    // politeness.
+                                    self.sync.try_add_known_block_to_source(
+                                        source_id,
+                                        height_to_verify,
+                                        hash_to_verify,
+                                    );
                                 }
                             }
 
-                            let new_finalized_hash = finalized_blocks
-                                .last()
-                                .map(|lf| lf.header.hash(self.sync.block_number_bytes()))
-                                .unwrap();
-                            let block_number_bytes = self.sync.block_number_bytes();
-                            database_blocks(&self.database, finalized_blocks, block_number_bytes)
+                            self.database
+                                .with_database_detached(move |database| {
+                                    // TODO: overhead for building the SCALE encoding of the header
+                                    let result = database.insert(
+                                        &scale_encoded_header_to_verify,
+                                        is_new_best,
+                                        iter::empty::<Vec<u8>>(), // TODO:,no /!\
+                                        storage_main_trie_changes
+                                            .diff_iter_unordered()
+                                            .map(|(k, v, ())| (k, v)),
+                                        u8::from(state_trie_version),
+                                    );
+
+                                    match result {
+                                        Ok(()) => {}
+                                        Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
+                                        Err(err) => panic!("{}", err),
+                                    }
+                                })
                                 .await;
-                            database_set_finalized(&self.database, new_finalized_hash).await;
-                            continue;
+
+                            return (self, true);
                         }
-                        (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitPending) => {
-                            log::debug!("finality-proof-verification; outcome=pending");
-                            self.sync = sync_out;
-                            continue;
+
+                        all::BlockVerification::ParentStorageGet(req) => {
+                            let key = req.key().as_ref().to_vec();
+                            let value = self
+                                .database
+                                .with_database(move |db| {
+                                    db.block_storage_main_trie_get(&parent_hash, &key)
+                                })
+                                .await
+                                .expect("database access error");
+
+                            verify = req.inject_value(value.as_ref().map(|(val, vers)| {
+                                (
+                                    &val[..],
+                                    TrieEntryVersion::try_from(*vers).expect("corrupted database"),
+                                )
+                            }));
                         }
-                        (sync_out, all::FinalityProofVerifyOutcome::AlreadyFinalized) => {
-                            log::debug!("finality-proof-verification; outcome=already-finalized");
-                            self.sync = sync_out;
-                            continue;
+                        all::BlockVerification::ParentStorageNextKey(req) => {
+                            let key = req.key().as_ref().to_vec();
+                            let or_equal = req.or_equal();
+                            let next_key = self
+                                .database
+                                .with_database(move |db| {
+                                    db.block_storage_main_trie_next_key(
+                                        &parent_hash,
+                                        &key,
+                                        or_equal,
+                                    )
+                                })
+                                .await
+                                .expect("database access error")
+                                .filter(|k| k.starts_with(req.prefix().as_ref()));
+
+                            debug_assert!(next_key
+                                .as_ref()
+                                .map_or(true, |k| &**k > req.key().as_ref()));
+                            verify = req.inject_key(next_key);
                         }
-                        (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitError(error)) => {
-                            log::warn!("finality-proof-verification-failure; error={}", error);
-                            self.sync = sync_out;
-                            continue;
+                        all::BlockVerification::ParentStoragePrefixKeys(req) => {
+                            let prefix = req.prefix().as_ref().to_vec();
+                            let keys = self
+                                .database
+                                .with_database(move |db| {
+                                    db.block_storage_main_trie_keys_ordered(&parent_hash, &prefix)
+                                })
+                                .await
+                                .expect("database access error");
+                            verify = req.inject_keys_ordered(keys.into_iter());
                         }
-                        (sync_out, all::FinalityProofVerifyOutcome::JustificationError(error)) => {
-                            log::warn!("finality-proof-verification-failure; error={}", error);
-                            self.sync = sync_out;
-                            continue;
+                        all::BlockVerification::RuntimeCompilation(rt) => {
+                            verify = rt.build();
                         }
                     }
                 }
+            }
 
-                all::ProcessOne::VerifyHeader(verify) => {
-                    let hash_to_verify = verify.hash();
-                    let height_to_verify = verify.height();
+            all::ProcessOne::VerifyFinalityProof(verify) => {
+                match verify.perform(rand::random()) {
+                    (
+                        sync_out,
+                        all::FinalityProofVerifyOutcome::NewFinalized {
+                            mut finalized_blocks,
+                            updates_best_block,
+                        },
+                    ) => {
+                        log::debug!("finality-proof-verification; outcome=success");
+                        self.sync = sync_out;
 
-                    let _jaeger_span = self
-                        .jaeger_service
-                        .block_header_verify_span(&hash_to_verify);
-
-                    match verify.perform(unix_time, ()) {
-                        all::HeaderVerifyOutcome::Success { sync: sync_out, .. } => {
-                            log::debug!(
-                                "header-verification; hash={}; height={}; outcome=success",
-                                HashDisplay(&hash_to_verify),
-                                height_to_verify
+                        if updates_best_block {
+                            let fut = self.network_service.set_local_best_block(
+                                self.network_chain_index,
+                                self.sync.best_block_hash(),
+                                self.sync.best_block_number(),
                             );
-                            self.sync = sync_out;
-                            continue;
+                            fut.await;
+
+                            // Reset the block authoring, in order to potentially build a
+                            // block on top of this new best.
+                            self.block_authoring = None;
                         }
-                        all::HeaderVerifyOutcome::Error {
-                            sync: sync_out,
-                            error,
-                            ..
-                        } => {
-                            log::debug!(
-                            "header-verification; hash={}; height={}; outcome=failure; error={}",
-                            HashDisplay(&hash_to_verify), height_to_verify, error
+
+                        let finalized_block = finalized_blocks.pop().unwrap();
+                        let NonFinalizedBlock::Verified { runtime } = finalized_block.user_data else { unreachable!() };
+                        self.finalized_runtime = runtime;
+                        let new_finalized_hash =
+                            finalized_block.header.hash(self.sync.block_number_bytes());
+                        // TODO: what if best block changed?
+                        self.database
+                            .with_database_detached(move |database| {
+                                database.set_finalized(&new_finalized_hash).unwrap();
+                            })
+                            .await;
+                        (self, true)
+                    }
+                    (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitPending) => {
+                        log::debug!("finality-proof-verification; outcome=pending");
+                        self.sync = sync_out;
+                        (self, true)
+                    }
+                    (sync_out, all::FinalityProofVerifyOutcome::AlreadyFinalized) => {
+                        log::debug!("finality-proof-verification; outcome=already-finalized");
+                        self.sync = sync_out;
+                        (self, true)
+                    }
+                    (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitError(error)) => {
+                        log::warn!("finality-proof-verification-failure; error={}", error);
+                        self.sync = sync_out;
+                        (self, true)
+                    }
+                    (sync_out, all::FinalityProofVerifyOutcome::JustificationError(error)) => {
+                        log::warn!("finality-proof-verification-failure; error={}", error);
+                        self.sync = sync_out;
+                        (self, true)
+                    }
+                }
+            }
+
+            all::ProcessOne::VerifyHeader(verify) => {
+                let hash_to_verify = verify.hash();
+                let height_to_verify = verify.height();
+
+                let _jaeger_span = self
+                    .jaeger_service
+                    .block_header_verify_span(&hash_to_verify);
+
+                match verify.perform(unix_time, NonFinalizedBlock::NotVerified) {
+                    all::HeaderVerifyOutcome::Success { sync: sync_out, .. } => {
+                        log::debug!(
+                            "header-verification; hash={}; height={}; outcome=success",
+                            HashDisplay(&hash_to_verify),
+                            height_to_verify
                         );
-                            self.sync = sync_out;
-                            continue;
-                        }
+                        self.sync = sync_out;
+                        (self, true)
+                    }
+                    all::HeaderVerifyOutcome::Error {
+                        sync: sync_out,
+                        error,
+                        ..
+                    } => {
+                        log::debug!(
+                            "header-verification; hash={}; height={}; outcome=failure; error={}",
+                            HashDisplay(&hash_to_verify),
+                            height_to_verify,
+                            error
+                        );
+                        self.sync = sync_out;
+                        (self, true)
                     }
                 }
             }
         }
-
-        self
     }
-}
-
-/// Writes blocks to the database
-async fn database_blocks(
-    database: &database_thread::DatabaseThread,
-    blocks: Vec<all::Block<()>>,
-    block_number_bytes: usize,
-) {
-    database
-        .with_database_detached(move |database| {
-            for block in blocks {
-                // TODO: overhead for building the SCALE encoding of the header
-                let result = database.insert(
-                    &block.header.scale_encoding(block_number_bytes).fold(
-                        Vec::new(),
-                        |mut a, b| {
-                            a.extend_from_slice(b.as_ref());
-                            a
-                        },
-                    ),
-                    true, // TODO: is_new_best?
-                    block.full.as_ref().unwrap().body.iter(),
-                    block
-                        .full
-                        .as_ref()
-                        .unwrap()
-                        .storage_main_trie_changes
-                        .diff_iter_unordered()
-                        .map(|(k, v, ())| (k, v)),
-                    u8::from(block.full.as_ref().unwrap().state_trie_version),
-                );
-
-                match result {
-                    Ok(()) => {}
-                    Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
-                    Err(err) => panic!("{}", err),
-                }
-            }
-        })
-        .await
-}
-
-/// Writes blocks to the database
-async fn database_set_finalized(
-    database: &database_thread::DatabaseThread,
-    finalized_block_hash: [u8; 32],
-) {
-    // TODO: what if best block changed?
-    database
-        .with_database_detached(move |database| {
-            database.set_finalized(&finalized_block_hash).unwrap();
-        })
-        .await
 }

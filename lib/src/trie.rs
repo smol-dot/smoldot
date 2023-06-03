@@ -163,8 +163,10 @@ pub fn empty_trie_merkle_value() -> [u8; 32] {
         },
         true,
     )
-    .unwrap()
-    .into()
+    .unwrap_or_else(|_| panic!())
+    .try_into()
+    // Guaranteed to never panic when `is_root_node` is `true`.
+    .unwrap_or_else(|_| panic!())
 }
 
 /// Returns the Merkle value of a trie containing the entries passed as parameter. The entries

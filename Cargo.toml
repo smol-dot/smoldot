@@ -1,4 +1,5 @@
 [workspace]
+resolver = "2"
 default-members = ["lib", "full-node"]
 members = [
     "lib",
@@ -6,6 +7,12 @@ members = [
     "light-base",
     "wasm-node/rust",
 ]
+
+[workspace.package]
+authors = ["Parity Technologies <admin@parity.io>", "Pierre Krieger <pierre.krieger1708@gmail.com>"]
+license = "GPL-3.0-or-later WITH Classpath-exception-2.0"
+edition = "2021"
+repository = "https://github.com/smol-dot/smoldot"
 
 [profile.dev]
 debug = 1    # Default value is `2`, which contains the full debug info. `1` is enough for stack traces.

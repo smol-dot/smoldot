@@ -73,14 +73,13 @@
 extern crate alloc;
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
-use core::{num::NonZeroU32, pin};
+use core::{num::NonZeroU32, ops, pin};
 use futures_channel::oneshot;
 use futures_util::{future, FutureExt as _};
 use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
 use smoldot::{
-    chain::{self, chain_information},
-    chain_spec, header,
+    chain, chain_spec, header,
     informant::HashDisplay,
     libp2p::{connection, multiaddr, peer_id},
 };
@@ -101,7 +100,8 @@ pub use peer_id::PeerId;
 /// See [`Client::add_chain`].
 #[derive(Debug, Clone)]
 pub struct AddChainConfig<'a, TChain, TRelays> {
-    /// Opaque user data that the [`Client`] will hold for this chain.
+    /// Opaque user data that the [`Client`] will hold for this chain. Can later be accessed using
+    /// the `Index` and `IndexMut` trait implementations on the [`Client`].
     pub user_data: TChain,
 
     /// JSON text containing the specification of the chain (the so-called "chain spec").
@@ -201,10 +201,9 @@ pub struct Client<TPlat: platform::PlatformRef, TChain = ()> {
     /// For each key, contains the services running for this chain plus the number of public API
     /// chains that correspond to it.
     ///
-    /// The [`ChainServices`] is within a `MaybeDone`. The variant will be `MaybeDone::Future` if
-    /// initialization is still in progress.
-    // TODO: use SipHasher
-    chains_by_key: HashMap<ChainKey, RunningChain<TPlat>, fnv::FnvBuildHasher>,
+    /// Because we use a `SipHasher`, this hashmap isn't created in the `new` function (as this
+    /// function is `const`) but lazily the first time it is needed.
+    chains_by_key: Option<HashMap<ChainKey, RunningChain<TPlat>, util::SipHasherBuild>>,
 }
 
 struct PublicApiChain<TChain> {
@@ -333,12 +332,11 @@ impl JsonRpcResponses {
 
 impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
     /// Initializes the smoldot client.
-    pub fn new(platform: TPlat) -> Self {
-        let expected_chains = 8;
+    pub const fn new(platform: TPlat) -> Self {
         Client {
             platform,
-            public_api_chains: slab::Slab::with_capacity(expected_chains),
-            chains_by_key: HashMap::with_capacity_and_hasher(expected_chains, Default::default()),
+            public_api_chains: slab::Slab::new(),
+            chains_by_key: None,
         }
     }
 
@@ -349,6 +347,11 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         &mut self,
         config: AddChainConfig<'_, TChain, impl Iterator<Item = ChainId>>,
     ) -> Result<AddChainSuccess, AddChainError> {
+        // `chains_by_key` is created lazily whenever needed.
+        let chains_by_key = self
+            .chains_by_key
+            .get_or_insert_with(|| HashMap::with_hasher(util::SipHasherBuild::new(rand::random())));
+
         // Decode the chain specification.
         let chain_spec = match chain_spec::ChainSpec::from_json_bytes(config.specification) {
             Ok(cs) => cs,
@@ -363,12 +366,10 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         // TODO: clean up that block
         let (chain_information, genesis_block_header, checkpoint_nodes) = {
             match (
-                chain_spec.as_chain_information().map(|(ci, _)| ci), // TODO: don't just throw away the runtime
-                chain_spec.light_sync_state().map(|s| {
-                    chain::chain_information::ValidChainInformation::try_from(
-                        s.as_chain_information(),
-                    )
-                }),
+                chain_spec.to_chain_information().map(|(ci, _)| ci), // TODO: don't just throw away the runtime
+                chain_spec
+                    .light_sync_state()
+                    .map(|s| s.to_chain_information()),
                 database::decode_database(
                     config.database_content,
                     chain_spec.block_number_bytes().into(),
@@ -468,19 +469,26 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
 
                 (Err(err), _, _) => return Err(AddChainError::InvalidGenesisStorage(err)),
 
-                (_, Some(Err(err)), _) => {
-                    return Err(AddChainError::InvalidCheckpoint(err));
-                }
-
                 (Ok(genesis_ci), Some(Ok(checkpoint)), _) => {
                     let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
                     (checkpoint, genesis_header.into(), Default::default())
                 }
 
-                (Ok(genesis_ci), None, _) => {
+                (
+                    Ok(genesis_ci),
+                    None
+                    | Some(Err(
+                        chain_spec::CheckpointToChainInformationError::GenesisBlockCheckpoint,
+                    )),
+                    _,
+                ) => {
                     let genesis_header =
                         header::Header::from(genesis_ci.as_ref().finalized_block_header.clone());
                     (genesis_ci, genesis_header, Default::default())
+                }
+
+                (_, Some(Err(err)), _) => {
+                    return Err(AddChainError::InvalidCheckpoint(err));
                 }
             }
         };
@@ -582,8 +590,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         // This could in principle be done later on, but doing so raises borrow checker errors.
         let relay_chain_ready_future: Option<(future::MaybeDone<future::Shared<_>>, String)> =
             relay_chain_id.map(|relay_chain| {
-                let relay_chain = &self
-                    .chains_by_key
+                let relay_chain = &chains_by_key
                     .get(&self.public_api_chains.get(relay_chain.0).unwrap().key)
                     .unwrap();
 
@@ -623,7 +630,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     base.clone()
                 };
 
-                if !self.chains_by_key.values().any(|c| *c.log_name == attempt) {
+                if !chains_by_key.values().any(|c| *c.log_name == attempt) {
                     break attempt;
                 }
 
@@ -635,7 +642,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         };
 
         // Start the services of the chain to add, or grab the services if they already exist.
-        let (services_init, log_name) = match self.chains_by_key.entry(new_chain_key.clone()) {
+        let (services_init, log_name) = match chains_by_key.entry(new_chain_key.clone()) {
             Entry::Occupied(mut entry) => {
                 // The chain to add always has a corresponding chain running. Simply grab the
                 // existing services and existing log name.
@@ -929,10 +936,18 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
     pub fn remove_chain(&mut self, id: ChainId) -> TChain {
         let removed_chain = self.public_api_chains.remove(id.0);
 
-        let running_chain = self.chains_by_key.get_mut(&removed_chain.key).unwrap();
+        // `chains_by_key` is created lazily when `add_chain` is called.
+        // Since we're removing a chain that has been added with `add_chain`, it is guaranteed
+        // that `chains_by_key` is set.
+        let chains_by_key = self
+            .chains_by_key
+            .as_mut()
+            .unwrap_or_else(|| unreachable!());
+
+        let running_chain = chains_by_key.get_mut(&removed_chain.key).unwrap();
         if running_chain.num_references.get() == 1 {
             log::info!(target: "smoldot", "Shutting down chain {}", running_chain.log_name);
-            self.chains_by_key.remove(&removed_chain.key);
+            chains_by_key.remove(&removed_chain.key);
         } else {
             running_chain.num_references =
                 NonZeroU32::new(running_chain.num_references.get() - 1).unwrap();
@@ -941,20 +956,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         self.public_api_chains.shrink_to_fit();
 
         removed_chain.user_data
-    }
-
-    /// Returns the user data associated to the given chain.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`ChainId`] is invalid.
-    ///
-    pub fn chain_user_data_mut(&mut self, chain_id: ChainId) -> &mut TChain {
-        &mut self
-            .public_api_chains
-            .get_mut(chain_id.0)
-            .unwrap()
-            .user_data
     }
 
     /// Enqueues a JSON-RPC request towards the given chain.
@@ -1001,6 +1002,20 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
     }
 }
 
+impl<TPlat: platform::PlatformRef, TChain> ops::Index<ChainId> for Client<TPlat, TChain> {
+    type Output = TChain;
+
+    fn index(&self, index: ChainId) -> &Self::Output {
+        &self.public_api_chains.get(index.0).unwrap().user_data
+    }
+}
+
+impl<TPlat: platform::PlatformRef, TChain> ops::IndexMut<ChainId> for Client<TPlat, TChain> {
+    fn index_mut(&mut self, index: ChainId) -> &mut Self::Output {
+        &mut self.public_api_chains.get_mut(index.0).unwrap().user_data
+    }
+}
+
 /// Error potentially returned by [`Client::add_chain`].
 #[derive(Debug, derive_more::Display)]
 pub enum AddChainError {
@@ -1013,7 +1028,7 @@ pub enum AddChainError {
     ChainSpecNeitherGenesisStorageNorCheckpoint,
     /// Checkpoint provided in the chain specification is invalid.
     #[display(fmt = "Invalid checkpoint in chain specification: {_0}")]
-    InvalidCheckpoint(chain_information::ValidityError),
+    InvalidCheckpoint(chain_spec::CheckpointToChainInformationError),
     /// Failed to build the information about the chain from the genesis storage. This indicates
     /// invalid data in the genesis storage.
     #[display(fmt = "Failed to build genesis chain information: {_0}")]

@@ -270,7 +270,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         let _prev_value = pinned_blocks.insert(
             (subscription_id, finalized_block.hash),
             PinnedBlock {
-                runtime: tree.finalized_async_user_data().clone(),
+                runtime: tree.output_finalized_async_user_data().clone(),
                 state_trie_root_hash: *decoded_finalized_block.state_root,
                 block_number: decoded_finalized_block.number,
                 block_ignores_limit: false,
@@ -280,18 +280,17 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
 
         let mut non_finalized_blocks_ancestry_order =
             Vec::with_capacity(tree.num_input_non_finalized_blocks());
-        for block in tree.input_iter_ancestry_order() {
+        for block in tree.input_output_iter_ancestry_order() {
             let runtime = match block.async_op_user_data {
                 Some(rt) => rt.clone(),
                 None => continue, // Runtime of that block not known yet, so it shouldn't be reported.
             };
 
             let block_hash = block.user_data.hash;
-            let parent_runtime = tree
-                .parent(block.id)
-                .map_or(tree.finalized_async_user_data().clone(), |parent_idx| {
-                    tree.block_async_user_data(parent_idx).unwrap().clone()
-                });
+            let parent_runtime = tree.parent(block.id).map_or(
+                tree.output_finalized_async_user_data().clone(),
+                |parent_idx| tree.block_async_user_data(parent_idx).unwrap().clone(),
+            );
 
             let parent_hash = *header::decode(
                 &block.user_data.scale_encoded_header,
@@ -302,7 +301,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             debug_assert!(
                 parent_hash == finalized_block.hash
                     || tree
-                        .input_iter_ancestry_order()
+                        .input_output_iter_ancestry_order()
                         .any(|b| parent_hash == b.user_data.hash && b.async_op_user_data.is_some())
             );
 
@@ -357,7 +356,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         SubscribeAll {
             finalized_block_scale_encoded_header: finalized_block.scale_encoded_header.clone(),
             finalized_block_runtime: tree
-                .finalized_async_user_data()
+                .output_finalized_async_user_data()
                 .runtime
                 .as_ref()
                 .map(|rt| rt.runtime_spec.clone())
@@ -438,11 +437,11 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     ///
     /// Panics if the given block isn't currently pinned by the given subscription.
     ///
-    pub async fn pinned_block_runtime_lock(
+    pub async fn pinned_block_runtime_access(
         &self,
         subscription_id: SubscriptionId,
         block_hash: &[u8; 32],
-    ) -> Result<RuntimeLock<TPlat>, PinnedBlockRuntimeLockError> {
+    ) -> Result<RuntimeAccess<TPlat>, PinnedBlockRuntimeAccessError> {
         // Note: copying the hash ahead of time fixes some weird intermittent borrow checker
         // issue.
         let block_hash = *block_hash;
@@ -466,16 +465,16 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
                         {
                             panic!("block already unpinned for subscription {sub_name}");
                         } else {
-                            return Err(PinnedBlockRuntimeLockError::ObsoleteSubscription);
+                            return Err(PinnedBlockRuntimeAccessError::ObsoleteSubscription);
                         }
                     }
                 }
             } else {
-                return Err(PinnedBlockRuntimeLockError::ObsoleteSubscription);
+                return Err(PinnedBlockRuntimeAccessError::ObsoleteSubscription);
             }
         };
 
-        Ok(RuntimeLock {
+        Ok(RuntimeAccess {
             sync_service: self.sync_service.clone(),
             hash: block_hash,
             runtime: pinned_block.runtime,
@@ -494,14 +493,14 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     ///
     /// Panics if the provided [`PinnedRuntimeId`] is stale or invalid.
     ///
-    pub async fn pinned_runtime_lock(
+    pub async fn pinned_runtime_access(
         &self,
         pinned_runtime_id: PinnedRuntimeId,
         block_hash: [u8; 32],
         block_number: u64,
         block_state_trie_root_hash: [u8; 32],
-    ) -> RuntimeLock<TPlat> {
-        RuntimeLock {
+    ) -> RuntimeAccess<TPlat> {
+        RuntimeAccess {
             sync_service: self.sync_service.clone(),
             hash: block_hash,
             runtime: pinned_runtime_id.0,
@@ -742,17 +741,16 @@ async fn is_near_head_of_chain_heuristic<TPlat: PlatformRef>(
     guarded.lock().await.best_near_head_of_chain
 }
 
-/// See [`RuntimeService::pinned_block_runtime_lock`].
+/// See [`RuntimeService::pinned_block_runtime_access`].
 #[derive(Debug, derive_more::Display, Clone)]
-pub enum PinnedBlockRuntimeLockError {
+pub enum PinnedBlockRuntimeAccessError {
     /// Subscription is dead.
     ObsoleteSubscription,
 }
 
-/// See [`RuntimeService::pinned_block_runtime_lock`].
-// TODO: rename, as it doesn't lock anything anymore
+/// See [`RuntimeService::pinned_block_runtime_access`].
 #[must_use]
-pub struct RuntimeLock<TPlat: PlatformRef> {
+pub struct RuntimeAccess<TPlat: PlatformRef> {
     sync_service: Arc<sync_service::SyncService<TPlat>>,
 
     block_number: u64,
@@ -761,7 +759,7 @@ pub struct RuntimeLock<TPlat: PlatformRef> {
     runtime: Arc<Runtime>,
 }
 
-impl<TPlat: PlatformRef> RuntimeLock<TPlat> {
+impl<TPlat: PlatformRef> RuntimeAccess<TPlat> {
     /// Returns the hash of the block the call is being made against.
     pub fn block_hash(&self) -> &[u8; 32] {
         &self.hash
@@ -782,7 +780,7 @@ impl<TPlat: PlatformRef> RuntimeLock<TPlat> {
         total_attempts: u32,
         timeout_per_request: Duration,
         max_parallel: NonZeroU32,
-    ) -> Result<(RuntimeCallLock<'b>, executor::host::HostVmPrototype), RuntimeCallError> {
+    ) -> Result<(RuntimeCall<'b>, executor::host::HostVmPrototype), RuntimeCallError> {
         // TODO: DRY :-/ this whole thing is messy
 
         // Perform the call proof request.
@@ -825,7 +823,7 @@ impl<TPlat: PlatformRef> RuntimeLock<TPlat> {
             }
         };
 
-        let lock = RuntimeCallLock {
+        let lock = RuntimeCall {
             guarded,
             block_state_root_hash: self.block_state_root_hash,
             call_proof,
@@ -835,15 +833,15 @@ impl<TPlat: PlatformRef> RuntimeLock<TPlat> {
     }
 }
 
-/// See [`RuntimeService::pinned_block_runtime_lock`].
+/// See [`RuntimeService::pinned_block_runtime_access`].
 #[must_use]
-pub struct RuntimeCallLock<'a> {
+pub struct RuntimeCall<'a> {
     guarded: MutexGuard<'a, Option<executor::host::HostVmPrototype>>,
     block_state_root_hash: [u8; 32],
     call_proof: Result<trie::proof_decode::DecodedTrieProof<Vec<u8>>, RuntimeCallError>,
 }
 
-impl<'a> RuntimeCallLock<'a> {
+impl<'a> RuntimeCall<'a> {
     /// Returns the storage root of the block the call is being made against.
     pub fn block_storage_root(&self) -> &[u8; 32] {
         &self.block_state_root_hash
@@ -935,10 +933,10 @@ impl<'a> RuntimeCallLock<'a> {
     }
 }
 
-impl<'a> Drop for RuntimeCallLock<'a> {
+impl<'a> Drop for RuntimeCall<'a> {
     fn drop(&mut self) {
         if self.guarded.is_none() {
-            // The [`RuntimeCallLock`] has been destroyed without being properly unlocked.
+            // The [`RuntimeCall`] has been destroyed without being properly unlocked.
             panic!()
         }
     }
@@ -1222,7 +1220,7 @@ async fn run_background<TPlat: PlatformRef>(
                                 None
                             } else {
                                 Some(
-                                    tree.input_iter_unordered()
+                                    tree.input_output_iter_unordered()
                                         .find(|b| b.user_data.hash == block.parent_hash)
                                         .unwrap()
                                         .id,
@@ -1278,7 +1276,7 @@ async fn run_background<TPlat: PlatformRef>(
 
                         for block in subscription.non_finalized_blocks_ancestry_order {
                             let parent_index = tree
-                                .input_iter_unordered()
+                                .input_output_iter_unordered()
                                 .find(|b| b.user_data.hash == block.parent_hash)
                                 .unwrap()
                                 .id;
@@ -1355,7 +1353,7 @@ async fn run_background<TPlat: PlatformRef>(
                                     let parent_index = if new_block.parent_hash == finalized_block.hash {
                                         None
                                     } else {
-                                        Some(tree.input_iter_unordered().find(|block| block.user_data.hash == new_block.parent_hash).unwrap().id)
+                                        Some(tree.input_output_iter_unordered().find(|block| block.user_data.hash == new_block.parent_hash).unwrap().id)
                                     };
 
                                     tree.input_insert_block(Block {
@@ -1364,7 +1362,7 @@ async fn run_background<TPlat: PlatformRef>(
                                     }, parent_index, same_runtime_as_parent, new_block.is_new_best);
                                 }
                                 GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                                    let parent_index = tree.input_iter_unordered().find(|block| block.user_data.hash == new_block.parent_hash).unwrap().id;
+                                    let parent_index = tree.input_output_iter_unordered().find(|block| block.user_data.hash == new_block.parent_hash).unwrap().id;
                                     tree.input_insert_block(Block {
                                         hash: header::hash_from_scale_encoded_header(&new_block.scale_encoded_header),
                                         scale_encoded_header: new_block.scale_encoded_header,
@@ -1398,14 +1396,19 @@ async fn run_background<TPlat: PlatformRef>(
 
                             match &mut guarded.tree {
                                 GuardedInner::FinalizedBlockRuntimeKnown {
+                                    finalized_block,
                                     tree, ..
                                 } => {
-                                    let idx = tree.input_iter_unordered().find(|block| block.user_data.hash == hash).unwrap().id;
+                                    let idx = if hash == finalized_block.hash {
+                                        None
+                                    } else {
+                                        Some(tree.input_output_iter_unordered().find(|block| block.user_data.hash == hash).unwrap().id)
+                                    };
                                     tree.input_set_best_block(idx);
                                 }
                                 GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                                    let idx = tree.input_iter_unordered().find(|block| block.user_data.hash == hash).unwrap().id;
-                                    tree.input_set_best_block(idx);
+                                    let idx = tree.input_output_iter_unordered().find(|block| block.user_data.hash == hash).unwrap().id;
+                                    tree.input_set_best_block(Some(idx));
                                 }
                             }
 
@@ -1700,7 +1703,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
                         let parent_runtime = tree
                             .parent(block_index)
-                            .map_or(tree.finalized_async_user_data().clone(), |idx| {
+                            .map_or(tree.output_finalized_async_user_data().clone(), |idx| {
                                 tree.block_async_user_data(idx).unwrap().clone()
                             });
 
@@ -1959,12 +1962,12 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             } => {
                 debug_assert_ne!(finalized_block.hash, hash_to_finalize);
                 let node_to_finalize = tree
-                    .input_iter_unordered()
+                    .input_output_iter_unordered()
                     .find(|block| block.user_data.hash == hash_to_finalize)
                     .unwrap()
                     .id;
                 let new_best_block = tree
-                    .input_iter_unordered()
+                    .input_output_iter_unordered()
                     .find(|block| block.user_data.hash == new_best_block_hash)
                     .unwrap()
                     .id;
@@ -1972,12 +1975,12 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             }
             GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
                 let node_to_finalize = tree
-                    .input_iter_unordered()
+                    .input_output_iter_unordered()
                     .find(|block| block.user_data.hash == hash_to_finalize)
                     .unwrap()
                     .id;
                 let new_best_block = tree
-                    .input_iter_unordered()
+                    .input_output_iter_unordered()
                     .find(|block| block.user_data.hash == new_best_block_hash)
                     .unwrap()
                     .id;

@@ -26,8 +26,7 @@ impl AsRef<[u8]> for VecWithOffset {
     }
 }
 
-// TODO: PartialEq/Eq?!
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct WriteQueue {
     /// Buffer of buffers to be written out.
     // TODO: is it a good idea to have an unbounded VecDeque?

@@ -624,7 +624,7 @@ where
             kademlia::kbuckets::Entry::Vacant(entry) => {
                 match entry.insert((), now, kademlia::kbuckets::PeerState::Disconnected) {
                     Err(kademlia::kbuckets::InsertError::Full) => return, // TODO: return some diagnostic?
-                    Ok((_, removed_entry)) => {
+                    Ok(kademlia::kbuckets::InsertResult { removed_entry, .. }) => {
                         // `removed_entry` is the peer that was removed the k-buckets as the
                         // result of the new insertion. Purge it from `self.kbuckets_peers`
                         // if necessary.

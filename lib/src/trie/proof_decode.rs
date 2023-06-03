@@ -938,7 +938,7 @@ mod tests {
 
         let trie_root = {
             let bytes =
-                hex::decode(&"29d0d972cd27cbc511e9589fcb7a4506d5eb6a9e8df205f00472e5ab354a4e17")
+                hex::decode("29d0d972cd27cbc511e9589fcb7a4506d5eb6a9e8df205f00472e5ab354a4e17")
                     .unwrap();
             <[u8; 32]>::try_from(&bytes[..]).unwrap()
         };

@@ -20,9 +20,10 @@
 
 mod cli;
 mod run;
+mod util;
 
 fn main() {
-    futures_executor::block_on(async_main())
+    smol::block_on(async_main())
 }
 
 async fn async_main() {

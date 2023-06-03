@@ -188,7 +188,11 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     self.sync_service.block_number_bytes(),
                 )
                 .unwrap(),
-                justifications: block.justifications,
+                justifications: block.justifications.map(|list| {
+                    list.into_iter()
+                        .map(|j| (j.engine_id, j.justification))
+                        .collect()
+                }),
             })
             .to_json_response(request_id.0)
         } else {
@@ -1214,7 +1218,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             .runtime_call(
                 &block_hash,
                 "Metadata",
-                1..=1,
+                1..=2,
                 "Metadata_metadata",
                 iter::empty::<Vec<u8>>(),
                 3,
@@ -1272,7 +1276,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         };
 
         let response = match self
-            .runtime_lock(&block_hash)
+            .runtime_access(&block_hash)
             .await
             .map(|l| l.specification())
         {

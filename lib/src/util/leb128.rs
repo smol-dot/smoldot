@@ -73,7 +73,12 @@ pub fn encode(value: impl Into<u64>) -> impl ExactSizeIterator<Item = u8> + Clon
 /// See also [`encode`].
 pub fn encode_usize(value: usize) -> impl ExactSizeIterator<Item = u8> + Clone {
     // `encode_usize` can leverage `encode` thanks to the property checked in this debug_assert.
-    debug_assert!(usize::BITS <= u64::BITS);
+    #[cfg(not(any(
+        target_pointer_width = "16",
+        target_pointer_width = "32",
+        target_pointer_width = "64"
+    )))]
+    compile_error!("usize must be <= u64");
     encode(u64::try_from(value).unwrap())
 }
 
@@ -86,7 +91,12 @@ pub(crate) fn nom_leb128_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
 ) -> nom::IResult<&'a [u8], usize, E> {
     // `nom_leb128_usize` can leverage `nom_leb128_u64` thanks to the property checked in this
     // debug_assert.
-    debug_assert!(usize::BITS <= u64::BITS);
+    #[cfg(not(any(
+        target_pointer_width = "16",
+        target_pointer_width = "32",
+        target_pointer_width = "64"
+    )))]
+    compile_error!("usize must be <= u64");
     let (rest, value) = nom_leb128_u64(bytes)?;
 
     let value = match usize::try_from(value) {
