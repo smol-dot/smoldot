@@ -17,7 +17,6 @@
 
 import * as child_process from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import * as zlib from 'node:zlib';
 
@@ -78,6 +77,7 @@ child_process.execSync(
     (buildProfile == 'debug' ? '' : ("--profile " + buildProfile)),
     { 'stdio': 'inherit', 'env': { 'RUSTFLAGS': '-C target-feature=+bulk-memory,+sign-ext,+simd128', ...process.env } }
 );
+const rustOutput = "../../target/wasm32-wasi/" + buildProfile + "/smoldot_light_wasm.wasm";
 
 // The code below will write a variable number of files to the `src/internals/bytecode` directory.
 // Start by clearing all existing files from this directory in case there are some left from past
