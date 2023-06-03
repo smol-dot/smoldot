@@ -64,6 +64,9 @@ fn block_building_works() {
                     .map(|(_, v)| iter::once(v));
                 builder = get.inject_value(value.map(|v| (v, super::TrieEntryVersion::V0)));
             }
+            super::BlockBuild::MerkleValue(req) => {
+                builder = req.resume_unknown();
+            }
             super::BlockBuild::NextKey(req) => {
                 let mut search =
                     trie::branch_search::start_branch_search(trie::branch_search::Config {

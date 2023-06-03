@@ -2772,6 +2772,10 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
     /// Loading a storage value of the parent block is required in order to continue.
     ParentStorageGet(StorageGet<TRq, TSrc, TBl>),
 
+    /// Obtaining the Merkle value of a trie node of the parent block storage is required in order
+    /// to continue.
+    ParentStorageMerkleValue(StorageMerkleValue<TRq, TSrc, TBl>),
+
     /// Fetching the key of the parent block storage that follows a given one is required in
     /// order to continue.
     ParentStorageNextKey(StorageNextKey<TRq, TSrc, TBl>),
@@ -2869,6 +2873,13 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     user_data,
                 })
             }
+            optimistic::BlockVerification::ParentStorageMerkleValue(inner) => {
+                BlockVerification::ParentStorageMerkleValue(StorageMerkleValue {
+                    inner,
+                    shared,
+                    user_data,
+                })
+            }
             optimistic::BlockVerification::ParentStorageNextKey(inner) => {
                 BlockVerification::ParentStorageNextKey(StorageNextKey {
                     inner,
@@ -2907,6 +2918,46 @@ impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
         value: Option<(&[u8], TrieEntryVersion)>,
     ) -> BlockVerification<TRq, TSrc, TBl> {
         let inner = self.inner.inject_value(value);
+        BlockVerification::from_inner(inner, self.shared, self.user_data)
+    }
+}
+
+/// Obtaining the Merkle value of a trie node is required in order to continue.
+#[must_use]
+pub struct StorageMerkleValue<TRq, TSrc, TBl> {
+    inner: optimistic::StorageMerkleValue<
+        OptimisticRequestExtra<TRq>,
+        OptimisticSourceExtra<TSrc>,
+        TBl,
+    >,
+    shared: Shared<TRq>,
+    user_data: TBl,
+}
+
+impl<TRq, TSrc, TBl> StorageMerkleValue<TRq, TSrc, TBl> {
+    /// Returns the key whose Merkle value must be passed back.
+    ///
+    /// The key is guaranteed to have been injected through [`StorageNextKey::inject_key`] earlier.
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+        self.inner.key()
+    }
+
+    /// Indicate that the value is unknown and resume the calculation.
+    ///
+    /// This function be used if you are unaware of the Merkle value. The algorithm will perform
+    /// the calculation of this Merkle value manually, which takes more time.
+    pub fn resume_unknown(self) -> BlockVerification<TRq, TSrc, TBl> {
+        let inner = self.inner.resume_unknown();
+        BlockVerification::from_inner(inner, self.shared, self.user_data)
+    }
+
+    /// Injects the corresponding Merkle value.
+    ///
+    /// Note that there is no way to indicate that the trie node doesn't exist. This is because
+    /// the node is guaranteed to have been injected through [`StorageNextKey::inject_key`]
+    /// earlier.
+    pub fn inject_merkle_value(self, merkle_value: &[u8]) -> BlockVerification<TRq, TSrc, TBl> {
+        let inner = self.inner.inject_merkle_value(merkle_value);
         BlockVerification::from_inner(inner, self.shared, self.user_data)
     }
 }

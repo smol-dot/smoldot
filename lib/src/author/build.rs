@@ -144,6 +144,9 @@ pub enum BuilderAuthoring {
     /// Loading a storage value from the parent storage is required in order to continue.
     StorageGet(StorageGet),
 
+    /// Obtaining the Merkle value of a trie node is required in order to continue.
+    MerkleValue(MerkleValue),
+
     /// Fetching the key that follows a given one in the parent storage is required in order to
     /// continue.
     NextKey(NextKey),
@@ -319,6 +322,36 @@ impl StorageGet {
         value: Option<(impl Iterator<Item = impl AsRef<[u8]>>, TrieEntryVersion)>,
     ) -> BuilderAuthoring {
         self.1.with_runtime_inner(self.0.inject_value(value))
+    }
+}
+
+/// Obtaining the Merkle value of a trie node is required in order to continue.
+#[must_use]
+pub struct MerkleValue(runtime::MerkleValue, Shared);
+
+impl MerkleValue {
+    /// Returns the key whose Merkle value must be passed to [`MerkleValue::inject_value`].
+    ///
+    /// The key is guaranteed to have been injected through [`NextKey::inject_key`] earlier.
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+        self.0.key()
+    }
+
+    /// Indicate that the value is unknown and resume the calculation.
+    ///
+    /// This function be used if you are unaware of the Merkle value. The algorithm will perform
+    /// the calculation of this Merkle value manually, which takes more time.
+    pub fn resume_unknown(self) -> BuilderAuthoring {
+        self.1.with_runtime_inner(self.0.resume_unknown())
+    }
+
+    /// Injects the corresponding Merkle value.
+    ///
+    /// Note that there is no way to indicate that the trie node doesn't exist. This is because
+    /// the node is guaranteed to have been injected through [`NextKey::inject_key`] earlier.
+    pub fn inject_merkle_value(self, merkle_value: &[u8]) -> BuilderAuthoring {
+        self.1
+            .with_runtime_inner(self.0.inject_merkle_value(merkle_value))
     }
 }
 
@@ -500,6 +533,9 @@ impl Shared {
                 }
                 runtime::BlockBuild::StorageGet(inner) => {
                     break BuilderAuthoring::StorageGet(StorageGet(inner, self))
+                }
+                runtime::BlockBuild::MerkleValue(inner) => {
+                    break BuilderAuthoring::MerkleValue(MerkleValue(inner, self))
                 }
                 runtime::BlockBuild::NextKey(inner) => {
                     break BuilderAuthoring::NextKey(NextKey(inner, self))

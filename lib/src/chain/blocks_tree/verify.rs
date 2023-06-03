@@ -646,6 +646,12 @@ impl<T> VerifyContext<T> {
                     inner,
                 })
             }
+            verify::header_body::Verify::StorageMerkleValue(inner) => {
+                BodyVerifyStep2::StorageMerkleValue(StorageMerkleValue {
+                    context: self,
+                    inner,
+                })
+            }
             verify::header_body::Verify::StorageNextKey(inner) => {
                 BodyVerifyStep2::StorageNextKey(StorageNextKey {
                     context: self,
@@ -879,6 +885,8 @@ pub enum BodyVerifyStep2<T> {
     },
     /// Loading a storage value is required in order to continue.
     StorageGet(StorageGet<T>),
+    /// Obtaining the Merkle value of a trie node is required in order to continue.
+    StorageMerkleValue(StorageMerkleValue<T>),
     /// Fetching the key that follows a given one is required in order to continue.
     StorageNextKey(StorageNextKey<T>),
     /// A new runtime must be compiled.
@@ -955,6 +963,41 @@ impl<T> StorageGet<T> {
         value: Option<(impl Iterator<Item = impl AsRef<[u8]>>, TrieEntryVersion)>,
     ) -> BodyVerifyStep2<T> {
         let inner = self.inner.inject_value(value);
+        self.context.with_body_verify(inner)
+    }
+}
+
+/// Obtaining the Merkle value of a trie node is required in order to continue.
+#[must_use]
+pub struct StorageMerkleValue<T> {
+    inner: verify::header_body::StorageMerkleValue,
+    context: Box<VerifyContext<T>>,
+}
+
+impl<T> StorageMerkleValue<T> {
+    /// Returns the key whose Merkle value must be passed back.
+    ///
+    /// The key is guaranteed to have been injected through [`StorageNextKey::inject_key`] earlier.
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+        self.inner.key()
+    }
+
+    /// Indicate that the value is unknown and resume the calculation.
+    ///
+    /// This function be used if you are unaware of the Merkle value. The algorithm will perform
+    /// the calculation of this Merkle value manually, which takes more time.
+    pub fn resume_unknown(self) -> BodyVerifyStep2<T> {
+        let inner = self.inner.resume_unknown();
+        self.context.with_body_verify(inner)
+    }
+
+    /// Injects the corresponding Merkle value.
+    ///
+    /// Note that there is no way to indicate that the trie node doesn't exist. This is because
+    /// the node is guaranteed to have been injected through [`StorageNextKey::inject_key`]
+    /// earlier.
+    pub fn inject_merkle_value(self, merkle_value: &[u8]) -> BodyVerifyStep2<T> {
+        let inner = self.inner.inject_merkle_value(merkle_value);
         self.context.with_body_verify(inner)
     }
 }

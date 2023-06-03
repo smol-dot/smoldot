@@ -244,6 +244,9 @@ pub enum BlockBuild {
     /// Loading a storage value from the parent storage is required in order to continue.
     StorageGet(StorageGet),
 
+    /// Obtaining the Merkle value of a trie node is required in order to continue.
+    MerkleValue(MerkleValue),
+
     /// Fetching the key that follows a given one in the parent storage is required in order to
     /// continue.
     NextKey(NextKey),
@@ -265,6 +268,9 @@ impl BlockBuild {
                 }
                 (Inner::Runtime(runtime_host::RuntimeHostVm::StorageGet(inner)), _) => {
                     return BlockBuild::StorageGet(StorageGet(inner, shared))
+                }
+                (Inner::Runtime(runtime_host::RuntimeHostVm::MerkleValue(inner)), _) => {
+                    return BlockBuild::MerkleValue(MerkleValue(inner, shared))
                 }
                 (Inner::Runtime(runtime_host::RuntimeHostVm::NextKey(inner)), _) => {
                     return BlockBuild::NextKey(NextKey(inner, shared))
@@ -612,6 +618,35 @@ impl StorageGet {
         value: Option<(impl Iterator<Item = impl AsRef<[u8]>>, TrieEntryVersion)>,
     ) -> BlockBuild {
         BlockBuild::from_inner(self.0.inject_value(value), self.1)
+    }
+}
+
+/// Obtaining the Merkle value of a trie node is required in order to continue.
+#[must_use]
+pub struct MerkleValue(runtime_host::MerkleValue, Shared);
+
+impl MerkleValue {
+    /// Returns the key whose Merkle value must be passed to [`MerkleValue::inject_value`].
+    ///
+    /// The key is guaranteed to have been injected through [`NextKey::inject_key`] earlier.
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+        self.0.key()
+    }
+
+    /// Indicate that the value is unknown and resume the calculation.
+    ///
+    /// This function be used if you are unaware of the Merkle value. The algorithm will perform
+    /// the calculation of this Merkle value manually, which takes more time.
+    pub fn resume_unknown(self) -> BlockBuild {
+        BlockBuild::from_inner(self.0.resume_unknown(), self.1)
+    }
+
+    /// Injects the corresponding Merkle value.
+    ///
+    /// Note that there is no way to indicate that the trie node doesn't exist. This is because
+    /// the node is guaranteed to have been injected through [`NextKey::inject_key`] earlier.
+    pub fn inject_merkle_value(self, merkle_value: &[u8]) -> BlockBuild {
+        BlockBuild::from_inner(self.0.inject_merkle_value(merkle_value), self.1)
     }
 }
 

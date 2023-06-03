@@ -173,6 +173,8 @@ pub enum RuntimeHostVm {
     Finished(Result<Success, Error>),
     /// Loading a storage value is required in order to continue.
     StorageGet(StorageGet),
+    /// Obtaining the Merkle value of a trie node is required in order to continue.
+    MerkleValue(MerkleValue),
     /// Fetching the key that follows a given one is required in order to continue.
     NextKey(NextKey),
     /// Verifying whether a signature is correct is required in order to continue.
@@ -186,6 +188,7 @@ impl RuntimeHostVm {
             RuntimeHostVm::Finished(Ok(inner)) => inner.virtual_machine.into_prototype(),
             RuntimeHostVm::Finished(Err(inner)) => inner.prototype,
             RuntimeHostVm::StorageGet(inner) => inner.inner.vm.into_prototype(),
+            RuntimeHostVm::MerkleValue(inner) => inner.inner.vm.into_prototype(),
             RuntimeHostVm::NextKey(inner) => inner.inner.vm.into_prototype(),
             RuntimeHostVm::SignatureVerification(inner) => inner.inner.vm.into_prototype(),
         }
@@ -459,6 +462,65 @@ impl NextKey {
             _ => unreachable!(),
         };
 
+        self.inner.run()
+    }
+}
+
+/// Obtaining the Merkle value of a trie node is required in order to continue.
+#[must_use]
+pub struct MerkleValue {
+    inner: Inner,
+}
+
+impl MerkleValue {
+    /// Returns the key whose Merkle value must be passed to [`MerkleValue::inject_value`].
+    ///
+    /// The key is guaranteed to have been injected through [`NextKey::inject_key`] earlier.
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+        debug_assert!(matches!(
+            &self.inner.vm,
+            host::HostVm::ExternalStorageRoot(_)
+        ));
+
+        let trie_root_calculator::InProgress::MerkleValue(request) =
+            self.inner.root_calculation.as_ref().unwrap()
+            else { unreachable!() };
+        request.key().flat_map(util::as_ref_iter)
+    }
+
+    /// Indicate that the value is unknown and resume the calculation.
+    ///
+    /// This function be used if you are unaware of the Merkle value. The algorithm will perform
+    /// the calculation of this Merkle value manually, which takes more time.
+    pub fn resume_unknown(mut self) -> RuntimeHostVm {
+        debug_assert!(matches!(
+            &self.inner.vm,
+            host::HostVm::ExternalStorageRoot(_)
+        ));
+
+        let trie_root_calculator::InProgress::MerkleValue(request) =
+            self.inner.root_calculation.take().unwrap()
+            else { unreachable!() };
+
+        self.inner.root_calculation = Some(request.resume_unknown());
+        self.inner.run()
+    }
+
+    /// Injects the corresponding Merkle value.
+    ///
+    /// Note that there is no way to indicate that the trie node doesn't exist. This is because
+    /// the node is guaranteed to have been injected through [`NextKey::inject_key`] earlier.
+    pub fn inject_merkle_value(mut self, merkle_value: &[u8]) -> RuntimeHostVm {
+        debug_assert!(matches!(
+            &self.inner.vm,
+            host::HostVm::ExternalStorageRoot(_)
+        ));
+
+        let trie_root_calculator::InProgress::MerkleValue(request) =
+            self.inner.root_calculation.take().unwrap()
+            else { unreachable!() };
+
+        self.inner.root_calculation = Some(request.inject_merkle_value(merkle_value));
         self.inner.run()
     }
 }
