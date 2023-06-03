@@ -1114,6 +1114,9 @@ impl SyncBackground {
             | all::ProcessOne::WarpSyncBuildChainInformation(_)
             | all::ProcessOne::WarpSyncFinished { .. } => unreachable!(),
             all::ProcessOne::VerifyBodyHeader(verify) => {
+                let when_verification_started = Instant::now();
+                let mut database_accesses_duration = Duration::new(0, 0);
+                let mut runtime_build_duration = Duration::new(0, 0);
                 let hash_to_verify = verify.hash();
                 let height_to_verify = verify.height();
                 let parent_hash = verify.parent_hash();
@@ -1148,9 +1151,11 @@ impl SyncBackground {
                             // to be aware of the verification failure.
                             // `error` is last because it's quite big.
                             log::warn!(
-                                "failed-block-verification; hash={}; height={}; error={}",
+                                "failed-block-verification; hash={}; height={}; \
+                                total_duration={:?}; error={}",
                                 HashDisplay(&hash_to_verify),
                                 height_to_verify,
+                                when_verification_started.elapsed(),
                                 error
                             );
                             *parent_runtime_arc.try_lock().unwrap() = Some(parent_runtime);
@@ -1167,9 +1172,14 @@ impl SyncBackground {
                             ..
                         } => {
                             log::debug!(
-                                "block-verification-success; hash={}; height={}; is_new_best={:?}",
+                                "block-verification-success; hash={}; height={}; \
+                                total_duration={:?}; database_accesses_duration={:?}; \
+                                runtime_build_duration={:?}; is_new_best={:?}",
                                 HashDisplay(&hash_to_verify),
                                 height_to_verify,
+                                when_verification_started.elapsed(),
+                                database_accesses_duration,
+                                runtime_build_duration,
                                 is_new_best
                             );
 
@@ -1283,6 +1293,7 @@ impl SyncBackground {
                         }
 
                         all::BlockVerification::ParentStorageGet(req) => {
+                            let when_database_access_started = Instant::now();
                             let key = req.key().as_ref().to_vec();
                             let value = self
                                 .database
@@ -1291,19 +1302,23 @@ impl SyncBackground {
                                 })
                                 .await
                                 .expect("database access error");
-
-                            verify = req.inject_value(value.as_ref().map(|(val, vers)| {
+                            let value = value.as_ref().map(|(val, vers)| {
                                 (
                                     &val[..],
                                     TrieEntryVersion::try_from(*vers).expect("corrupted database"),
                                 )
-                            }));
+                            });
+
+                            database_accesses_duration += when_database_access_started.elapsed();
+                            verify = req.inject_value(value);
                         }
                         all::BlockVerification::ParentStorageMerkleValue(req) => {
                             // TODO: the syncing is currently extremely slow due to this
                             verify = req.resume_unknown();
                         }
                         all::BlockVerification::ParentStorageNextKey(req) => {
+                            let when_database_access_started = Instant::now();
+
                             let search_params = trie::branch_search::Config {
                                 key_before: req.key().collect::<Vec<_>>().into_iter(),
                                 or_equal: req.or_equal(),
@@ -1345,10 +1360,14 @@ impl SyncBackground {
                                 })
                                 .await;
 
+                            database_accesses_duration += when_database_access_started.elapsed();
                             verify = req.inject_key(next_key.map(|nk| nk.into_iter()));
                         }
                         all::BlockVerification::RuntimeCompilation(rt) => {
-                            verify = rt.build();
+                            let before_runtime_build = Instant::now();
+                            let outcome = rt.build();
+                            runtime_build_duration += before_runtime_build.elapsed();
+                            verify = outcome;
                         }
                     }
                 }
