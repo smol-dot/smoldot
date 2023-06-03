@@ -106,6 +106,7 @@ use core::iter;
 
 mod nibble;
 
+pub mod branch_search;
 pub mod calculate_root;
 pub mod prefix_proof;
 pub mod proof_decode;
@@ -115,7 +116,7 @@ pub mod trie_structure;
 
 pub use nibble::{
     all_nibbles, bytes_to_nibbles, nibbles_to_bytes_prefix_extend, nibbles_to_bytes_suffix_extend,
-    BytesToNibbles, Nibble, NibbleFromU8Error,
+    nibbles_to_bytes_truncate, BytesToNibbles, Nibble, NibbleFromU8Error,
 };
 
 /// The format of the nodes of trie has two different versions.

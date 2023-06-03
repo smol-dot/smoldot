@@ -41,6 +41,7 @@ use smoldot::{
     libp2p,
     network::{self, protocol::BlockData},
     sync::all::{self, TrieEntryVersion},
+    trie,
 };
 use std::{
     iter, mem,
@@ -746,7 +747,6 @@ impl SyncBackground {
                         .unwrap(),
                     parent_runtime,
                     block_body_capacity: 0, // TODO: could be set to the size of the tx pool
-                    main_trie_root_calculation_cache: None, // TODO: pretty important for performances
                     max_log_level: 0,
                 })
             };
@@ -811,7 +811,6 @@ impl SyncBackground {
                     author::build::BuilderAuthoring::ApplyExtrinsic(apply) => {
                         // TODO: actually implement including transactions in the blocks
                         block_authoring = apply.finish();
-                        continue;
                     }
                     author::build::BuilderAuthoring::ApplyExtrinsicResult { result, resume } => {
                         if let Err(error) = result {
@@ -821,7 +820,6 @@ impl SyncBackground {
 
                         // TODO: actually implement including transactions in the blocks
                         block_authoring = resume.finish();
-                        continue;
                     }
 
                     // Access to the best block storage.
@@ -841,37 +839,50 @@ impl SyncBackground {
                                 TrieEntryVersion::try_from(*vers).expect("corrupted database"),
                             )
                         }));
-                        continue;
+                    }
+                    author::build::BuilderAuthoring::MerkleValue(req) => {
+                        block_authoring = req.resume_unknown();
                     }
                     author::build::BuilderAuthoring::NextKey(req) => {
-                        let key = req.key().as_ref().to_vec();
-                        let or_equal = req.or_equal();
+                        let search_params = trie::branch_search::Config {
+                            key_before: req.key().collect::<Vec<_>>().into_iter(),
+                            or_equal: req.or_equal(),
+                            prefix: req.prefix().collect::<Vec<_>>().into_iter(),
+                            no_branch_search: !req.branch_nodes(),
+                        };
+
                         let next_key = self
                             .database
                             .with_database(move |db| {
-                                db.block_storage_main_trie_next_key(&parent_hash, &key, or_equal)
-                            })
-                            .await
-                            .expect("database access error")
-                            .filter(|k| k.starts_with(req.prefix().as_ref()));
+                                let mut search =
+                                    trie::branch_search::start_branch_search(search_params);
 
-                        debug_assert!(next_key
-                            .as_ref()
-                            .map_or(true, |k| &**k > req.key().as_ref()));
-                        block_authoring = req.inject_key(next_key);
-                        continue;
-                    }
-                    author::build::BuilderAuthoring::PrefixKeys(req) => {
-                        let prefix = req.prefix().as_ref().to_vec();
-                        let keys = self
-                            .database
-                            .with_database(move |db| {
-                                db.block_storage_main_trie_keys_ordered(&parent_hash, &prefix)
+                                loop {
+                                    match search {
+                                        trie::branch_search::BranchSearch::Found {
+                                            branch_trie_node_key,
+                                        } => break branch_trie_node_key,
+                                        trie::branch_search::BranchSearch::NextKey(req) => {
+                                            let mut next_key = db
+                                                .block_storage_main_trie_next_key(
+                                                    &parent_hash,
+                                                    &req.key_before().collect::<Vec<_>>(),
+                                                    req.or_equal(),
+                                                )
+                                                .expect("database access error");
+                                            if next_key.as_ref().map_or(false, |nk| {
+                                                !nk.starts_with(&req.prefix().collect::<Vec<_>>())
+                                            }) {
+                                                next_key = None;
+                                            }
+                                            search = req.inject(next_key.map(|k| k.into_iter()));
+                                        }
+                                    }
+                                }
                             })
-                            .await
-                            .expect("database access error");
-                        block_authoring = req.inject_keys_ordered(keys.into_iter());
-                        continue;
+                            .await;
+
+                        block_authoring = req.inject_key(next_key.map(|nk| nk.into_iter()));
                     }
                 }
             }
@@ -1288,37 +1299,53 @@ impl SyncBackground {
                                 )
                             }));
                         }
+                        all::BlockVerification::ParentStorageMerkleValue(req) => {
+                            // TODO: the syncing is currently extremely slow due to this
+                            verify = req.resume_unknown();
+                        }
                         all::BlockVerification::ParentStorageNextKey(req) => {
-                            let key = req.key().as_ref().to_vec();
-                            let or_equal = req.or_equal();
+                            let search_params = trie::branch_search::Config {
+                                key_before: req.key().collect::<Vec<_>>().into_iter(),
+                                or_equal: req.or_equal(),
+                                prefix: req.prefix().collect::<Vec<_>>().into_iter(),
+                                no_branch_search: !req.branch_nodes(),
+                            };
+
                             let next_key = self
                                 .database
                                 .with_database(move |db| {
-                                    db.block_storage_main_trie_next_key(
-                                        &parent_hash,
-                                        &key,
-                                        or_equal,
-                                    )
-                                })
-                                .await
-                                .expect("database access error")
-                                .filter(|k| k.starts_with(req.prefix().as_ref()));
+                                    let mut search =
+                                        trie::branch_search::start_branch_search(search_params);
 
-                            debug_assert!(next_key
-                                .as_ref()
-                                .map_or(true, |k| &**k > req.key().as_ref()));
-                            verify = req.inject_key(next_key);
-                        }
-                        all::BlockVerification::ParentStoragePrefixKeys(req) => {
-                            let prefix = req.prefix().as_ref().to_vec();
-                            let keys = self
-                                .database
-                                .with_database(move |db| {
-                                    db.block_storage_main_trie_keys_ordered(&parent_hash, &prefix)
+                                    loop {
+                                        match search {
+                                            trie::branch_search::BranchSearch::Found {
+                                                branch_trie_node_key,
+                                            } => break branch_trie_node_key,
+                                            trie::branch_search::BranchSearch::NextKey(req) => {
+                                                let mut next_key = db
+                                                    .block_storage_main_trie_next_key(
+                                                        &parent_hash,
+                                                        &req.key_before().collect::<Vec<_>>(),
+                                                        req.or_equal(),
+                                                    )
+                                                    .expect("database access error");
+                                                if next_key.as_ref().map_or(false, |nk| {
+                                                    !nk.starts_with(
+                                                        &req.prefix().collect::<Vec<_>>(),
+                                                    )
+                                                }) {
+                                                    next_key = None;
+                                                }
+                                                search =
+                                                    req.inject(next_key.map(|k| k.into_iter()));
+                                            }
+                                        }
+                                    }
                                 })
-                                .await
-                                .expect("database access error");
-                            verify = req.inject_keys_ordered(keys.into_iter());
+                                .await;
+
+                            verify = req.inject_key(next_key.map(|nk| nk.into_iter()));
                         }
                         all::BlockVerification::RuntimeCompilation(rt) => {
                             verify = rt.build();

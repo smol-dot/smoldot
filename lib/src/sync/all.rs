@@ -47,7 +47,7 @@ use core::{
 };
 
 pub use crate::executor::vm::ExecHint;
-pub use optimistic::TrieEntryVersion;
+pub use optimistic::{Nibble, TrieEntryVersion};
 pub use warp_sync::{FragmentError as WarpSyncFragmentError, WarpSyncFragment};
 
 /// Configuration for the [`AllSync`].
@@ -2816,9 +2816,9 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
     /// Loading a storage value of the parent block is required in order to continue.
     ParentStorageGet(StorageGet<TRq, TSrc, TBl>),
 
-    /// Fetching the list of keys of the parent block with a given prefix is required in order
+    /// Obtaining the Merkle value of a trie node of the parent block storage is required in order
     /// to continue.
-    ParentStoragePrefixKeys(StoragePrefixKeys<TRq, TSrc, TBl>),
+    ParentStorageMerkleValue(StorageMerkleValue<TRq, TSrc, TBl>),
 
     /// Fetching the key of the parent block storage that follows a given one is required in
     /// order to continue.
@@ -2917,8 +2917,8 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     user_data,
                 })
             }
-            optimistic::BlockVerification::ParentStoragePrefixKeys(inner) => {
-                BlockVerification::ParentStoragePrefixKeys(StoragePrefixKeys {
+            optimistic::BlockVerification::ParentStorageMerkleValue(inner) => {
+                BlockVerification::ParentStorageMerkleValue(StorageMerkleValue {
                     inner,
                     shared,
                     user_data,
@@ -2966,10 +2966,10 @@ impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
     }
 }
 
-/// Fetching the list of keys with a given prefix is required in order to continue.
+/// Obtaining the Merkle value of a trie node is required in order to continue.
 #[must_use]
-pub struct StoragePrefixKeys<TRq, TSrc, TBl> {
-    inner: optimistic::StoragePrefixKeys<
+pub struct StorageMerkleValue<TRq, TSrc, TBl> {
+    inner: optimistic::StorageMerkleValue<
         OptimisticRequestExtra<TRq>,
         OptimisticSourceExtra<TSrc>,
         TBl,
@@ -2978,18 +2978,30 @@ pub struct StoragePrefixKeys<TRq, TSrc, TBl> {
     user_data: TBl,
 }
 
-impl<TRq, TSrc, TBl> StoragePrefixKeys<TRq, TSrc, TBl> {
-    /// Returns the prefix whose keys to load.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.inner.prefix()
+impl<TRq, TSrc, TBl> StorageMerkleValue<TRq, TSrc, TBl> {
+    /// Returns the key whose Merkle value must be passed back.
+    ///
+    /// The key is guaranteed to have been injected through [`StorageNextKey::inject_key`] earlier.
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+        self.inner.key()
     }
 
-    /// Injects the list of keys ordered lexicographically.
-    pub fn inject_keys_ordered(
-        self,
-        keys: impl Iterator<Item = impl AsRef<[u8]>>,
-    ) -> BlockVerification<TRq, TSrc, TBl> {
-        let inner = self.inner.inject_keys_ordered(keys);
+    /// Indicate that the value is unknown and resume the calculation.
+    ///
+    /// This function be used if you are unaware of the Merkle value. The algorithm will perform
+    /// the calculation of this Merkle value manually, which takes more time.
+    pub fn resume_unknown(self) -> BlockVerification<TRq, TSrc, TBl> {
+        let inner = self.inner.resume_unknown();
+        BlockVerification::from_inner(inner, self.shared, self.user_data)
+    }
+
+    /// Injects the corresponding Merkle value.
+    ///
+    /// Note that there is no way to indicate that the trie node doesn't exist. This is because
+    /// the node is guaranteed to have been injected through [`StorageNextKey::inject_key`]
+    /// earlier.
+    pub fn inject_merkle_value(self, merkle_value: &[u8]) -> BlockVerification<TRq, TSrc, TBl> {
+        let inner = self.inner.inject_merkle_value(merkle_value);
         BlockVerification::from_inner(inner, self.shared, self.user_data)
     }
 }
@@ -3004,7 +3016,7 @@ pub struct StorageNextKey<TRq, TSrc, TBl> {
 }
 
 impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.key()
     }
 
@@ -3014,9 +3026,15 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
         self.inner.or_equal()
     }
 
+    /// If `true`, then the search must include both branch nodes and storage nodes. If `false`,
+    /// the search only covers storage nodes.
+    pub fn branch_nodes(&self) -> bool {
+        self.inner.branch_nodes()
+    }
+
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.prefix()
     }
 
@@ -3026,7 +3044,10 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
-    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> BlockVerification<TRq, TSrc, TBl> {
+    pub fn inject_key(
+        self,
+        key: Option<impl Iterator<Item = Nibble>>,
+    ) -> BlockVerification<TRq, TSrc, TBl> {
         let inner = self.inner.inject_key(key);
         BlockVerification::from_inner(inner, self.shared, self.user_data)
     }

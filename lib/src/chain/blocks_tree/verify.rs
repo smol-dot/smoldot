@@ -23,9 +23,7 @@
 use crate::{
     chain::{chain_information, fork_tree},
     executor::{host, storage_diff},
-    header,
-    trie::calculate_root,
-    verify,
+    header, verify,
 };
 
 use super::{
@@ -36,7 +34,7 @@ use super::{
 use alloc::boxed::Box;
 use core::cmp::Ordering;
 
-pub use verify::header_body::TrieEntryVersion;
+pub use verify::header_body::{Nibble, TrieEntryVersion};
 
 impl<T> NonFinalizedTree<T> {
     /// Verifies the given block.
@@ -624,7 +622,6 @@ impl<T> VerifyContext<T> {
                     storage_main_trie_changes: success.storage_main_trie_changes,
                     state_trie_version: success.state_trie_version,
                     offchain_storage_changes: success.offchain_storage_changes,
-                    main_trie_root_calculation_cache: success.main_trie_root_calculation_cache,
                     insert: BodyInsert(Box::new(BodyInsertInner {
                         context: self,
                         is_new_best,
@@ -649,14 +646,14 @@ impl<T> VerifyContext<T> {
                     inner,
                 })
             }
-            verify::header_body::Verify::StorageNextKey(inner) => {
-                BodyVerifyStep2::StorageNextKey(StorageNextKey {
+            verify::header_body::Verify::StorageMerkleValue(inner) => {
+                BodyVerifyStep2::StorageMerkleValue(StorageMerkleValue {
                     context: self,
                     inner,
                 })
             }
-            verify::header_body::Verify::StoragePrefixKeys(inner) => {
-                BodyVerifyStep2::StoragePrefixKeys(StoragePrefixKeys {
+            verify::header_body::Verify::StorageNextKey(inner) => {
+                BodyVerifyStep2::StorageNextKey(StorageNextKey {
                     context: self,
                     inner,
                 })
@@ -753,18 +750,10 @@ impl<T> BodyVerifyRuntimeRequired<T> {
     ///
     /// `parent_runtime` must be a Wasm virtual machine containing the runtime code of the parent
     /// block.
-    ///
-    /// The value of `main_trie_root_calculation_cache` can be the one provided by the
-    /// [`BodyVerifyStep2::Finished`] variant when the parent block has been verified. `None` can
-    /// be passed if this information isn't available.
-    ///
-    /// While `main_trie_root_calculation_cache` is optional, providing a value will considerably
-    /// speed up the calculation.
     pub fn resume(
         self,
         parent_runtime: host::HostVmPrototype,
         block_body: impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone,
-        main_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
     ) -> BodyVerifyStep2<T> {
         let parent_block_header = if let Some(parent_tree_index) = self.context.parent_tree_index {
             &self
@@ -839,7 +828,6 @@ impl<T> BodyVerifyRuntimeRequired<T> {
             )
             .unwrap(),
             block_body,
-            main_trie_root_calculation_cache,
             max_log_level: 0,
         });
 
@@ -883,10 +871,6 @@ pub enum BodyVerifyStep2<T> {
         state_trie_version: TrieEntryVersion,
         /// List of changes to the off-chain storage that this block performs.
         offchain_storage_changes: storage_diff::TrieDiff,
-        /// Cache of calculation for the storage trie of the best block.
-        /// Pass this value to [`BodyVerifyRuntimeRequired::resume`] when verifying a children of
-        /// this block in order to considerably speed up the verification.
-        main_trie_root_calculation_cache: calculate_root::CalculationCache,
         /// Use to insert the block in the chain.
         insert: BodyInsert<T>,
     },
@@ -901,8 +885,8 @@ pub enum BodyVerifyStep2<T> {
     },
     /// Loading a storage value is required in order to continue.
     StorageGet(StorageGet<T>),
-    /// Fetching the list of keys with a given prefix is required in order to continue.
-    StoragePrefixKeys(StoragePrefixKeys<T>),
+    /// Obtaining the Merkle value of a trie node is required in order to continue.
+    StorageMerkleValue(StorageMerkleValue<T>),
     /// Fetching the key that follows a given one is required in order to continue.
     StorageNextKey(StorageNextKey<T>),
     /// A new runtime must be compiled.
@@ -983,61 +967,37 @@ impl<T> StorageGet<T> {
     }
 }
 
-/// Fetching the list of keys with a given prefix is required in order to continue.
+/// Obtaining the Merkle value of a trie node is required in order to continue.
 #[must_use]
-pub struct StoragePrefixKeys<T> {
-    inner: verify::header_body::StoragePrefixKeys,
+pub struct StorageMerkleValue<T> {
+    inner: verify::header_body::StorageMerkleValue,
     context: Box<VerifyContext<T>>,
 }
 
-impl<T> StoragePrefixKeys<T> {
-    /// Returns the prefix whose keys to load.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.inner.prefix()
+impl<T> StorageMerkleValue<T> {
+    /// Returns the key whose Merkle value must be passed back.
+    ///
+    /// The key is guaranteed to have been injected through [`StorageNextKey::inject_key`] earlier.
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+        self.inner.key()
     }
 
-    /// Access to the Nth ancestor's information and hierarchy. Returns `None` if `n` is too
-    /// large. A value of `0` for `n` corresponds to the parent block. A value of `1` corresponds
-    /// to the parent's parent. And so on.
-    pub fn nth_ancestor(&mut self, n: u64) -> Option<BlockAccess<T>> {
-        let parent_index = self.context.parent_tree_index?;
-        let n = usize::try_from(n).ok()?;
-        let ret = self
-            .context
-            .chain
-            .blocks
-            .node_to_root_path(parent_index)
-            .nth(n)?;
-        Some(BlockAccess {
-            tree: &mut self.context.chain,
-            node_index: ret,
-        })
+    /// Indicate that the value is unknown and resume the calculation.
+    ///
+    /// This function be used if you are unaware of the Merkle value. The algorithm will perform
+    /// the calculation of this Merkle value manually, which takes more time.
+    pub fn resume_unknown(self) -> BodyVerifyStep2<T> {
+        let inner = self.inner.resume_unknown();
+        self.context.with_body_verify(inner)
     }
 
-    /// Returns the number of non-finalized blocks in the tree that are ancestors to the block
-    /// being verified.
-    pub fn num_non_finalized_ancestors(&self) -> u64 {
-        let parent_index = match self.context.parent_tree_index {
-            Some(p) => p,
-            None => return 0,
-        };
-
-        u64::try_from(
-            self.context
-                .chain
-                .blocks
-                .node_to_root_path(parent_index)
-                .count(),
-        )
-        .unwrap()
-    }
-
-    /// Injects the list of keys ordered lexicographically.
-    pub fn inject_keys_ordered(
-        self,
-        keys: impl Iterator<Item = impl AsRef<[u8]>>,
-    ) -> BodyVerifyStep2<T> {
-        let inner = self.inner.inject_keys_ordered(keys);
+    /// Injects the corresponding Merkle value.
+    ///
+    /// Note that there is no way to indicate that the trie node doesn't exist. This is because
+    /// the node is guaranteed to have been injected through [`StorageNextKey::inject_key`]
+    /// earlier.
+    pub fn inject_merkle_value(self, merkle_value: &[u8]) -> BodyVerifyStep2<T> {
+        let inner = self.inner.inject_merkle_value(merkle_value);
         self.context.with_body_verify(inner)
     }
 }
@@ -1051,7 +1011,7 @@ pub struct StorageNextKey<T> {
 
 impl<T> StorageNextKey<T> {
     /// Returns the key whose next key must be passed back.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.key()
     }
 
@@ -1061,9 +1021,15 @@ impl<T> StorageNextKey<T> {
         self.inner.or_equal()
     }
 
+    /// If `true`, then the search must include both branch nodes and storage nodes. If `false`,
+    /// the search only covers storage nodes.
+    pub fn branch_nodes(&self) -> bool {
+        self.inner.branch_nodes()
+    }
+
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.prefix()
     }
 
@@ -1109,7 +1075,7 @@ impl<T> StorageNextKey<T> {
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
-    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> BodyVerifyStep2<T> {
+    pub fn inject_key(self, key: Option<impl Iterator<Item = Nibble>>) -> BodyVerifyStep2<T> {
         let inner = self.inner.inject_key(key);
         self.context.with_body_verify(inner)
     }

@@ -18,16 +18,14 @@
 use crate::{
     chain::chain_information,
     executor::{self, host, runtime_host, storage_diff, vm},
-    header,
-    trie::calculate_root,
-    util,
+    header, util,
     verify::{aura, babe, inherents},
 };
 
 use alloc::{string::String, vec::Vec};
 use core::{iter, num::NonZeroU64, time::Duration};
 
-pub use runtime_host::TrieEntryVersion;
+pub use runtime_host::{Nibble, TrieEntryVersion};
 
 /// Configuration for a block verification.
 pub struct Config<'a, TBody> {
@@ -66,10 +64,6 @@ pub struct Config<'a, TBody> {
 
     /// Body of the block to verify.
     pub block_body: TBody,
-
-    /// Optional cache corresponding to the storage trie root hash calculation of the parent
-    /// block.
-    pub main_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
 
     /// Maximum log level of the runtime.
     ///
@@ -131,9 +125,6 @@ pub struct Success {
 
     /// List of changes to the off-chain storage that this block performs.
     pub offchain_storage_changes: storage_diff::TrieDiff,
-
-    /// Cache used for calculating the main trie root.
-    pub main_trie_root_calculation_cache: calculate_root::CalculationCache,
 
     /// Concatenation of all the log messages printed by the runtime.
     pub logs: String,
@@ -372,7 +363,6 @@ pub fn verify(
                     .map(either::Left)
                     .chain(encoded_list.map(either::Right))
             },
-            main_trie_root_calculation_cache: config.main_trie_root_calculation_cache,
             storage_main_trie_changes: Default::default(),
             offchain_storage_changes: Default::default(),
             max_log_level: config.max_log_level,
@@ -411,8 +401,8 @@ pub enum Verify {
     RuntimeCompilation(RuntimeCompilation),
     /// Loading a storage value is required in order to continue.
     StorageGet(StorageGet),
-    /// Fetching the list of keys with a given prefix is required in order to continue.
-    StoragePrefixKeys(StoragePrefixKeys),
+    /// Obtaining the Merkle value of a trie node is required in order to continue.
+    StorageMerkleValue(StorageMerkleValue),
     /// Fetching the key that follows a given one is required in order to continue.
     StorageNextKey(StorageNextKey),
 }
@@ -465,9 +455,6 @@ impl VerifyInner {
                             virtual_machine: success.virtual_machine.into_prototype(),
                             function_to_call: "Core_execute_block",
                             parameter: iter::once(&execute_block_parameters),
-                            main_trie_root_calculation_cache: Some(
-                                success.main_trie_root_calculation_cache,
-                            ),
                             storage_main_trie_changes: success.storage_main_trie_changes,
                             offchain_storage_changes: success.offchain_storage_changes,
                             max_log_level: 0,
@@ -553,8 +540,6 @@ impl VerifyInner {
                                 offchain_storage_changes: success.offchain_storage_changes,
                                 storage_main_trie_changes: success.storage_main_trie_changes,
                                 state_trie_version: success.state_trie_version,
-                                main_trie_root_calculation_cache: success
-                                    .main_trie_root_calculation_cache,
                             });
                         }
                     }
@@ -566,7 +551,6 @@ impl VerifyInner {
                         storage_main_trie_changes: success.storage_main_trie_changes,
                         state_trie_version: success.state_trie_version,
                         offchain_storage_changes: success.offchain_storage_changes,
-                        main_trie_root_calculation_cache: success.main_trie_root_calculation_cache,
                         logs: success.logs,
                     }));
                 }
@@ -577,8 +561,8 @@ impl VerifyInner {
                         consensus_success: self.consensus_success,
                     })
                 }
-                (runtime_host::RuntimeHostVm::PrefixKeys(inner), phase) => {
-                    break Verify::StoragePrefixKeys(StoragePrefixKeys {
+                (runtime_host::RuntimeHostVm::MerkleValue(inner), phase) => {
+                    break Verify::StorageMerkleValue(StorageMerkleValue {
                         inner,
                         phase,
                         consensus_success: self.consensus_success,
@@ -656,25 +640,44 @@ impl StorageGet {
     }
 }
 
-/// Fetching the list of keys with a given prefix is required in order to continue.
+/// Obtaining the Merkle value of a trie node is required in order to continue.
 #[must_use]
-pub struct StoragePrefixKeys {
-    inner: runtime_host::PrefixKeys,
+pub struct StorageMerkleValue {
+    inner: runtime_host::MerkleValue,
     /// See [`VerifyInner::phase`].
     phase: VerifyInnerPhase,
     consensus_success: SuccessConsensus,
 }
 
-impl StoragePrefixKeys {
-    /// Returns the prefix whose keys to load.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.inner.prefix()
+impl StorageMerkleValue {
+    /// Returns the key whose Merkle value must be passed back.
+    ///
+    /// The key is guaranteed to have been injected through [`StorageNextKey::inject_key`] earlier.
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+        self.inner.key()
     }
 
-    /// Injects the list of keys ordered lexicographically.
-    pub fn inject_keys_ordered(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> Verify {
+    /// Indicate that the value is unknown and resume the calculation.
+    ///
+    /// This function be used if you are unaware of the Merkle value. The algorithm will perform
+    /// the calculation of this Merkle value manually, which takes more time.
+    pub fn resume_unknown(self) -> Verify {
         VerifyInner {
-            inner: self.inner.inject_keys_ordered(keys),
+            inner: self.inner.resume_unknown(),
+            phase: self.phase,
+            consensus_success: self.consensus_success,
+        }
+        .run()
+    }
+
+    /// Injects the corresponding Merkle value.
+    ///
+    /// Note that there is no way to indicate that the trie node doesn't exist. This is because
+    /// the node is guaranteed to have been injected through [`StorageNextKey::inject_key`]
+    /// earlier.
+    pub fn inject_merkle_value(self, merkle_value: &[u8]) -> Verify {
+        VerifyInner {
+            inner: self.inner.inject_merkle_value(merkle_value),
             phase: self.phase,
             consensus_success: self.consensus_success,
         }
@@ -693,7 +696,7 @@ pub struct StorageNextKey {
 
 impl StorageNextKey {
     /// Returns the key whose next key must be passed back.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.key()
     }
 
@@ -703,9 +706,15 @@ impl StorageNextKey {
         self.inner.or_equal()
     }
 
+    /// If `true`, then the search must include both branch nodes and storage nodes. If `false`,
+    /// the search only covers storage nodes.
+    pub fn branch_nodes(&self) -> bool {
+        self.inner.branch_nodes()
+    }
+
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.prefix()
     }
 
@@ -715,7 +724,7 @@ impl StorageNextKey {
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
-    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> Verify {
+    pub fn inject_key(self, key: Option<impl Iterator<Item = Nibble>>) -> Verify {
         VerifyInner {
             inner: self.inner.inject_key(key),
             phase: self.phase,
@@ -735,7 +744,6 @@ pub struct RuntimeCompilation {
     storage_main_trie_changes: storage_diff::TrieDiff,
     state_trie_version: TrieEntryVersion,
     offchain_storage_changes: storage_diff::TrieDiff,
-    main_trie_root_calculation_cache: calculate_root::CalculationCache,
     logs: String,
     heap_pages: vm::HeapPages,
     parent_code: Option<Option<Vec<u8>>>,
@@ -776,7 +784,6 @@ impl RuntimeCompilation {
             storage_main_trie_changes: self.storage_main_trie_changes,
             state_trie_version: self.state_trie_version,
             offchain_storage_changes: self.offchain_storage_changes,
-            main_trie_root_calculation_cache: self.main_trie_root_calculation_cache,
             logs: self.logs,
         }))
     }
