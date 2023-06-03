@@ -56,6 +56,10 @@ pub fn open(config: Config) -> Result<DatabaseOpen, InternalError> {
     }
     .map_err(InternalError)?;
 
+    // The underlying SQLite wrapper maintains a cache of prepared statements. We set it to a
+    // value superior to the number of different queries we make.
+    database.set_prepared_statement_cache_capacity(64);
+
     database
         .execute_batch(
             r#"
