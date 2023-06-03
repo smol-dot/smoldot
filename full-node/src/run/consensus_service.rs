@@ -840,6 +840,9 @@ impl SyncBackground {
                             )
                         }));
                     }
+                    author::build::BuilderAuthoring::MerkleValue(req) => {
+                        block_authoring = req.resume_unknown();
+                    }
                     author::build::BuilderAuthoring::NextKey(req) => {
                         let search_params = trie::branch_search::Config {
                             key_before: req.key().collect::<Vec<_>>().into_iter(),
@@ -1295,6 +1298,10 @@ impl SyncBackground {
                                     TrieEntryVersion::try_from(*vers).expect("corrupted database"),
                                 )
                             }));
+                        }
+                        all::BlockVerification::ParentStorageMerkleValue(req) => {
+                            // TODO: the syncing is currently extremely slow due to this
+                            verify = req.resume_unknown();
                         }
                         all::BlockVerification::ParentStorageNextKey(req) => {
                             let search_params = trie::branch_search::Config {
