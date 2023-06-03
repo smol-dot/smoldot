@@ -19,7 +19,11 @@
 //!
 //! Contains everything related to the opening and initialization of the database.
 
-use super::{encode_babe_epoch_information, AccessError, SqliteFullDatabase};
+// TODO:remove all the unwraps in this module that shouldn't be there
+
+use super::{
+    encode_babe_epoch_information, AccessError, CorruptedError, InternalError, SqliteFullDatabase,
+};
 use crate::chain::chain_information;
 
 use std::{fs, path::Path};
@@ -27,17 +31,16 @@ use std::{fs, path::Path};
 /// Opens the database using the given [`Config`].
 ///
 /// Note that this doesn't return a [`SqliteFullDatabase`], but rather a [`DatabaseOpen`].
-pub fn open(config: Config) -> Result<DatabaseOpen, super::InternalError> {
-    let flags = sqlite::OpenFlags::new()
-        .set_create()
-        .set_read_write()
+pub fn open(config: Config) -> Result<DatabaseOpen, InternalError> {
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE |
+        rusqlite::OpenFlags::SQLITE_OPEN_CREATE |
         // The "no mutex" option opens SQLite in "multi-threaded" mode, meaning that it can safely
         // be used from multiple threads as long as we don't access the connection from multiple
         // threads *at the same time*. Since we put the connection behind a `Mutex`, and that the
         // underlying library implements `!Sync` for `Connection` as a safety measure anyway, it
         // is safe to enable this option.
         // See https://www.sqlite.org/threadsafe.html
-        .set_no_mutex();
+        rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
 
     let database = match config.ty {
         ConfigTy::Disk(path) => {
@@ -47,14 +50,14 @@ pub fn open(config: Config) -> Result<DatabaseOpen, super::InternalError> {
             // function more complex. If `create_dir_all` fails, opening the database will most
             // likely fail too.
             let _ = fs::create_dir_all(&path);
-            sqlite::Connection::open_with_flags(path.join("database.sqlite"), flags)
+            rusqlite::Connection::open_with_flags(path.join("database.sqlite"), flags)
         }
-        ConfigTy::Memory => sqlite::Connection::open_with_flags(":memory:", flags),
+        ConfigTy::Memory => rusqlite::Connection::open_in_memory_with_flags(flags),
     }
-    .map_err(super::InternalError)?;
+    .map_err(InternalError)?;
 
     database
-        .execute(
+        .execute_batch(
             r#"
 -- See https://sqlite.org/pragma.html and https://www.sqlite.org/wal.html
 PRAGMA journal_mode = WAL;
@@ -198,20 +201,18 @@ CREATE TABLE IF NOT EXISTS aura_finalized_authorities(
 
     "#,
         )
-        .map_err(super::InternalError)?;
+        .map_err(InternalError)?;
 
-    let is_empty = {
-        let mut statement = database
-            .prepare("SELECT COUNT(*) FROM meta WHERE key = ?")
-            .unwrap()
-            .bind(1, "best")
-            .unwrap();
-        statement.next().unwrap();
-        statement.read::<i64>(0).unwrap() == 0
-    };
+    let is_empty = database
+        .prepare_cached("SELECT COUNT(*) FROM meta WHERE key = ?")
+        .map_err(InternalError)?
+        .query_row(("best",), |row| row.get::<_, i64>(0))
+        .map_err(InternalError)? == 0;
 
     // The database is *always* within a transaction.
-    database.execute("BEGIN TRANSACTION").unwrap();
+    database
+        .execute("BEGIN TRANSACTION", ())
+        .map_err(InternalError)?;
 
     Ok(if !is_empty {
         DatabaseOpen::Open(SqliteFullDatabase {
@@ -261,7 +262,7 @@ pub enum DatabaseOpen {
 /// An open database. Holds file descriptors.
 pub struct DatabaseEmpty {
     /// See the similar field in [`SqliteFullDatabase`].
-    database: sqlite::Connection,
+    database: rusqlite::Connection,
 
     /// See the similar field in [`SqliteFullDatabase`].
     block_number_bytes: usize,
@@ -297,85 +298,59 @@ impl DatabaseEmpty {
         {
             let mut statement = self
                 .database
-                .prepare("INSERT INTO finalized_storage_main_trie(key, value, trie_entry_version) VALUES(?, ?, ?)")
+                .prepare_cached("INSERT INTO finalized_storage_main_trie(key, value, trie_entry_version) VALUES(?, ?, ?)")
                 .unwrap();
             for (key, value) in finalized_block_storage_main_trie_entries {
-                statement = statement
-                    .bind(1, key)
-                    .unwrap()
-                    .bind(2, value)
-                    .unwrap()
-                    .bind(3, i64::from(finalized_block_state_version))
-                    .unwrap();
-                statement.next().unwrap();
-                statement = statement.reset().unwrap();
+                statement
+                    .execute((key, value, i64::from(finalized_block_state_version)))
+                    .map_err(|err| {
+                        AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))
+                    })?;
             }
         }
 
-        {
-            let mut statement = if chain_information.finalized_block_header.number != 0 {
-                self
-                    .database
-                    .prepare(
-                        "INSERT INTO blocks(hash, parent_hash, number, header, justification) VALUES(?, ?, ?, ?, ?)",
-                    )
-                    .unwrap()
-                    .bind(1, &finalized_block_hash[..])
-                    .unwrap()
-                    .bind(
-                        2,
-                        &chain_information.finalized_block_header.parent_hash[..]
-                    )
-                    .unwrap()
-                    .bind(
-                        3,
-                        i64::try_from(chain_information.finalized_block_header.number).unwrap(),
-                    )
-                    .unwrap()
-                    .bind(4, &scale_encoded_finalized_block_header[..])
-                    .unwrap()
-            } else {
-                self
-                    .database
-                    .prepare(
-                        "INSERT INTO blocks(hash, parent_hash, number, header, justification) VALUES(?, NULL, ?, ?, ?)",
-                    )
-                    .unwrap()
-                    .bind(1, &finalized_block_hash[..])
-                    .unwrap()
-                    .bind(
-                        2,
-                        i64::try_from(chain_information.finalized_block_header.number).unwrap(),
-                    )
-                    .unwrap()
-                    .bind(3, &scale_encoded_finalized_block_header[..])
-                    .unwrap()
-            };
-            if let Some(finalized_block_justification) = &finalized_block_justification {
-                statement = statement
-                    .bind(4, &finalized_block_justification[..])
-                    .unwrap();
-            } else {
-                statement = statement.bind(4, ()).unwrap();
-            }
-            statement.next().unwrap();
+        if chain_information.finalized_block_header.number != 0 {
+            self
+                .database
+                .prepare_cached(
+                    "INSERT INTO blocks(hash, parent_hash, number, header, justification) VALUES(?, ?, ?, ?, ?)",
+                )
+                .unwrap()
+                .execute((
+                    &finalized_block_hash[..],
+                    &chain_information.finalized_block_header.parent_hash[..],
+                    i64::try_from(chain_information.finalized_block_header.number).unwrap(), 
+                    &scale_encoded_finalized_block_header[..],
+                    finalized_block_justification.as_deref(),
+                ))
+                .unwrap();
+        } else {
+            self
+                .database
+                .prepare_cached(
+                    "INSERT INTO blocks(hash, parent_hash, number, header, justification) VALUES(?, NULL, ?, ?, ?)",
+                )
+                .unwrap()
+                .execute((
+                    &finalized_block_hash[..],
+                    i64::try_from(chain_information.finalized_block_header.number).unwrap(),
+                    &scale_encoded_finalized_block_header[..],
+                    finalized_block_justification.as_deref(),
+                ))
+                .unwrap();
         }
 
         {
             let mut statement = self
                 .database
-                .prepare("INSERT INTO blocks_body(hash, idx, extrinsic) VALUES(?, ?, ?)")
+                .prepare_cached("INSERT INTO blocks_body(hash, idx, extrinsic) VALUES(?, ?, ?)")
                 .unwrap();
             for (index, item) in finalized_block_body.enumerate() {
-                statement = statement
-                    .bind(1, &finalized_block_hash[..])
-                    .unwrap()
-                    .bind(2, i64::try_from(index).unwrap())
-                    .unwrap()
-                    .bind(3, item)
-                    .unwrap();
-                statement.next().unwrap();
-                statement = statement.reset().unwrap();
+                statement.execute((
+                    &finalized_block_hash[..],
+                    i64::try_from(index).unwrap(),
+                    item
+                )).unwrap();
             }
         }
 
@@ -384,8 +359,7 @@ impl DatabaseEmpty {
             &self.database,
             "finalized",
             chain_information.finalized_block_header.number,
-        )
-        .unwrap();
+        )?;
 
         match &chain_information.finality {
             chain_information::ChainInformationFinalityRef::Outsourced => {}
@@ -398,43 +372,33 @@ impl DatabaseEmpty {
                     &self.database,
                     "grandpa_authorities_set_id",
                     *after_finalized_block_authorities_set_id,
-                )
-                .unwrap();
+                )?;
 
                 let mut statement = self
                     .database
-                    .prepare("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
+                    .prepare_cached("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
                     .unwrap();
                 for (index, item) in finalized_triggered_authorities.iter().enumerate() {
-                    statement = statement
-                        .bind(1, i64::try_from(index).unwrap())
-                        .unwrap()
-                        .bind(2, &item.public_key[..])
-                        .unwrap()
-                        .bind(3, i64::from_ne_bytes(item.weight.get().to_ne_bytes()))
-                        .unwrap();
-                    statement.next().unwrap();
-                    statement = statement.reset().unwrap();
+                    statement.execute((
+                        i64::try_from(index).unwrap(),
+                        &item.public_key[..],
+                        i64::from_ne_bytes(item.weight.get().to_ne_bytes())
+                    )).unwrap();
                 }
 
                 if let Some((height, list)) = finalized_scheduled_change {
-                    super::meta_set_number(&self.database, "grandpa_scheduled_target", *height)
-                        .unwrap();
+                    super::meta_set_number(&self.database, "grandpa_scheduled_target", *height)?;
 
                     let mut statement = self
                         .database
-                        .prepare("INSERT INTO grandpa_scheduled_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
+                        .prepare_cached("INSERT INTO grandpa_scheduled_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
                         .unwrap();
                     for (index, item) in list.iter().enumerate() {
-                        statement = statement
-                            .bind(1, i64::try_from(index).unwrap())
-                            .unwrap()
-                            .bind(2, &item.public_key[..])
-                            .unwrap()
-                            .bind(3, i64::from_ne_bytes(item.weight.get().to_ne_bytes()))
-                            .unwrap();
-                        statement.next().unwrap();
-                        statement = statement.reset().unwrap();
+                        statement.execute((
+                            i64::try_from(index).unwrap(),
+                            &item.public_key[..],
+                            i64::from_ne_bytes(item.weight.get().to_ne_bytes())
+                        )).unwrap();
                     }
                 }
             }
@@ -451,16 +415,15 @@ impl DatabaseEmpty {
 
                 let mut statement = self
                     .database
-                    .prepare("INSERT INTO aura_finalized_authorities(idx, public_key) VALUES(?, ?)")
+                    .prepare_cached(
+                        "INSERT INTO aura_finalized_authorities(idx, public_key) VALUES(?, ?)",
+                    )
                     .unwrap();
                 for (index, item) in finalized_authorities_list.clone().enumerate() {
-                    statement = statement
-                        .bind(1, i64::try_from(index).unwrap())
-                        .unwrap()
-                        .bind(2, &item.public_key[..])
-                        .unwrap();
-                    statement.next().unwrap();
-                    statement = statement.reset().unwrap();
+                    statement.execute((
+                        i64::try_from(index).unwrap(),
+                        &item.public_key[..]
+                    )).unwrap();
                 }
             }
             chain_information::ChainInformationConsensusRef::Babe {

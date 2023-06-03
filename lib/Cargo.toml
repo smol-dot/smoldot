@@ -13,7 +13,7 @@ repository.workspace = true
 default = ["database-sqlite", "std"]
 database-sqlite = [
     "parking_lot",
-    "sqlite",
+    "rusqlite",
     "std"   # A database stored on the filesystem can't reasonably work without a filesystem.
 ]
 std = [
@@ -76,7 +76,7 @@ twox-hash = { version = "1.6.3", default-features = false }
 wasmi = { version = "0.30.0", default-features = false }
 
 # `database-sqlite` feature
-sqlite = { version = "0.27.3", optional = true, default-features = false, features = ["linkage"] }
+rusqlite = { version = "0.29.0", optional = true, default-features = false, features = ["bundled"] }
 
 # `std` feature
 # Add here the crates that cannot function without the help of the operating system or environment.
