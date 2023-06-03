@@ -357,7 +357,7 @@ impl StorageValue {
                 if child_info.merkle_value.as_ref().len() == 32 {
                     self.0.stack.push(InProgressNode {
                         partial_key: new_partial_key,
-                        children_partial_key_changed: child_info.children_pratial_key_changed,
+                        children_partial_key_changed: child_info.children_partial_key_changed,
                         children: arrayvec::ArrayVec::new(),
                     });
                     return self.0.next();
@@ -388,7 +388,7 @@ impl StorageValue {
                     // replaced in the trie with that one single child.
                     parent_node.children.push(Some(ChildInfo {
                         partial_key: new_partial_key,
-                        children_pratial_key_changed: child_info.children_pratial_key_changed,
+                        children_partial_key_changed: child_info.children_partial_key_changed,
                         merkle_value: calculated_elem_merkle_value,
                     }));
                     self.0.next()
@@ -447,7 +447,7 @@ impl StorageValue {
                 if let Some(parent_node) = parent_node {
                     parent_node.children.push(Some(ChildInfo {
                         partial_key: calculated_elem.partial_key,
-                        children_pratial_key_changed: calculated_elem.children_partial_key_changed,
+                        children_partial_key_changed: calculated_elem.children_partial_key_changed,
                         merkle_value,
                     }));
                     self.0.next()
@@ -562,7 +562,7 @@ impl MerkleValue {
             debug_assert_ne!(parent_node.children.len(), 16);
             parent_node.children.push(Some(ChildInfo {
                 partial_key: self.descendant_partial_key,
-                children_pratial_key_changed: false,
+                children_partial_key_changed: false,
                 merkle_value: trie::trie_node::MerkleValueOutput::from_bytes(AsRef::as_ref(
                     &merkle_value,
                 )),
@@ -619,8 +619,8 @@ struct InProgressNode {
 struct ChildInfo {
     /// Same as [`InProgressNode::partial_key`].
     partial_key: Vec<Nibble>,
-    /// Same as [`InProgressNode::children_pratial_key_changed`].
-    children_pratial_key_changed: bool,
+    /// Same as [`InProgressNode::children_partial_key_changed`].
+    children_partial_key_changed: bool,
 
     /// Merkle value of that node.
     merkle_value: trie::trie_node::MerkleValueOutput,
