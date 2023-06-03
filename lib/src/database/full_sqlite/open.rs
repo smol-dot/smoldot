@@ -211,7 +211,8 @@ CREATE TABLE IF NOT EXISTS aura_finalized_authorities(
         .prepare_cached("SELECT COUNT(*) FROM meta WHERE key = ?")
         .map_err(InternalError)?
         .query_row(("best",), |row| row.get::<_, i64>(0))
-        .map_err(InternalError)? == 0;
+        .map_err(InternalError)?
+        == 0;
 
     // The database is *always* within a transaction.
     database
@@ -313,36 +314,22 @@ impl DatabaseEmpty {
             }
         }
 
-        if chain_information.finalized_block_header.number != 0 {
-            self
-                .database
-                .prepare_cached(
-                    "INSERT INTO blocks(hash, parent_hash, number, header, justification) VALUES(?, ?, ?, ?, ?)",
-                )
-                .unwrap()
-                .execute((
-                    &finalized_block_hash[..],
-                    &chain_information.finalized_block_header.parent_hash[..],
-                    i64::try_from(chain_information.finalized_block_header.number).unwrap(), 
-                    &scale_encoded_finalized_block_header[..],
-                    finalized_block_justification.as_deref(),
-                ))
-                .unwrap();
-        } else {
-            self
-                .database
-                .prepare_cached(
-                    "INSERT INTO blocks(hash, parent_hash, number, header, justification) VALUES(?, NULL, ?, ?, ?)",
-                )
-                .unwrap()
-                .execute((
-                    &finalized_block_hash[..],
-                    i64::try_from(chain_information.finalized_block_header.number).unwrap(),
-                    &scale_encoded_finalized_block_header[..],
-                    finalized_block_justification.as_deref(),
-                ))
-                .unwrap();
-        }
+        self
+            .database
+            .prepare_cached(
+                "INSERT INTO blocks(hash, parent_hash, number, header, justification) VALUES(?, ?, ?, ?, ?)",
+            )
+            .unwrap()
+            .execute((
+                &finalized_block_hash[..],
+                if chain_information.finalized_block_header.number != 0 {
+                    Some(&chain_information.finalized_block_header.parent_hash[..])
+                } else { None },
+                i64::try_from(chain_information.finalized_block_header.number).unwrap(),
+                &scale_encoded_finalized_block_header[..],
+                finalized_block_justification.as_deref(),
+            ))
+            .unwrap();
 
         {
             let mut statement = self
@@ -350,11 +337,13 @@ impl DatabaseEmpty {
                 .prepare_cached("INSERT INTO blocks_body(hash, idx, extrinsic) VALUES(?, ?, ?)")
                 .unwrap();
             for (index, item) in finalized_block_body.enumerate() {
-                statement.execute((
-                    &finalized_block_hash[..],
-                    i64::try_from(index).unwrap(),
-                    item
-                )).unwrap();
+                statement
+                    .execute((
+                        &finalized_block_hash[..],
+                        i64::try_from(index).unwrap(),
+                        item,
+                    ))
+                    .unwrap();
             }
         }
 
@@ -383,11 +372,13 @@ impl DatabaseEmpty {
                     .prepare_cached("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
                     .unwrap();
                 for (index, item) in finalized_triggered_authorities.iter().enumerate() {
-                    statement.execute((
-                        i64::try_from(index).unwrap(),
-                        &item.public_key[..],
-                        i64::from_ne_bytes(item.weight.get().to_ne_bytes())
-                    )).unwrap();
+                    statement
+                        .execute((
+                            i64::try_from(index).unwrap(),
+                            &item.public_key[..],
+                            i64::from_ne_bytes(item.weight.get().to_ne_bytes()),
+                        ))
+                        .unwrap();
                 }
 
                 if let Some((height, list)) = finalized_scheduled_change {
@@ -398,11 +389,13 @@ impl DatabaseEmpty {
                         .prepare_cached("INSERT INTO grandpa_scheduled_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
                         .unwrap();
                     for (index, item) in list.iter().enumerate() {
-                        statement.execute((
-                            i64::try_from(index).unwrap(),
-                            &item.public_key[..],
-                            i64::from_ne_bytes(item.weight.get().to_ne_bytes())
-                        )).unwrap();
+                        statement
+                            .execute((
+                                i64::try_from(index).unwrap(),
+                                &item.public_key[..],
+                                i64::from_ne_bytes(item.weight.get().to_ne_bytes()),
+                            ))
+                            .unwrap();
                     }
                 }
             }
@@ -424,10 +417,9 @@ impl DatabaseEmpty {
                     )
                     .unwrap();
                 for (index, item) in finalized_authorities_list.clone().enumerate() {
-                    statement.execute((
-                        i64::try_from(index).unwrap(),
-                        &item.public_key[..]
-                    )).unwrap();
+                    statement
+                        .execute((i64::try_from(index).unwrap(), &item.public_key[..]))
+                        .unwrap();
                 }
             }
             chain_information::ChainInformationConsensusRef::Babe {
