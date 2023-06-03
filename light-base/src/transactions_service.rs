@@ -1230,14 +1230,18 @@ async fn validate_transaction<TPlat: PlatformRef>(
                 // TODO:
                 runtime_call_lock.unlock(validate::Query::MerkleValue(mv).into_prototype());
                 break Err(ValidationError::InvalidOrError(
-                    InvalidOrError::ValidateError(ValidateTransactionError::NextKeyMerkleValueForbidden),
+                    InvalidOrError::ValidateError(
+                        ValidateTransactionError::NextKeyMerkleValueForbidden,
+                    ),
                 ));
             }
             validate::Query::NextKey(nk) => {
                 // TODO:
                 runtime_call_lock.unlock(validate::Query::NextKey(nk).into_prototype());
                 break Err(ValidationError::InvalidOrError(
-                    InvalidOrError::ValidateError(ValidateTransactionError::NextKeyMerkleValueForbidden),
+                    InvalidOrError::ValidateError(
+                        ValidateTransactionError::NextKeyMerkleValueForbidden,
+                    ),
                 ));
             }
         }
