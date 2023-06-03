@@ -1362,11 +1362,17 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     runtime_call =
                         get.inject_value(storage_value.map(|(val, vers)| (iter::once(val), vers)));
                 }
+                runtime_host::RuntimeHostVm::MerkleValue(mv) => {
+                    // TODO:
+                    runtime_call_lock
+                        .unlock(runtime_host::RuntimeHostVm::MerkleValue(mv).into_prototype());
+                    break Err(RuntimeCallError::NextKeyMerkleValueForbidden);
+                }
                 runtime_host::RuntimeHostVm::NextKey(nk) => {
                     // TODO:
                     runtime_call_lock
                         .unlock(runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
-                    break Err(RuntimeCallError::NextKeyForbidden);
+                    break Err(RuntimeCallError::NextKeyMerkleValueForbidden);
                 }
                 runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
                     runtime_call = sig.verify_and_resume();
@@ -1398,8 +1404,8 @@ enum RuntimeCallError {
     StartError(host::StartErr),
     #[display(fmt = "{_0}")]
     RuntimeError(runtime_host::ErrorDetail),
-    #[display(fmt = "Getting all the next key isn't supported")]
-    NextKeyForbidden,
+    #[display(fmt = "Getting the next key or Merkle value isn't supported")]
+    NextKeyMerkleValueForbidden,
     /// Required runtime API isn't supported by the runtime.
     #[display(fmt = "Required runtime API isn't supported by the runtime")]
     ApiNotFound,
