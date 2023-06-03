@@ -808,9 +808,10 @@ impl Inner {
                             }
                         }
                         trie_root_calculator::InProgress::MerkleValue(calc_req) => {
-                            // TODO: temporary hack to test if things work; instead propagate this to the outside
                             self.vm = req.into();
-                            self.root_calculation = Some(calc_req.resume_unknown());
+                            self.root_calculation =
+                                Some(trie_root_calculator::InProgress::MerkleValue(calc_req));
+                            return RuntimeHostVm::MerkleValue(MerkleValue { inner: self });
                         }
                         trie_root_calculator::InProgress::Finished { trie_root_hash } => {
                             self.vm = req.resume(Some(&trie_root_hash));
