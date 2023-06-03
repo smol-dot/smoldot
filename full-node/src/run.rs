@@ -51,7 +51,7 @@ mod network_service;
 pub async fn run(cli_options: cli::CliOptionsRun) {
     // Determine the actual CLI output by replacing `Auto` with the actual value.
     let cli_output = if let cli::Output::Auto = cli_options.output {
-        if atty::is(atty::Stream::Stderr) && cli_options.log.is_empty() {
+        if io::IsTerminal::is_terminal(&io::stderr()) && cli_options.log.is_empty() {
             cli::Output::Informant
         } else {
             cli::Output::Logs
