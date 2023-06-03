@@ -473,7 +473,7 @@ pub struct MerkleValue {
 }
 
 impl MerkleValue {
-    /// Returns the key whose Merkle value must be passed to [`MerkleValue::inject_value`].
+    /// Returns the key whose Merkle value must be passed to [`MerkleValue::inject_merkle_value`].
     ///
     /// The key is guaranteed to have been injected through [`NextKey::inject_key`] earlier.
     pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
