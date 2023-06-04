@@ -38,17 +38,13 @@ pub static TOTAL_BYTES_RECEIVED: AtomicU64 = AtomicU64::new(0);
 /// sent.
 pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Clone)]
-pub(crate) struct Platform {}
+pub(crate) const PLATFORM_REF: PlatformRef = PlatformRef {};
 
-impl Platform {
-    pub const fn new() -> Self {
-        Self {}
-    }
-}
+#[derive(Debug, Copy, Clone)]
+pub(crate) struct PlatformRef {}
 
 // TODO: this trait implementation was written before GATs were stable in Rust; now that the associated types have lifetimes, it should be possible to considerably simplify this code
-impl smoldot_light::platform::PlatformRef for Platform {
+impl smoldot_light::platform::PlatformRef for PlatformRef {
     type Delay = Delay;
     type Yield = Yield;
     type Instant = Instant;
