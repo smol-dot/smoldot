@@ -304,48 +304,14 @@ impl StorageValue {
                         .unwrap_or_else(|_| panic!()),
                 );
 
-                // TODO: DRY
-                // Now calculate `DiffContainsEntryWithPrefix` and
-                // `LongestCommonDenominator(DiffInsertsNodesWithPrefix)`.
-                let mut diff_inserts_lcd = None::<Vec<Nibble>>;
-                {
-                    // TODO: could be optimized?
-                    let mut prefix_nibbles =
-                        self.0.current_node_full_key().fold(Vec::new(), |mut a, b| {
-                            a.extend_from_slice(b.as_ref());
-                            a
-                        });
-                    prefix_nibbles.extend_from_slice(&partial_key);
-                    let prefix =
-                        trie::nibbles_to_bytes_suffix_extend(prefix_nibbles.iter().copied())
-                            .collect::<Vec<_>>();
-                    for (key, inserts_entry) in self.0.diff.diff_range_ordered::<[u8]>((
-                        ops::Bound::Included(&prefix[..]),
-                        ops::Bound::Unbounded,
-                    )) {
-                        let key = trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>();
-                        if !key.starts_with(&prefix_nibbles) {
-                            break;
-                        }
-
-                        if inserts_entry {
-                            diff_inserts_lcd = match diff_inserts_lcd.take() {
-                                Some(mut v) => {
-                                    let lcd = key
-                                        .iter()
-                                        .zip(v.iter())
-                                        .take_while(|(a, b)| a == b)
-                                        .count();
-                                    debug_assert!(lcd >= prefix_nibbles.len());
-                                    debug_assert_eq!(&key[..lcd], &v[..lcd]);
-                                    v.truncate(lcd);
-                                    Some(v)
-                                }
-                                None => Some(key),
-                            };
-                        }
-                    }
-                };
+                // Now calculate `LongestCommonDenominator(DiffInsertsNodesWithPrefix)`.
+                let (_, diff_inserts_lcd) = diff_inserts_least_common_denominator(
+                    &self.0.diff,
+                    self.0
+                        .current_node_full_key()
+                        .map(either::Left)
+                        .chain(iter::once(either::Right(&partial_key))),
+                );
 
                 InProgress::ClosestDescendant(ClosestDescendant {
                     inner: self.0,
@@ -527,41 +493,8 @@ impl Inner {
         // a `ClosestDescendant`.
         // Now calculate `ForceCalculate` and
         // `LongestCommonDenominator(DiffInsertsNodesWithPrefix)`.
-        let mut force_recalculate = false;
-        let mut diff_inserts_lcd = None::<Vec<Nibble>>;
-        {
-            // TODO: could be optimized?
-            let prefix_nibbles = self.current_node_full_key().fold(Vec::new(), |mut a, b| {
-                a.extend_from_slice(b.as_ref());
-                a
-            });
-            let prefix = trie::nibbles_to_bytes_suffix_extend(prefix_nibbles.iter().copied())
-                .collect::<Vec<_>>();
-            for (key, inserts_entry) in self.diff.diff_range_ordered::<[u8]>((
-                ops::Bound::Included(&prefix[..]),
-                ops::Bound::Unbounded,
-            )) {
-                let key = trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>();
-                if !key.starts_with(&prefix_nibbles) {
-                    break;
-                }
-
-                force_recalculate = true;
-
-                if inserts_entry {
-                    diff_inserts_lcd = match diff_inserts_lcd.take() {
-                        Some(mut v) => {
-                            let lcd = key.iter().zip(v.iter()).take_while(|(a, b)| a == b).count();
-                            debug_assert!(lcd >= prefix_nibbles.len());
-                            debug_assert_eq!(&key[..lcd], &v[..lcd]);
-                            v.truncate(lcd);
-                            Some(v)
-                        }
-                        None => Some(key),
-                    };
-                }
-            }
-        };
+        let (force_recalculate, diff_inserts_lcd) =
+            diff_inserts_least_common_denominator(&self.diff, self.current_node_full_key());
 
         // If the diff doesn't contain any descendant, jump to calling `BaseTrieMerkleValue`.
         if !force_recalculate
@@ -595,4 +528,51 @@ impl Inner {
                 .chain(child_nibble.map(|n| either::Left([n])).into_iter())
         })
     }
+}
+
+/// Given a diff and a prefix, returns:
+///
+/// - Whether the diff contains any entry starts with this prefix.
+/// - The least common denominator of all the insertions that start with this prefix, or `None` if
+///   there is no insertion.
+///
+fn diff_inserts_least_common_denominator(
+    diff: &TrieDiff,
+    prefix: impl Iterator<Item = impl AsRef<[Nibble]>>,
+) -> (bool, Option<Vec<Nibble>>) {
+    let mut force_recalculate = false;
+    let mut diff_inserts_lcd = None::<Vec<Nibble>>;
+
+    // TODO: could be optimized?
+    let prefix_nibbles = prefix.fold(Vec::new(), |mut a, b| {
+        a.extend_from_slice(b.as_ref());
+        a
+    });
+    let prefix =
+        trie::nibbles_to_bytes_suffix_extend(prefix_nibbles.iter().copied()).collect::<Vec<_>>();
+    for (key, inserts_entry) in
+        diff.diff_range_ordered::<[u8]>((ops::Bound::Included(&prefix[..]), ops::Bound::Unbounded))
+    {
+        let key = trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>();
+        if !key.starts_with(&prefix_nibbles) {
+            break;
+        }
+
+        force_recalculate = true;
+
+        if inserts_entry {
+            diff_inserts_lcd = match diff_inserts_lcd.take() {
+                Some(mut v) => {
+                    let lcd = key.iter().zip(v.iter()).take_while(|(a, b)| a == b).count();
+                    debug_assert!(lcd >= prefix_nibbles.len());
+                    debug_assert_eq!(&key[..lcd], &v[..lcd]);
+                    v.truncate(lcd);
+                    Some(v)
+                }
+                None => Some(key),
+            };
+        }
+    }
+
+    (force_recalculate, diff_inserts_lcd)
 }
