@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.8 - 2023-06-05
+
 ### Changed
 
 - Instead of manually decompressing the WebAssembly bytecode in JavaScript, smoldot will now use the native `DecompressionStream` API within browsers and the native `zlib.inflate` function in NodeJS. This should speed up the initialization and reduce the size of the package. The new `DecompressionStream` API has been stable since February 2020 on Chrome and Edge, since March 2023 on Safari, and since May 2023 on Firefox. ([#640](https://github.com/smol-dot/smoldot/pull/640))
