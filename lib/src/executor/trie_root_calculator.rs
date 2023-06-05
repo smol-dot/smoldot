@@ -116,8 +116,6 @@ pub struct ClosestDescendant {
     inner: Box<Inner>,
     /// Extra nibbles to append at the end of what `self.key()` returns.
     key_extra_nibbles: Vec<Nibble>,
-    /// `true` if the Merkle value of the descendant must always be recalculated.
-    force_recalculate: bool,
     /// `Some` if the diff inserts a value that is equal or a descendant of `self.key()`. If
     /// `Some`, contains the least common denominator shared amongst all these insertions.
     diff_inserts_lcd: Option<Vec<Nibble>>,
@@ -357,7 +355,6 @@ impl StorageValue {
                 InProgress::ClosestDescendant(ClosestDescendant {
                     inner: self.0,
                     key_extra_nibbles: partial_key,
-                    force_recalculate: true, // The partial key of the closest descendant has changed.
                     diff_inserts_lcd,
                 })
             }
@@ -447,7 +444,7 @@ impl ClosestDescendantMerkleValue {
     ///
     /// This function be used if you are unaware of the Merkle value. The algorithm will perform
     /// the calculation of this Merkle value manually, which takes more time.
-    pub fn resume_unknown(mut self) -> InProgress {
+    pub fn resume_unknown(self) -> InProgress {
         // The element currently being iterated was `Btcd`, and is now switched to being
         // `MaybeNodeKey`. Because a `MerkleValue` is only ever created if the diff doesn't
         // contain any entry that descends the currently iterated node, we know for sure that
@@ -455,7 +452,6 @@ impl ClosestDescendantMerkleValue {
         InProgress::ClosestDescendant(ClosestDescendant {
             inner: self.inner,
             key_extra_nibbles: Vec::new(),
-            force_recalculate: true,
             diff_inserts_lcd: None,
         })
     }
@@ -601,7 +597,6 @@ impl Inner {
         InProgress::ClosestDescendant(ClosestDescendant {
             inner: self,
             key_extra_nibbles: Vec::new(),
-            force_recalculate,
             diff_inserts_lcd,
         })
     }
