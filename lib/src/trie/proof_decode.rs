@@ -684,6 +684,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// > **Note**: This function is a convenient wrapper around
     /// >           [`DecodedTrieProof::trie_node_info`].
     // TODO: return a Result instead of Option?
+    // TODO: accept param as iterator rather than slice?
     pub fn storage_value(&'_ self, key: &[u8]) -> Option<Option<(&'_ [u8], TrieEntryVersion)>> {
         // Annoyingly we have to create a `Vec` for the key, but the API of BTreeMap gives us
         // no other choice.
@@ -716,6 +717,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// Returns `Some(None)` if the proof indicates that there is no next key (within the given
     /// prefix).
     // TODO: return a Result instead of Option?
+    // TODO: accept params as iterators rather than slices?
     pub fn next_key(
         &'_ self,
         key_before: &[nibble::Nibble],
@@ -826,6 +828,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// value.
     /// Returns `Some(None)` if the proof indicates that there is no descendant.
     // TODO: return a Result instead of Option?
+    // TODO: accept params as iterators rather than slices?
     pub fn closest_descendant_merkle_value(
         &'_ self,
         key: &[nibble::Nibble],

@@ -1844,32 +1844,56 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             );
                                         }
                                         runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv) => {
-                                            // TODO: implement somehow
-                                            runtime_call_lock.unlock(
-                                                runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv)
-                                                    .into_prototype(),
-                                            );
-                                            break methods::ServerToClient::chainHead_unstable_callEvent {
-                                                    subscription: (&subscription_id).into(),
-                                                    result: methods::ChainHeadCallEvent::Inaccessible {
-                                                        error: "getting Merkle value not implemented".into(),
-                                                    },
+                                            // TODO: what if the remote lied to us?
+                                            let merkle_value = runtime_call_lock
+                                                .closest_descendant_merkle_value(&mv.key().collect::<Vec<_>>());
+                                            let merkle_value = match merkle_value {
+                                                Ok(v) => v,
+                                                Err(error) => {
+                                                    runtime_call_lock.unlock(
+                                                        runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(
+                                                            mv,
+                                                        )
+                                                        .into_prototype(),
+                                                    );
+                                                    break methods::ServerToClient::chainHead_unstable_callEvent {
+                                                            subscription: (&subscription_id).into(),
+                                                            result: methods::ChainHeadCallEvent::Inaccessible {
+                                                                error: error.to_string().into(),
+                                                            },
+                                                        }
+                                                        .to_json_call_object_parameters(None);
                                                 }
-                                                .to_json_call_object_parameters(None);
+                                            };
+                                            runtime_call = mv.inject_merkle_value(merkle_value);
                                         }
                                         runtime_host::RuntimeHostVm::NextKey(nk) => {
-                                            // TODO: implement somehow
-                                            runtime_call_lock.unlock(
-                                                runtime_host::RuntimeHostVm::NextKey(nk)
-                                                    .into_prototype(),
+                                            // TODO: what if the remote lied to us?
+                                            let next_key = runtime_call_lock.next_key(
+                                                &nk.key().collect::<Vec<_>>(),
+                                                nk.or_equal(),
+                                                &nk.prefix().collect::<Vec<_>>(),
+                                                nk.branch_nodes(),
                                             );
-                                            break methods::ServerToClient::chainHead_unstable_callEvent {
-                                                    subscription: (&subscription_id).into(),
-                                                    result: methods::ChainHeadCallEvent::Inaccessible {
-                                                        error: "getting next key not implemented".into(),
-                                                    },
+                                            let next_key = match next_key {
+                                                Ok(v) => v,
+                                                Err(error) => {
+                                                    runtime_call_lock.unlock(
+                                                        runtime_host::RuntimeHostVm::NextKey(
+                                                            nk,
+                                                        )
+                                                        .into_prototype(),
+                                                    );
+                                                    break methods::ServerToClient::chainHead_unstable_callEvent {
+                                                            subscription: (&subscription_id).into(),
+                                                            result: methods::ChainHeadCallEvent::Inaccessible {
+                                                                error: error.to_string().into(),
+                                                            },
+                                                        }
+                                                        .to_json_call_object_parameters(None);
                                                 }
-                                                .to_json_call_object_parameters(None);
+                                            };
+                                            runtime_call = nk.inject_key(next_key.map(|k| k.iter().copied()));
                                         }
                                         runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
                                             runtime_call = sig.verify_and_resume();

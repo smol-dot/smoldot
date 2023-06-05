@@ -877,7 +877,7 @@ impl<'a> RuntimeCall<'a> {
     ///
     /// If `branch_nodes` is `false`, then trie nodes that don't have a storage value are skipped.
     ///
-    /// Returns an error if the key couldn't be found in the proof, meaning that the proof is
+    /// Returns an error if the proof doesn't contain enough information, meaning that the proof is
     /// invalid.
     pub fn next_key(
         &'_ self,
@@ -900,20 +900,20 @@ impl<'a> RuntimeCall<'a> {
     /// Find in the proof the closest trie node that descends from `key` and returns its Merkle
     /// value.
     ///
-    /// Returns an error if the key couldn't be found in the proof, meaning that the proof is
+    /// Returns an error if the proof doesn't contain enough information, meaning that the proof is
     /// invalid.
     pub fn closest_descendant_merkle_value(
         &'_ self,
         key: &[trie::Nibble],
-    ) -> Result<Option<&'_ [u8]>, RuntimeCallError> {
+    ) -> Result<&'_ [u8], RuntimeCallError> {
         let call_proof = match &self.call_proof {
             Ok(p) => p,
             Err(err) => return Err(err.clone()),
         };
 
         match call_proof.closest_descendant_merkle_value(key) {
-            Some(v) => Ok(v),
-            None => Err(RuntimeCallError::MissingProofEntry),
+            Some(Some(v)) => Ok(v),
+            Some(None) | None => Err(RuntimeCallError::MissingProofEntry),
         }
     }
 
