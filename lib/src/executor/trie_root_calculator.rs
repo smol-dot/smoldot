@@ -162,12 +162,15 @@ impl ClosestDescendant {
 
         // If the base trie contains a descendant but the diff doesn't contain any descendant,
         // jump to calling `BaseTrieMerkleValue`.
-        if !self.force_recalculate && self.diff_inserts_lcd.is_none() {
+        if !self.force_recalculate
+            && self.diff_inserts_lcd.is_none()
+            && self
+                .inner
+                .stack
+                .last()
+                .map_or(true, |n| !n.children_partial_key_changed)
+        {
             if let Some(closest_descendant) = closest_descendant {
-                // Note that if the current node's `children_partial_key_changed` is set to true,
-                // we could in principle not ask for the Merkle value. However we do it anyway
-                // with the hope that the Merkle value is < 32 bytes and its partial key can be
-                // adjusted without having to recalculate the entire sub-tree.
                 return InProgress::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue {
                     inner: self.inner,
                     descendant_partial_key: closest_descendant.skip(iter_key_len).collect(),
@@ -491,37 +494,6 @@ impl ClosestDescendantMerkleValue {
         // doesn't actually care about the content, providing a wrong value clearly indicates a
         // bug somewhere in the API user's code.
         debug_assert!(merkle_value.len() == 32 || trie::trie_node::decode(merkle_value).is_ok());
-
-        // If the node at the top of stack was newly-inserted, we need to update the Merkle value
-        // provided by the user to adjust its `partial_key`.
-        // This can only be done if the Merkle value isn't a hash, otherwise we have to jump to
-        // the recalculation path.
-        let merkle_value = if self
-            .inner
-            .stack
-            .last()
-            .map_or(false, |n| n.children_partial_key_changed)
-        {
-            if merkle_value.len() == 32 {
-                return self.resume_unknown();
-            }
-
-            let decoded = trie::trie_node::decode(merkle_value)
-                .unwrap_or_else(|err| panic!("invalid node value provided: {}", err));
-            either::Left(
-                trie::trie_node::calculate_merkle_value(
-                    trie::trie_node::Decoded {
-                        children: decoded.children,
-                        storage_value: decoded.storage_value,
-                        partial_key: self.descendant_partial_key.iter().copied(),
-                    },
-                    self.inner.stack.is_empty(),
-                )
-                .unwrap_or_else(|_| panic!()),
-            )
-        } else {
-            either::Right(merkle_value)
-        };
 
         if let Some(parent_node) = self.inner.stack.last_mut() {
             // If the element has a parent, add the Merkle value to its children and resume the
