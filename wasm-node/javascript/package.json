@@ -69,7 +69,6 @@
     "doc": "node prepare.mjs --debug && typedoc --basePath ./src --out ./dist/doc --treatWarningsAsErrors ./src/index-browser.ts"
   },
   "dependencies": {
-    "pako": "^2.0.4",
     "ws": "^8.8.1"
   },
   "devDependencies": {
