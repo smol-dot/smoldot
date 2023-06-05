@@ -114,8 +114,10 @@ pub enum InProgress {
 /// itself.
 pub struct ClosestDescendant {
     inner: Box<Inner>,
-    /// `true` if the diff erases a value that is equal or a descendant of `self.key()`.
-    diff_erases_a_descendant: bool,
+    /// Extra nibbles to append at the end of what `self.key()` returns.
+    key_extra_nibbles: Vec<Nibble>,
+    /// `true` if the Merkle value of the descendant must always be recalculated.
+    force_recalculate: bool,
     /// `Some` if the diff inserts a value that is equal or a descendant of `self.key()`. If
     /// `Some`, contains the least common denominator shared amongst all these insertions.
     diff_inserts_lcd: Option<Vec<Nibble>>,
@@ -125,7 +127,10 @@ impl ClosestDescendant {
     /// Returns an iterator of slices, which, when joined together, form the full key of the trie
     /// node whose closest descendant must be fetched.
     pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[Nibble]> + '_> + '_ {
-        self.inner.current_node_full_key()
+        self.inner
+            .current_node_full_key()
+            .map(either::Left)
+            .chain(iter::once(either::Right(&self.key_extra_nibbles)))
     }
 
     /// Returns the same value as [`ClosestDescendant`] but as a `Vec`.
@@ -149,12 +154,15 @@ impl ClosestDescendant {
             .last()
             .map_or(true, |n| n.children.len() != 16));
 
-        // Length of the key returned by `key()`.
-        let self_key_len = self.key().fold(0, |acc, k| acc + k.as_ref().len());
+        // Length of the key of the currently-iterated node.
+        let iter_key_len = self
+            .inner
+            .current_node_full_key()
+            .fold(0, |acc, k| acc + k.as_ref().len());
 
         // If the base trie contains a descendant but the diff doesn't contain any descendant,
         // jump to calling `BaseTrieMerkleValue`.
-        if !self.diff_erases_a_descendant && self.diff_inserts_lcd.is_none() {
+        if !self.force_recalculate && self.diff_inserts_lcd.is_none() {
             if let Some(closest_descendant) = closest_descendant {
                 // Note that if the current node's `children_partial_key_changed` is set to true,
                 // we could in principle not ask for the Merkle value. However we do it anyway
@@ -162,7 +170,7 @@ impl ClosestDescendant {
                 // adjusted without having to recalculate the entire sub-tree.
                 return InProgress::MerkleValue(MerkleValue {
                     inner: self.inner,
-                    descendant_partial_key: closest_descendant.skip(self_key_len).collect(),
+                    descendant_partial_key: closest_descendant.skip(iter_key_len).collect(),
                 });
             }
         }
@@ -173,10 +181,10 @@ impl ClosestDescendant {
                 (Some(inserted_key), Some(base_trie_key)) => {
                     // `children_partial_key_changed` is `true` if
                     // `diff_inserts_lcd < closest_descendant`.
-                    let mut inserted_key_iter = inserted_key.iter().copied().skip(self_key_len);
-                    let mut base_trie_key = base_trie_key.skip(self_key_len);
+                    let mut inserted_key_iter = inserted_key.iter().copied().skip(iter_key_len);
+                    let mut base_trie_key = base_trie_key.skip(iter_key_len);
                     let mut maybe_node_pk =
-                        Vec::with_capacity(inserted_key.len() - self_key_len + 8);
+                        Vec::with_capacity(inserted_key.len() - iter_key_len + 8);
                     let mut children_pk_changed = false;
                     loop {
                         match (inserted_key_iter.next(), base_trie_key.next()) {
@@ -193,11 +201,11 @@ impl ClosestDescendant {
                 (Some(inserted_key), None) => (
                     inserted_key
                         .into_iter()
-                        .skip(self_key_len)
+                        .skip(iter_key_len)
                         .collect::<Vec<_>>(),
                     true,
                 ),
-                (None, Some(base_trie_key)) => (base_trie_key.skip(self_key_len).collect(), false),
+                (None, Some(base_trie_key)) => (base_trie_key.skip(iter_key_len).collect(), false),
                 (None, None) => {
                     // If neither the base trie nor the diff contain any descendant, then skip ahead.
                     return if let Some(parent_node) = self.inner.stack.last_mut() {
@@ -299,84 +307,74 @@ impl StorageValue {
                 self.0.next()
             }
 
-            (None, 1, parent_node) => {
+            (None, 1, _parent_node) => {
                 // Trie node no longer exists after the diff has been applied, but it has exactly
                 // one child.
                 // Unfortunately, the child Merkle value is wrong as its partial key has changed.
+
+                // To handle this situation, we back jump to `ClosestDescendant` but this time
+                // make sure to skip over `calculated_elem`.
                 let child_index = calculated_elem
                     .children
                     .iter()
                     .position(|c| c.is_some())
                     .unwrap_or_else(|| panic!());
-                let child_nibble =
+
+                let mut partial_key = calculated_elem.partial_key;
+                partial_key.push(
                     Nibble::try_from(u8::try_from(child_index).unwrap_or_else(|_| panic!()))
-                        .unwrap_or_else(|_| panic!());
-                let child_info = calculated_elem.children[child_index].as_ref().unwrap();
+                        .unwrap_or_else(|_| panic!()),
+                );
 
-                // If the child Merkle value is decodable, we can directly adjust its partial key.
-                // If not, we have to force a recalculation.
+                // TODO: DRY
+                // Now calculate `DiffContainsEntryWithPrefix` and
+                // `LongestCommonDenominator(DiffInsertsNodesWithPrefix)`.
+                let mut diff_inserts_lcd = None::<Vec<Nibble>>;
+                {
+                    // TODO: could be optimized?
+                    let mut prefix_nibbles =
+                        self.0.current_node_full_key().fold(Vec::new(), |mut a, b| {
+                            a.extend_from_slice(b.as_ref());
+                            a
+                        });
+                    prefix_nibbles.extend_from_slice(&partial_key);
+                    let prefix =
+                        trie::nibbles_to_bytes_suffix_extend(prefix_nibbles.iter().copied())
+                            .collect::<Vec<_>>();
+                    for (key, inserts_entry) in self.0.diff.diff_range_ordered::<[u8]>((
+                        ops::Bound::Included(&prefix[..]),
+                        ops::Bound::Unbounded,
+                    )) {
+                        let key = trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>();
+                        if !key.starts_with(&prefix_nibbles) {
+                            break;
+                        }
 
-                let mut new_partial_key = calculated_elem.partial_key;
-                new_partial_key.reserve(1 + child_info.partial_key.len());
-                new_partial_key.push(child_nibble);
-                new_partial_key.extend_from_slice(&child_info.partial_key);
-
-                // First, handle the forced recalculation path as it is more simple.
-                // We do so by replacing `calculated_elem` in the stack with its one child.
-                // Note that this seems slightly inefficient because we will retraverse the
-                // children of the element we're pushing even though we might have traversed
-                // them earlier. However, solving this inefficiency would be extremely complicated
-                // and probably not worth it.
-                if child_info.merkle_value.as_ref().len() == 32 {
-                    self.0.stack.push(InProgressNode {
-                        partial_key: new_partial_key,
-                        children_partial_key_changed: child_info.children_partial_key_changed,
-                        children: arrayvec::ArrayVec::new(),
-                    });
-                    return self.0.next();
-                }
-
-                // Recalculate the child's value so that it becomes the calculated_elem's Merkle
-                // value.
-                let calculated_elem_merkle_value = {
-                    let decoded = trie::trie_node::decode(child_info.merkle_value.as_ref())
-                        .unwrap_or_else(|err| panic!("invalid node value provided: {:?}", err));
-                    debug_assert_eq!(
-                        decoded.partial_key.collect::<Vec<_>>(),
-                        child_info.partial_key
-                    );
-                    trie::trie_node::calculate_merkle_value(
-                        trie::trie_node::Decoded {
-                            children: decoded.children,
-                            partial_key: new_partial_key.iter().copied(),
-                            storage_value: decoded.storage_value,
-                        },
-                        parent_node.is_none(),
-                    )
-                    .unwrap_or_else(|_| panic!())
+                        if inserts_entry {
+                            diff_inserts_lcd = match diff_inserts_lcd.take() {
+                                Some(mut v) => {
+                                    let lcd = key
+                                        .iter()
+                                        .zip(v.iter())
+                                        .take_while(|(a, b)| a == b)
+                                        .count();
+                                    debug_assert!(lcd >= prefix_nibbles.len());
+                                    debug_assert_eq!(&key[..lcd], &v[..lcd]);
+                                    v.truncate(lcd);
+                                    Some(v)
+                                }
+                                None => Some(key),
+                            };
+                        }
+                    }
                 };
 
-                if let Some(parent_node) = parent_node {
-                    // Trie node no longer exists, but from its parent's point of view it has been
-                    // replaced in the trie with that one single child.
-                    parent_node.children.push(Some(ChildInfo {
-                        partial_key: new_partial_key,
-                        children_partial_key_changed: child_info.children_partial_key_changed,
-                        merkle_value: calculated_elem_merkle_value,
-                    }));
-                    self.0.next()
-                } else {
-                    // No more node in the stack means that this was the root node. The child is
-                    // the trie root.
-                    InProgress::Finished {
-                        // Never panics given that we passed `is_root_node: true` in the
-                        // calculation above.
-                        trie_root_hash: *<&[u8; 32]>::try_from(
-                            calculated_elem_merkle_value.as_ref(),
-                        )
-                        .unwrap_or_else(|_| panic!()),
-                    }
-                }
+                InProgress::ClosestDescendant(ClosestDescendant {
+                    inner: self.0,
+                    key_extra_nibbles: partial_key,
+                    force_recalculate: true, // The partial key of the closest descendant has changed.
+                    diff_inserts_lcd,
+                })
             }
 
             (_, _, parent_node) => {
@@ -418,11 +416,7 @@ impl StorageValue {
                 .unwrap_or_else(|_| panic!());
 
                 if let Some(parent_node) = parent_node {
-                    parent_node.children.push(Some(ChildInfo {
-                        partial_key: calculated_elem.partial_key,
-                        children_partial_key_changed: calculated_elem.children_partial_key_changed,
-                        merkle_value,
-                    }));
+                    parent_node.children.push(Some(ChildInfo { merkle_value }));
                     self.0.next()
                 } else {
                     // No more node in the stack means that this was the root node. The calculated
@@ -534,8 +528,6 @@ impl MerkleValue {
             // algorithm.
             debug_assert_ne!(parent_node.children.len(), 16);
             parent_node.children.push(Some(ChildInfo {
-                partial_key: self.descendant_partial_key,
-                children_partial_key_changed: false,
                 merkle_value: trie::trie_node::MerkleValueOutput::from_bytes(AsRef::as_ref(
                     &merkle_value,
                 )),
@@ -588,13 +580,9 @@ struct InProgressNode {
     children: arrayvec::ArrayVec<Option<ChildInfo>, 16>,
 }
 
+// TODO: useless struct?
 #[derive(Debug)]
 struct ChildInfo {
-    /// Same as [`InProgressNode::partial_key`].
-    partial_key: Vec<Nibble>,
-    /// Same as [`InProgressNode::children_partial_key_changed`].
-    children_partial_key_changed: bool,
-
     /// Merkle value of that node.
     merkle_value: trie::trie_node::MerkleValueOutput,
 }
@@ -609,9 +597,9 @@ impl Inner {
 
         // In the paths below, we want to obtain `MaybeChildren` and thus we're going to return
         // a `ClosestDescendant`.
-        // Now calculate `DiffContainsEntryWithPrefix` and
+        // Now calculate `ForceCalculate` and
         // `LongestCommonDenominator(DiffInsertsNodesWithPrefix)`.
-        let mut diff_erases_a_descendant = false;
+        let mut force_recalculate = false;
         let mut diff_inserts_lcd = None::<Vec<Nibble>>;
         {
             // TODO: could be optimized?
@@ -630,9 +618,9 @@ impl Inner {
                     break;
                 }
 
-                if !inserts_entry {
-                    diff_erases_a_descendant = true;
-                } else {
+                force_recalculate = true;
+
+                if inserts_entry {
                     diff_inserts_lcd = match diff_inserts_lcd.take() {
                         Some(mut v) => {
                             let lcd = key.iter().zip(v.iter()).take_while(|(a, b)| a == b).count();
@@ -649,7 +637,8 @@ impl Inner {
 
         InProgress::ClosestDescendant(ClosestDescendant {
             inner: self,
-            diff_erases_a_descendant,
+            key_extra_nibbles: Vec::new(),
+            force_recalculate,
             diff_inserts_lcd,
         })
     }
