@@ -137,6 +137,7 @@ where
     if merkle_values.is_empty() {
         return Ok(DecodedTrieProof {
             proof: config.proof,
+            trie_root_merkle_value: *config.trie_root_hash,
             entries: BTreeMap::new(),
         });
     }
@@ -300,6 +301,7 @@ where
 
     Ok(DecodedTrieProof {
         proof: config.proof,
+        trie_root_merkle_value: *config.trie_root_hash,
         entries,
     })
 }
@@ -329,6 +331,9 @@ pub struct DecodedTrieProof<T> {
     /// its node value, and the children bitmap.
     // TODO: a BTreeMap is actually kind of stupid since `proof` is itself in a tree format
     entries: BTreeMap<Vec<nibble::Nibble>, (StorageValueInner, ops::Range<usize>, u16)>,
+
+    /// Trie root as provided by the API user.
+    trie_root_merkle_value: [u8; 32],
 }
 
 impl<T: AsRef<[u8]>> fmt::Debug for DecodedTrieProof<T> {
@@ -834,7 +839,8 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
         key: &[nibble::Nibble],
     ) -> Option<Option<&'_ [u8]>> {
         if key.is_empty() {
-            todo!()
+            // The closest descendant of an empty key is always the root of the trie.
+            return Some(Some(&self.trie_root_merkle_value));
         }
 
         // Call `closest_ancestor(parent(key))`.
