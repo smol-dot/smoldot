@@ -646,11 +646,13 @@ impl<T> VerifyContext<T> {
                     inner,
                 })
             }
-            verify::header_body::Verify::StorageMerkleValue(inner) => {
-                BodyVerifyStep2::StorageMerkleValue(StorageMerkleValue {
-                    context: self,
-                    inner,
-                })
+            verify::header_body::Verify::StorageClosestDescendantMerkleValue(inner) => {
+                BodyVerifyStep2::StorageClosestDescendantMerkleValue(
+                    StorageClosestDescendantMerkleValue {
+                        context: self,
+                        inner,
+                    },
+                )
             }
             verify::header_body::Verify::StorageNextKey(inner) => {
                 BodyVerifyStep2::StorageNextKey(StorageNextKey {
@@ -885,8 +887,9 @@ pub enum BodyVerifyStep2<T> {
     },
     /// Loading a storage value is required in order to continue.
     StorageGet(StorageGet<T>),
-    /// Obtaining the Merkle value of a trie node is required in order to continue.
-    StorageMerkleValue(StorageMerkleValue<T>),
+    /// Obtaining the Merkle value of the closest descendant of a trie node is required in order
+    /// to continue.
+    StorageClosestDescendantMerkleValue(StorageClosestDescendantMerkleValue<T>),
     /// Fetching the key that follows a given one is required in order to continue.
     StorageNextKey(StorageNextKey<T>),
     /// A new runtime must be compiled.
@@ -967,17 +970,16 @@ impl<T> StorageGet<T> {
     }
 }
 
-/// Obtaining the Merkle value of a trie node is required in order to continue.
+/// Obtaining the Merkle value of the closest descendant of a trie node is required in order
+/// to continue.
 #[must_use]
-pub struct StorageMerkleValue<T> {
-    inner: verify::header_body::StorageMerkleValue,
+pub struct StorageClosestDescendantMerkleValue<T> {
+    inner: verify::header_body::StorageClosestDescendantMerkleValue,
     context: Box<VerifyContext<T>>,
 }
 
-impl<T> StorageMerkleValue<T> {
-    /// Returns the key whose Merkle value must be passed back.
-    ///
-    /// The key is guaranteed to have been injected through [`StorageNextKey::inject_key`] earlier.
+impl<T> StorageClosestDescendantMerkleValue<T> {
+    /// Returns the key whose closest descendant Merkle value must be passed back.
     pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.key()
     }
@@ -992,10 +994,6 @@ impl<T> StorageMerkleValue<T> {
     }
 
     /// Injects the corresponding Merkle value.
-    ///
-    /// Note that there is no way to indicate that the trie node doesn't exist. This is because
-    /// the node is guaranteed to have been injected through [`StorageNextKey::inject_key`]
-    /// earlier.
     pub fn inject_merkle_value(self, merkle_value: &[u8]) -> BodyVerifyStep2<T> {
         let inner = self.inner.inject_merkle_value(merkle_value);
         self.context.with_body_verify(inner)

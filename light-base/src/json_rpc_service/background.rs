@@ -1362,10 +1362,12 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     runtime_call =
                         get.inject_value(storage_value.map(|(val, vers)| (iter::once(val), vers)));
                 }
-                runtime_host::RuntimeHostVm::MerkleValue(mv) => {
+                runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv) => {
                     // TODO:
-                    runtime_call_lock
-                        .unlock(runtime_host::RuntimeHostVm::MerkleValue(mv).into_prototype());
+                    runtime_call_lock.unlock(
+                        runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv)
+                            .into_prototype(),
+                    );
                     break Err(RuntimeCallError::NextKeyMerkleValueForbidden);
                 }
                 runtime_host::RuntimeHostVm::NextKey(nk) => {

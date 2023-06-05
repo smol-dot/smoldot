@@ -1843,10 +1843,10 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                     .map(|(val, vers)| (iter::once(val), vers)),
                                             );
                                         }
-                                        runtime_host::RuntimeHostVm::MerkleValue(mv) => {
+                                        runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv) => {
                                             // TODO: implement somehow
                                             runtime_call_lock.unlock(
-                                                runtime_host::RuntimeHostVm::MerkleValue(mv)
+                                                runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv)
                                                     .into_prototype(),
                                             );
                                             break methods::ServerToClient::chainHead_unstable_callEvent {

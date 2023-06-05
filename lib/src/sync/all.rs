@@ -2818,7 +2818,7 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
 
     /// Obtaining the Merkle value of a trie node of the parent block storage is required in order
     /// to continue.
-    ParentStorageMerkleValue(StorageMerkleValue<TRq, TSrc, TBl>),
+    ParentStorageMerkleValue(StorageClosestDescendantMerkleValue<TRq, TSrc, TBl>),
 
     /// Fetching the key of the parent block storage that follows a given one is required in
     /// order to continue.
@@ -2918,7 +2918,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                 })
             }
             optimistic::BlockVerification::ParentStorageMerkleValue(inner) => {
-                BlockVerification::ParentStorageMerkleValue(StorageMerkleValue {
+                BlockVerification::ParentStorageMerkleValue(StorageClosestDescendantMerkleValue {
                     inner,
                     shared,
                     user_data,
@@ -2966,10 +2966,11 @@ impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
     }
 }
 
-/// Obtaining the Merkle value of a trie node is required in order to continue.
+/// Obtaining the Merkle value of the closest descendant of a trie node is required in order to
+/// continue.
 #[must_use]
-pub struct StorageMerkleValue<TRq, TSrc, TBl> {
-    inner: optimistic::StorageMerkleValue<
+pub struct StorageClosestDescendantMerkleValue<TRq, TSrc, TBl> {
+    inner: optimistic::StorageClosestDescendantMerkleValue<
         OptimisticRequestExtra<TRq>,
         OptimisticSourceExtra<TSrc>,
         TBl,
@@ -2978,10 +2979,8 @@ pub struct StorageMerkleValue<TRq, TSrc, TBl> {
     user_data: TBl,
 }
 
-impl<TRq, TSrc, TBl> StorageMerkleValue<TRq, TSrc, TBl> {
-    /// Returns the key whose Merkle value must be passed back.
-    ///
-    /// The key is guaranteed to have been injected through [`StorageNextKey::inject_key`] earlier.
+impl<TRq, TSrc, TBl> StorageClosestDescendantMerkleValue<TRq, TSrc, TBl> {
+    /// Returns the key whose closest descendant Merkle value must be passed back.
     pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.key()
     }
@@ -2996,10 +2995,6 @@ impl<TRq, TSrc, TBl> StorageMerkleValue<TRq, TSrc, TBl> {
     }
 
     /// Injects the corresponding Merkle value.
-    ///
-    /// Note that there is no way to indicate that the trie node doesn't exist. This is because
-    /// the node is guaranteed to have been injected through [`StorageNextKey::inject_key`]
-    /// earlier.
     pub fn inject_merkle_value(self, merkle_value: &[u8]) -> BlockVerification<TRq, TSrc, TBl> {
         let inner = self.inner.inject_merkle_value(merkle_value);
         BlockVerification::from_inner(inner, self.shared, self.user_data)

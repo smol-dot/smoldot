@@ -64,7 +64,7 @@ fn block_building_works() {
                     .map(|(_, v)| iter::once(v));
                 builder = get.inject_value(value.map(|v| (v, super::TrieEntryVersion::V0)));
             }
-            super::BlockBuild::MerkleValue(req) => {
+            super::BlockBuild::ClosestDescendantMerkleValue(req) => {
                 builder = req.resume_unknown();
             }
             super::BlockBuild::NextKey(req) => {

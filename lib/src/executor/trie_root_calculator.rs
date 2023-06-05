@@ -383,7 +383,7 @@ impl ClosestDescendantMerkleValue {
     /// Returns an iterator of slices, which, when joined together, form the full key of the trie
     /// node whose closest descendant Merkle value must be fetched.
     pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[Nibble]> + '_> + '_ {
-        // A `MerkleValue` is created directly in response to a `ClosestAncestor` without
+        // A `ClosestDescendantMerkleValue` is created directly in response to a `ClosestAncestor` without
         // updating the `Inner`.
         self.inner.current_node_full_key()
     }
@@ -403,7 +403,7 @@ impl ClosestDescendantMerkleValue {
     /// the calculation of this Merkle value manually, which takes more time.
     pub fn resume_unknown(self) -> InProgress {
         // The element currently being iterated was `Btcd`, and is now switched to being
-        // `MaybeNodeKey`. Because a `MerkleValue` is only ever created if the diff doesn't
+        // `MaybeNodeKey`. Because a `ClosestDescendantMerkleValue` is only ever created if the diff doesn't
         // contain any entry that descends the currently iterated node, we know for sure that
         // `MaybeNodeKey` is equal to `Btcd`.
         InProgress::ClosestDescendant(ClosestDescendant {
@@ -414,7 +414,7 @@ impl ClosestDescendantMerkleValue {
     }
 
     /// Indicate the Merkle value of closest descendant of the trie node indicated by
-    /// [`MerkleValue::key`] and resume the calculation.
+    /// [`ClosestDescendantMerkleValue::key`] and resume the calculation.
     pub fn inject_merkle_value(mut self, merkle_value: &[u8]) -> InProgress {
         // We are after a call to `BaseTrieClosestDescendantMerkleValue` in the algorithm shown
         // at the top.
