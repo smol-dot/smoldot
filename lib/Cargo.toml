@@ -13,7 +13,7 @@ repository.workspace = true
 default = ["database-sqlite", "std"]
 database-sqlite = [
     "parking_lot",
-    "sqlite",
+    "rusqlite",
     "std"   # A database stored on the filesystem can't reasonably work without a filesystem.
 ]
 std = [
@@ -38,7 +38,7 @@ atomic = { version = "0.5.3", default-features = false }
 base64 = { version = "0.21.2", default-features = false, features = ["alloc"] }
 bip39 = { version = "2.0.0", default-features = false }
 blake2-rfc = { version = "0.2.18", default-features = false }
-bs58 = { version = "0.4.0", default-features = false, features = ["alloc"] }
+bs58 = { version = "0.5.0", default-features = false, features = ["alloc"] }
 crossbeam-queue = { version = "0.3.8", default-features = false, features = ["alloc"] }
 derive_more = "0.99.17"
 ed25519-zebra = { version = "3.1.0", default-features = false }
@@ -76,7 +76,7 @@ twox-hash = { version = "1.6.3", default-features = false }
 wasmi = { version = "0.30.0", default-features = false }
 
 # `database-sqlite` feature
-sqlite = { version = "0.27.3", optional = true, default-features = false, features = ["linkage"] }
+rusqlite = { version = "0.29.0", optional = true, default-features = false, features = ["bundled"] }
 
 # `std` feature
 # Add here the crates that cannot function without the help of the operating system or environment.
@@ -84,10 +84,6 @@ async-std = { version = "1.12.0", optional = true }
 parking_lot = { version = "0.12.1", optional = true }
 pin-project = { version = "1.1.0", optional = true }
 soketto = { version = "0.7.1", optional = true }
-
-# BELOW: DEPENDENCIES TO REMOVE
-# TODO:
-parity-scale-codec = { version = "3.5.0", features = ["derive"], default-features = false } # TODO: a lot of unnecessary overhead in terms of memory allocations
 
 # This list of targets matches the tier 1 and tier 2 of platforms supported by wasmtime: <https://docs.wasmtime.dev/stability-tiers.html>
 # The arch and OS of a specific target can be found with the command `rustc +nightly -Z unstable-options --print target-spec-json --target ...`

@@ -1776,7 +1776,6 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             virtual_machine,
                             function_to_call: &function_to_call,
                             parameter: iter::once(&call_parameters.0),
-                            main_trie_root_calculation_cache: None,
                             offchain_storage_changes: Default::default(),
                             storage_main_trie_changes: Default::default(),
                             max_log_level: 0,
@@ -1844,6 +1843,20 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                     .map(|(val, vers)| (iter::once(val), vers)),
                                             );
                                         }
+                                        runtime_host::RuntimeHostVm::MerkleValue(mv) => {
+                                            // TODO: implement somehow
+                                            runtime_call_lock.unlock(
+                                                runtime_host::RuntimeHostVm::MerkleValue(mv)
+                                                    .into_prototype(),
+                                            );
+                                            break methods::ServerToClient::chainHead_unstable_callEvent {
+                                                    subscription: (&subscription_id).into(),
+                                                    result: methods::ChainHeadCallEvent::Inaccessible {
+                                                        error: "getting Merkle value not implemented".into(),
+                                                    },
+                                                }
+                                                .to_json_call_object_parameters(None);
+                                        }
                                         runtime_host::RuntimeHostVm::NextKey(nk) => {
                                             // TODO: implement somehow
                                             runtime_call_lock.unlock(
@@ -1854,20 +1867,6 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                     subscription: (&subscription_id).into(),
                                                     result: methods::ChainHeadCallEvent::Inaccessible {
                                                         error: "getting next key not implemented".into(),
-                                                    },
-                                                }
-                                                .to_json_call_object_parameters(None);
-                                        }
-                                        runtime_host::RuntimeHostVm::PrefixKeys(nk) => {
-                                            // TODO: implement somehow
-                                            runtime_call_lock.unlock(
-                                                runtime_host::RuntimeHostVm::PrefixKeys(nk)
-                                                    .into_prototype(),
-                                            );
-                                            break methods::ServerToClient::chainHead_unstable_callEvent {
-                                                    subscription: (&subscription_id).into(),
-                                                    result: methods::ChainHeadCallEvent::Inaccessible {
-                                                        error: "getting prefix keys not implemented".into(),
                                                     },
                                                 }
                                                 .to_json_call_object_parameters(None);

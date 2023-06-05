@@ -280,9 +280,9 @@ pub enum ValidateTransactionError {
     /// Error during the validation runtime call.
     #[display(fmt = "{_0}")]
     Validation(validate::Error),
-    /// Tried to access the next key of a storage key. This isn't possible through a call request
-    /// at the moment.
-    NextKeyForbidden,
+    /// Tried to access the next key or getting the Merkle value of a storage key. This isn't
+    /// possible through a call request at the moment.
+    NextKeyMerkleValueForbidden,
 }
 
 #[derive(Debug, Clone)]
@@ -1226,29 +1226,23 @@ async fn validate_transaction<TPlat: PlatformRef>(
                 validation_in_progress =
                     get.inject_value(storage_value.map(|(val, vers)| (iter::once(val), vers)));
             }
+            validate::Query::MerkleValue(mv) => {
+                // TODO:
+                runtime_call_lock.unlock(validate::Query::MerkleValue(mv).into_prototype());
+                break Err(ValidationError::InvalidOrError(
+                    InvalidOrError::ValidateError(
+                        ValidateTransactionError::NextKeyMerkleValueForbidden,
+                    ),
+                ));
+            }
             validate::Query::NextKey(nk) => {
                 // TODO:
                 runtime_call_lock.unlock(validate::Query::NextKey(nk).into_prototype());
                 break Err(ValidationError::InvalidOrError(
-                    InvalidOrError::ValidateError(ValidateTransactionError::NextKeyForbidden),
+                    InvalidOrError::ValidateError(
+                        ValidateTransactionError::NextKeyMerkleValueForbidden,
+                    ),
                 ));
-            }
-            validate::Query::PrefixKeys(prefix) => {
-                // TODO: lots of allocations because I couldn't figure how to make this annoying borrow checker happy
-                let rq_prefix = prefix.prefix().as_ref().to_owned();
-                let result = runtime_call_lock
-                    .storage_prefix_keys_ordered(&rq_prefix)
-                    .map(|i| i.map(|v| v.as_ref().to_owned()).collect::<Vec<_>>());
-                match result {
-                    Ok(v) => validation_in_progress = prefix.inject_keys_ordered(v.into_iter()),
-                    Err(err) => {
-                        runtime_call_lock
-                            .unlock(validate::Query::PrefixKeys(prefix).into_prototype());
-                        return Err(ValidationError::InvalidOrError(
-                            InvalidOrError::ValidateError(ValidateTransactionError::Call(err)),
-                        ));
-                    }
-                }
             }
         }
     }

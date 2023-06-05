@@ -31,24 +31,20 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-/// Total number of bytes that all the connections created through [`Platform`] combined have
+/// Total number of bytes that all the connections created through [`PlatformRef`] combined have
 /// received.
 pub static TOTAL_BYTES_RECEIVED: AtomicU64 = AtomicU64::new(0);
-/// Total number of bytes that all the connections created through [`Platform`] combined have
+/// Total number of bytes that all the connections created through [`PlatformRef`] combined have
 /// sent.
 pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Clone)]
-pub(crate) struct Platform {}
+pub(crate) const PLATFORM_REF: PlatformRef = PlatformRef {};
 
-impl Platform {
-    pub const fn new() -> Self {
-        Self {}
-    }
-}
+#[derive(Debug, Copy, Clone)]
+pub(crate) struct PlatformRef {}
 
 // TODO: this trait implementation was written before GATs were stable in Rust; now that the associated types have lifetimes, it should be possible to considerably simplify this code
-impl smoldot_light::platform::PlatformRef for Platform {
+impl smoldot_light::platform::PlatformRef for PlatformRef {
     type Delay = Delay;
     type Yield = Yield;
     type Instant = Instant;
@@ -671,7 +667,7 @@ enum ConnectionInner {
         /// but that haven't been reported through
         /// [`smoldot_light::platform::PlatformRef::next_substream`] yet.
         opened_substreams_to_pick_up: VecDeque<(u32, PlatformSubstreamDirection, u32)>,
-        /// Number of objects (connections and streams) in the [`Platform`] API that reference
+        /// Number of objects (connections and streams) in the [`PlatformRef`] API that reference
         /// this connection. If it switches from 1 to 0, the connection must be removed.
         connection_handles_alive: u32,
         /// Multihash encoding of the TLS certificate used by the local node at the DTLS layer.
@@ -683,7 +679,7 @@ enum ConnectionInner {
     Reset {
         /// Message given by the bindings to justify the closure.
         message: String,
-        /// Number of objects (connections and streams) in the [`Platform`] API that reference
+        /// Number of objects (connections and streams) in the [`PlatformRef`] API that reference
         /// this connection. If it switches from 1 to 0, the connection must be removed.
         connection_handles_alive: u32,
     },

@@ -49,7 +49,6 @@ use crate::{
     chain::{blocks_tree, chain_information},
     executor::{host, storage_diff},
     header,
-    trie::calculate_root,
 };
 
 use alloc::{
@@ -65,7 +64,7 @@ use core::{
 };
 use hashbrown::HashMap;
 
-pub use blocks_tree::TrieEntryVersion;
+pub use blocks_tree::{Nibble, TrieEntryVersion};
 
 mod verification_queue;
 
@@ -147,10 +146,6 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
 
     /// See [`Config::full_mode`].
     full_mode: bool,
-
-    /// Cache of calculation for the storage trie of the best block.
-    /// Providing this value when verifying a block considerably speeds up the verification.
-    main_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
 
     /// See [`Config::download_ahead_blocks`].
     download_ahead_blocks: NonZeroU32,
@@ -272,7 +267,6 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             inner: Box::new(OptimisticSyncInner {
                 finalized_chain_information: blocks_tree_config,
                 full_mode: config.full_mode,
-                main_trie_root_calculation_cache: None,
                 sources: HashMap::with_capacity_and_hasher(
                     config.sources_capacity,
                     Default::default(),
@@ -912,7 +906,6 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                 }
 
                 self.inner.make_requests_obsolete(&self.chain);
-                self.inner.main_trie_root_calculation_cache = None;
 
                 let previous_best_height = self.chain.best_block_header().number;
                 BlockVerification::Reset {
@@ -984,9 +977,9 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
     /// Loading a storage value of the parent block is required in order to continue.
     ParentStorageGet(StorageGet<TRq, TSrc, TBl>),
 
-    /// Fetching the list of keys of the parent block with a given prefix is required in order
+    /// Obtaining the Merkle value of a trie node of the parent block storage is required in order
     /// to continue.
-    ParentStoragePrefixKeys(StoragePrefixKeys<TRq, TSrc, TBl>),
+    ParentStorageMerkleValue(StorageMerkleValue<TRq, TSrc, TBl>),
 
     /// Fetching the key of the parent block storage that follows a given one is required in
     /// order to continue.
@@ -1048,18 +1041,13 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                 ) => {
                     // The verification process is asking for a Wasm virtual machine containing
                     // the parent block's runtime.
-                    inner = Inner::Step2(req.resume(
-                        parent_runtime,
-                        shared.block_body.iter(),
-                        shared.inner.main_trie_root_calculation_cache.take(),
-                    ));
+                    inner = Inner::Step2(req.resume(parent_runtime, shared.block_body.iter()));
                 }
 
                 Inner::Step2(blocks_tree::BodyVerifyStep2::Finished {
                     storage_main_trie_changes,
                     state_trie_version,
                     offchain_storage_changes,
-                    main_trie_root_calculation_cache,
                     parent_runtime,
                     new_runtime,
                     insert,
@@ -1073,9 +1061,6 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                                 .diff_get(&b":heappages"[..])
                                 .is_some()
                     );
-
-                    shared.inner.main_trie_root_calculation_cache =
-                        Some(main_trie_root_calculation_cache);
 
                     let chain = {
                         let header = insert.header().into();
@@ -1114,22 +1099,19 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     break BlockVerification::ParentStorageGet(StorageGet { inner: req, shared });
                 }
 
+                Inner::Step2(blocks_tree::BodyVerifyStep2::StorageMerkleValue(req)) => {
+                    // The underlying verification process is asking for the Merkle value of a
+                    // trie node.
+                    break BlockVerification::ParentStorageMerkleValue(StorageMerkleValue {
+                        inner: req,
+                        shared,
+                    });
+                }
+
                 Inner::Step2(blocks_tree::BodyVerifyStep2::StorageNextKey(req)) => {
                     // The underlying verification process is asking for the key that follows
                     // the requested one.
                     break BlockVerification::ParentStorageNextKey(StorageNextKey {
-                        inner: req,
-                        shared,
-                        key_overwrite: None,
-                    });
-                }
-
-                Inner::Step2(blocks_tree::BodyVerifyStep2::StoragePrefixKeys(req)) => {
-                    // The underlying verification process is asking for all the keys that start
-                    // with a certain prefix.
-                    // The first step is to ask the user for that information when it comes to
-                    // the finalized block.
-                    break BlockVerification::ParentStoragePrefixKeys(StoragePrefixKeys {
                         inner: req,
                         shared,
                     });
@@ -1170,9 +1152,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                         shared.inner.finalized_chain_information.clone(),
                     );
 
-                    let mut inner = shared.inner.with_requests_obsoleted(&chain);
-                    inner.main_trie_root_calculation_cache = None;
-
+                    let inner = shared.inner.with_requests_obsoleted(&chain);
                     break BlockVerification::Reset {
                         previous_best_height: old_chain.best_block_header().number,
                         parent_runtime: Some(parent_runtime),
@@ -1201,9 +1181,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                         shared.inner.finalized_chain_information.clone(),
                     );
 
-                    let mut inner = shared.inner.with_requests_obsoleted(&chain);
-                    inner.main_trie_root_calculation_cache = None;
-
+                    let inner = shared.inner.with_requests_obsoleted(&chain);
                     break BlockVerification::Reset {
                         previous_best_height: old_chain.best_block_header().number,
                         parent_runtime: Some(parent_runtime),
@@ -1230,9 +1208,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                         shared.inner.finalized_chain_information.clone(),
                     );
 
-                    let mut inner = shared.inner.with_requests_obsoleted(&chain);
-                    inner.main_trie_root_calculation_cache = None;
-
+                    let inner = shared.inner.with_requests_obsoleted(&chain);
                     break BlockVerification::Reset {
                         previous_best_height: old_chain.best_block_header().number,
                         parent_runtime: Some(parent_runtime),
@@ -1288,9 +1264,7 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
                     self.inner.finalized_chain_information.clone(),
                 );
 
-                let mut inner = self.inner.with_requests_obsoleted(&chain);
-                inner.main_trie_root_calculation_cache = None;
-
+                let inner = self.inner.with_requests_obsoleted(&chain);
                 let previous_best_height = chain.best_block_header().number;
                 return (
                     OptimisticSync { chain, inner },
@@ -1387,25 +1361,37 @@ impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
     }
 }
 
-/// Fetching the list of keys with a given prefix is required in order to continue.
+/// Obtaining the Merkle value of a trie node is required in order to continue.
 #[must_use]
-pub struct StoragePrefixKeys<TRq, TSrc, TBl> {
-    inner: blocks_tree::StoragePrefixKeys<Block<TBl>>,
+pub struct StorageMerkleValue<TRq, TSrc, TBl> {
+    inner: blocks_tree::StorageMerkleValue<Block<TBl>>,
     shared: BlockVerificationShared<TRq, TSrc, TBl>,
 }
 
-impl<TRq, TSrc, TBl> StoragePrefixKeys<TRq, TSrc, TBl> {
-    /// Returns the prefix whose keys to load.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.inner.prefix()
+impl<TRq, TSrc, TBl> StorageMerkleValue<TRq, TSrc, TBl> {
+    /// Returns the key whose Merkle value must be passed back.
+    ///
+    /// The key is guaranteed to have been injected through [`StorageNextKey::inject_key`] earlier.
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+        self.inner.key()
     }
 
-    /// Injects the list of keys ordered lexicographically.
-    pub fn inject_keys_ordered(
-        self,
-        keys: impl Iterator<Item = impl AsRef<[u8]>>,
-    ) -> BlockVerification<TRq, TSrc, TBl> {
-        let inner = self.inner.inject_keys_ordered(keys);
+    /// Indicate that the value is unknown and resume the calculation.
+    ///
+    /// This function be used if you are unaware of the Merkle value. The algorithm will perform
+    /// the calculation of this Merkle value manually, which takes more time.
+    pub fn resume_unknown(self) -> BlockVerification<TRq, TSrc, TBl> {
+        let inner: blocks_tree::BodyVerifyStep2<Block<TBl>> = self.inner.resume_unknown();
+        BlockVerification::from(Inner::Step2(inner), self.shared)
+    }
+
+    /// Injects the corresponding Merkle value.
+    ///
+    /// Note that there is no way to indicate that the trie node doesn't exist. This is because
+    /// the node is guaranteed to have been injected through [`StorageNextKey::inject_key`]
+    /// earlier.
+    pub fn inject_merkle_value(self, merkle_value: &[u8]) -> BlockVerification<TRq, TSrc, TBl> {
+        let inner = self.inner.inject_merkle_value(merkle_value);
         BlockVerification::from(Inner::Step2(inner), self.shared)
     }
 }
@@ -1415,19 +1401,11 @@ impl<TRq, TSrc, TBl> StoragePrefixKeys<TRq, TSrc, TBl> {
 pub struct StorageNextKey<TRq, TSrc, TBl> {
     inner: blocks_tree::StorageNextKey<Block<TBl>>,
     shared: BlockVerificationShared<TRq, TSrc, TBl>,
-
-    /// If `Some`, ask for the key inside of this field rather than the one of `inner`. Used in
-    /// corner-case situations where the key provided by the user has been erased from storage.
-    key_overwrite: Option<Vec<u8>>,
 }
 
 impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
-        if let Some(key_overwrite) = &self.key_overwrite {
-            either::Left(key_overwrite)
-        } else {
-            either::Right(self.inner.key())
-        }
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+        self.inner.key()
     }
 
     /// If `true`, then the provided value must the one superior or equal to the requested key.
@@ -1436,9 +1414,15 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
         self.inner.or_equal()
     }
 
+    /// If `true`, then the search must include both branch nodes and storage nodes. If `false`,
+    /// the search only covers storage nodes.
+    pub fn branch_nodes(&self) -> bool {
+        self.inner.branch_nodes()
+    }
+
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.prefix()
     }
 
@@ -1448,7 +1432,10 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
-    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> BlockVerification<TRq, TSrc, TBl> {
+    pub fn inject_key(
+        self,
+        key: Option<impl Iterator<Item = Nibble>>,
+    ) -> BlockVerification<TRq, TSrc, TBl> {
         let inner = self.inner.inject_key(key);
         BlockVerification::from(Inner::Step2(inner), self.shared)
     }

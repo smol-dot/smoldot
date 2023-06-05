@@ -72,9 +72,9 @@
 
 use crate::{chain::chain_information, header, util};
 
-use alloc::collections::{btree_map, BTreeMap};
-use core::{fmt, iter, num::NonZeroU64};
+use core::{fmt, num::NonZeroU64};
 use parking_lot::Mutex;
+use rusqlite::OptionalExtension as _;
 
 pub use open::{open, Config, ConfigTy, DatabaseEmpty, DatabaseOpen};
 
@@ -88,7 +88,7 @@ pub struct SqliteFullDatabase {
     /// When the database is opened, `BEGIN TRANSACTION` is immediately run. We periodically
     /// call `COMMIT; BEGIN_TRANSACTION` when deemed necessary. `COMMIT` is basically the
     /// equivalent of `fsync`, and must be called carefully in order to not lose too much speed.
-    database: Mutex<sqlite::Connection>,
+    database: Mutex<rusqlite::Connection>,
 
     /// Number of bytes used to encode the block number.
     block_number_bytes: usize,
@@ -127,22 +127,14 @@ impl SqliteFullDatabase {
     ) -> Result<Option<Vec<u8>>, AccessError> {
         let connection = self.database.lock();
 
-        let mut statement = connection
-            .prepare(r#"SELECT header FROM blocks WHERE hash = ?"#)
-            .map_err(InternalError)
-            .map_err(CorruptedError::Internal)?
-            .bind(1, &block_hash[..])
-            .unwrap();
+        let out = connection
+            .prepare_cached(r#"SELECT header FROM blocks WHERE hash = ?"#)
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?
+            .query_row((&block_hash[..],), |row| row.get::<_, Vec<u8>>(0))
+            .optional()
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 
-        if !matches!(statement.next().unwrap(), sqlite::State::Row) {
-            return Ok(None);
-        }
-
-        let value = statement
-            .read::<Vec<u8>>(0)
-            .map_err(InternalError)
-            .map_err(CorruptedError::Internal)?;
-        Ok(Some(value))
+        Ok(out)
     }
 
     /// Returns the list of extrinsics of the given block, or `None` if the block is unknown.
@@ -158,24 +150,17 @@ impl SqliteFullDatabase {
     ) -> Result<Option<impl ExactSizeIterator<Item = Vec<u8>>>, AccessError> {
         let connection = self.database.lock();
 
-        let mut statement = connection
-            .prepare(r#"SELECT extrinsic FROM blocks_body WHERE hash = ? ORDER BY idx ASC"#)
-            .map_err(InternalError)
-            .map_err(CorruptedError::Internal)?
-            .bind(1, &block_hash[..])
-            .unwrap();
-
         // TODO: doesn't detect if block is absent
 
-        let mut out = Vec::new();
-        while matches!(statement.next().unwrap(), sqlite::State::Row) {
-            let extrinsic = statement
-                .read::<Vec<u8>>(0)
-                .map_err(InternalError)
-                .map_err(CorruptedError::Internal)?;
-            out.push(extrinsic);
-        }
-        Ok(Some(out.into_iter()))
+        let result = connection
+            .prepare_cached(r#"SELECT extrinsic FROM blocks_body WHERE hash = ? ORDER BY idx ASC"#)
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?
+            .query_map((&block_hash[..],), |row| row.get::<_, Vec<u8>>(0))
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+
+        Ok(Some(result.into_iter()))
     }
 
     /// Returns the hashes of the blocks given a block number.
@@ -183,30 +168,9 @@ impl SqliteFullDatabase {
         &self,
         block_number: u64,
     ) -> Result<impl ExactSizeIterator<Item = [u8; 32]>, AccessError> {
-        let block_number = match i64::try_from(block_number) {
-            Ok(n) => n,
-            Err(_) => return Ok(either::Right(iter::empty())),
-        };
-
         let connection = self.database.lock();
-
-        let mut statement = connection
-            .prepare(r#"SELECT hash FROM blocks WHERE number = ?"#)
-            .map_err(InternalError)
-            .map_err(CorruptedError::Internal)?
-            .bind(1, block_number)
-            .unwrap();
-
-        let mut out = Vec::new();
-        while matches!(statement.next().unwrap(), sqlite::State::Row) {
-            let hash = statement.read::<Vec<u8>>(0).unwrap();
-            out.push(
-                <[u8; 32]>::try_from(&hash[..])
-                    .map_err(|_| AccessError::Corrupted(CorruptedError::InvalidBlockHashLen))?,
-            );
-        }
-
-        Ok(either::Left(out.into_iter()))
+        let result = block_hashes_by_number(&connection, block_number)?;
+        Ok(result.into_iter())
     }
 
     /// Returns a [`chain_information::ChainInformation`] struct containing the information about
@@ -352,58 +316,53 @@ impl SqliteFullDatabase {
             return Err(InsertError::FinalizedNephew);
         }
 
-        let mut statement = connection
-            .prepare(
+        connection
+            .prepare_cached(
                 "INSERT INTO blocks(number, hash, parent_hash, header, justification) VALUES (?, ?, ?, ?, NULL)",
             )
             .unwrap()
-            .bind(1, i64::try_from(header.number).unwrap())
-            .unwrap()
-            .bind(2, &block_hash[..])
-            .unwrap()
-            .bind(3, &header.parent_hash[..])
-            .unwrap()
-            .bind(4, scale_encoded_header)
+            .execute((
+                i64::try_from(header.number).unwrap(),
+                &block_hash[..],
+                &header.parent_hash[..],
+                scale_encoded_header
+            ))
             .unwrap();
-        statement.next().unwrap();
 
-        let mut statement = connection
-            .prepare("INSERT INTO blocks_body(hash, idx, extrinsic) VALUES (?, ?, ?)")
-            .unwrap();
-        for (index, item) in body.enumerate() {
-            statement = statement
-                .bind(1, &block_hash[..])
-                .unwrap()
-                .bind(2, i64::try_from(index).unwrap())
-                .unwrap()
-                .bind(3, item.as_ref())
+        {
+            let mut statement = connection
+                .prepare_cached("INSERT INTO blocks_body(hash, idx, extrinsic) VALUES (?, ?, ?)")
                 .unwrap();
-            statement.next().unwrap();
-            statement = statement.reset().unwrap();
+            for (index, item) in body.enumerate() {
+                statement
+                    .execute((
+                        &block_hash[..],
+                        i64::try_from(index).unwrap(),
+                        item.as_ref(),
+                    ))
+                    .unwrap();
+            }
         }
 
         // Insert the storage changes.
-        let mut statement = connection
-            .prepare("INSERT INTO non_finalized_changes(hash, key, value, trie_entry_version) VALUES (?, ?, ?, ?)")
-            .unwrap();
-        for (key, value) in storage_main_trie_changes {
-            statement = statement
-                .bind(1, &block_hash[..])
-                .unwrap()
-                .bind(2, key.as_ref())
+        {
+            let mut statement = connection
+                .prepare_cached("INSERT INTO non_finalized_changes(hash, key, value, trie_entry_version) VALUES (?, ?, ?, ?)")
                 .unwrap();
-            if let Some(value) = value {
-                statement = statement
-                    .bind(3, value.as_ref())
-                    .unwrap()
-                    .bind(4, i64::from(trie_entries_version))
+            for (key, value) in storage_main_trie_changes {
+                statement
+                    .execute((
+                        &block_hash[..],
+                        key.as_ref(),
+                        value.as_ref().map(|v| v.as_ref()),
+                        if value.is_some() {
+                            Some(i64::from(trie_entries_version))
+                        } else {
+                            None
+                        },
+                    ))
                     .unwrap();
-            } else {
-                // Binds NULL.
-                statement = statement.bind(3, ()).unwrap().bind(4, ()).unwrap();
             }
-            statement.next().unwrap();
-            statement = statement.reset().unwrap();
         }
 
         // Various other updates.
@@ -557,44 +516,41 @@ impl SqliteFullDatabase {
                 .map_err(AccessError::Corrupted)
                 .map_err(SetFinalizedError::Access)?;
 
-            let mut statement = connection
-                .prepare(
+            connection
+                .prepare_cached(
                     "DELETE FROM finalized_storage_main_trie
                 WHERE key IN (
                     SELECT key FROM non_finalized_changes WHERE hash = ? AND value IS NULL
                 );",
                 )
                 .unwrap()
-                .bind(1, &block_hash[..])
+                .execute((&block_hash[..],))
                 .unwrap();
-            statement.next().unwrap();
 
-            let mut statement = connection
-                .prepare(
+            connection
+                .prepare_cached(
                     "INSERT OR REPLACE INTO finalized_storage_main_trie(key, value, trie_entry_version)
                 SELECT key, value, trie_entry_version
                 FROM non_finalized_changes 
                 WHERE non_finalized_changes.hash = ? AND non_finalized_changes.value IS NOT NULL",
                 )
                 .unwrap()
-                .bind(1, &block_hash[..])
+                .execute((&block_hash[..],))
                 .unwrap();
-            statement.next().unwrap();
 
             // Remove the entries from `non_finalized_changes` as they are now finalized.
-            let mut statement = connection
-                .prepare("DELETE FROM non_finalized_changes WHERE hash = ?")
+            connection
+                .prepare_cached("DELETE FROM non_finalized_changes WHERE hash = ?")
                 .unwrap()
-                .bind(1, &block_hash[..])
+                .execute((&block_hash[..],))
                 .unwrap();
-            statement.next().unwrap();
 
             // TODO: the code below is very verbose and redundant with other similar code in smoldot ; could be improved
 
             if let Some((new_epoch, next_config)) = block_header.digest.babe_epoch_information() {
                 let epoch = meta_get_blob(&connection, "babe_finalized_next_epoch")?.unwrap(); // TODO: don't unwrap
                 let decoded_epoch = decode_babe_epoch_information(&epoch)?;
-                connection.execute(r#"INSERT OR REPLACE INTO meta(key, value_blob) SELECT "babe_finalized_epoch", value_blob FROM meta WHERE key = "babe_finalized_next_epoch""#).unwrap();
+                connection.execute(r#"INSERT OR REPLACE INTO meta(key, value_blob) SELECT "babe_finalized_epoch", value_blob FROM meta WHERE key = "babe_finalized_next_epoch""#, ()).unwrap();
 
                 let slot_number = block_header
                     .digest
@@ -657,23 +613,21 @@ impl SqliteFullDatabase {
                         assert_eq!(change.delay, 0); // TODO: not implemented if != 0
 
                         connection
-                            .execute("DELETE FROM grandpa_triggered_authorities")
+                            .execute("DELETE FROM grandpa_triggered_authorities", ())
                             .unwrap();
 
-                        let mut statement = connection.prepare("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)").unwrap();
+                        let mut statement = connection.prepare_cached("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)").unwrap();
                         for (index, item) in change.next_authorities.enumerate() {
-                            statement = statement
-                                .bind(1, i64::try_from(index).unwrap())
-                                .unwrap()
-                                .bind(2, &item.public_key[..])
-                                .unwrap()
-                                .bind(3, i64::from_ne_bytes(item.weight.get().to_ne_bytes()))
+                            statement
+                                .execute((
+                                    i64::try_from(index).unwrap(),
+                                    &item.public_key[..],
+                                    i64::from_ne_bytes(item.weight.get().to_ne_bytes()),
+                                ))
                                 .unwrap();
-                            statement.next().unwrap();
-                            statement = statement.reset().unwrap();
                         }
 
-                        connection.execute(r#"UPDATE meta SET value_number = value_number + 1 WHERE key = "grandpa_authorities_set_id""#).unwrap();
+                        connection.execute(r#"UPDATE meta SET value_number = value_number + 1 WHERE key = "grandpa_authorities_set_id""#, ()).unwrap();
                     }
                 }
             }
@@ -709,33 +663,22 @@ impl SqliteFullDatabase {
         let finalized_hash = finalized_hash(&connection)?;
 
         while block_hash != finalized_hash {
-            let mut statement = connection
-                .prepare(
+            let maybe_value = connection
+                .prepare_cached(
                     r#"SELECT value, trie_entry_version FROM non_finalized_changes WHERE hash = ? AND key = ?"#,
                 )
-                .map_err(InternalError)
-                .map_err(CorruptedError::Internal)
-                .map_err(AccessError::Corrupted)
-                .map_err(StorageAccessError::Access)?
-                .bind(1, &block_hash[..])
-                .unwrap()
-                .bind(2, key)
-                .unwrap();
+                .map_err(|err| StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))))?
+                .query_row((&block_hash[..], key), |row| {
+                    let value = row
+                        .get::<_, Option<Vec<u8>>>(0)?;
+                    let trie_entry_version = row
+                        .get::<_, Option<i64>>(1)?;
+                    Ok((value, trie_entry_version))
+                })
+                .optional()
+                .map_err(|err| StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))))?;
 
-            if matches!(statement.next().unwrap(), sqlite::State::Row) {
-                let value = statement
-                    .read::<Option<Vec<u8>>>(0)
-                    .map_err(InternalError)
-                    .map_err(CorruptedError::Internal)
-                    .map_err(AccessError::Corrupted)
-                    .map_err(StorageAccessError::Access)?;
-
-                let trie_entry_version = statement
-                    .read::<Option<i64>>(1)
-                    .map_err(InternalError)
-                    .map_err(CorruptedError::Internal)
-                    .map_err(AccessError::Corrupted)
-                    .map_err(StorageAccessError::Access)?;
+            if let Some((value, trie_entry_version)) = maybe_value {
                 let trie_entry_version = trie_entry_version
                     .map(u8::try_from)
                     .transpose()
@@ -759,33 +702,27 @@ impl SqliteFullDatabase {
             block_hash = parent_hash;
         }
 
-        let mut statement = connection
-            .prepare(
+        let finalized_value = connection
+            .prepare_cached(
                 r#"SELECT value, trie_entry_version FROM finalized_storage_main_trie WHERE key = ?"#,
             )
-            .map_err(InternalError)
-            .map_err(CorruptedError::Internal)
-            .map_err(AccessError::Corrupted)
-            .map_err(StorageAccessError::Access)?
-            .bind(1, key)
-            .unwrap();
+            .map_err(|err| StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))))?
+            .query_row((key,), |row| {
+                let value = row
+                    .get::<_, Vec<u8>>(0)?;
+                let trie_entry_version = row
+                    .get::<_, i64>(1)?;
+                Ok((value, trie_entry_version))
+            })
+            .optional()
+            .map_err(|err| StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))))?;
 
-        if !matches!(statement.next().unwrap(), sqlite::State::Row) {
-            return Ok(None);
-        }
-
-        let value = statement
-            .read::<Vec<u8>>(0)
-            .map_err(InternalError)
-            .map_err(CorruptedError::Internal)
-            .map_err(AccessError::Corrupted)
-            .map_err(StorageAccessError::Access)?;
-
-        let trie_entry_version = u8::try_from(statement.read::<i64>(1).unwrap())
+        let Some((value, trie_entry_version)) = finalized_value
+            else { return Ok(None) };
+        let trie_entry_version = u8::try_from(trie_entry_version)
             .map_err(|_| CorruptedError::InvalidTrieEntryVersion)
             .map_err(AccessError::Corrupted)
             .map_err(StorageAccessError::Access)?;
-
         Ok(Some((value, trie_entry_version)))
     }
 
@@ -819,33 +756,44 @@ impl SqliteFullDatabase {
         while block_hash != finalized_hash {
             // TODO: add AND key < next_key?
             let mut statement = connection
-                .prepare(
+                .prepare_cached(
                     r#"
-                    SELECT key, value IS NOT NULL FROM non_finalized_changes
-                    WHERE
-                        hash = ? AND (key > ? OR (? AND key = ?))
-                    ORDER BY key ASC"#,
+                SELECT key, value IS NOT NULL FROM non_finalized_changes
+                WHERE
+                    hash = :hash AND (key > :key OR (:or_equal AND key = :key))
+                ORDER BY key ASC"#,
                 )
-                .map_err(InternalError)
-                .map_err(CorruptedError::Internal)
-                .map_err(AccessError::Corrupted)
-                .map_err(StorageAccessError::Access)?
-                .bind(1, &block_hash[..])
-                .unwrap()
-                .bind(2, key)
-                .unwrap() // TODO: use named parameters
-                .bind(3, if or_equal { 1 } else { 0 })
-                .unwrap()
-                .bind(4, key)
-                .unwrap();
+                .map_err(|err| {
+                    StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(
+                        InternalError(err),
+                    )))
+                })?;
 
-            while matches!(statement.next().unwrap(), sqlite::State::Row) {
-                let key = statement
-                    .read::<Vec<u8>>(0)
-                    .map_err(InternalError)
-                    .map_err(CorruptedError::Internal)
-                    .map_err(AccessError::Corrupted)
-                    .map_err(StorageAccessError::Access)?;
+            let iter = statement
+                .query_map(
+                    rusqlite::named_params! {
+                        ":hash": &block_hash[..],
+                        ":key": key,
+                        ":or_equal": if or_equal { 1 } else { 0 }
+                    },
+                    |row| {
+                        let key = row.get::<_, Vec<u8>>(0)?;
+                        let inserted = row.get::<_, i64>(1)? != 0;
+                        Ok((key, inserted))
+                    },
+                )
+                .map_err(|err| {
+                    StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(
+                        InternalError(err),
+                    )))
+                })?;
+
+            for result in iter {
+                let (key, inserted) = result.map_err(|err| {
+                    StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(
+                        InternalError(err),
+                    )))
+                })?;
 
                 // TODO: cloning the key :-/
                 if let hashbrown::hash_set::Entry::Vacant(entry) = erased_keys.entry(key.clone()) {
@@ -854,14 +802,6 @@ impl SqliteFullDatabase {
                     // Key was erased by a child. Ignoring.
                     continue;
                 }
-
-                let inserted = statement
-                    .read::<i64>(1)
-                    .map_err(InternalError)
-                    .map_err(CorruptedError::Internal)
-                    .map_err(AccessError::Corrupted)
-                    .map_err(StorageAccessError::Access)?
-                    != 0;
 
                 if !inserted {
                     continue;
@@ -883,22 +823,29 @@ impl SqliteFullDatabase {
 
         // TODO: add AND key < next_key?
         let mut statement = connection
-            .prepare(r#"SELECT key FROM finalized_storage_main_trie WHERE key > ? OR (key = ? AND ?) ORDER BY key ASC"#)
-            .map_err(InternalError)
-            .map_err(CorruptedError::Internal)
-            .map_err(AccessError::Corrupted)
-            .map_err(StorageAccessError::Access)?
-            .bind(1, key).unwrap()
-            .bind(2, key).unwrap() // TODO: use named parameter
-            .bind(3, if or_equal { 1 } else { 0 }).unwrap();
+        .prepare_cached(r#"SELECT key FROM finalized_storage_main_trie WHERE key > :key OR (key = :key AND :or_equal) ORDER BY key ASC"#)
+        .map_err(|err| StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))))?;
 
-        while matches!(statement.next().unwrap(), sqlite::State::Row) {
-            let key = statement
-                .read::<Vec<u8>>(0)
-                .map_err(InternalError)
-                .map_err(CorruptedError::Internal)
-                .map_err(AccessError::Corrupted)
-                .map_err(StorageAccessError::Access)?;
+        let iter = statement
+            .query_map(
+                rusqlite::named_params! {
+                    ":key": key,
+                    ":or_equal": if or_equal { 1 } else { 0 }
+                },
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .map_err(|err| {
+                StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(
+                    InternalError(err),
+                )))
+            })?;
+
+        for result in iter {
+            let key = result.map_err(|err| {
+                StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(
+                    InternalError(err),
+                )))
+            })?;
 
             if erased_keys.contains(&key) {
                 // Key was erased by a child. Ignoring.
@@ -914,106 +861,6 @@ impl SqliteFullDatabase {
 
         Ok(next_key)
     }
-
-    /// Returns the list of keys of the storage of either the latest finalized block or a
-    /// non-finalized block that start with the given prefix. Pass `&[]` for the prefix to get
-    /// the list of all keys.
-    pub fn block_storage_main_trie_keys_ordered(
-        &self,
-        block_hash: &[u8; 32],
-        prefix: &[u8],
-    ) -> Result<Vec<Vec<u8>>, StorageAccessError> {
-        let connection = self.database.lock();
-
-        match block_height(&connection, block_hash)? {
-            None => return Err(StorageAccessError::UnknownBlock),
-            Some(height) if height < finalized_num(&connection)? => {
-                return Err(StorageAccessError::Pruned)
-            }
-            Some(_) => {}
-        }
-
-        let mut block_hash = *block_hash;
-        let finalized_hash = finalized_hash(&connection)?;
-
-        let mut keys = BTreeMap::new();
-
-        while block_hash != finalized_hash {
-            let mut statement = connection
-                .prepare(r#"SELECT key, value IS NULL FROM non_finalized_changes WHERE hash = ? AND key >= ?"#)
-                .map_err(InternalError)
-                .map_err(CorruptedError::Internal)
-                .map_err(AccessError::Corrupted)
-                .map_err(StorageAccessError::Access)?
-                .bind(1, &block_hash[..]).unwrap()
-                .bind(2, prefix)
-                .unwrap();
-
-            while matches!(statement.next().unwrap(), sqlite::State::Row) {
-                let key = statement
-                    .read::<Vec<u8>>(0)
-                    .map_err(InternalError)
-                    .map_err(CorruptedError::Internal)
-                    .map_err(AccessError::Corrupted)
-                    .map_err(StorageAccessError::Access)?;
-
-                let inserted = statement
-                    .read::<i64>(1)
-                    .map_err(InternalError)
-                    .map_err(CorruptedError::Internal)
-                    .map_err(AccessError::Corrupted)
-                    .map_err(StorageAccessError::Access)?
-                    != 0;
-
-                // TODO: hack because I don't know how to ask sqlite to do that
-                if !(key.starts_with(prefix)) {
-                    continue;
-                }
-
-                if let btree_map::Entry::Vacant(entry) = keys.entry(key) {
-                    entry.insert(inserted);
-                }
-            }
-
-            let parent_hash = block_parent_hash(&connection, &block_hash)?
-                .ok_or(CorruptedError::BrokenChain)
-                .map_err(AccessError::Corrupted)
-                .map_err(StorageAccessError::Access)?;
-            block_hash = parent_hash;
-        }
-
-        let mut statement = connection
-            .prepare(r#"SELECT key FROM finalized_storage_main_trie WHERE key >= ?"#)
-            .map_err(InternalError)
-            .map_err(CorruptedError::Internal)
-            .map_err(AccessError::Corrupted)
-            .map_err(StorageAccessError::Access)?
-            .bind(1, prefix)
-            .unwrap();
-
-        while matches!(statement.next().unwrap(), sqlite::State::Row) {
-            let key = statement
-                .read::<Vec<u8>>(0)
-                .map_err(InternalError)
-                .map_err(CorruptedError::Internal)
-                .map_err(AccessError::Corrupted)
-                .map_err(StorageAccessError::Access)?;
-
-            // TODO: hack because I don't know how to ask sqlite to do that
-            if !(key.starts_with(prefix)) {
-                continue;
-            }
-
-            if let btree_map::Entry::Vacant(entry) = keys.entry(key) {
-                entry.insert(true);
-            }
-        }
-
-        Ok(keys
-            .into_iter()
-            .filter_map(|(key, inserted)| if inserted { Some(key) } else { None })
-            .collect())
-    }
 }
 
 impl fmt::Debug for SqliteFullDatabase {
@@ -1025,13 +872,13 @@ impl fmt::Debug for SqliteFullDatabase {
 impl Drop for SqliteFullDatabase {
     fn drop(&mut self) {
         if !std::thread::panicking() {
-            let _ = self.database.get_mut().execute("PRAGMA optimize;");
-            let _ = self.database.get_mut().execute("COMMIT");
+            let _ = self.database.get_mut().execute("PRAGMA optimize", ());
+            let _ = self.database.get_mut().execute("COMMIT", ());
         } else {
-            // Rolling back if we're unwind is not the worst idea, in case we were in the middle
-            // of an update.
+            // Rolling back if we're unwinding is not the worst idea, in case we were in the
+            // middle of an update.
             // We might roll back too much, but it is not considered a problem.
-            let _ = self.database.get_mut().execute("ROLLBACK");
+            let _ = self.database.get_mut().execute("ROLLBACK", ());
         }
     }
 }
@@ -1123,124 +970,79 @@ pub enum CorruptedError {
 
 /// Low-level database error, such as an error while accessing the file system.
 #[derive(Debug, derive_more::Display)]
-pub struct InternalError(sqlite::Error);
+pub struct InternalError(rusqlite::Error);
 
-fn meta_get_blob(database: &sqlite::Connection, key: &str) -> Result<Option<Vec<u8>>, AccessError> {
-    let mut statement = database
-        .prepare(r#"SELECT value_blob FROM meta WHERE key = ?"#)
-        .map_err(InternalError)
-        .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?
-        .bind(1, key)
-        .unwrap();
-
-    if !matches!(statement.next().unwrap(), sqlite::State::Row) {
-        return Ok(None);
-    }
-
-    let value = statement
-        .read::<Vec<u8>>(0)
-        .map_err(InternalError)
-        .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?;
-    Ok(Some(value))
+fn meta_get_blob(
+    database: &rusqlite::Connection,
+    key: &str,
+) -> Result<Option<Vec<u8>>, AccessError> {
+    let value = database
+        .prepare_cached(r#"SELECT value_blob FROM meta WHERE key = ?"#)
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .query_row((key,), |row| row.get::<_, Vec<u8>>(0))
+        .optional()
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+    Ok(value)
 }
 
-fn meta_get_number(database: &sqlite::Connection, key: &str) -> Result<Option<u64>, AccessError> {
-    let mut statement = database
-        .prepare(r#"SELECT value_number FROM meta WHERE key = ?"#)
-        .map_err(InternalError)
-        .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?
-        .bind(1, key)
-        .unwrap();
-
-    if !matches!(statement.next().unwrap(), sqlite::State::Row) {
-        return Ok(None);
-    }
-
-    let value = statement
-        .read::<i64>(0)
-        .map_err(InternalError)
-        .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?;
-    Ok(Some(u64::from_ne_bytes(value.to_ne_bytes())))
+fn meta_get_number(database: &rusqlite::Connection, key: &str) -> Result<Option<u64>, AccessError> {
+    let value = database
+        .prepare_cached(r#"SELECT value_number FROM meta WHERE key = ?"#)
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .query_row((key,), |row| row.get::<_, i64>(0))
+        .optional()
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+    Ok(value.map(|value| u64::from_ne_bytes(value.to_ne_bytes())))
 }
 
 fn meta_set_blob(
-    database: &sqlite::Connection,
+    database: &rusqlite::Connection,
     key: &str,
     value: &[u8],
 ) -> Result<(), AccessError> {
-    let mut statement = database
-        .prepare(r#"INSERT OR REPLACE INTO meta(key, value_blob) VALUES (?, ?)"#)
-        .map_err(InternalError)
-        .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?
-        .bind(1, key)
-        .unwrap()
-        .bind(2, value)
-        .unwrap();
-    statement.next().unwrap();
+    database
+        .prepare_cached(r#"INSERT OR REPLACE INTO meta(key, value_blob) VALUES (?, ?)"#)
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .execute((key, value))
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
     Ok(())
 }
 
 fn meta_set_number(
-    database: &sqlite::Connection,
+    database: &rusqlite::Connection,
     key: &str,
     value: u64,
 ) -> Result<(), AccessError> {
-    let mut statement = database
-        .prepare(r#"INSERT OR REPLACE INTO meta(key, value_number) VALUES (?, ?)"#)
-        .map_err(InternalError)
-        .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?
-        .bind(1, key)
-        .unwrap()
-        .bind(2, i64::from_ne_bytes(value.to_ne_bytes()))
-        .unwrap();
-    statement.next().unwrap();
+    database
+        .prepare_cached(r#"INSERT OR REPLACE INTO meta(key, value_number) VALUES (?, ?)"#)
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .execute((key, i64::from_ne_bytes(value.to_ne_bytes())))
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
     Ok(())
 }
 
-fn has_block(database: &sqlite::Connection, hash: &[u8]) -> Result<bool, AccessError> {
-    let mut statement = database
-        .prepare(r#"SELECT COUNT(*) FROM blocks WHERE hash = ?"#)
-        .map_err(InternalError)
-        .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?
-        .bind(1, hash)
-        .unwrap();
-
-    if !matches!(statement.next().unwrap(), sqlite::State::Row) {
-        panic!()
-    }
-
-    Ok(statement.read::<i64>(0).unwrap() != 0)
+fn has_block(database: &rusqlite::Connection, hash: &[u8]) -> Result<bool, AccessError> {
+    database
+        .prepare_cached(r#"SELECT COUNT(*) FROM blocks WHERE hash = ?"#)
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .query_row((hash,), |row| Ok(row.get_unwrap::<_, i64>(0) != 0))
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))
 }
 
 // TODO: the fact that the meta table stores blobs makes it impossible to use joins ; fix that
-fn finalized_num(database: &sqlite::Connection) -> Result<u64, AccessError> {
+fn finalized_num(database: &rusqlite::Connection) -> Result<u64, AccessError> {
     meta_get_number(database, "finalized")?
         .ok_or(AccessError::Corrupted(CorruptedError::MissingMetaKey))
 }
 
-fn finalized_hash(database: &sqlite::Connection) -> Result<[u8; 32], AccessError> {
-    let mut statement = database
-        .prepare(r#"SELECT hash FROM blocks WHERE number = (SELECT value_number FROM meta WHERE key = "finalized")"#)
-        .map_err(InternalError)
-        .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?;
-
-    if !matches!(statement.next().unwrap(), sqlite::State::Row) {
-        return Err(AccessError::Corrupted(CorruptedError::InvalidFinalizedNum));
-    }
-
-    let value = statement
-        .read::<Vec<u8>>(0)
-        .map_err(InternalError)
-        .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?;
+fn finalized_hash(database: &rusqlite::Connection) -> Result<[u8; 32], AccessError> {
+    let value = database
+        .prepare_cached(r#"SELECT hash FROM blocks WHERE number = (SELECT value_number FROM meta WHERE key = "finalized")"#)
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .query_row((), |row| row.get::<_, Vec<u8>>(0))
+        .optional()
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .ok_or(AccessError::Corrupted(CorruptedError::InvalidFinalizedNum))?;
 
     if value.len() == 32 {
         let mut out = [0; 32];
@@ -1252,7 +1054,7 @@ fn finalized_hash(database: &sqlite::Connection) -> Result<[u8; 32], AccessError
 }
 
 fn block_hashes_by_number(
-    database: &sqlite::Connection,
+    database: &rusqlite::Connection,
     number: u64,
 ) -> Result<Vec<[u8; 32]>, AccessError> {
     let number = match i64::try_from(number) {
@@ -1260,209 +1062,157 @@ fn block_hashes_by_number(
         Err(_) => return Ok(Vec::new()),
     };
 
-    let mut statement = database
-        .prepare(r#"SELECT hash FROM blocks WHERE number = ?"#)
-        .map_err(InternalError)
-        .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?
-        .bind(1, number)
-        .unwrap();
-
-    let mut out = Vec::new();
-    while matches!(statement.next().unwrap(), sqlite::State::Row) {
-        let value = statement
-            .read::<Vec<u8>>(0)
-            .map_err(InternalError)
-            .map_err(CorruptedError::Internal)
-            .map_err(AccessError::Corrupted)?;
-
-        out.push(
+    database
+        .prepare_cached(r#"SELECT hash FROM blocks WHERE number = ?"#)
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .query_map((number,), |row| row.get::<_, Vec<u8>>(0))
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .map(|value| {
+            let value = value.map_err(|err| {
+                AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))
+            })?;
             <[u8; 32]>::try_from(&value[..])
-                .map_err(|_| AccessError::Corrupted(CorruptedError::InvalidBlockHashLen))?,
-        );
-    }
-
-    Ok(out)
+                .map_err(|_| AccessError::Corrupted(CorruptedError::InvalidBlockHashLen))
+        })
+        .collect::<Result<Vec<_>, _>>()
 }
 
 fn block_parent_hash(
-    database: &sqlite::Connection,
+    database: &rusqlite::Connection,
     hash: &[u8; 32],
 ) -> Result<Option<[u8; 32]>, AccessError> {
-    let mut statement = database
-        .prepare(r#"SELECT parent_hash FROM blocks WHERE hash = ?"#)
-        .map_err(InternalError)
-        .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?
-        .bind(1, &hash[..])
-        .unwrap();
+    let raw_hash = database
+        .prepare_cached(r#"SELECT parent_hash FROM blocks WHERE hash = ?"#)
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .query_row((&hash[..],), |row| row.get::<_, Vec<u8>>(0))
+        .optional()
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
 
-    if !matches!(statement.next().unwrap(), sqlite::State::Row) {
-        return Ok(None);
-    }
-
-    let value = statement
-        .read::<Vec<u8>>(0)
-        .map_err(InternalError)
-        .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?;
-
-    let parent_hash = <[u8; 32]>::try_from(&value[..])
+    let Some(raw_hash) = raw_hash
+        else { return Ok(None) };
+    let parent_hash = <[u8; 32]>::try_from(&raw_hash[..])
         .map_err(|_| AccessError::Corrupted(CorruptedError::InvalidBlockHashLen))?;
-
     Ok(Some(parent_hash))
 }
 
 fn block_header(
-    database: &sqlite::Connection,
+    database: &rusqlite::Connection,
     hash: &[u8; 32],
 ) -> Result<Option<Vec<u8>>, AccessError> {
-    let mut statement = database
-        .prepare(r#"SELECT header FROM blocks WHERE hash = ?"#)
-        .map_err(InternalError)
-        .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?
-        .bind(1, &hash[..])
-        .unwrap();
-
-    if !matches!(statement.next().unwrap(), sqlite::State::Row) {
-        return Ok(None);
-    }
-
-    let encoded = statement
-        .read::<Vec<u8>>(0)
-        .map_err(InternalError)
-        .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?;
-
-    Ok(Some(encoded))
+    database
+        .prepare_cached(r#"SELECT header FROM blocks WHERE hash = ?"#)
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .query_row((&hash[..],), |row| row.get::<_, Vec<u8>>(0))
+        .optional()
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))
 }
 
 fn block_height(
-    database: &sqlite::Connection,
+    database: &rusqlite::Connection,
     hash: &[u8; 32],
 ) -> Result<Option<u64>, AccessError> {
-    let mut statement = database
-        .prepare(r#"SELECT number FROM blocks WHERE hash = ?"#)
-        .map_err(InternalError)
-        .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?
-        .bind(1, &hash[..])
-        .unwrap();
+    let number = database
+        .prepare_cached(r#"SELECT number FROM blocks WHERE hash = ?"#)
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .query_row((&hash[..],), |row| row.get::<_, i64>(0))
+        .optional()
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
 
-    if !matches!(statement.next().unwrap(), sqlite::State::Row) {
-        return Ok(None);
-    }
-
-    let value = statement
-        .read::<i64>(0)
-        .map_err(InternalError)
-        .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?;
-
-    let number = u64::try_from(value)
-        .map_err(|_| CorruptedError::InvalidNumber)
-        .map_err(AccessError::Corrupted)?;
-
+    let Some(number) = number
+        else { return Ok(None) };
+    let number =
+        u64::try_from(number).map_err(|_| AccessError::Corrupted(CorruptedError::InvalidNumber))?;
     Ok(Some(number))
 }
 
-fn flush(database: &sqlite::Connection) -> Result<(), AccessError> {
-    database.execute("COMMIT; BEGIN TRANSACTION;").unwrap();
-    Ok(())
-}
-
-fn purge_block(database: &sqlite::Connection, hash: &[u8; 32]) -> Result<(), AccessError> {
-    let mut statement = database
-        .prepare(
-            "DELETE FROM non_finalized_changes WHERE hash = :hash;
-        DELETE FROM blocks_body WHERE hash = :hash;
-        DELETE FROM blocks WHERE hash = :hash;",
-        )
-        .unwrap()
-        .bind_by_name(":hash", &hash[..])
+fn flush(database: &rusqlite::Connection) -> Result<(), AccessError> {
+    database
+        .execute_batch("COMMIT; BEGIN TRANSACTION;")
         .unwrap();
-    statement.next().unwrap();
-
     Ok(())
 }
 
-fn grandpa_authorities_set_id(database: &sqlite::Connection) -> Result<Option<u64>, AccessError> {
+fn purge_block(database: &rusqlite::Connection, hash: &[u8; 32]) -> Result<(), AccessError> {
+    database
+        .prepare_cached("DELETE FROM non_finalized_changes WHERE hash = ?")
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .execute((&hash[..],))
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+    database
+        .prepare_cached("DELETE FROM blocks_body WHERE hash = ?")
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .execute((&hash[..],))
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+    database
+        .prepare_cached("DELETE FROM blocks WHERE hash = ?")
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .execute((&hash[..],))
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+    Ok(())
+}
+
+fn grandpa_authorities_set_id(database: &rusqlite::Connection) -> Result<Option<u64>, AccessError> {
     meta_get_number(database, "grandpa_authorities_set_id")
 }
 
 fn grandpa_finalized_triggered_authorities(
-    database: &sqlite::Connection,
+    database: &rusqlite::Connection,
 ) -> Result<Vec<header::GrandpaAuthority>, AccessError> {
-    let mut statement = database
-        .prepare(r#"SELECT public_key, weight FROM grandpa_triggered_authorities ORDER BY idx ASC"#)
-        .map_err(InternalError)
-        .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?;
-
-    let mut out = Vec::new();
-    while matches!(statement.next().unwrap(), sqlite::State::Row) {
-        let public_key = statement
-            .read::<Vec<u8>>(0)
-            .map_err(InternalError)
-            .map_err(CorruptedError::Internal)
-            .map_err(AccessError::Corrupted)?;
-
-        let public_key = <[u8; 32]>::try_from(&public_key[..])
-            .map_err(|_| CorruptedError::InvalidBlockHashLen)
-            .map_err(AccessError::Corrupted)?;
-
-        let weight = statement
-            .read::<i64>(1)
-            .map_err(InternalError)
-            .map_err(CorruptedError::Internal)
-            .map_err(AccessError::Corrupted)?;
-
-        let weight = NonZeroU64::new(u64::from_ne_bytes(weight.to_ne_bytes()))
-            .ok_or(CorruptedError::InvalidNumber)
-            .map_err(AccessError::Corrupted)?;
-        out.push(header::GrandpaAuthority { public_key, weight });
-    }
-
-    Ok(out)
-}
-
-fn grandpa_finalized_scheduled_change(
-    database: &sqlite::Connection,
-) -> Result<Option<(u64, Vec<header::GrandpaAuthority>)>, AccessError> {
-    if let Some(height) = meta_get_number(database, "grandpa_scheduled_target")? {
-        // TODO: duplicated from above except different table name
-        let mut statement = database
-            .prepare(
-                r#"SELECT public_key, weight FROM grandpa_scheduled_authorities ORDER BY idx ASC"#,
-            )
-            .map_err(InternalError)
-            .map_err(CorruptedError::Internal)
-            .map_err(AccessError::Corrupted)?;
-
-        let mut out = Vec::new();
-        while matches!(statement.next().unwrap(), sqlite::State::Row) {
-            let public_key = statement
-                .read::<Vec<u8>>(0)
-                .map_err(InternalError)
-                .map_err(CorruptedError::Internal)
-                .map_err(AccessError::Corrupted)?;
-
+    database
+        .prepare_cached(
+            r#"SELECT public_key, weight FROM grandpa_triggered_authorities ORDER BY idx ASC"#,
+        )
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .query_map((), |row| {
+            let pk = row.get::<_, Vec<u8>>(0)?;
+            let weight = row.get::<_, i64>(1)?;
+            Ok((pk, weight))
+        })
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .map(|result| {
+            let (public_key, weight) = result.map_err(|err| {
+                AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))
+            })?;
             let public_key = <[u8; 32]>::try_from(&public_key[..])
                 .map_err(|_| CorruptedError::InvalidBlockHashLen)
                 .map_err(AccessError::Corrupted)?;
-
-            let weight = statement
-                .read::<i64>(1)
-                .map_err(InternalError)
-                .map_err(CorruptedError::Internal)
-                .map_err(AccessError::Corrupted)?;
-
             let weight = NonZeroU64::new(u64::from_ne_bytes(weight.to_ne_bytes()))
                 .ok_or(CorruptedError::InvalidNumber)
                 .map_err(AccessError::Corrupted)?;
-            out.push(header::GrandpaAuthority { public_key, weight });
-        }
+            Ok(header::GrandpaAuthority { public_key, weight })
+        })
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn grandpa_finalized_scheduled_change(
+    database: &rusqlite::Connection,
+) -> Result<Option<(u64, Vec<header::GrandpaAuthority>)>, AccessError> {
+    if let Some(height) = meta_get_number(database, "grandpa_scheduled_target")? {
+        // TODO: duplicated from above except different table name
+        let out = database
+            .prepare_cached(
+                r#"SELECT public_key, weight FROM grandpa_scheduled_authorities ORDER BY idx ASC"#,
+            )
+            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+            .query_map((), |row| {
+                let pk = row.get::<_, Vec<u8>>(0)?;
+                let weight = row.get::<_, i64>(1)?;
+                Ok((pk, weight))
+            })
+            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+            .map(|result| {
+                let (public_key, weight) = result.map_err(|err| {
+                    AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))
+                })?;
+                let public_key = <[u8; 32]>::try_from(&public_key[..])
+                    .map_err(|_| CorruptedError::InvalidBlockHashLen)
+                    .map_err(AccessError::Corrupted)?;
+                let weight = NonZeroU64::new(u64::from_ne_bytes(weight.to_ne_bytes()))
+                    .ok_or(CorruptedError::InvalidNumber)
+                    .map_err(AccessError::Corrupted)?;
+                Ok(header::GrandpaAuthority { public_key, weight })
+            })
+            .collect::<Result<Vec<_>, AccessError>>()?;
 
         Ok(Some((height, out)))
     } else {
@@ -1477,30 +1227,23 @@ fn expect_nz_u64(value: u64) -> Result<NonZeroU64, AccessError> {
 }
 
 fn aura_finalized_authorities(
-    database: &sqlite::Connection,
+    database: &rusqlite::Connection,
 ) -> Result<Vec<header::AuraAuthority>, AccessError> {
-    let mut statement = database
-        .prepare(r#"SELECT public_key FROM aura_finalized_authorities ORDER BY idx ASC"#)
-        .map_err(InternalError)
-        .map_err(CorruptedError::Internal)
-        .map_err(AccessError::Corrupted)?;
-
-    let mut out = Vec::new();
-    while matches!(statement.next().unwrap(), sqlite::State::Row) {
-        let public_key = statement
-            .read::<Vec<u8>>(0)
-            .map_err(InternalError)
-            .map_err(CorruptedError::Internal)
-            .map_err(AccessError::Corrupted)?;
-
-        let public_key = <[u8; 32]>::try_from(&public_key[..])
-            .map_err(|_| CorruptedError::InvalidBlockHashLen)
-            .map_err(AccessError::Corrupted)?;
-
-        out.push(header::AuraAuthority { public_key });
-    }
-
-    Ok(out)
+    database
+        .prepare_cached(r#"SELECT public_key FROM aura_finalized_authorities ORDER BY idx ASC"#)
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .query_map((), |row| row.get::<_, Vec<u8>>(0))
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .map(|result| {
+            let public_key = result.map_err(|err| {
+                AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))
+            })?;
+            let public_key = <[u8; 32]>::try_from(&public_key[..])
+                .map_err(|_| CorruptedError::InvalidBlockHashLen)
+                .map_err(AccessError::Corrupted)?;
+            Ok(header::AuraAuthority { public_key })
+        })
+        .collect::<Result<Vec<_>, AccessError>>()
 }
 
 fn encode_babe_epoch_information(info: chain_information::BabeEpochInformationRef) -> Vec<u8> {

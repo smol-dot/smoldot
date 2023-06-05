@@ -49,16 +49,14 @@ mod tests;
 
 use crate::{
     executor::{host, runtime_host, storage_diff},
-    header,
-    trie::calculate_root,
-    util,
+    header, util,
     verify::inherents,
 };
 
 use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
 use core::{iter, mem};
 
-pub use runtime_host::TrieEntryVersion;
+pub use runtime_host::{Nibble, TrieEntryVersion};
 
 /// Configuration for a block generation.
 pub struct Config<'a> {
@@ -83,10 +81,6 @@ pub struct Config<'a> {
     ///
     /// > **Note**: In the case of Aura and Babe, contains the slot being claimed.
     pub consensus_digest_log_item: ConfigPreRuntime<'a>,
-
-    /// Optional cache corresponding to the storage trie root hash calculation coming from the
-    /// parent block verification.
-    pub main_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
 
     /// Capacity to reserve for the number of extrinsics. Should be higher than the approximate
     /// number of extrinsics that are going to be applied.
@@ -125,8 +119,6 @@ pub struct Success {
     pub state_trie_version: TrieEntryVersion,
     /// List of changes to the off-chain storage that this block performs.
     pub offchain_storage_changes: storage_diff::TrieDiff,
-    /// Cache used for calculating the main trie root of the new block.
-    pub main_trie_root_calculation_cache: calculate_root::CalculationCache,
     /// Concatenation of all the log messages printed by the runtime.
     pub logs: String,
 }
@@ -195,7 +187,6 @@ pub fn build_block(config: Config) -> BlockBuild {
             .scale_encoding(config.block_number_bytes)
         },
         virtual_machine: config.parent_runtime,
-        main_trie_root_calculation_cache: config.main_trie_root_calculation_cache,
         storage_main_trie_changes: Default::default(),
         offchain_storage_changes: Default::default(),
         max_log_level: config.max_log_level,
@@ -253,9 +244,8 @@ pub enum BlockBuild {
     /// Loading a storage value from the parent storage is required in order to continue.
     StorageGet(StorageGet),
 
-    /// Fetching the list of keys with a given prefix from the parent storage is required in order
-    /// to continue.
-    PrefixKeys(PrefixKeys),
+    /// Obtaining the Merkle value of a trie node is required in order to continue.
+    MerkleValue(MerkleValue),
 
     /// Fetching the key that follows a given one in the parent storage is required in order to
     /// continue.
@@ -279,8 +269,8 @@ impl BlockBuild {
                 (Inner::Runtime(runtime_host::RuntimeHostVm::StorageGet(inner)), _) => {
                     return BlockBuild::StorageGet(StorageGet(inner, shared))
                 }
-                (Inner::Runtime(runtime_host::RuntimeHostVm::PrefixKeys(inner)), _) => {
-                    return BlockBuild::PrefixKeys(PrefixKeys(inner, shared))
+                (Inner::Runtime(runtime_host::RuntimeHostVm::MerkleValue(inner)), _) => {
+                    return BlockBuild::MerkleValue(MerkleValue(inner, shared))
                 }
                 (Inner::Runtime(runtime_host::RuntimeHostVm::NextKey(inner)), _) => {
                     return BlockBuild::NextKey(NextKey(inner, shared))
@@ -305,7 +295,6 @@ impl BlockBuild {
                         parent_runtime: success.virtual_machine.into_prototype(),
                         storage_main_trie_changes: success.storage_main_trie_changes,
                         offchain_storage_changes: success.offchain_storage_changes,
-                        main_trie_root_calculation_cache: success.main_trie_root_calculation_cache,
                     });
                 }
 
@@ -340,9 +329,6 @@ impl BlockBuild {
                         virtual_machine: success.virtual_machine.into_prototype(),
                         function_to_call: "BlockBuilder_apply_extrinsic",
                         parameter: iter::once(extrinsic),
-                        main_trie_root_calculation_cache: Some(
-                            success.main_trie_root_calculation_cache,
-                        ),
                         storage_main_trie_changes: success.storage_main_trie_changes,
                         offchain_storage_changes: success.offchain_storage_changes,
                         max_log_level: shared.max_log_level,
@@ -362,7 +348,6 @@ impl BlockBuild {
                         parent_runtime: success.virtual_machine.into_prototype(),
                         storage_main_trie_changes: success.storage_main_trie_changes,
                         offchain_storage_changes: success.offchain_storage_changes,
-                        main_trie_root_calculation_cache: success.main_trie_root_calculation_cache,
                     });
                 }
 
@@ -446,8 +431,6 @@ impl BlockBuild {
                             parent_runtime: success.virtual_machine.into_prototype(),
                             storage_main_trie_changes: success.storage_main_trie_changes,
                             offchain_storage_changes: success.offchain_storage_changes,
-                            main_trie_root_calculation_cache: success
-                                .main_trie_root_calculation_cache,
                         },
                     };
                 }
@@ -465,7 +448,6 @@ impl BlockBuild {
                         storage_main_trie_changes: success.storage_main_trie_changes,
                         state_trie_version: success.state_trie_version,
                         offchain_storage_changes: success.offchain_storage_changes,
-                        main_trie_root_calculation_cache: success.main_trie_root_calculation_cache,
                         logs: shared.logs,
                     }));
                 }
@@ -510,7 +492,6 @@ pub struct InherentExtrinsics {
     parent_runtime: host::HostVmPrototype,
     storage_main_trie_changes: storage_diff::TrieDiff,
     offchain_storage_changes: storage_diff::TrieDiff,
-    main_trie_root_calculation_cache: calculate_root::CalculationCache,
 }
 
 impl InherentExtrinsics {
@@ -552,7 +533,6 @@ impl InherentExtrinsics {
                     .map(either::Left)
                     .chain(encoded_list.map(either::Right))
             },
-            main_trie_root_calculation_cache: Some(self.main_trie_root_calculation_cache),
             storage_main_trie_changes: self.storage_main_trie_changes,
             offchain_storage_changes: self.offchain_storage_changes,
             max_log_level: self.shared.max_log_level,
@@ -574,7 +554,6 @@ pub struct ApplyExtrinsic {
     parent_runtime: host::HostVmPrototype,
     storage_main_trie_changes: storage_diff::TrieDiff,
     offchain_storage_changes: storage_diff::TrieDiff,
-    main_trie_root_calculation_cache: calculate_root::CalculationCache,
 }
 
 impl ApplyExtrinsic {
@@ -586,7 +565,6 @@ impl ApplyExtrinsic {
             virtual_machine: self.parent_runtime,
             function_to_call: "BlockBuilder_apply_extrinsic",
             parameter: iter::once(&extrinsic),
-            main_trie_root_calculation_cache: Some(self.main_trie_root_calculation_cache),
             storage_main_trie_changes: self.storage_main_trie_changes,
             offchain_storage_changes: self.offchain_storage_changes,
             max_log_level: self.shared.max_log_level,
@@ -610,7 +588,6 @@ impl ApplyExtrinsic {
             virtual_machine: self.parent_runtime,
             function_to_call: "BlockBuilder_finalize_block",
             parameter: iter::empty::<&[u8]>(),
-            main_trie_root_calculation_cache: Some(self.main_trie_root_calculation_cache),
             storage_main_trie_changes: self.storage_main_trie_changes,
             offchain_storage_changes: self.offchain_storage_changes,
             max_log_level: self.shared.max_log_level,
@@ -644,20 +621,32 @@ impl StorageGet {
     }
 }
 
-/// Fetching the list of keys with a given prefix from the parent storage is required in order to
-/// continue.
+/// Obtaining the Merkle value of a trie node is required in order to continue.
 #[must_use]
-pub struct PrefixKeys(runtime_host::PrefixKeys, Shared);
+pub struct MerkleValue(runtime_host::MerkleValue, Shared);
 
-impl PrefixKeys {
-    /// Returns the prefix whose keys to load.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.0.prefix()
+impl MerkleValue {
+    /// Returns the key whose Merkle value must be passed to [`MerkleValue::inject_merkle_value`].
+    ///
+    /// The key is guaranteed to have been injected through [`NextKey::inject_key`] earlier.
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+        self.0.key()
     }
 
-    /// Injects the list of keys ordered lexicographically.
-    pub fn inject_keys_ordered(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> BlockBuild {
-        BlockBuild::from_inner(self.0.inject_keys_ordered(keys), self.1)
+    /// Indicate that the value is unknown and resume the calculation.
+    ///
+    /// This function be used if you are unaware of the Merkle value. The algorithm will perform
+    /// the calculation of this Merkle value manually, which takes more time.
+    pub fn resume_unknown(self) -> BlockBuild {
+        BlockBuild::from_inner(self.0.resume_unknown(), self.1)
+    }
+
+    /// Injects the corresponding Merkle value.
+    ///
+    /// Note that there is no way to indicate that the trie node doesn't exist. This is because
+    /// the node is guaranteed to have been injected through [`NextKey::inject_key`] earlier.
+    pub fn inject_merkle_value(self, merkle_value: &[u8]) -> BlockBuild {
+        BlockBuild::from_inner(self.0.inject_merkle_value(merkle_value), self.1)
     }
 }
 
@@ -668,7 +657,7 @@ pub struct NextKey(runtime_host::NextKey, Shared);
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.0.key()
     }
 
@@ -678,9 +667,15 @@ impl NextKey {
         self.0.or_equal()
     }
 
+    /// If `true`, then the search must include both branch nodes and storage nodes. If `false`,
+    /// the search only covers storage nodes.
+    pub fn branch_nodes(&self) -> bool {
+        self.0.branch_nodes()
+    }
+
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.0.prefix()
     }
 
@@ -690,7 +685,7 @@ impl NextKey {
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
-    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> BlockBuild {
+    pub fn inject_key(self, key: Option<impl Iterator<Item = Nibble>>) -> BlockBuild {
         BlockBuild::from_inner(self.0.inject_key(key), self.1)
     }
 }
