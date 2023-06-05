@@ -280,9 +280,6 @@ pub enum ValidateTransactionError {
     /// Error during the validation runtime call.
     #[display(fmt = "{_0}")]
     Validation(validate::Error),
-    /// Tried to access the next key or getting the Merkle value of a storage key. This isn't
-    /// possible through a call request at the moment.
-    NextKeyMerkleValueForbidden,
 }
 
 #[derive(Debug, Clone)]
@@ -1227,23 +1224,38 @@ async fn validate_transaction<TPlat: PlatformRef>(
                     get.inject_value(storage_value.map(|(val, vers)| (iter::once(val), vers)));
             }
             validate::Query::ClosestDescendantMerkleValue(mv) => {
-                // TODO:
-                runtime_call_lock
-                    .unlock(validate::Query::ClosestDescendantMerkleValue(mv).into_prototype());
-                break Err(ValidationError::InvalidOrError(
-                    InvalidOrError::ValidateError(
-                        ValidateTransactionError::NextKeyMerkleValueForbidden,
-                    ),
-                ));
+                let merkle_value = runtime_call_lock
+                    .closest_descendant_merkle_value(&mv.key().collect::<Vec<_>>());
+                let merkle_value = match merkle_value {
+                    Ok(v) => v,
+                    Err(err) => {
+                        runtime_call_lock.unlock(
+                            validate::Query::ClosestDescendantMerkleValue(mv).into_prototype(),
+                        );
+                        return Err(ValidationError::InvalidOrError(
+                            InvalidOrError::ValidateError(ValidateTransactionError::Call(err)),
+                        ));
+                    }
+                };
+                validation_in_progress = mv.inject_merkle_value(merkle_value);
             }
             validate::Query::NextKey(nk) => {
-                // TODO:
-                runtime_call_lock.unlock(validate::Query::NextKey(nk).into_prototype());
-                break Err(ValidationError::InvalidOrError(
-                    InvalidOrError::ValidateError(
-                        ValidateTransactionError::NextKeyMerkleValueForbidden,
-                    ),
-                ));
+                let next_key = runtime_call_lock.next_key(
+                    &nk.key().collect::<Vec<_>>(),
+                    nk.or_equal(),
+                    &nk.prefix().collect::<Vec<_>>(),
+                    nk.branch_nodes(),
+                );
+                let next_key = match next_key {
+                    Ok(v) => v,
+                    Err(err) => {
+                        runtime_call_lock.unlock(validate::Query::NextKey(nk).into_prototype());
+                        return Err(ValidationError::InvalidOrError(
+                            InvalidOrError::ValidateError(ValidateTransactionError::Call(err)),
+                        ));
+                    }
+                };
+                validation_in_progress = nk.inject_key(next_key.map(|k| k.iter().copied()));
             }
         }
     }

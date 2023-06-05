@@ -1363,18 +1363,36 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         get.inject_value(storage_value.map(|(val, vers)| (iter::once(val), vers)));
                 }
                 runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv) => {
-                    // TODO:
-                    runtime_call_lock.unlock(
-                        runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv)
-                            .into_prototype(),
-                    );
-                    break Err(RuntimeCallError::NextKeyMerkleValueForbidden);
+                    let merkle_value = runtime_call_lock
+                        .closest_descendant_merkle_value(&mv.key().collect::<Vec<_>>());
+                    let merkle_value = match merkle_value {
+                        Ok(v) => v,
+                        Err(err) => {
+                            runtime_call_lock.unlock(
+                                runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv)
+                                    .into_prototype(),
+                            );
+                            break Err(RuntimeCallError::Call(err));
+                        }
+                    };
+                    runtime_call = mv.inject_merkle_value(merkle_value);
                 }
                 runtime_host::RuntimeHostVm::NextKey(nk) => {
-                    // TODO:
-                    runtime_call_lock
-                        .unlock(runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
-                    break Err(RuntimeCallError::NextKeyMerkleValueForbidden);
+                    let next_key = runtime_call_lock.next_key(
+                        &nk.key().collect::<Vec<_>>(),
+                        nk.or_equal(),
+                        &nk.prefix().collect::<Vec<_>>(),
+                        nk.branch_nodes(),
+                    );
+                    let next_key = match next_key {
+                        Ok(v) => v,
+                        Err(err) => {
+                            runtime_call_lock
+                                .unlock(runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
+                            break Err(RuntimeCallError::Call(err));
+                        }
+                    };
+                    runtime_call = nk.inject_key(next_key.map(|k| k.iter().copied()));
                 }
                 runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
                     runtime_call = sig.verify_and_resume();
@@ -1406,8 +1424,6 @@ enum RuntimeCallError {
     StartError(host::StartErr),
     #[display(fmt = "{_0}")]
     RuntimeError(runtime_host::ErrorDetail),
-    #[display(fmt = "Getting the next key or Merkle value isn't supported")]
-    NextKeyMerkleValueForbidden,
     /// Required runtime API isn't supported by the runtime.
     #[display(fmt = "Required runtime API isn't supported by the runtime")]
     ApiNotFound,

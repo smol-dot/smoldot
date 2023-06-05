@@ -867,6 +867,56 @@ impl<'a> RuntimeCall<'a> {
         }
     }
 
+    /// Find in the proof the trie node that follows `key_before` in lexicographic order.
+    ///
+    /// If `or_equal` is `true`, then `key_before` is returned if it is equal to a node in the
+    /// trie. If `false`, then only keys that are strictly superior are returned.
+    ///
+    /// The returned value must always start with `prefix`. Note that the value of `prefix` is
+    /// important as it can be the difference between `None` and `Some(None)`.
+    ///
+    /// If `branch_nodes` is `false`, then trie nodes that don't have a storage value are skipped.
+    ///
+    /// Returns an error if the proof doesn't contain enough information, meaning that the proof is
+    /// invalid.
+    pub fn next_key(
+        &'_ self,
+        key_before: &[trie::Nibble],
+        or_equal: bool,
+        prefix: &[trie::Nibble],
+        branch_nodes: bool,
+    ) -> Result<Option<&'_ [trie::Nibble]>, RuntimeCallError> {
+        let call_proof = match &self.call_proof {
+            Ok(p) => p,
+            Err(err) => return Err(err.clone()),
+        };
+
+        match call_proof.next_key(key_before, or_equal, prefix, branch_nodes) {
+            Some(v) => Ok(v),
+            None => Err(RuntimeCallError::MissingProofEntry),
+        }
+    }
+
+    /// Find in the proof the closest trie node that descends from `key` and returns its Merkle
+    /// value.
+    ///
+    /// Returns an error if the proof doesn't contain enough information, meaning that the proof is
+    /// invalid.
+    pub fn closest_descendant_merkle_value(
+        &'_ self,
+        key: &[trie::Nibble],
+    ) -> Result<&'_ [u8], RuntimeCallError> {
+        let call_proof = match &self.call_proof {
+            Ok(p) => p,
+            Err(err) => return Err(err.clone()),
+        };
+
+        match call_proof.closest_descendant_merkle_value(key) {
+            Some(Some(v)) => Ok(v),
+            Some(None) | None => Err(RuntimeCallError::MissingProofEntry),
+        }
+    }
+
     /// End the runtime call.
     ///
     /// This method **must** be called.
