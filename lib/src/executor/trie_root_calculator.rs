@@ -114,6 +114,11 @@ pub enum InProgress {
 /// itself.
 pub struct ClosestDescendant {
     inner: Box<Inner>,
+    /// `true` if the diff erases a value that is equal or a descendant of `self.key()`.
+    diff_erases_a_descendant: bool,
+    /// `Some` if the diff inserts a value that is equal or a descendant of `self.key()`. If
+    /// `Some`, contains the least common denominator shared amongst all these insertions.
+    diff_inserts_lcd: Option<Vec<Nibble>>,
 }
 
 impl ClosestDescendant {
@@ -147,47 +152,9 @@ impl ClosestDescendant {
         // Length of the key returned by `key()`.
         let self_key_len = self.key().fold(0, |acc, k| acc + k.as_ref().len());
 
-        // Now calculate `DiffContainsEntryWithPrefix` and
-        // `LongestCommonDenominator(DiffInsertsNodesWithPrefix)`.
-        let mut diff_erases_a_descendant = false;
-        let mut diff_inserts_lcd = None::<Vec<Nibble>>;
-        {
-            // TODO: could be optimized?
-            let prefix_nibbles = self.key().fold(Vec::new(), |mut a, b| {
-                a.extend_from_slice(b.as_ref());
-                a
-            });
-            let prefix = trie::nibbles_to_bytes_suffix_extend(prefix_nibbles.iter().copied())
-                .collect::<Vec<_>>();
-            for (key, inserts_entry) in self.inner.diff.diff_range_ordered::<[u8]>((
-                ops::Bound::Included(&prefix[..]),
-                ops::Bound::Unbounded,
-            )) {
-                let key = trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>();
-                if !key.starts_with(&prefix_nibbles) {
-                    break;
-                }
-
-                if !inserts_entry {
-                    diff_erases_a_descendant = true;
-                } else {
-                    diff_inserts_lcd = match diff_inserts_lcd.take() {
-                        Some(mut v) => {
-                            let lcd = key.iter().zip(v.iter()).take_while(|(a, b)| a == b).count();
-                            debug_assert!(lcd >= self_key_len);
-                            debug_assert_eq!(&key[..lcd], &v[..lcd]);
-                            v.truncate(lcd);
-                            Some(v)
-                        }
-                        None => Some(key),
-                    };
-                }
-            }
-        };
-
         // If the base trie contains a descendant but the diff doesn't contain any descendant,
         // jump to calling `BaseTrieMerkleValue`.
-        if !diff_erases_a_descendant && diff_inserts_lcd.is_none() {
+        if !self.diff_erases_a_descendant && self.diff_inserts_lcd.is_none() {
             if let Some(closest_descendant) = closest_descendant {
                 // Note that if the current node's `children_partial_key_changed` is set to true,
                 // we could in principle not ask for the Merkle value. However we do it anyway
@@ -202,7 +169,7 @@ impl ClosestDescendant {
 
         // Find the value of `MaybeNode`.
         let (maybe_node_partial_key, children_partial_key_changed) =
-            match (diff_inserts_lcd, closest_descendant) {
+            match (self.diff_inserts_lcd, closest_descendant) {
                 (Some(inserted_key), Some(base_trie_key)) => {
                     // `children_partial_key_changed` is `true` if
                     // `diff_inserts_lcd < closest_descendant`.
@@ -635,18 +602,56 @@ struct ChildInfo {
 impl Inner {
     /// Analyzes the content of the [`Inner`] and progresses the algorithm.
     fn next(self: Box<Self>) -> InProgress {
-        let Some(deepest_stack_elem) = self.stack.last() else {
-            // Only reached at the very start of the calculation.
-            return InProgress::ClosestDescendant(ClosestDescendant { inner: self })
+        if self.stack.last().map_or(false, |n| n.children.len() == 16) {
+            // Finished obtaining `MaybeChildren` and jumping to obtaining `MaybeStorageValue`.
+            return InProgress::StorageValue(StorageValue(self));
+        }
+
+        // In the paths below, we want to obtain `MaybeChildren` and thus we're going to return
+        // a `ClosestDescendant`.
+        // Now calculate `DiffContainsEntryWithPrefix` and
+        // `LongestCommonDenominator(DiffInsertsNodesWithPrefix)`.
+        let mut diff_erases_a_descendant = false;
+        let mut diff_inserts_lcd = None::<Vec<Nibble>>;
+        {
+            // TODO: could be optimized?
+            let prefix_nibbles = self.current_node_full_key().fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            });
+            let prefix = trie::nibbles_to_bytes_suffix_extend(prefix_nibbles.iter().copied())
+                .collect::<Vec<_>>();
+            for (key, inserts_entry) in self.diff.diff_range_ordered::<[u8]>((
+                ops::Bound::Included(&prefix[..]),
+                ops::Bound::Unbounded,
+            )) {
+                let key = trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>();
+                if !key.starts_with(&prefix_nibbles) {
+                    break;
+                }
+
+                if !inserts_entry {
+                    diff_erases_a_descendant = true;
+                } else {
+                    diff_inserts_lcd = match diff_inserts_lcd.take() {
+                        Some(mut v) => {
+                            let lcd = key.iter().zip(v.iter()).take_while(|(a, b)| a == b).count();
+                            debug_assert!(lcd >= prefix_nibbles.len());
+                            debug_assert_eq!(&key[..lcd], &v[..lcd]);
+                            v.truncate(lcd);
+                            Some(v)
+                        }
+                        None => Some(key),
+                    };
+                }
+            }
         };
 
-        if deepest_stack_elem.children.len() == 16 {
-            // Finished obtaining `MaybeChildren` and jumping to obtaining `MaybeStorageValue`.
-            InProgress::StorageValue(StorageValue(self))
-        } else {
-            // Still obtaining `MaybeChildren`.
-            InProgress::ClosestDescendant(ClosestDescendant { inner: self })
-        }
+        InProgress::ClosestDescendant(ClosestDescendant {
+            inner: self,
+            diff_erases_a_descendant,
+            diff_inserts_lcd,
+        })
     }
 
     /// Iterator of arrays which, when joined together, form the full key of the node currently
