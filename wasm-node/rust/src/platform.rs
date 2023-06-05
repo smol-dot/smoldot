@@ -31,10 +31,10 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-/// Total number of bytes that all the connections created through [`Platform`] combined have
+/// Total number of bytes that all the connections created through [`PlatformRef`] combined have
 /// received.
 pub static TOTAL_BYTES_RECEIVED: AtomicU64 = AtomicU64::new(0);
-/// Total number of bytes that all the connections created through [`Platform`] combined have
+/// Total number of bytes that all the connections created through [`PlatformRef`] combined have
 /// sent.
 pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
 
@@ -667,7 +667,7 @@ enum ConnectionInner {
         /// but that haven't been reported through
         /// [`smoldot_light::platform::PlatformRef::next_substream`] yet.
         opened_substreams_to_pick_up: VecDeque<(u32, PlatformSubstreamDirection, u32)>,
-        /// Number of objects (connections and streams) in the [`Platform`] API that reference
+        /// Number of objects (connections and streams) in the [`PlatformRef`] API that reference
         /// this connection. If it switches from 1 to 0, the connection must be removed.
         connection_handles_alive: u32,
         /// Multihash encoding of the TLS certificate used by the local node at the DTLS layer.
@@ -679,7 +679,7 @@ enum ConnectionInner {
     Reset {
         /// Message given by the bindings to justify the closure.
         message: String,
-        /// Number of objects (connections and streams) in the [`Platform`] API that reference
+        /// Number of objects (connections and streams) in the [`PlatformRef`] API that reference
         /// this connection. If it switches from 1 to 0, the connection must be removed.
         connection_handles_alive: u32,
     },
