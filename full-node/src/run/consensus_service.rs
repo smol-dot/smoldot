@@ -840,7 +840,7 @@ impl SyncBackground {
                             )
                         }));
                     }
-                    author::build::BuilderAuthoring::MerkleValue(req) => {
+                    author::build::BuilderAuthoring::ClosestDescendantMerkleValue(req) => {
                         block_authoring = req.resume_unknown();
                     }
                     author::build::BuilderAuthoring::NextKey(req) => {

@@ -244,8 +244,9 @@ pub enum BlockBuild {
     /// Loading a storage value from the parent storage is required in order to continue.
     StorageGet(StorageGet),
 
-    /// Obtaining the Merkle value of a trie node is required in order to continue.
-    MerkleValue(MerkleValue),
+    /// Obtaining the Merkle value of the closest descendant of a trie node is required in order
+    /// to continue.
+    ClosestDescendantMerkleValue(ClosestDescendantMerkleValue),
 
     /// Fetching the key that follows a given one in the parent storage is required in order to
     /// continue.
@@ -269,8 +270,15 @@ impl BlockBuild {
                 (Inner::Runtime(runtime_host::RuntimeHostVm::StorageGet(inner)), _) => {
                     return BlockBuild::StorageGet(StorageGet(inner, shared))
                 }
-                (Inner::Runtime(runtime_host::RuntimeHostVm::MerkleValue(inner)), _) => {
-                    return BlockBuild::MerkleValue(MerkleValue(inner, shared))
+                (
+                    Inner::Runtime(runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(
+                        inner,
+                    )),
+                    _,
+                ) => {
+                    return BlockBuild::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue(
+                        inner, shared,
+                    ))
                 }
                 (Inner::Runtime(runtime_host::RuntimeHostVm::NextKey(inner)), _) => {
                     return BlockBuild::NextKey(NextKey(inner, shared))
@@ -621,14 +629,14 @@ impl StorageGet {
     }
 }
 
-/// Obtaining the Merkle value of a trie node is required in order to continue.
+/// Obtaining the Merkle value of the closest descendant of a trie node is required in order
+/// to continue.
 #[must_use]
-pub struct MerkleValue(runtime_host::MerkleValue, Shared);
+pub struct ClosestDescendantMerkleValue(runtime_host::ClosestDescendantMerkleValue, Shared);
 
-impl MerkleValue {
-    /// Returns the key whose Merkle value must be passed to [`MerkleValue::inject_merkle_value`].
-    ///
-    /// The key is guaranteed to have been injected through [`NextKey::inject_key`] earlier.
+impl ClosestDescendantMerkleValue {
+    /// Returns the key whose closest descendant Merkle value must be passed to
+    /// [`ClosestDescendantMerkleValue::inject_merkle_value`].
     pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.0.key()
     }
@@ -642,9 +650,6 @@ impl MerkleValue {
     }
 
     /// Injects the corresponding Merkle value.
-    ///
-    /// Note that there is no way to indicate that the trie node doesn't exist. This is because
-    /// the node is guaranteed to have been injected through [`NextKey::inject_key`] earlier.
     pub fn inject_merkle_value(self, merkle_value: &[u8]) -> BlockBuild {
         BlockBuild::from_inner(self.0.inject_merkle_value(merkle_value), self.1)
     }

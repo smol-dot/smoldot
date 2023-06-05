@@ -1226,9 +1226,10 @@ async fn validate_transaction<TPlat: PlatformRef>(
                 validation_in_progress =
                     get.inject_value(storage_value.map(|(val, vers)| (iter::once(val), vers)));
             }
-            validate::Query::MerkleValue(mv) => {
+            validate::Query::ClosestDescendantMerkleValue(mv) => {
                 // TODO:
-                runtime_call_lock.unlock(validate::Query::MerkleValue(mv).into_prototype());
+                runtime_call_lock
+                    .unlock(validate::Query::ClosestDescendantMerkleValue(mv).into_prototype());
                 break Err(ValidationError::InvalidOrError(
                     InvalidOrError::ValidateError(
                         ValidateTransactionError::NextKeyMerkleValueForbidden,
