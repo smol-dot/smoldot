@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Smoldot will no longer produce errors when calling a runtime function (such as with `state_call` or `chainHead_unstable_call`) that calls the `ext_storage_root` host function. ([#670](https://github.com/smol-dot/smoldot/pull/670))
 - Fix panic when receiving a networking request of a protocol not supported by smoldot. ([#635](https://github.com/smol-dot/smoldot/pull/635))
 - Fix `chainHead_unstable_stopStorage` and `chainHead_unstable_stopBody` being mixed. In other words, storage requests were interrupted by `chainHead_unstable_stopBody` and body requests were interrupted by `chainHead_unstable_stopStorage` ([#648](https://github.com/smol-dot/smoldot/pull/648))
 
