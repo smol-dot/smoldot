@@ -78,7 +78,7 @@
     "@types/ws": "^8.5.3",
     "ava": "^5.0.1",
     "dtslint": "^4.0.6",
-    "typedoc": "^0.24.1",
+    "typedoc": "^0.24.8",
     "typescript": "^5.1.3"
   }
 }
