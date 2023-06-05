@@ -112,13 +112,15 @@ pub enum InProgress {
 /// In order to continue the calculation, must find in the base trie the closest descendant
 /// (including branch node) to a certain key in the trie. This can be equal to the requested key
 /// itself.
-pub struct ClosestDescendant(Box<Inner>);
+pub struct ClosestDescendant {
+    inner: Box<Inner>,
+}
 
 impl ClosestDescendant {
     /// Returns an iterator of slices, which, when joined together, form the full key of the trie
     /// node whose closest descendant must be fetched.
     pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[Nibble]> + '_> + '_ {
-        self.0.current_node_full_key()
+        self.inner.current_node_full_key()
     }
 
     /// Returns the same value as [`ClosestDescendant`] but as a `Vec`.
@@ -136,7 +138,11 @@ impl ClosestDescendant {
         closest_descendant: Option<impl Iterator<Item = Nibble>>,
     ) -> InProgress {
         // We are after a call to `BaseTrieClosestDescendant`.
-        debug_assert!(self.0.stack.last().map_or(true, |n| n.children.len() != 16));
+        debug_assert!(self
+            .inner
+            .stack
+            .last()
+            .map_or(true, |n| n.children.len() != 16));
 
         // Length of the key returned by `key()`.
         let self_key_len = self.key().fold(0, |acc, k| acc + k.as_ref().len());
@@ -153,7 +159,7 @@ impl ClosestDescendant {
             });
             let prefix = trie::nibbles_to_bytes_suffix_extend(prefix_nibbles.iter().copied())
                 .collect::<Vec<_>>();
-            for (key, inserts_entry) in self.0.diff.diff_range_ordered::<[u8]>((
+            for (key, inserts_entry) in self.inner.diff.diff_range_ordered::<[u8]>((
                 ops::Bound::Included(&prefix[..]),
                 ops::Bound::Unbounded,
             )) {
@@ -188,7 +194,7 @@ impl ClosestDescendant {
                 // with the hope that the Merkle value is < 32 bytes and its partial key can be
                 // adjusted without having to recalculate the entire sub-tree.
                 return InProgress::MerkleValue(MerkleValue {
-                    inner: self.0,
+                    inner: self.inner,
                     descendant_partial_key: closest_descendant.skip(self_key_len).collect(),
                 });
             }
@@ -227,12 +233,12 @@ impl ClosestDescendant {
                 (None, Some(base_trie_key)) => (base_trie_key.skip(self_key_len).collect(), false),
                 (None, None) => {
                     // If neither the base trie nor the diff contain any descendant, then skip ahead.
-                    return if let Some(parent_node) = self.0.stack.last_mut() {
+                    return if let Some(parent_node) = self.inner.stack.last_mut() {
                         // If the element has a parent, indicate that the current iterated node doesn't
                         // exist and continue the algorithm.
                         debug_assert_ne!(parent_node.children.len(), 16);
                         parent_node.children.push(None);
-                        self.0.next()
+                        self.inner.next()
                     } else {
                         // If the element doesn't have a parent, then the trie is completely empty.
                         InProgress::Finished {
@@ -243,12 +249,12 @@ impl ClosestDescendant {
             };
 
         // Push `MaybeNode` onto the stack and continue the algorithm.
-        self.0.stack.push(InProgressNode {
+        self.inner.stack.push(InProgressNode {
             partial_key: maybe_node_partial_key,
             children_partial_key_changed,
             children: arrayvec::ArrayVec::new(),
         });
-        self.0.next()
+        self.inner.next()
     }
 }
 
@@ -631,7 +637,7 @@ impl Inner {
     fn next(self: Box<Self>) -> InProgress {
         let Some(deepest_stack_elem) = self.stack.last() else {
             // Only reached at the very start of the calculation.
-            return InProgress::ClosestDescendant(ClosestDescendant(self))
+            return InProgress::ClosestDescendant(ClosestDescendant { inner: self })
         };
 
         if deepest_stack_elem.children.len() == 16 {
@@ -639,7 +645,7 @@ impl Inner {
             InProgress::StorageValue(StorageValue(self))
         } else {
             // Still obtaining `MaybeChildren`.
-            InProgress::ClosestDescendant(ClosestDescendant(self))
+            InProgress::ClosestDescendant(ClosestDescendant { inner: self })
         }
     }
 
