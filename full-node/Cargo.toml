@@ -14,7 +14,6 @@ name = "full-node"
 path = "src/main.rs"
 
 [dependencies]
-atty = "0.2.14"
 blake2-rfc = { version = "0.2.18", default-features = false }
 clap = { version = "4.3.1", default-features = false, features = ["color", "derive", "help", "std", "suggestions", "usage"] }  # Note: enabling/disabling some features modifies the internal behavior of clap, be careful
 ctrlc = "3.4.0"
