@@ -41,7 +41,7 @@
 use super::{nibble, trie_node, TrieEntryVersion};
 
 use alloc::{collections::BTreeMap, vec, vec::Vec};
-use core::{fmt, mem, ops};
+use core::{fmt, iter, mem, ops};
 
 /// Configuration to pass to [`decode_and_verify_proof`].
 pub struct Config<'a, I> {
@@ -478,14 +478,14 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
 
     fn children_from_key<'a>(
         &'a self,
-        key: &Vec<nibble::Nibble>,
+        key: &[nibble::Nibble],
         parent_node_value: &'a [u8],
         children_bitmap: u16,
     ) -> Children<'a> {
         debug_assert_eq!(self.entries.get(key).unwrap().2, children_bitmap);
 
         let mut children = [Child::NoChild; 16];
-        let mut child_search = key.clone();
+        let mut child_search = key.to_vec();
 
         let parent_node_value = trie_node::decode(parent_node_value).unwrap();
 
@@ -518,13 +518,16 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
         Children { children }
     }
 
-    /// Returns information about a trie node.
-    ///
-    /// Returns `None` if the proof doesn't contain enough information about this trie node.
-    ///
-    /// This function might return `Some` even if there is no node in the trie for `key`, in which
-    /// case the returned [`TrieNodeInfo`] will indicate no storage value and no children.
-    pub fn trie_node_info(&'_ self, key: &[nibble::Nibble]) -> Option<TrieNodeInfo<'_>> {
+    /// Returns the closest ancestor to the given key. If `key` is in the proof, returns `key`.
+    fn closest_ancestor<'a>(
+        &'a self,
+        key: &[nibble::Nibble],
+    ) -> Option<
+        Option<(
+            &'a [nibble::Nibble],
+            &'a (StorageValueInner, ops::Range<usize>, u16),
+        )>,
+    > {
         // If the proof is empty, then we have no information about the node whatsoever.
         // This check is necessary because we assume below that a lack of ancestor means that the
         // key is outside of the trie.
@@ -532,8 +535,6 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
             return None;
         }
 
-        // The requested key can be found directly in the proof, but it can also be a child of an
-        // item of the proof.
         // Search for the key in the proof that is an ancestor or equal to the requested key.
         // As explained in the comments below, there are at most `key.len()` iterations, making
         // this `O(log n)`.
@@ -554,86 +555,11 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                     // The requested key doesn't have any ancestor in the trie. This means that
                     // it doesn't share any prefix with any other entry in the trie. This means
                     // that it doesn't exist.
-                    return Some(TrieNodeInfo {
-                        storage_value: StorageValue::None,
-                        children: Children {
-                            children: [Child::NoChild; 16],
-                        },
-                    });
+                    return Some(None);
                 }
-                Some((found_key, (storage_value, node_value_range, children_bitmap)))
-                    if *found_key == key =>
-                {
-                    // Found exact match. Returning.
-                    return Some(TrieNodeInfo {
-                        storage_value: match storage_value {
-                            StorageValueInner::Known {
-                                offset,
-                                len,
-                                is_inline,
-                                ..
-                            } => StorageValue::Known {
-                                value: &self.proof.as_ref()[*offset..][..*len],
-                                inline: *is_inline,
-                            },
-                            StorageValueInner::None => StorageValue::None,
-                            StorageValueInner::HashKnownValueMissing { offset } => {
-                                StorageValue::HashKnownValueMissing(
-                                    <&[u8; 32]>::try_from(&self.proof.as_ref()[*offset..][..32])
-                                        .unwrap(),
-                                )
-                            }
-                        },
-                        children: self.children_from_key(
-                            found_key,
-                            &self.proof.as_ref()[node_value_range.clone()],
-                            *children_bitmap,
-                        ),
-                    });
-                }
-                Some((found_key, (_, _, children_bitmap))) if key.starts_with(found_key) => {
-                    // Requested key is a descendant of an entry found in the proof.
-                    // Check whether the entry can have a descendant in the direction towards the
-                    // requested key.
-                    if children_bitmap & (1 << u8::from(key[found_key.len()])) == 0 {
-                        // Child absent.
-                        // It has been proven that the requested key doesn't exist in the trie.
-                        return Some(TrieNodeInfo {
-                            storage_value: StorageValue::None,
-                            children: Children {
-                                children: [Child::NoChild; 16],
-                            },
-                        });
-                    }
-
-                    if self
-                        .entries
-                        .range::<[nibble::Nibble], _>((
-                            ops::Bound::Included(&key[..found_key.len() + 1]),
-                            ops::Bound::Unbounded,
-                        ))
-                        .next()
-                        .map_or(false, |(k, _)| k.starts_with(&key[..found_key.len() + 1]))
-                    {
-                        // There exists at least one node in the proof that starts with
-                        // `key[..found_key.len() + 1]` but that isn't `key` and doesn't start
-                        // with key, and there isn't any branch node at the common ancestor between
-                        // this node and `key`, as otherwise would have found it when iterating
-                        // earlier. This branch node can't be missing from the proof as otherwise
-                        // the proof would be invalid.
-                        // Thus, the requested key doesn't exist in the trie.
-                        return Some(TrieNodeInfo {
-                            storage_value: StorageValue::None,
-                            children: Children {
-                                children: [Child::NoChild; 16],
-                            },
-                        });
-                    }
-
-                    // Child present.
-                    // The request key can possibly be in the trie, but we have no way of
-                    // knowing because the proof doesn't have enough information.
-                    return None;
+                Some((found_key, value)) if key.starts_with(found_key) => {
+                    // Requested key is a descendant of an entry found in the proof. Returning.
+                    return Some(Some((found_key, value)));
                 }
                 Some((found_key, _)) => {
                     // ̀`found_key` is somewhere between the ancestor of the requested key and the
@@ -649,6 +575,103 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                     debug_assert_eq!(&found_key[..common_nibbles], &key[..common_nibbles]);
                     to_search = &key[..common_nibbles];
                 }
+            }
+        }
+    }
+
+    /// Returns information about a trie node.
+    ///
+    /// Returns `None` if the proof doesn't contain enough information about this trie node.
+    ///
+    /// This function might return `Some` even if there is no node in the trie for `key`, in which
+    /// case the returned [`TrieNodeInfo`] will indicate no storage value and no children.
+    pub fn trie_node_info(&'_ self, key: &[nibble::Nibble]) -> Option<TrieNodeInfo<'_>> {
+        match self.closest_ancestor(key) {
+            None => None,
+            Some(None) => {
+                // Node is known to not exist.
+                Some(TrieNodeInfo {
+                    storage_value: StorageValue::None,
+                    children: Children {
+                        children: [Child::NoChild; 16],
+                    },
+                })
+            }
+            Some(Some((ancestor_key, (storage_value, node_value_range, children_bitmap))))
+                if ancestor_key == key =>
+            {
+                // Found exact match.
+                return Some(TrieNodeInfo {
+                    storage_value: match storage_value {
+                        StorageValueInner::Known {
+                            offset,
+                            len,
+                            is_inline,
+                            ..
+                        } => StorageValue::Known {
+                            value: &self.proof.as_ref()[*offset..][..*len],
+                            inline: *is_inline,
+                        },
+                        StorageValueInner::None => StorageValue::None,
+                        StorageValueInner::HashKnownValueMissing { offset } => {
+                            StorageValue::HashKnownValueMissing(
+                                <&[u8; 32]>::try_from(&self.proof.as_ref()[*offset..][..32])
+                                    .unwrap(),
+                            )
+                        }
+                    },
+                    children: self.children_from_key(
+                        ancestor_key,
+                        &self.proof.as_ref()[node_value_range.clone()],
+                        *children_bitmap,
+                    ),
+                });
+            }
+            Some(Some((ancestor_key, (_, _, children_bitmap)))) => {
+                // Requested key is a descendant of an entry found in the proof.
+                // Check whether the entry can have a descendant in the direction towards the
+                // requested key.
+                if children_bitmap & (1 << u8::from(key[ancestor_key.len()])) == 0 {
+                    // Child absent.
+                    // It has been proven that the requested key doesn't exist in the trie.
+                    return Some(TrieNodeInfo {
+                        storage_value: StorageValue::None,
+                        children: Children {
+                            children: [Child::NoChild; 16],
+                        },
+                    });
+                }
+
+                if self
+                    .entries
+                    .range::<[nibble::Nibble], _>((
+                        ops::Bound::Included(&key[..ancestor_key.len() + 1]),
+                        ops::Bound::Unbounded,
+                    ))
+                    .next()
+                    .map_or(false, |(k, _)| {
+                        k.starts_with(&key[..ancestor_key.len() + 1])
+                    })
+                {
+                    // There exists at least one node in the proof that starts with
+                    // `key[..ancestor.len() + 1]` but that isn't `key` and doesn't start
+                    // with key, and there isn't any branch node at the common ancestor between
+                    // this node and `key`, as otherwise would have found it when iterating
+                    // earlier. This branch node can't be missing from the proof as otherwise
+                    // the proof would be invalid.
+                    // Thus, the requested key doesn't exist in the trie.
+                    return Some(TrieNodeInfo {
+                        storage_value: StorageValue::None,
+                        children: Children {
+                            children: [Child::NoChild; 16],
+                        },
+                    });
+                }
+
+                // Child present.
+                // The request key can possibly be in the trie, but we have no way of
+                // knowing because the proof doesn't have enough information.
+                None
             }
         }
     }
@@ -679,7 +702,181 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
         }
     }
 
-    // TODO: add a ̀`next_key` and a `prefix_keys` function
+    /// Find in the proof the trie node that follows `key_before` in lexicographic order.
+    ///
+    /// If `or_equal` is `true`, then `key_before` is returned if it is equal to a node in the
+    /// trie. If `false`, then only keys that are strictly superior are returned.
+    ///
+    /// The returned value must always start with `prefix`. Note that the value of `prefix` is
+    /// important as it can be the difference between `None` and `Some(None)`.
+    ///
+    /// If `branch_nodes` is `false`, then trie nodes that don't have a storage value are skipped.
+    ///
+    /// Returns `None` if the proof doesn't contain enough information to determine the next key.
+    /// Returns `Some(None)` if the proof indicates that there is no next key (within the given
+    /// prefix).
+    // TODO: return a Result instead of Option?
+    pub fn next_key(
+        &'_ self,
+        key_before: &[nibble::Nibble],
+        or_equal: bool,
+        prefix: &[nibble::Nibble],
+        branch_nodes: bool,
+    ) -> Option<Option<&'_ [nibble::Nibble]>> {
+        let mut key_before = {
+            let mut k = Vec::with_capacity(key_before.len() + 4);
+            k.extend_from_slice(key_before);
+            k
+        };
+
+        // First, we get rid of the question of `or_equal` by pushing an additional nibble if it
+        // is `false`. In the algorithm below, we assume that `or_equal` is `true`.
+        if !or_equal {
+            key_before.push(nibble::Nibble::zero());
+        }
+
+        loop {
+            match self.closest_ancestor(&key_before) {
+                None => return None,
+                Some(None) => {
+                    // `key_before` has no ancestor, meaning that it is either the root of the
+                    // trie or out of range of the trie completely. In both cases, the only
+                    // possible candidate if the root of the trie.
+                    match self.entries.iter().next() {
+                        Some((k, _)) if *k >= key_before => {
+                            // We still need to handle the prefix and branch nodes. To make our
+                            // life easier, we just update `key_before` and loop again.
+                            key_before = k.clone()
+                        }
+                        Some(_) => return Some(None), // `key_before` is after every trie node.
+                        None => return Some(None),    // Empty trie.
+                    };
+                }
+                Some(Some((ancestor_key, (storage_value, _, _)))) if ancestor_key == key_before => {
+                    // It's a match!
+
+                    // Check for `branch_nodes`.
+                    if !branch_nodes && matches!(storage_value, StorageValueInner::None) {
+                        // Skip to next node.
+                        key_before.push(nibble::Nibble::zero());
+                        continue;
+                    }
+
+                    if !key_before.starts_with(prefix) {
+                        return Some(None);
+                    } else {
+                        return Some(Some(ancestor_key));
+                    }
+                }
+                Some(Some((ancestor_key, (_, _, children_bitmap)))) => {
+                    debug_assert!(key_before.starts_with(ancestor_key));
+
+                    // Find which descendant of `ancestor_key` and that is after `key_before`
+                    // actually exists.
+                    let nibble_towards_key_before = key_before[ancestor_key.len()];
+                    let nibble_that_exists =
+                        iter::successors(Some(nibble_towards_key_before), |n| n.checked_add(1))
+                            .find(|n| children_bitmap & (1 << u8::from(*n)) != 0);
+
+                    if let Some(nibble_that_exists) = nibble_that_exists {
+                        // The next key of `key_before` is the descendant of `ancestor_key` in
+                        // the direction of `nibble_that_exists`.
+                        key_before.push(nibble_that_exists);
+                        if let Some((descendant_key, _)) = self
+                            .entries
+                            .range::<[nibble::Nibble], _>((
+                                ops::Bound::Included(&key_before[..]),
+                                ops::Bound::Unbounded,
+                            ))
+                            .next()
+                            .filter(|(k, _)| k.starts_with(&key_before))
+                        {
+                            key_before = descendant_key.clone();
+                        } else {
+                            // We know that there is a descendant but it is not in the proof.
+                            return None;
+                        }
+                    } else {
+                        // `ancestor_key` has no children that can possibly be superior
+                        // to `key_before`. Advance to finding the first sibling after
+                        // `ancestor_key`.
+                        key_before.truncate(ancestor_key.len());
+                        loop {
+                            let Some(nibble) = key_before.pop()
+                                else {
+                                    // `key_before` is equal to `0xffff...` and thus can't
+                                    // have any next sibling.
+                                    return Some(None)
+                                };
+                            if let Some(new_nibble) = nibble.checked_add(1) {
+                                key_before.push(new_nibble);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Find in the proof the closest trie node that descends from `key` and returns its Merkle
+    /// value.
+    ///
+    /// Returns `None` if the proof doesn't contain enough information to determine the Merkle
+    /// value.
+    /// Returns `Some(None)` if the proof indicates that there is no descendant.
+    // TODO: return a Result instead of Option?
+    pub fn closest_descendant_merkle_value(
+        &'_ self,
+        key: &[nibble::Nibble],
+    ) -> Option<Option<&'_ [u8]>> {
+        if key.is_empty() {
+            todo!()
+        }
+
+        // Call `closest_ancestor(parent(key))`.
+        match self.closest_ancestor(&key[..key.len() - 1]) {
+            None => None,
+            Some(None) => Some(None),
+            Some(Some((parent_key, (_, parent_node_value_range, _))))
+                if parent_key.len() == key.len() - 1 =>
+            {
+                // Exact match, meaning that `parent_key` is precisely one less nibble than `key`.
+                // This means that there's no need between `parent_key` and `key`. Consequently,
+                // the closest-descendant-or-equal of `key` is also the strict-closest-descendant
+                // of `parent_key`, and its Merkle value can be found in `parent_key`'s node
+                // value.
+                let nibble = key[key.len() - 1];
+                let parent_node_value =
+                    trie_node::decode(&self.proof.as_ref()[parent_node_value_range.clone()])
+                        .unwrap();
+                Some(parent_node_value.children[usize::from(u8::from(nibble))])
+            }
+            Some(Some((parent_key, (_, parent_node_value_range, _)))) => {
+                // The closest parent is more than one nibble away.
+                // If the proof contains a node in this direction, then we know that there's no
+                // node in the trie between `parent_key` and `key`. If the proof doesn't contain
+                // any node in this direction, then we can't be sure of that.
+                if self
+                    .entries
+                    .range::<[nibble::Nibble], _>((
+                        ops::Bound::Included(key),
+                        ops::Bound::Unbounded,
+                    ))
+                    .next()
+                    .map_or(true, |(k, _)| !k.starts_with(key))
+                {
+                    return Some(None);
+                }
+
+                let nibble = key[parent_key.len()];
+                let parent_node_value =
+                    trie_node::decode(&self.proof.as_ref()[parent_node_value_range.clone()])
+                        .unwrap();
+                Some(parent_node_value.children[usize::from(u8::from(nibble))])
+            }
+        }
+    }
 }
 
 /// Storage value of the node.
