@@ -59,7 +59,7 @@ use crate::{platform::PlatformRef, sync_service};
 use alloc::{
     borrow::ToOwned as _,
     boxed::Box,
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     format,
     string::{String, ToString as _},
     sync::{Arc, Weak},
@@ -865,63 +865,6 @@ impl<'a> RuntimeCall<'a> {
             Some(v) => Ok(v),
             None => Err(RuntimeCallError::MissingProofEntry),
         }
-    }
-
-    /// Finds in the call proof the list of keys that match a certain prefix.
-    ///
-    /// Returns an error if not all the keys could be found in the proof, meaning that the proof
-    /// is invalid.
-    ///
-    /// The keys returned are ordered lexicographically.
-    // TODO: if proof is invalid, we should give the option to fetch another call proof
-    pub fn storage_prefix_keys_ordered(
-        &'_ self,
-        prefix: &[u8],
-    ) -> Result<impl Iterator<Item = impl AsRef<[u8]> + '_>, RuntimeCallError> {
-        // TODO: this could be a function in the proof_decode module
-        let mut to_find = VecDeque::<Vec<_>>::new();
-        to_find.push_back(trie::bytes_to_nibbles(prefix.iter().copied()).collect::<Vec<_>>());
-
-        let mut output = Vec::new();
-
-        let call_proof = match &self.call_proof {
-            Ok(p) => p,
-            Err(err) => return Err(err.clone()),
-        };
-
-        while let Some(key) = to_find.pop_front() {
-            let node_info = call_proof
-                .trie_node_info(&key)
-                .ok_or(RuntimeCallError::MissingProofEntry)?;
-
-            if matches!(
-                node_info.storage_value,
-                proof_decode::StorageValue::Known { .. }
-                    | proof_decode::StorageValue::HashKnownValueMissing(_)
-            ) {
-                assert_eq!(key.len() % 2, 0);
-                let key_as_bytes =
-                    trie::nibbles_to_bytes_suffix_extend(key.iter().copied()).collect::<Vec<_>>();
-                debug_assert!(output.last().map_or(true, |last| *last < key_as_bytes));
-                output.push(key_as_bytes);
-            }
-
-            for child in node_info.children.children().rev() {
-                match child {
-                    proof_decode::Child::NoChild => continue,
-                    proof_decode::Child::AbsentFromProof => {
-                        return Err(RuntimeCallError::MissingProofEntry);
-                    }
-                    proof_decode::Child::InProof { child_key } => {
-                        debug_assert!(to_find.front().map_or(true, |f| child_key < f));
-                        to_find.push_front(child_key.to_owned());
-                    }
-                }
-            }
-        }
-
-        // TODO: debug_assert!(output.is_sorted()); // TODO: https://github.com/rust-lang/rust/issues/53485
-        Ok(output.into_iter())
     }
 
     /// End the runtime call.

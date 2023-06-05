@@ -59,9 +59,9 @@ impl SipHasherBuild {
 }
 
 impl core::hash::BuildHasher for SipHasherBuild {
-    type Hasher = siphasher::sip::SipHasher;
+    type Hasher = siphasher::sip::SipHasher13;
 
     fn build_hasher(&self) -> Self::Hasher {
-        siphasher::sip::SipHasher::new_with_key(&self.0)
+        siphasher::sip::SipHasher13::new_with_key(&self.0)
     }
 }

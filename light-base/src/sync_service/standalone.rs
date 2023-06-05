@@ -595,14 +595,40 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 return (self, false);
             }
 
-            all::ProcessOne::WarpSyncError { sync, error } => {
-                self.sync = sync;
-                log::warn!(
-                    target: &self.log_target,
-                    "Error during GrandPa warp syncing: {}",
-                    error
-                );
-                return (self, true);
+            all::ProcessOne::WarpSyncBuildRuntime(req) => {
+                // Warp syncing compiles the runtime. The compiled runtime will later be yielded
+                // in the `WarpSyncFinished` variant, which is then provided as an event.
+                let before_instant = self.platform.now();
+                let (new_sync, error) = req.build(all::ExecHint::CompileAheadOfTime, true);
+                let elapsed = self.platform.now() - before_instant;
+                match error {
+                    Ok(()) => {
+                        log::debug!(
+                            target: &self.log_target,
+                            "Sync => WarpSyncRuntimeBuild(success=true, duration={:?})",
+                            elapsed
+                        );
+                    }
+                    Err(err) => {
+                        log::debug!(target: &self.log_target, "Sync => WarpSyncRuntimeBuild(error={})", err);
+                        log::warn!(target: &self.log_target, "Failed to compile runtime during warp syncing process: {}", err);
+                    }
+                };
+                self.sync = new_sync;
+            }
+
+            all::ProcessOne::WarpSyncBuildChainInformation(req) => {
+                let (new_sync, error) = req.build();
+                match error {
+                    Ok(()) => {
+                        log::debug!(target: &self.log_target, "Sync => WarpSyncBuildChainInformation(success=true)")
+                    }
+                    Err(err) => {
+                        log::debug!(target: &self.log_target, "Sync => WarpSyncBuildChainInformation(error={})", err);
+                        log::warn!(target: &self.log_target, "Failed to build the chain information during warp syncing process: {}", err);
+                    }
+                };
+                self.sync = new_sync;
             }
 
             all::ProcessOne::WarpSyncFinished {
@@ -636,8 +662,6 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 // Since there is a gap in the blocks, all active notifications to all blocks
                 // must be cleared.
                 self.all_notifications.clear();
-
-                return (self, true);
             }
 
             all::ProcessOne::VerifyWarpSyncFragment(verify) => {
@@ -659,6 +683,12 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                             been enacted on the chain. If this is the case, please update the \
                             chain specification with a checkpoint past this forced change."
                         } else { "" }
+                    );
+                } else {
+                    log::debug!(
+                        target: &self.log_target,
+                        "Sync => WarpSyncFragmentVerified(sender={})",
+                        sender_peer_id,
                     );
                 }
             }

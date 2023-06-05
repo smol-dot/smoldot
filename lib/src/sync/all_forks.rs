@@ -2297,10 +2297,6 @@ pub enum BlockBodyVerify<TBl, TRq, TSrc> {
     /// Loading a storage value of the finalized block is required in order to continue.
     FinalizedStorageGet(StorageGet<TBl, TRq, TSrc>),
 
-    /// Fetching the list of keys of the finalized block with a given prefix is required in order
-    /// to continue.
-    FinalizedStoragePrefixKeys(StoragePrefixKeys<TBl, TRq, TSrc>),
-
     /// Fetching the key of the finalized block storage that follows a given one is required in
     /// order to continue.
     FinalizedStorageNextKey(StorageNextKey<TBl, TRq, TSrc>),*/

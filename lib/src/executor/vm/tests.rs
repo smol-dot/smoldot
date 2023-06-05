@@ -235,6 +235,29 @@ fn memory_misnamed() {
 }
 
 #[test]
+fn memory_isnt_memory() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (func (export "memory") (result i32) i32.const 0)
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        assert!(matches!(
+            super::VirtualMachinePrototype::new(super::Config {
+                module_bytes: &module_bytes,
+                exec_hint,
+                symbols: &mut |_, _, _| Ok(0)
+            }),
+            Err(super::NewErr::MemoryIsntMemory)
+        ));
+    }
+}
+
+#[test]
 fn two_memories() {
     let module_bytes = wat::parse_str(
         r#"

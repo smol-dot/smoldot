@@ -1,4 +1,5 @@
 [workspace]
+resolver = "2"
 default-members = ["lib", "full-node"]
 members = [
     "lib",
@@ -34,7 +35,7 @@ lto = true
 # https://doc.rust-lang.org/rustc/codegen-options/index.html#codegen-units
 codegen-units = 1
 incremental = false
-#strip = "symbols"      # TODO: uncomment once stable
+strip = "symbols"
 
 [profile.min-size-release]
 inherits = "release"

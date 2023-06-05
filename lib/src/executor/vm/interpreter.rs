@@ -176,16 +176,21 @@ impl InterpreterPrototype {
             .ensure_no_start(&mut store)
             .map_err(|_| NewErr::StartFunctionNotSupported)?;
 
+        let exported_memory = match instance.get_export(&store, "memory") {
+            Some(wasmi::Extern::Memory(m)) => Some(m),
+            None => None,
+            Some(_) => return Err(NewErr::MemoryIsntMemory),
+        };
+
         let memory = if let Some(wasmi::Extern::Memory(import_memory)) =
             linker.get(&store, "env", "memory")
         {
-            if instance.get_memory(&store, "memory").is_some() {
+            if exported_memory.is_some() {
                 return Err(NewErr::TwoMemories);
             }
 
             import_memory
-        } else if let Some(mem) = instance.get_memory(&store, "memory") {
-            // TODO: we don't detect NewErr::MemoryIsntMemory
+        } else if let Some(mem) = exported_memory {
             mem
         } else {
             return Err(NewErr::NoMemory);
