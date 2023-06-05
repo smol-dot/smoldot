@@ -160,24 +160,6 @@ impl ClosestDescendant {
             .current_node_full_key()
             .fold(0, |acc, k| acc + k.as_ref().len());
 
-        // If the base trie contains a descendant but the diff doesn't contain any descendant,
-        // jump to calling `BaseTrieMerkleValue`.
-        if !self.force_recalculate
-            && self.diff_inserts_lcd.is_none()
-            && self
-                .inner
-                .stack
-                .last()
-                .map_or(true, |n| !n.children_partial_key_changed)
-        {
-            if let Some(closest_descendant) = closest_descendant {
-                return InProgress::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue {
-                    inner: self.inner,
-                    descendant_partial_key: closest_descendant.skip(iter_key_len).collect(),
-                });
-            }
-        }
-
         // Find the value of `MaybeNode`.
         let (maybe_node_partial_key, children_partial_key_changed) =
             match (self.diff_inserts_lcd, closest_descendant) {
@@ -440,7 +422,6 @@ impl StorageValue {
 /// the calculation will walk down the trie in order to calculate the Merkle value manually.
 pub struct ClosestDescendantMerkleValue {
     inner: Box<Inner>,
-    descendant_partial_key: Vec<Nibble>,
 }
 
 impl ClosestDescendantMerkleValue {
@@ -451,10 +432,7 @@ impl ClosestDescendantMerkleValue {
     pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[Nibble]> + '_> + '_ {
         // A `MerkleValue` is created directly in response to a `ClosestAncestor` without
         // updating the `Inner`.
-        self.inner
-            .current_node_full_key()
-            .map(either::Left)
-            .chain(iter::once(either::Right(&self.descendant_partial_key)))
+        self.inner.current_node_full_key()
     }
 
     /// Returns the same value as [`ClosestDescendant`] but as a `Vec`.
@@ -474,12 +452,12 @@ impl ClosestDescendantMerkleValue {
         // `MaybeNodeKey`. Because a `MerkleValue` is only ever created if the diff doesn't
         // contain any entry that descends the currently iterated node, we know for sure that
         // `MaybeNodeKey` is equal to `Btcd`.
-        self.inner.stack.push(InProgressNode {
-            partial_key: self.descendant_partial_key,
-            children_partial_key_changed: false,
-            children: arrayvec::ArrayVec::new(),
-        });
-        self.inner.next()
+        InProgress::ClosestDescendant(ClosestDescendant {
+            inner: self.inner,
+            key_extra_nibbles: Vec::new(),
+            force_recalculate: true,
+            diff_inserts_lcd: None,
+        })
     }
 
     /// Indicate the Merkle value of the trie node indicated by [`MerkleValue::key`] and resume
@@ -606,6 +584,19 @@ impl Inner {
                 }
             }
         };
+
+        // If the diff doesn't contain any descendant, jump to calling `BaseTrieMerkleValue`.
+        if !force_recalculate
+            && diff_inserts_lcd.is_none()
+            && self
+                .stack
+                .last()
+                .map_or(true, |n| !n.children_partial_key_changed)
+        {
+            return InProgress::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue {
+                inner: self,
+            });
+        }
 
         InProgress::ClosestDescendant(ClosestDescendant {
             inner: self,
