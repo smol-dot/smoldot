@@ -40,7 +40,7 @@ fn empty_trie_works() {
             InProgress::ClosestDescendant(req) => {
                 calculation = req.inject(None::<iter::Empty<_>>);
             }
-            InProgress::MerkleValue(_) => {
+            InProgress::ClosestDescendantMerkleValue(_) => {
                 unreachable!()
             }
             InProgress::StorageValue(req) => {
@@ -80,7 +80,7 @@ fn one_inserted_node_in_diff() {
             InProgress::ClosestDescendant(req) => {
                 calculation = req.inject(None::<iter::Empty<_>>);
             }
-            InProgress::MerkleValue(_) => {
+            InProgress::ClosestDescendantMerkleValue(_) => {
                 unreachable!()
             }
             InProgress::StorageValue(req) => {
@@ -295,7 +295,7 @@ fn fuzzing() {
                             next_node.map(|n| trie_before_diff.node_full_key_by_index(n).unwrap()),
                         );
                     }
-                    InProgress::MerkleValue(req) => {
+                    InProgress::ClosestDescendantMerkleValue(req) => {
                         if rand::random::<bool>() {
                             let merkle_value = if let trie::trie_structure::Entry::Occupied(e) =
                                 trie_before_diff.node(req.key_as_vec().into_iter())

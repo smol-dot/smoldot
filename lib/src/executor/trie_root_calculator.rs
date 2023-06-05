@@ -106,7 +106,7 @@ pub enum InProgress {
     /// See [`StorageValue`].
     StorageValue(StorageValue),
     /// See [`MerkleValue`].
-    MerkleValue(MerkleValue),
+    ClosestDescendantMerkleValue(ClosestDescendantMerkleValue),
 }
 
 /// In order to continue the calculation, must find in the base trie the closest descendant
@@ -168,7 +168,7 @@ impl ClosestDescendant {
                 // we could in principle not ask for the Merkle value. However we do it anyway
                 // with the hope that the Merkle value is < 32 bytes and its partial key can be
                 // adjusted without having to recalculate the entire sub-tree.
-                return InProgress::MerkleValue(MerkleValue {
+                return InProgress::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue {
                     inner: self.inner,
                     descendant_partial_key: closest_descendant.skip(iter_key_len).collect(),
                 });
@@ -435,12 +435,12 @@ impl StorageValue {
 ///
 /// It is possible to continue the calculation even if the Merkle value is unknown, in which case
 /// the calculation will walk down the trie in order to calculate the Merkle value manually.
-pub struct MerkleValue {
+pub struct ClosestDescendantMerkleValue {
     inner: Box<Inner>,
     descendant_partial_key: Vec<Nibble>,
 }
 
-impl MerkleValue {
+impl ClosestDescendantMerkleValue {
     /// Returns an iterator of slices, which, when joined together, form the full key of the trie
     /// node whose Merkle value must be fetched.
     ///

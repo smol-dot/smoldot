@@ -482,7 +482,7 @@ impl MerkleValue {
             host::HostVm::ExternalStorageRoot(_)
         ));
 
-        let trie_root_calculator::InProgress::MerkleValue(request) =
+        let trie_root_calculator::InProgress::ClosestDescendantMerkleValue(request) =
             self.inner.root_calculation.as_ref().unwrap()
             else { unreachable!() };
         request.key().flat_map(util::as_ref_iter)
@@ -498,7 +498,7 @@ impl MerkleValue {
             host::HostVm::ExternalStorageRoot(_)
         ));
 
-        let trie_root_calculator::InProgress::MerkleValue(request) =
+        let trie_root_calculator::InProgress::ClosestDescendantMerkleValue(request) =
             self.inner.root_calculation.take().unwrap()
             else { unreachable!() };
 
@@ -516,7 +516,7 @@ impl MerkleValue {
             host::HostVm::ExternalStorageRoot(_)
         ));
 
-        let trie_root_calculator::InProgress::MerkleValue(request) =
+        let trie_root_calculator::InProgress::ClosestDescendantMerkleValue(request) =
             self.inner.root_calculation.take().unwrap()
             else { unreachable!() };
 
@@ -807,10 +807,15 @@ impl Inner {
                                 self.root_calculation = Some(calc_req.inject_value(None));
                             }
                         }
-                        trie_root_calculator::InProgress::MerkleValue(calc_req) => {
+                        trie_root_calculator::InProgress::ClosestDescendantMerkleValue(
+                            calc_req,
+                        ) => {
                             self.vm = req.into();
-                            self.root_calculation =
-                                Some(trie_root_calculator::InProgress::MerkleValue(calc_req));
+                            self.root_calculation = Some(
+                                trie_root_calculator::InProgress::ClosestDescendantMerkleValue(
+                                    calc_req,
+                                ),
+                            );
                             return RuntimeHostVm::MerkleValue(MerkleValue { inner: self });
                         }
                         trie_root_calculator::InProgress::Finished { trie_root_hash } => {
