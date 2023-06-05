@@ -25,34 +25,29 @@
 //! TrieRoot = ClosestDescendantMerkleValue(∅, False) || EmptyTrieRootHash
 //!
 //! ClosestDescendantMerkleValue(Key, ForceRecalculate) =
+//!     If !ForceRecalculate AND !DiffContainsEntryWithPrefix(Key)
+//!         MaybeMerkleValue := BaseTrieClosestDescendantMerkleValue(Key)
+//!         If MaybeMerkleValue
+//!             return MaybeMerkleValue
+//!
 //!     Btcd := BaseTrieClosestDescendant(Key)
-//!     If ForceRecalculate || DiffContainsEntryWithPrefix(Key)
-//!         MaybeNodeKey := LongestCommonDenominator(Btcd, ...DiffInsertsNodesWithPrefix(Key))
-//!         MaybeChildren := Array(ClosestDescendantMerkleValue(Concat(MaybeNodeKey, 0), MaybeNodeKey != Btcd), ..., ClosestDescendantMerkleValue(Concat(MaybeNodeKey, 15), MaybeNodeKey != Btcd))
-//!         MaybeStorageValue := DiffInserts(MaybeNodeKey) || (BaseTrieStorageValue(MaybeNodeKey) - DiffErases(MaybeNodeKey))
+//!     MaybeNodeKey := LongestCommonDenominator(Btcd, ...DiffInsertsNodesWithPrefix(Key))
+//!     MaybeChildren := Array(ClosestDescendantMerkleValue(Concat(MaybeNodeKey, 0), MaybeNodeKey != Btcd), ..., ClosestDescendantMerkleValue(Concat(MaybeNodeKey, 15), MaybeNodeKey != Btcd))
+//!     MaybeStorageValue := DiffInserts(MaybeNodeKey) || (BaseTrieStorageValue(MaybeNodeKey) - DiffErases(MaybeNodeKey))
 //!
-//!         If MaybeStorageValue = ∅ AND NumChildren(MaybeChildren) == 0
-//!             ∅
-//!         ElseIf NumChildren(MaybeChildren) == 1 AND BaseTrieStorageValue(MaybeNodeKey) != ∅ AND MaybeStorageValue = ∅
-//!             # Because the partial key of the child has changed, we have to recalculate it.
-//!             ClosestDescendantMerkleValue(ChildThatExists(MaybeChildren), True)
-//!         ElseIf NumChildren(MaybeChildren) == 1 AND BaseTrieStorageValue(MaybeNodeKey) = ∅ AND MaybeStorageValue = ∅
-//!             ChildThatExists(MaybeChildren)
-//!         Else
-//!             Encode(MaybeStorageValue, MaybeChildren)
-//!
+//!     If MaybeStorageValue = ∅ AND NumChildren(MaybeChildren) == 0
+//!         ∅
+//!     ElseIf NumChildren(MaybeChildren) == 1 AND BaseTrieStorageValue(MaybeNodeKey) != ∅ AND MaybeStorageValue = ∅
+//!         # Because the partial key of the child has changed, we have to recalculate it.
+//!         ClosestDescendantMerkleValue(ChildThatExists(MaybeChildren), True)
+//!     ElseIf NumChildren(MaybeChildren) == 1 AND BaseTrieStorageValue(MaybeNodeKey) = ∅ AND MaybeStorageValue = ∅
+//!         ChildThatExists(MaybeChildren)
 //!     Else
-//!         BaseTrieMerkleValue(Btcd)
+//!         Encode(MaybeStorageValue, MaybeChildren)
 //! ```
 //!
-//! The public API functions are thus `BaseTrieClosestDescendant`, `BaseTrieMerkleValue`,
-//! and `BaseTrieStorageValue`.
-//!
-//! They could be consolidated into `BaseTrieClosestDescendantMerkleValue` and
-//! `BaseTrieClosestDescendantStorageValue`, but we.don't do so for API convenience.
-//!
-//! Furthermore, `BaseTrieMerkleValue` is allowed to return "unknown", in which case we switch
-//! to the other branch of the `If` and recalculate the Merkle value ourselves.
+//! The public API functions are thus `BaseTrieClosestDescendant`,
+//! `BaseTrieClosestDescendantMerkleValue`, and `BaseTrieStorageValue`.
 //!
 //! The algorithm above is recursive. In order to implement it, we instead maintain a stack of
 //! nodes that are currently being calculated.
@@ -105,7 +100,7 @@ pub enum InProgress {
     ClosestDescendant(ClosestDescendant),
     /// See [`StorageValue`].
     StorageValue(StorageValue),
-    /// See [`MerkleValue`].
+    /// See [`ClosestDescendantMerkleValue`].
     ClosestDescendantMerkleValue(ClosestDescendantMerkleValue),
 }
 
@@ -413,7 +408,8 @@ impl StorageValue {
     }
 }
 
-/// In order to continue, must fetch the Merkle value of the given key in the base trie.
+/// In order to continue, must fetch the Merkle value of the closest descendant to the given key
+/// in the base trie.
 ///
 /// It is possible to continue the calculation even if the Merkle value is unknown, in which case
 /// the calculation will walk down the trie in order to calculate the Merkle value manually.
@@ -423,16 +419,14 @@ pub struct ClosestDescendantMerkleValue {
 
 impl ClosestDescendantMerkleValue {
     /// Returns an iterator of slices, which, when joined together, form the full key of the trie
-    /// node whose Merkle value must be fetched.
-    ///
-    /// The key is guaranteed to have been injected through [`ClosestDescendant::inject`] earlier.
+    /// node whose closest descendant Merkle value must be fetched.
     pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[Nibble]> + '_> + '_ {
         // A `MerkleValue` is created directly in response to a `ClosestAncestor` without
         // updating the `Inner`.
         self.inner.current_node_full_key()
     }
 
-    /// Returns the same value as [`ClosestDescendant`] but as a `Vec`.
+    /// Returns the same value as [`ClosestDescendantMerkleValue::key`] but as a `Vec`.
     pub fn key_as_vec(&self) -> Vec<Nibble> {
         self.key().fold(Vec::new(), |mut a, b| {
             a.extend_from_slice(b.as_ref());
@@ -440,7 +434,8 @@ impl ClosestDescendantMerkleValue {
         })
     }
 
-    /// Indicate that the value is unknown and resume the calculation.
+    /// Indicate that the closest descendant or its Merkle value is unknown and resume the
+    /// calculation.
     ///
     /// This function be used if you are unaware of the Merkle value. The algorithm will perform
     /// the calculation of this Merkle value manually, which takes more time.
@@ -456,13 +451,11 @@ impl ClosestDescendantMerkleValue {
         })
     }
 
-    /// Indicate the Merkle value of the trie node indicated by [`MerkleValue::key`] and resume
-    /// the calculation.
-    ///
-    /// Note that there is no way to indicate that the trie node doesn't exist. This is because the
-    /// node is guaranteed to have been injected through [`ClosestDescendant::inject`] earlier.
+    /// Indicate the Merkle value of closest descendant of the trie node indicated by
+    /// [`MerkleValue::key`] and resume the calculation.
     pub fn inject_merkle_value(mut self, merkle_value: &[u8]) -> InProgress {
-        // We are after a call to `BaseTrieMerkleValue` in the algorithm shown at the top.
+        // We are after a call to `BaseTrieClosestDescendantMerkleValue` in the algorithm shown
+        // at the top.
 
         // Check with a debug_assert! that this is a valid Merkle value. While this algorithm
         // doesn't actually care about the content, providing a wrong value clearly indicates a
