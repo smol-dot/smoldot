@@ -84,8 +84,7 @@ pub(crate) fn init(max_log_level: u32) {
 
     // Spawn a constantly-running task that periodically prints the total memory usage of
     // the node.
-    // TODO: creating a new Platform here is hacky
-    platform::Platform::new().spawn_task(
+    platform::PLATFORM_REF.spawn_task(
         "memory-printer".into(),
         Box::pin(async move {
             let mut previous_read_bytes = 0;

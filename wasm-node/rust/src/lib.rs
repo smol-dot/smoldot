@@ -35,8 +35,8 @@ mod init;
 mod platform;
 mod timers;
 
-static CLIENT: Mutex<init::Client<platform::Platform, ()>> = Mutex::new(init::Client {
-    smoldot: smoldot_light::Client::new(platform::Platform::new()),
+static CLIENT: Mutex<init::Client<platform::PlatformRef, ()>> = Mutex::new(init::Client {
+    smoldot: smoldot_light::Client::new(platform::PLATFORM_REF),
     chains: slab::Slab::new(),
 });
 
