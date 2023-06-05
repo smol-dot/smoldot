@@ -367,11 +367,7 @@ impl StorageValue {
                     };
                 let merkle_value = trie::trie_node::calculate_merkle_value(
                     trie::trie_node::Decoded {
-                        children: array::from_fn(|n| {
-                            calculated_elem.children[n]
-                                .as_ref()
-                                .map(|c| &c.merkle_value)
-                        }),
+                        children: array::from_fn(|n| calculated_elem.children[n].as_ref()),
                         partial_key: calculated_elem.partial_key.iter().copied(),
                         storage_value: match maybe_storage_value {
                             Some((value, TrieEntryVersion::V0)) => {
@@ -393,7 +389,7 @@ impl StorageValue {
                 .unwrap_or_else(|_| panic!());
 
                 if let Some(parent_node) = parent_node {
-                    parent_node.children.push(Some(ChildInfo { merkle_value }));
+                    parent_node.children.push(Some(merkle_value));
                     self.0.next()
                 } else {
                     // No more node in the stack means that this was the root node. The calculated
@@ -466,11 +462,11 @@ impl ClosestDescendantMerkleValue {
             // If the element has a parent, add the Merkle value to its children and resume the
             // algorithm.
             debug_assert_ne!(parent_node.children.len(), 16);
-            parent_node.children.push(Some(ChildInfo {
-                merkle_value: trie::trie_node::MerkleValueOutput::from_bytes(AsRef::as_ref(
-                    &merkle_value,
-                )),
-            }));
+            parent_node
+                .children
+                .push(Some(trie::trie_node::MerkleValueOutput::from_bytes(
+                    AsRef::as_ref(&merkle_value),
+                )));
             self.inner.next()
         } else {
             // If the element doesn't have a parent, then the Merkle value is the root of trie!
@@ -514,16 +510,9 @@ struct InProgressNode {
     /// values in the base trie.
     children_partial_key_changed: bool,
 
-    /// Information about the children of the node. Filled up to 16 elements, then the storage
+    /// Merkle values of the children of the node. Filled up to 16 elements, then the storage
     /// value is requested. Each element is `Some` or `None` depending on whether a child exists.
-    children: arrayvec::ArrayVec<Option<ChildInfo>, 16>,
-}
-
-// TODO: useless struct?
-#[derive(Debug)]
-struct ChildInfo {
-    /// Merkle value of that node.
-    merkle_value: trie::trie_node::MerkleValueOutput,
+    children: arrayvec::ArrayVec<Option<trie::trie_node::MerkleValueOutput>, 16>,
 }
 
 impl Inner {
