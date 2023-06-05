@@ -18,7 +18,6 @@
 /// <reference lib="dom" />
 
 import { default as wasmBase64 } from './internals/bytecode/wasm.js';
-import { classicDecode } from './internals/base64.js'
 import { SmoldotBytecode } from './public-types.js';
 
 /**
@@ -29,7 +28,7 @@ export async function compileBytecode(): Promise<SmoldotBytecode> {
     // different file.
     // This is suboptimal compared to using `instantiateStreaming`, but it is the most
     // cross-platform cross-bundler approach.
-    return WebAssembly.compile(await zlibInflate(classicDecode(wasmBase64)))
+    return WebAssembly.compile(await zlibInflate(trustedBase64Decode(wasmBase64)))
         .then((m) => { return { wasm: m } });
 }
 
@@ -60,4 +59,21 @@ async function zlibInflate(buffer: Uint8Array): Promise<Uint8Array> {
         offset += array.byteLength;
     }
     return concatenated;
+}
+
+/**
+ * Decodes a base64 string.
+ *
+ * The input is assumed to be correct.
+ */
+function trustedBase64Decode(base64: string): Uint8Array {
+    // This code is a bit sketchy due to the fact that we decode into a string, but it seems to
+    // work.
+    const binaryString = atob(base64);
+    const size = binaryString.length;
+    const bytes = new Uint8Array(size);
+    for (let i = 0; i < size; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes;
 }
