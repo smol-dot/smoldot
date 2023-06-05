@@ -463,8 +463,11 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             _ => None,
                         },
                         trie_node_info: TrieNodeInfo {
-                            children: self.children_from_key(key, *children_bitmap),
-
+                            children: self.children_from_key(
+                                key,
+                                &self.proof.as_ref()[node_value_range.clone()],
+                                *children_bitmap,
+                            ),
                             storage_value,
                         },
                     },
@@ -473,15 +476,24 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
         )
     }
 
-    fn children_from_key(&self, key: &Vec<nibble::Nibble>, children_bitmap: u16) -> Children {
+    fn children_from_key<'a>(
+        &'a self,
+        key: &Vec<nibble::Nibble>,
+        parent_node_value: &'a [u8],
+        children_bitmap: u16,
+    ) -> Children<'a> {
         debug_assert_eq!(self.entries.get(key).unwrap().2, children_bitmap);
 
         let mut children = [Child::NoChild; 16];
         let mut child_search = key.clone();
 
+        let parent_node_value = trie_node::decode(parent_node_value).unwrap();
+
         for nibble in nibble::all_nibbles().filter(|n| (children_bitmap & (1 << u8::from(*n))) != 0)
         {
             child_search.push(nibble);
+
+            let merkle_value = &parent_node_value.children[usize::from(u8::from(nibble))].unwrap();
 
             children[usize::from(u8::from(nibble))] = if let Some((child, _)) = self
                 .entries
@@ -492,9 +504,12 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                 .next()
                 .filter(|(maybe_child, _)| maybe_child.starts_with(&child_search))
             {
-                Child::InProof { child_key: child }
+                Child::InProof {
+                    child_key: child,
+                    merkle_value,
+                }
             } else {
-                Child::AbsentFromProof
+                Child::AbsentFromProof { merkle_value }
             };
 
             child_search.pop();
@@ -546,7 +561,9 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                         },
                     });
                 }
-                Some((found_key, (storage_value, _, children_bitmap))) if *found_key == key => {
+                Some((found_key, (storage_value, node_value_range, children_bitmap)))
+                    if *found_key == key =>
+                {
                     // Found exact match. Returning.
                     return Some(TrieNodeInfo {
                         storage_value: match storage_value {
@@ -567,7 +584,11 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                                 )
                             }
                         },
-                        children: self.children_from_key(found_key, *children_bitmap),
+                        children: self.children_from_key(
+                            found_key,
+                            &self.proof.as_ref()[node_value_range.clone()],
+                            *children_bitmap,
+                        ),
                     });
                 }
                 Some((found_key, (_, _, children_bitmap))) if key.starts_with(found_key) => {
@@ -774,9 +795,14 @@ pub enum Child<'a> {
     InProof {
         /// Key of the child. Always starts with the key of its parent.
         child_key: &'a [nibble::Nibble],
+        /// Merkle value of the child.
+        merkle_value: &'a [u8],
     },
     /// Child exists but isn't present in the proof.
-    AbsentFromProof,
+    AbsentFromProof {
+        /// Merkle value of the child.
+        merkle_value: &'a [u8],
+    },
     /// Child doesn't exist.
     NoChild,
 }
@@ -785,7 +811,7 @@ impl<'a> Children<'a> {
     /// Returns `true` if a child in the direction of the given nibble is present.
     pub fn has_child(&self, nibble: nibble::Nibble) -> bool {
         match self.children[usize::from(u8::from(nibble))] {
-            Child::InProof { .. } | Child::AbsentFromProof => true,
+            Child::InProof { .. } | Child::AbsentFromProof { .. } => true,
             Child::NoChild => false,
         }
     }
@@ -813,7 +839,7 @@ impl<'a> fmt::Binary for Children<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for child in &self.children {
             let chr = match child {
-                Child::InProof { .. } | Child::AbsentFromProof => '1',
+                Child::InProof { .. } | Child::AbsentFromProof { .. } => '1',
                 Child::NoChild => '0',
             };
 
