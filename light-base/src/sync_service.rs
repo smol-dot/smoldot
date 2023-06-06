@@ -439,7 +439,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     for key in requested_keys.clone() {
                         result.push(
                             decoded
-                                .storage_value(key.as_ref())
+                                .storage_value(storage_trie_root, key.as_ref())
                                 .ok_or(StorageQueryErrorDetail::MissingProofEntry)?
                                 .map(|(v, _)| v.to_owned()),
                         );

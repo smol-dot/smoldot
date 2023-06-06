@@ -118,7 +118,10 @@ impl PrefixScan {
                         QueryTy::Direction => &query_key[..query_key.len() - 1],
                     };
 
-                    match (decoded_proof.trie_node_info(info_of_node), query_ty) {
+                    match (
+                        decoded_proof.trie_node_info(&self.trie_root_hash, info_of_node),
+                        query_ty,
+                    ) {
                         (Some(info), QueryTy::Exact) => info,
                         (Some(info), QueryTy::Direction) => {
                             match info.children.child(query_key[query_key.len() - 1]) {

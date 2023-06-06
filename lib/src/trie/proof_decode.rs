@@ -137,7 +137,6 @@ where
     if merkle_values.is_empty() {
         return Ok(DecodedTrieProof {
             proof: config.proof,
-            trie_root_merkle_value: *config.trie_root_hash,
             entries: BTreeMap::new(),
         });
     }
@@ -301,7 +300,6 @@ where
 
     Ok(DecodedTrieProof {
         proof: config.proof,
-        trie_root_merkle_value: *config.trie_root_hash,
         entries,
     })
 }
@@ -322,7 +320,6 @@ enum StorageValueInner {
 }
 
 /// Decoded Merkle proof. The proof is guaranteed valid.
-// TODO: implement Debug
 pub struct DecodedTrieProof<T> {
     /// The proof itself.
     proof: T,
@@ -331,36 +328,49 @@ pub struct DecodedTrieProof<T> {
     /// range at which to find its node value, and the children bitmap.
     // TODO: a BTreeMap is actually kind of stupid since `proof` is itself in a tree format
     entries: BTreeMap<([u8; 32], Vec<nibble::Nibble>), (StorageValueInner, ops::Range<usize>, u16)>,
-
-    /// Trie root as provided by the API user.
-    trie_root_merkle_value: [u8; 32],
 }
 
 impl<T: AsRef<[u8]>> fmt::Debug for DecodedTrieProof<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_map()
-            .entries(self.iter_ordered().map(|(nibbles, entry)| {
-                struct Dummy<'a>(&'a [nibble::Nibble]);
-                impl<'a> fmt::Debug for Dummy<'a> {
-                    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                        if self.0.is_empty() {
-                            write!(f, "∅")?
+            .entries(
+                self.iter_ordered()
+                    .map(|((trie_root_hash, nibbles), entry)| {
+                        struct DummyHash<'a>(&'a [u8]);
+                        impl<'a> fmt::Debug for DummyHash<'a> {
+                            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                                if self.0.is_empty() {
+                                    write!(f, "∅")?
+                                }
+                                for byte in self.0 {
+                                    write!(f, "{:02x}", *byte)?
+                                }
+                                Ok(())
+                            }
                         }
-                        for nibble in self.0 {
-                            write!(f, "{:x}", *nibble)?
-                        }
-                        Ok(())
-                    }
-                }
 
-                (
-                    Dummy(nibbles),
-                    (
-                        entry.trie_node_info.children,
-                        entry.trie_node_info.storage_value,
-                    ),
-                )
-            }))
+                        struct DummyNibbles<'a>(&'a [nibble::Nibble]);
+                        impl<'a> fmt::Debug for DummyNibbles<'a> {
+                            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                                if self.0.is_empty() {
+                                    write!(f, "∅")?
+                                }
+                                for nibble in self.0 {
+                                    write!(f, "{:x}", *nibble)?
+                                }
+                                Ok(())
+                            }
+                        }
+
+                        (
+                            (DummyHash(trie_root_hash), DummyNibbles(nibbles)),
+                            (
+                                entry.trie_node_info.children,
+                                entry.trie_node_info.storage_value,
+                            ),
+                        )
+                    }),
+            )
             .finish()
     }
 }
@@ -416,17 +426,18 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     ///
     pub fn iter_runtime_context_ordered(
         &'_ self,
-    ) -> impl Iterator<Item = (Vec<u8>, StorageValue<'_>)> + '_ {
-        self.iter_ordered().filter_map(|(key, entry)| {
-            let value = entry.trie_node_info.storage_value;
+    ) -> impl Iterator<Item = ((&'_ [u8; 32], Vec<u8>), StorageValue<'_>)> + '_ {
+        self.iter_ordered()
+            .filter_map(|((trie_root_hash, key), entry)| {
+                let value = entry.trie_node_info.storage_value;
 
-            if key.len() % 2 != 0 {
-                return None;
-            }
+                if key.len() % 2 != 0 {
+                    return None;
+                }
 
-            let key = nibble::nibbles_to_bytes_suffix_extend(key.iter().copied()).collect();
-            Some((key, value))
-        })
+                let key = nibble::nibbles_to_bytes_suffix_extend(key.iter().copied()).collect();
+                Some(((trie_root_hash, key), value))
+            })
     }
 
     /// Returns a list of all elements of the proof, ordered by key in lexicographic order.
@@ -434,14 +445,9 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// The iterator includes branch nodes.
     pub fn iter_ordered(
         &'_ self,
-    ) -> impl Iterator<Item = (&'_ [nibble::Nibble], ProofEntry<'_>)> + '_ {
-        self.entries.iter().filter_map(
+    ) -> impl Iterator<Item = ((&'_ [u8; 32], &'_ [nibble::Nibble]), ProofEntry<'_>)> + '_ {
+        self.entries.iter().map(
             |((trie_root_hash, key), (storage_value_inner, node_value_range, children_bitmap))| {
-                // TODO: this filtering out is temporary as it is O(n)
-                if *trie_root_hash != self.trie_root_merkle_value {
-                    return None;
-                }
-
                 let storage_value = match storage_value_inner {
                     StorageValueInner::Known {
                         offset,
@@ -460,8 +466,8 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                     }
                 };
 
-                Some((
-                    &key[..],
+                (
+                    (trie_root_hash, &key[..]),
                     ProofEntry {
                         node_value: &self.proof.as_ref()[node_value_range.clone()],
                         unhashed_storage_value: match storage_value_inner {
@@ -474,6 +480,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                         },
                         trie_node_info: TrieNodeInfo {
                             children: self.children_from_key(
+                                trie_root_hash,
                                 key,
                                 &self.proof.as_ref()[node_value_range.clone()],
                                 *children_bitmap,
@@ -481,20 +488,21 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             storage_value,
                         },
                     },
-                ))
+                )
             },
         )
     }
 
     fn children_from_key<'a>(
         &'a self,
+        trie_root_merkle_value: &[u8; 32],
         key: &[nibble::Nibble],
         parent_node_value: &'a [u8],
         children_bitmap: u16,
     ) -> Children<'a> {
         debug_assert_eq!(
             self.entries
-                .get(&(self.trie_root_merkle_value, key.to_vec()))
+                .get(&(*trie_root_merkle_value, key.to_vec()))
                 .unwrap()
                 .2,
             children_bitmap
@@ -514,13 +522,12 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
             children[usize::from(u8::from(nibble))] = if let Some(((_, child), _)) = self
                 .entries
                 .range((
-                    ops::Bound::Included((self.trie_root_merkle_value, child_search.clone())), // TODO: stupid allocation
+                    ops::Bound::Included((*trie_root_merkle_value, child_search.clone())), // TODO: stupid allocation
                     ops::Bound::Unbounded,
                 ))
                 .next()
                 .filter(|((trie_root, maybe_child), _)| {
-                    *trie_root == self.trie_root_merkle_value
-                        && maybe_child.starts_with(&child_search)
+                    trie_root == trie_root_merkle_value && maybe_child.starts_with(&child_search)
                 }) {
                 Child::InProof {
                     child_key: child,
@@ -539,6 +546,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// Returns the closest ancestor to the given key. If `key` is in the proof, returns `key`.
     fn closest_ancestor<'a>(
         &'a self,
+        trie_root_merkle_value: &[u8; 32],
         key: &[nibble::Nibble],
     ) -> Option<
         Option<(
@@ -563,8 +571,8 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
             match self
                 .entries
                 .range((
-                    ops::Bound::Included(&(self.trie_root_merkle_value, Vec::new())),
-                    ops::Bound::Included(&(self.trie_root_merkle_value, to_search.to_vec())), // TODO: stupid allocation
+                    ops::Bound::Included(&(*trie_root_merkle_value, Vec::new())),
+                    ops::Bound::Included(&(*trie_root_merkle_value, to_search.to_vec())), // TODO: stupid allocation
                 ))
                 .next_back()
             {
@@ -603,8 +611,12 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     ///
     /// This function might return `Some` even if there is no node in the trie for `key`, in which
     /// case the returned [`TrieNodeInfo`] will indicate no storage value and no children.
-    pub fn trie_node_info(&'_ self, key: &[nibble::Nibble]) -> Option<TrieNodeInfo<'_>> {
-        match self.closest_ancestor(key) {
+    pub fn trie_node_info(
+        &'_ self,
+        trie_root_merkle_value: &[u8; 32],
+        key: &[nibble::Nibble],
+    ) -> Option<TrieNodeInfo<'_>> {
+        match self.closest_ancestor(trie_root_merkle_value, key) {
             None => None,
             Some(None) => {
                 // Node is known to not exist.
@@ -639,6 +651,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                         }
                     },
                     children: self.children_from_key(
+                        trie_root_merkle_value,
                         ancestor_key,
                         &self.proof.as_ref()[node_value_range.clone()],
                         *children_bitmap,
@@ -664,15 +677,14 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                     .entries
                     .range((
                         ops::Bound::Included((
-                            self.trie_root_merkle_value,
+                            *trie_root_merkle_value,
                             key[..ancestor_key.len() + 1].to_vec(), // TODO: stupid allocation
                         )),
                         ops::Bound::Unbounded,
                     ))
                     .next()
                     .map_or(false, |((r, k), _)| {
-                        *r == self.trie_root_merkle_value
-                            && k.starts_with(&key[..ancestor_key.len() + 1])
+                        r == trie_root_merkle_value && k.starts_with(&key[..ancestor_key.len() + 1])
                     })
                 {
                     // There exists at least one node in the proof that starts with
@@ -707,11 +719,18 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// >           [`DecodedTrieProof::trie_node_info`].
     // TODO: return a Result instead of Option?
     // TODO: accept param as iterator rather than slice?
-    pub fn storage_value(&'_ self, key: &[u8]) -> Option<Option<(&'_ [u8], TrieEntryVersion)>> {
+    pub fn storage_value(
+        &'_ self,
+        trie_root_merkle_value: &[u8; 32],
+        key: &[u8],
+    ) -> Option<Option<(&'_ [u8], TrieEntryVersion)>> {
         // Annoyingly we have to create a `Vec` for the key, but the API of BTreeMap gives us
         // no other choice.
         let key = nibble::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>();
-        match self.trie_node_info(&key)?.storage_value {
+        match self
+            .trie_node_info(trie_root_merkle_value, &key)?
+            .storage_value
+        {
             StorageValue::Known { value, inline } => Some(Some((
                 value,
                 if inline {
@@ -742,6 +761,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     // TODO: accept params as iterators rather than slices?
     pub fn next_key(
         &'_ self,
+        trie_root_merkle_value: &[u8; 32],
         key_before: &[nibble::Nibble],
         or_equal: bool,
         prefix: &[nibble::Nibble],
@@ -760,7 +780,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
         }
 
         loop {
-            match self.closest_ancestor(&key_before) {
+            match self.closest_ancestor(trie_root_merkle_value, &key_before) {
                 None => return None,
                 Some(None) => {
                     // `key_before` has no ancestor, meaning that it is either the root of the
@@ -769,11 +789,11 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                     match self
                         .entries
                         .range((
-                            ops::Bound::Included((self.trie_root_merkle_value, Vec::new())),
+                            ops::Bound::Included((*trie_root_merkle_value, Vec::new())),
                             ops::Bound::Unbounded,
                         ))
                         .next()
-                        .filter(|((h, _), _)| *h == self.trie_root_merkle_value)
+                        .filter(|((h, _), _)| h == trie_root_merkle_value)
                     {
                         Some(((_, k), _)) if *k >= key_before => {
                             // We still need to handle the prefix and branch nodes. To make our
@@ -818,14 +838,14 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             .entries
                             .range((
                                 ops::Bound::Included((
-                                    self.trie_root_merkle_value,
+                                    *trie_root_merkle_value,
                                     key_before.to_vec(), // TODO: stupid allocation
                                 )),
                                 ops::Bound::Unbounded,
                             ))
                             .next()
                             .filter(|((h, k), _)| {
-                                *h == self.trie_root_merkle_value && k.starts_with(&key_before)
+                                h == trie_root_merkle_value && k.starts_with(&key_before)
                             })
                         {
                             key_before = descendant_key.clone();
@@ -866,15 +886,31 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     // TODO: accept params as iterators rather than slices?
     pub fn closest_descendant_merkle_value(
         &'_ self,
+        trie_root_merkle_value: &[u8; 32],
         key: &[nibble::Nibble],
     ) -> Option<Option<&'_ [u8]>> {
         if key.is_empty() {
-            // The closest descendant of an empty key is always the root of the trie.
-            return Some(Some(&self.trie_root_merkle_value));
+            // The closest descendant of an empty key is always the root of the trie itself,
+            // assuming that the proof contains this trie.
+            return self
+                .entries
+                .range((
+                    ops::Bound::Included((*trie_root_merkle_value, Vec::new())),
+                    ops::Bound::Unbounded,
+                ))
+                .next()
+                .and_then(|((h, _), _)| {
+                    if h == trie_root_merkle_value {
+                        Some(&h[..])
+                    } else {
+                        None
+                    }
+                })
+                .map(Some);
         }
 
         // Call `closest_ancestor(parent(key))`.
-        match self.closest_ancestor(&key[..key.len() - 1]) {
+        match self.closest_ancestor(trie_root_merkle_value, &key[..key.len() - 1]) {
             None => None,
             Some(None) => Some(None),
             Some(Some((parent_key, (_, parent_node_value_range, _))))
@@ -899,12 +935,12 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                 if self
                     .entries
                     .range((
-                        ops::Bound::Included((self.trie_root_merkle_value, key.to_vec())), // TODO: stupid allocation
+                        ops::Bound::Included((*trie_root_merkle_value, key.to_vec())), // TODO: stupid allocation
                         ops::Bound::Unbounded,
                     ))
                     .next()
                     .map_or(true, |((h, k), _)| {
-                        *h != self.trie_root_merkle_value || !k.starts_with(key)
+                        h != trie_root_merkle_value || !k.starts_with(key)
                     })
                 {
                     return Some(None);
