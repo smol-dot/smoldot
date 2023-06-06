@@ -2684,8 +2684,6 @@ impl ExternalStorageRoot {
     /// Must be passed `None` if [`ExternalStorageRoot::trie`] returned [`Trie::ChildTrieDefault`]
     /// and the trie doesn't exist.
     ///
-    /// See also the documentation of [`ExternalStorageRoot::commit_changes`].
-    ///
     /// # Panic
     ///
     /// Panics if `None` is passed and [`ExternalStorageRoot::trie`] returned [`Trie::MainTrie`].
