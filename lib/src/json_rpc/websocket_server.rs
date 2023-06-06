@@ -110,8 +110,8 @@
 //! case of a (D)DoS attack on the WebSocket server, only up to one core of CPU processing power
 //! can be occupied by the attacker.
 
-#![cfg(all(feature = "std"))]
-#![cfg_attr(docsrs, doc(cfg(all(feature = "std"))))]
+#![cfg(feature = "std")]
+#![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
 #[cfg(test)]
 mod tests;

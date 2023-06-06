@@ -40,8 +40,8 @@
 //! >           questionable decisions that it has to keep for backwards compatibility reasons.
 //! >           This keystore, being newly-written, doesn't have to follow them.
 
-#![cfg(all(feature = "std"))]
-#![cfg_attr(docsrs, doc(cfg(all(feature = "std"))))]
+#![cfg(feature = "std")]
+#![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
 use crate::{identity::seed_phrase, util::SipHasherBuild};
 
