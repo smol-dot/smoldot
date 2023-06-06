@@ -92,9 +92,11 @@ pub fn run(
             .virtual_machine
             .run_vectored(config.function_to_call, config.parameter)?
             .into(),
-        main_trie_changes: config.storage_main_trie_changes,
+        storage_changes: StorageChanges {
+            main_trie: config.storage_main_trie_changes,
+        },
         state_trie_version,
-        main_trie_transaction: Vec::new(),
+        transactions_stack: Vec::new(),
         offchain_storage_changes: config.offchain_storage_changes,
         root_calculation: None,
         logs: String::new(),
@@ -272,9 +274,11 @@ impl StorageGet {
                 // TODO: could be less overhead?
                 let mut value = value.map(|(v, _)| v).unwrap_or_default();
                 append_to_storage_value(&mut value, req.value().as_ref());
-                self.inner
-                    .main_trie_changes
-                    .diff_insert(req.key().as_ref().to_vec(), value, ());
+                self.inner.storage_changes.main_trie.diff_insert(
+                    req.key().as_ref().to_vec(),
+                    value,
+                    (),
+                );
 
                 self.inner.vm = req.resume();
             }
@@ -381,7 +385,7 @@ impl NextKey {
                     } else {
                         req_key.as_ref()
                     };
-                    self.inner.main_trie_changes.storage_next_key(
+                    self.inner.storage_changes.main_trie.storage_next_key(
                         requested_key,
                         key.as_deref(),
                         false,
@@ -420,7 +424,8 @@ impl NextKey {
                         self.inner.vm = req.resume(self.keys_removed_so_far, true);
                     } else {
                         self.inner
-                            .main_trie_changes
+                            .storage_changes
+                            .main_trie
                             .diff_insert_erase(key.clone(), ());
                         self.keys_removed_so_far += 1;
                         self.key_overwrite = Some(key); // TODO: might be expensive if lots of keys
@@ -593,15 +598,15 @@ struct Inner {
     /// Virtual machine running the call.
     vm: host::HostVm,
 
-    /// Pending changes to the top storage trie that this execution performs.
-    main_trie_changes: storage_diff::TrieDiff,
+    /// Pending changes to the storage that this execution performs.
+    storage_changes: StorageChanges,
 
-    /// Contains a copy of [`Inner::main_trie_changes`] at the time when the transaction started.
+    /// Contains a copy of [`Inner::storage_changes`] at the time when the transaction started.
     /// When the storage transaction ends, either the entry is silently discarded (to commit),
-    /// or is written over [`Inner::main_trie_changes`] (to rollback).
+    /// or is written over [`Inner::storage_changes`] (to rollback).
     ///
     /// Contains a `Vec` in case transactions are stacked.
-    main_trie_transaction: Vec<storage_diff::TrieDiff>,
+    transactions_stack: Vec<StorageChanges>,
 
     /// State trie version indicated by the runtime. All the storage changes that are performed
     /// use this version.
@@ -618,6 +623,13 @@ struct Inner {
 
     /// Value provided by [`Config::max_log_level`].
     max_log_level: u32,
+}
+
+/// See [`Inner::storage_changes`].
+#[derive(Clone)]
+struct StorageChanges {
+    /// Changes to the main trie.
+    main_trie: storage_diff::TrieDiff,
 }
 
 impl Inner {
@@ -640,7 +652,7 @@ impl Inner {
                 host::HostVm::Finished(finished) => {
                     return RuntimeHostVm::Finished(Ok(Success {
                         virtual_machine: SuccessVirtualMachine(finished),
-                        storage_main_trie_changes: self.main_trie_changes,
+                        storage_main_trie_changes: self.storage_changes.main_trie,
                         state_trie_version: self.state_trie_version,
                         offchain_storage_changes: self.offchain_storage_changes,
                         logs: self.logs,
@@ -654,7 +666,7 @@ impl Inner {
                         continue;
                     }
 
-                    let search = self.main_trie_changes.diff_get(req.key().as_ref());
+                    let search = self.storage_changes.main_trie.diff_get(req.key().as_ref());
                     if let Some((overlay, _)) = search {
                         self.vm = req.resume_full_value(overlay);
                     } else {
@@ -671,10 +683,14 @@ impl Inner {
                     }
 
                     if let Some(value) = req.value() {
-                        self.main_trie_changes
-                            .diff_insert(req.key().as_ref(), value.as_ref(), ());
+                        self.storage_changes.main_trie.diff_insert(
+                            req.key().as_ref(),
+                            value.as_ref(),
+                            (),
+                        );
                     } else {
-                        self.main_trie_changes
+                        self.storage_changes
+                            .main_trie
                             .diff_insert_erase(req.key().as_ref(), ());
                     }
 
@@ -689,13 +705,13 @@ impl Inner {
                     }
 
                     let current_value = self
-                        .main_trie_changes
+                        .storage_changes.main_trie
                         .diff_get(req.key().as_ref())
                         .map(|(v, _)| v);
                     if let Some(current_value) = current_value {
                         let mut current_value = current_value.unwrap_or_default().to_vec();
                         append_to_storage_value(&mut current_value, req.value().as_ref());
-                        self.main_trie_changes.diff_insert(
+                        self.storage_changes.main_trie.diff_insert(
                             req.key().as_ref().to_vec(),
                             current_value,
                             (),
@@ -735,7 +751,7 @@ impl Inner {
                     if self.root_calculation.is_none() {
                         self.root_calculation = Some(trie_root_calculator::trie_root_calculator(
                             trie_root_calculator::Config {
-                                diff: self.main_trie_changes.clone(), // TODO: don't clone?
+                                diff: self.storage_changes.main_trie.clone(), // TODO: don't clone?
                                 diff_trie_entries_version: self.state_trie_version,
                                 max_trie_recalculation_depth_hint: 16, // TODO: ?!
                             },
@@ -854,19 +870,19 @@ impl Inner {
 
                 host::HostVm::StartStorageTransaction(tx) => {
                     // TODO: this cloning is very expensive, but providing a more optimized implementation is very complicated
-                    self.main_trie_transaction
-                        .push(self.main_trie_changes.clone());
+                    self.transactions_stack
+                        .push(self.storage_changes.clone());
                     self.vm = tx.resume();
                 }
 
                 host::HostVm::EndStorageTransaction { resume, rollback } => {
                     // The inner implementation guarantees that a storage transaction can only
                     // end if it has earlier been started.
-                    debug_assert!(!self.main_trie_transaction.is_empty());
-                    let rollback_diff = self.main_trie_transaction.pop().unwrap();
+                    debug_assert!(!self.transactions_stack.is_empty());
+                    let rollback_diff = self.transactions_stack.pop().unwrap();
 
                     if rollback {
-                        self.main_trie_changes = rollback_diff;
+                        self.storage_changes = rollback_diff;
                     }
 
                     self.vm = resume.resume();
