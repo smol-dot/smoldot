@@ -2150,22 +2150,24 @@ impl ExternalStorageGet {
     /// >           child tries and obtain a valid value, this is handled entirely internally and
     /// >           doesn't need to be handled by the API user. Providing the value is simply about
     /// >           looking up an entry in a map.
-    pub fn key(&'_ self) -> StorageKey<impl AsRef<[u8]> + '_> {
-        let key = self
-            .inner
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+        self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
-            .unwrap();
+            .unwrap()
+    }
 
+    /// Returns the trie that must be read from.
+    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
         if let Some((child_trie_ptr, child_trie_size)) = self.child_trie_ptr_size {
             let child_trie = self
                 .inner
                 .vm
                 .read_memory(child_trie_ptr, child_trie_size)
                 .unwrap();
-            StorageKey::ChildTrieDefault { child_trie, key }
+            Trie::ChildTrieDefault { child_trie }
         } else {
-            StorageKey::MainTrie { key }
+            Trie::MainTrie
         }
     }
 
@@ -2355,32 +2357,11 @@ enum ExternalStorageSetInner {
 
 impl ExternalStorageSet {
     /// Returns the key whose value must be set.
-    pub fn key(&'_ self) -> StorageKey<impl AsRef<[u8]> + '_> {
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
         match &self.write_inner {
             ExternalStorageSetInner::Regular {
-                key_ptr,
-                key_size,
-                child_trie_ptr_size,
-                ..
-            } => {
-                let key = self.inner.vm.read_memory(*key_ptr, *key_size).unwrap();
-
-                if let Some((child_trie_ptr, child_trie_size)) = child_trie_ptr_size {
-                    let child_trie = self
-                        .inner
-                        .vm
-                        .read_memory(*child_trie_ptr, *child_trie_size)
-                        .unwrap();
-                    StorageKey::ChildTrieDefault {
-                        child_trie: either::Left(child_trie),
-                        key: either::Left(key),
-                    }
-                } else {
-                    StorageKey::MainTrie {
-                        key: either::Left(key),
-                    }
-                }
-            }
+                key_ptr, key_size, ..
+            } => either::Left(self.inner.vm.read_memory(*key_ptr, *key_size).unwrap()),
             ExternalStorageSetInner::ChildTrieRootCommit {
                 child_trie_ptr_size: (child_trie_ptr, child_trie_size),
                 ..
@@ -2398,10 +2379,26 @@ impl ExternalStorageSet {
                         .unwrap()
                         .as_ref(),
                 );
-                StorageKey::MainTrie {
-                    key: either::Right(actual_key),
-                }
+                either::Right(actual_key)
             }
+        }
+    }
+
+    /// Returns the trie that must be written to.
+    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+        match &self.write_inner {
+            ExternalStorageSetInner::Regular {
+                child_trie_ptr_size: Some((ptr, size)),
+                ..
+            } => {
+                let child_trie = self.inner.vm.read_memory(*ptr, *size).unwrap();
+                Trie::ChildTrieDefault { child_trie }
+            }
+            ExternalStorageSetInner::Regular {
+                child_trie_ptr_size: None,
+                ..
+            } => Trie::MainTrie,
+            ExternalStorageSetInner::ChildTrieRootCommit { .. } => Trie::MainTrie,
         }
     }
 
@@ -2458,42 +2455,6 @@ impl fmt::Debug for ExternalStorageSet {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
-pub enum StorageKey<T> {
-    MainTrie { key: T },
-    ChildTrieDefault { child_trie: T, key: T },
-}
-
-impl<T> StorageKey<T> {
-    /// Returns the key alone.
-    pub fn into_key(self) -> T {
-        match self {
-            StorageKey::MainTrie { key } => key,
-            StorageKey::ChildTrieDefault { key, .. } => key,
-        }
-    }
-}
-
-impl<T> fmt::Debug for StorageKey<T>
-where
-    T: AsRef<[u8]>,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            StorageKey::MainTrie { key } => f
-                .debug_struct("StorageKey")
-                .field("key", &hex::encode(key.as_ref()))
-                .field("trie", &"<main trie>")
-                .finish(),
-            StorageKey::ChildTrieDefault { child_trie, key } => f
-                .debug_struct("StorageKey")
-                .field("key", &hex::encode(key.as_ref()))
-                .field("trie", &hex::encode(child_trie.as_ref()))
-                .finish(),
-        }
-    }
-}
-
 /// Must load a storage value, treat it as if it was a SCALE-encoded container, and put `value`
 /// at the end of the container, increasing the number of elements.
 ///
@@ -2529,14 +2490,20 @@ pub struct ExternalStorageAppend {
 
 impl ExternalStorageAppend {
     /// Returns the key whose value must be set.
-    pub fn key(&'_ self) -> StorageKey<impl AsRef<[u8]> + '_> {
-        // Note that there is no equivalent of this host function for child tries.
-        let key = self
-            .inner
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+        self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
-            .unwrap();
-        StorageKey::MainTrie { key }
+            .unwrap()
+    }
+
+    /// Returns the trie that must be written to.
+    ///
+    /// > **Note**: At the moment, this function always returns [`Trie::MainTrie`], as there is
+    /// >           no host function that appends to a child trie storage.
+    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+        // Note that there is no equivalent of this host function for child tries.
+        Trie::<&'static [u8]>::MainTrie
     }
 
     /// Returns the value to append.
@@ -2583,25 +2550,25 @@ pub struct ExternalStorageClearPrefix {
 
 impl ExternalStorageClearPrefix {
     /// Returns the prefix whose keys must be removed.
-    pub fn prefix(&'_ self) -> StorageKey<impl AsRef<[u8]> + '_> {
-        let prefix = if let Some((prefix_ptr, prefix_size)) = self.prefix_ptr_size {
+    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+        if let Some((prefix_ptr, prefix_size)) = self.prefix_ptr_size {
             either::Left(self.inner.vm.read_memory(prefix_ptr, prefix_size).unwrap())
         } else {
             either::Right(&[][..])
-        };
+        }
+    }
 
+    /// Returns the trie that must be written to.
+    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
         if let Some((child_trie_ptr, child_trie_size)) = self.child_trie_ptr_size {
             let child_trie = self
                 .inner
                 .vm
                 .read_memory(child_trie_ptr, child_trie_size)
                 .unwrap();
-            StorageKey::ChildTrieDefault {
-                child_trie: either::Left(child_trie),
-                key: prefix,
-            }
+            Trie::ChildTrieDefault { child_trie }
         } else {
-            StorageKey::MainTrie { key: prefix }
+            Trie::MainTrie
         }
     }
 
@@ -2747,23 +2714,24 @@ impl ExternalStorageNextKey {
     /// > **Note**: While the runtime is able to obtain keys correspond to child tries by iterating
     /// >           over keys, this is handled internally and doesn't need any special handling by
     /// >           by the API user.
-    pub fn key(&'_ self) -> StorageKey<impl AsRef<[u8]> + '_> {
-        let key = self
-            .inner
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+        self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
-            .unwrap();
+            .unwrap()
+    }
 
+    /// Returns the trie that must be read from.
+    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
         if let Some((child_trie_ptr, child_trie_size)) = self.child_trie_ptr_size {
             let child_trie = self
                 .inner
                 .vm
                 .read_memory(child_trie_ptr, child_trie_size)
                 .unwrap();
-            StorageKey::ChildTrieDefault { child_trie, key }
+            Trie::ChildTrieDefault { child_trie }
         } else {
-            debug_assert!(!key.as_ref().starts_with(CHILD_STORAGE_SPECIAL_PREFIX));
-            StorageKey::MainTrie { key }
+            Trie::MainTrie
         }
     }
 
