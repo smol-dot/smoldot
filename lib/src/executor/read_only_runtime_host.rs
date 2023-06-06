@@ -416,11 +416,6 @@ impl Inner {
                     }
                 }
 
-                host::HostVm::ExternalStorageNextChildTrie(req) => {
-                    // TODO: this is a dummy implementation and child tries are not implemented properly
-                    self.vm = req.resume(None);
-                }
-
                 host::HostVm::SignatureVerification(req) => {
                     self.vm = req.into();
                     return RuntimeHostVm::SignatureVerification(SignatureVerification {

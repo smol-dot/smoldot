@@ -762,9 +762,6 @@ impl Inner {
                         continue;
                     }
 
-                    // For the main trie, whether the changes must be committed is a dummy value.
-                    debug_assert!(req.commit_changes());
-
                     if self.root_calculation.is_none() {
                         self.root_calculation = Some(trie_root_calculator::trie_root_calculator(
                             trie_root_calculator::Config {
@@ -837,11 +834,6 @@ impl Inner {
                         // TODO: this is a dummy implementation and child tries are not implemented properly
                         self.vm = req.resume(None);
                     }
-                }
-
-                host::HostVm::ExternalStorageNextChildTrie(req) => {
-                    // TODO: this is a dummy implementation and child tries are not implemented properly
-                    self.vm = req.resume(None);
                 }
 
                 host::HostVm::ExternalOffchainStorageSet(req) => {
