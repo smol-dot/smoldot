@@ -431,7 +431,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     let decoded = outcome.decode();
                     let decoded = proof_decode::decode_and_verify_proof(proof_decode::Config {
                         proof: decoded,
-                        trie_root_hash: storage_trie_root,
                     })
                     .map_err(StorageQueryErrorDetail::ProofVerification)?;
 

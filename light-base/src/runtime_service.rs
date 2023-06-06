@@ -807,7 +807,6 @@ impl<TPlat: PlatformRef> RuntimeAccess<TPlat> {
         let call_proof = call_proof.and_then(|call_proof| {
             proof_decode::decode_and_verify_proof(proof_decode::Config {
                 proof: call_proof.decode().to_owned(), // TODO: to_owned() inefficiency, need some help from the networking to obtain the owned data
-                trie_root_hash: &self.block_state_root_hash,
             })
             .map_err(RuntimeCallError::StorageRetrieval)
         });

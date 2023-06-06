@@ -44,12 +44,7 @@ use alloc::{collections::BTreeMap, vec, vec::Vec};
 use core::{fmt, iter, mem, ops};
 
 /// Configuration to pass to [`decode_and_verify_proof`].
-pub struct Config<'a, I> {
-    /// Merkle value (or node value) of the root node of the trie.
-    ///
-    /// > **Note**: The Merkle value and node value are always the same for the root node.
-    pub trie_root_hash: &'a [u8; 32],
-
+pub struct Config<I> {
     /// List of node values of nodes found in the trie. At least one entry corresponding to the
     /// root node of the trie must be present in order for the verification to succeed.
     pub proof: I,
@@ -141,154 +136,182 @@ where
         });
     }
 
+    // Start by iterating over each element of the proof, and keep track of elements that are
+    // decodable but aren't mentioned in any other element. This gives us the tries roots.
+    let trie_roots = {
+        let mut maybe_trie_roots = merkle_values
+            .keys()
+            .collect::<hashbrown::HashSet<_, fnv::FnvBuildHasher>>();
+        for (hash, (_, proof_entry_range)) in merkle_values.iter() {
+            let node_value = &config.proof.as_ref()[proof_entry_range.clone()];
+            let Ok(decoded) = trie_node::decode(node_value)
+                else {
+                    maybe_trie_roots.remove(hash);
+                    continue 
+                };
+            for child in decoded.children.into_iter().flatten() {
+                if let Ok(child) = &<[u8; 32]>::try_from(child) {
+                    maybe_trie_roots.remove(child);
+                }
+            }
+        }
+        maybe_trie_roots
+    };
+
     // The implementation below iterates down the tree of nodes represented by this proof, keeping
     // note of the traversed elements.
+
+    // Keep track of all the entries found in the proof.
+    let mut entries = BTreeMap::new();
 
     // Keep track of the proof entries that haven't been visited when traversing.
     let mut unvisited_proof_entries =
         (0..merkle_values.len()).collect::<hashbrown::HashSet<_, fnv::FnvBuildHasher>>();
 
-    // Find the expected trie root in the proof. This is the starting point of the verification.
-    let mut remain_iterate = {
-        let (root_position, root_range) = merkle_values
-            .get(&config.trie_root_hash[..])
-            .ok_or(Error::TrieRootNotFound)?
-            .clone();
-        let _ = unvisited_proof_entries.remove(&root_position);
-        vec![(root_range, Vec::new())]
-    };
+    // We repeat this operation for every trie root.
+    for trie_root_hash in trie_roots {
+        // Find the expected trie root in the proof. This is the starting point of the verification.
+        let mut remain_iterate = {
+            let (root_position, root_range) =
+                merkle_values.get(&trie_root_hash[..]).unwrap().clone();
+            let _ = unvisited_proof_entries.remove(&root_position);
+            vec![(root_range, Vec::new())]
+        };
 
-    // Keep track of all the entries found in the proof.
-    let mut entries = BTreeMap::new();
-
-    while !remain_iterate.is_empty() {
-        // Iterate through each entry in `remain_iterate`.
-        // This clears `remain_iterate` so that we can add new entries to it during the iteration.
-        for (proof_entry_range, storage_key_before_partial) in
-            mem::replace(&mut remain_iterate, Vec::with_capacity(merkle_values.len()))
-        {
-            // Decodes the proof entry.
-            let proof_entry = &proof_as_ref[proof_entry_range.clone()];
-            let decoded_node_value =
-                trie_node::decode(proof_entry).map_err(Error::InvalidNodeValue)?;
-            let decoded_node_value_children_bitmap = decoded_node_value.children_bitmap();
-
-            // Build the storage key of the node.
-            let storage_key = {
-                let mut storage_key_after_partial = Vec::with_capacity(
-                    storage_key_before_partial.len() + decoded_node_value.partial_key.len(),
-                );
-                storage_key_after_partial.extend_from_slice(&storage_key_before_partial);
-                storage_key_after_partial.extend(decoded_node_value.partial_key);
-                storage_key_after_partial
-            };
-
-            // Add the children to `remain_iterate`.
-            for (child_num, child_node_value) in decoded_node_value.children.into_iter().enumerate()
+        while !remain_iterate.is_empty() {
+            // Iterate through each entry in `remain_iterate`.
+            // This clears `remain_iterate` so that we can add new entries to it during the iteration.
+            for (proof_entry_range, storage_key_before_partial) in
+                mem::replace(&mut remain_iterate, Vec::with_capacity(merkle_values.len()))
             {
-                // Ignore missing children slots.
-                let child_node_value = match child_node_value {
-                    None => continue,
-                    Some(v) => v,
+                // Decodes the proof entry.
+                let proof_entry = &proof_as_ref[proof_entry_range.clone()];
+                let decoded_node_value =
+                    trie_node::decode(proof_entry).map_err(Error::InvalidNodeValue)?;
+                let decoded_node_value_children_bitmap = decoded_node_value.children_bitmap();
+
+                // Build the storage key of the node.
+                let storage_key = {
+                    let mut storage_key_after_partial = Vec::with_capacity(
+                        storage_key_before_partial.len() + decoded_node_value.partial_key.len(),
+                    );
+                    storage_key_after_partial.extend_from_slice(&storage_key_before_partial);
+                    storage_key_after_partial.extend(decoded_node_value.partial_key);
+                    storage_key_after_partial
                 };
 
-                debug_assert!(child_num < 16);
-                let child_nibble =
-                    nibble::Nibble::try_from(u8::try_from(child_num).unwrap()).unwrap();
+                // Add the children to `remain_iterate`.
+                for (child_num, child_node_value) in
+                    decoded_node_value.children.into_iter().enumerate()
+                {
+                    // Ignore missing children slots.
+                    let child_node_value = match child_node_value {
+                        None => continue,
+                        Some(v) => v,
+                    };
 
-                // Key of the child node before its partial key.
-                let mut child_storage_key_before_partial =
-                    Vec::with_capacity(storage_key.len() + 1);
-                child_storage_key_before_partial.extend_from_slice(&storage_key);
-                child_storage_key_before_partial.push(child_nibble);
+                    debug_assert!(child_num < 16);
+                    let child_nibble =
+                        nibble::Nibble::try_from(u8::try_from(child_num).unwrap()).unwrap();
 
-                // The value of the child node is either directly inlined (if less than 32 bytes)
-                // or is a hash.
-                if child_node_value.len() < 32 {
-                    let offset = proof_entry_range.start
-                        + if !child_node_value.is_empty() {
-                            child_node_value.as_ptr() as usize - proof_entry.as_ptr() as usize
-                        } else {
-                            0
-                        };
-                    debug_assert!(offset == 0 || offset >= proof_entry_range.start);
-                    debug_assert!(offset <= (proof_entry_range.start + proof_entry.len()));
-                    remain_iterate.push((
-                        offset..(offset + child_node_value.len()),
-                        child_storage_key_before_partial,
-                    ));
-                } else {
-                    // The decoding API guarantees that the child value is never larger than
-                    // 32 bytes.
-                    debug_assert_eq!(child_node_value.len(), 32);
-                    if let Some((child_position, child_entry_range)) =
-                        merkle_values.get(child_node_value)
-                    {
-                        // If the node value of the child is less than 32 bytes long, it should
-                        // have been inlined instead of given separately.
-                        if child_entry_range.end - child_entry_range.start < 32 {
-                            return Err(Error::UnexpectedHashedNode);
-                        }
+                    // Key of the child node before its partial key.
+                    let mut child_storage_key_before_partial =
+                        Vec::with_capacity(storage_key.len() + 1);
+                    child_storage_key_before_partial.extend_from_slice(&storage_key);
+                    child_storage_key_before_partial.push(child_nibble);
 
-                        // Remove the entry from `unvisited_proof_entries`.
-                        // Note that it is questionable what to do if the same entry is visited
-                        // multiple times. In case where multiple storage branches are identical,
-                        // the sender of the proof should de-duplicate the identical nodes. For
-                        // this reason, it could be legitimate for the same proof entry to be
-                        // visited multiple times.
-                        let _ = unvisited_proof_entries.remove(child_position);
-                        remain_iterate
-                            .push((child_entry_range.clone(), child_storage_key_before_partial));
-                    }
-                }
-            }
-
-            // Insert the node into `entries`.
-            // This is done at the end so that `storage_key` doesn't need to be cloned.
-            let _prev_value = entries.insert((*config.trie_root_hash, storage_key), {
-                let storage_value = match decoded_node_value.storage_value {
-                    trie_node::StorageValue::None => StorageValueInner::None,
-                    trie_node::StorageValue::Hashed(value_hash) => {
-                        if let Some((value_position, value_entry_range)) =
-                            merkle_values.get(&value_hash[..])
-                        {
-                            let _ = unvisited_proof_entries.remove(value_position);
-                            StorageValueInner::Known {
-                                is_inline: false,
-                                offset: value_entry_range.start,
-                                len: value_entry_range.end - value_entry_range.start,
-                            }
-                        } else {
-                            let offset =
-                                value_hash.as_ptr() as usize - proof_as_ref.as_ptr() as usize;
-                            debug_assert!(offset >= proof_entry_range.start);
-                            debug_assert!(offset <= (proof_entry_range.start + proof_entry.len()));
-                            StorageValueInner::HashKnownValueMissing { offset }
-                        }
-                    }
-                    trie_node::StorageValue::Unhashed(v) => {
-                        let offset = if !v.is_empty() {
-                            v.as_ptr() as usize - proof_as_ref.as_ptr() as usize
-                        } else {
-                            0
-                        };
+                    // The value of the child node is either directly inlined (if less than 32 bytes)
+                    // or is a hash.
+                    if child_node_value.len() < 32 {
+                        let offset = proof_entry_range.start
+                            + if !child_node_value.is_empty() {
+                                child_node_value.as_ptr() as usize - proof_entry.as_ptr() as usize
+                            } else {
+                                0
+                            };
                         debug_assert!(offset == 0 || offset >= proof_entry_range.start);
                         debug_assert!(offset <= (proof_entry_range.start + proof_entry.len()));
-                        StorageValueInner::Known {
-                            is_inline: true,
-                            offset,
-                            len: v.len(),
+                        remain_iterate.push((
+                            offset..(offset + child_node_value.len()),
+                            child_storage_key_before_partial,
+                        ));
+                    } else {
+                        // The decoding API guarantees that the child value is never larger than
+                        // 32 bytes.
+                        debug_assert_eq!(child_node_value.len(), 32);
+                        if let Some((child_position, child_entry_range)) =
+                            merkle_values.get(child_node_value)
+                        {
+                            // If the node value of the child is less than 32 bytes long, it should
+                            // have been inlined instead of given separately.
+                            if child_entry_range.end - child_entry_range.start < 32 {
+                                return Err(Error::UnexpectedHashedNode);
+                            }
+
+                            // Remove the entry from `unvisited_proof_entries`.
+                            // Note that it is questionable what to do if the same entry is visited
+                            // multiple times. In case where multiple storage branches are identical,
+                            // the sender of the proof should de-duplicate the identical nodes. For
+                            // this reason, it could be legitimate for the same proof entry to be
+                            // visited multiple times.
+                            let _ = unvisited_proof_entries.remove(child_position);
+                            remain_iterate.push((
+                                child_entry_range.clone(),
+                                child_storage_key_before_partial,
+                            ));
                         }
                     }
-                };
+                }
 
-                (
-                    storage_value,
-                    proof_entry_range.clone(),
-                    decoded_node_value_children_bitmap,
-                )
-            });
-            debug_assert!(_prev_value.is_none());
+                // Insert the node into `entries`.
+                // This is done at the end so that `storage_key` doesn't need to be cloned.
+                let _prev_value = entries.insert((*trie_root_hash, storage_key), {
+                    let storage_value = match decoded_node_value.storage_value {
+                        trie_node::StorageValue::None => StorageValueInner::None,
+                        trie_node::StorageValue::Hashed(value_hash) => {
+                            if let Some((value_position, value_entry_range)) =
+                                merkle_values.get(&value_hash[..])
+                            {
+                                let _ = unvisited_proof_entries.remove(value_position);
+                                StorageValueInner::Known {
+                                    is_inline: false,
+                                    offset: value_entry_range.start,
+                                    len: value_entry_range.end - value_entry_range.start,
+                                }
+                            } else {
+                                let offset =
+                                    value_hash.as_ptr() as usize - proof_as_ref.as_ptr() as usize;
+                                debug_assert!(offset >= proof_entry_range.start);
+                                debug_assert!(
+                                    offset <= (proof_entry_range.start + proof_entry.len())
+                                );
+                                StorageValueInner::HashKnownValueMissing { offset }
+                            }
+                        }
+                        trie_node::StorageValue::Unhashed(v) => {
+                            let offset = if !v.is_empty() {
+                                v.as_ptr() as usize - proof_as_ref.as_ptr() as usize
+                            } else {
+                                0
+                            };
+                            debug_assert!(offset == 0 || offset >= proof_entry_range.start);
+                            debug_assert!(offset <= (proof_entry_range.start + proof_entry.len()));
+                            StorageValueInner::Known {
+                                is_inline: true,
+                                offset,
+                                len: v.len(),
+                            }
+                        }
+                    };
+
+                    (
+                        storage_value,
+                        proof_entry_range.clone(),
+                        decoded_node_value_children_bitmap,
+                    )
+                });
+                debug_assert!(_prev_value.is_none());
+            }
         }
     }
 
@@ -1008,8 +1031,6 @@ impl<'a> fmt::Debug for StorageValue<'a> {
 pub enum Error {
     /// Proof is in an invalid format.
     InvalidFormat,
-    /// Trie root wasn't found in the proof.
-    TrieRootNotFound,
     /// One of the node values in the proof has an invalid format.
     #[display(fmt = "A node of the proof has an invalid format: {_0}")]
     InvalidNodeValue(trie_node::Error),

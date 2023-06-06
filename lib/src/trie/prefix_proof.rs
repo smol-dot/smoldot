@@ -90,13 +90,11 @@ impl PrefixScan {
     ///
     /// Returns an error if the proof is invalid. In that case, `self` isn't modified.
     pub fn resume(mut self, proof: &[u8]) -> Result<ResumeOutcome, (Self, Error)> {
-        let decoded_proof = match proof_decode::decode_and_verify_proof(proof_decode::Config {
-            proof,
-            trie_root_hash: &self.trie_root_hash,
-        }) {
-            Ok(d) => d,
-            Err(err) => return Err((self, Error::InvalidProof(err))),
-        };
+        let decoded_proof =
+            match proof_decode::decode_and_verify_proof(proof_decode::Config { proof }) {
+                Ok(d) => d,
+                Err(err) => return Err((self, Error::InvalidProof(err))),
+            };
 
         let mut non_terminal_queries = mem::take(&mut self.next_queries);
 

@@ -1204,7 +1204,6 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             let decoded_downloaded_runtime =
                 match proof_decode::decode_and_verify_proof(proof_decode::Config {
                     proof: &downloaded_runtime[..],
-                    trie_root_hash: &header.state_root,
                 }) {
                     Ok(p) => p,
                     Err(err) => {
@@ -1422,7 +1421,6 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     let proof = proof.take().unwrap();
                     let decoded_proof =
                         match proof_decode::decode_and_verify_proof(proof_decode::Config {
-                            trie_root_hash: &header.state_root,
                             proof: proof.into_iter(),
                         }) {
                             Ok(d) => d,
