@@ -603,11 +603,11 @@ mod tests {
             let proof = proof_builder.build_to_vec();
 
             // Verify the correctness of the proof.
-            proof_decode::decode_and_verify_proof(proof_decode::Config {
-                trie_root_hash: &trie_root_hash,
-                proof,
-            })
-            .unwrap();
+            let proof =
+                proof_decode::decode_and_verify_proof(proof_decode::Config { proof }).unwrap();
+            assert!(proof
+                .closest_descendant_merkle_value(&trie_root_hash, &[])
+                .is_some());
         }
     }
 
@@ -658,10 +658,6 @@ mod tests {
         // The proof builder should de-duplicate the two children, otherwise the proof is invalid.
         proof_decode::decode_and_verify_proof(proof_decode::Config {
             proof: proof_builder.build_to_vec(),
-            trie_root_hash: &[
-                198, 201, 55, 96, 115, 79, 43, 132, 215, 236, 180, 232, 125, 60, 98, 103, 17, 46,
-                150, 56, 154, 235, 33, 17, 222, 105, 142, 178, 235, 61, 88, 52,
-            ],
         })
         .unwrap();
     }

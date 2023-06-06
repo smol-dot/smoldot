@@ -1150,7 +1150,6 @@ mod tests {
     #[test]
     fn empty_is_valid() {
         let _ = super::decode_and_verify_proof(super::Config {
-            trie_root_hash: &[0; 32], // Trie root hash doesn't matter.
             proof: &[0],
         })
         .unwrap();
@@ -1265,13 +1264,12 @@ mod tests {
         };
 
         let decoded = super::decode_and_verify_proof(super::Config {
-            trie_root_hash: &trie_root,
             proof,
         })
         .unwrap();
 
         let requested_key = hex::decode("9c5d795d0297be56027a4b2464e3339763e6d3c1fb15805edfd024172ea4817d7081542596adb05d6140c170ac479edf7cfd5aa35357590acfe5d11a804d944e").unwrap();
-        let obtained = decoded.storage_value(&requested_key).unwrap();
+        let obtained = decoded.storage_value(&trie_root, &requested_key).unwrap();
 
         assert_eq!(
             obtained.unwrap().0,
@@ -1317,7 +1315,6 @@ mod tests {
         ];
 
         let decoded = super::decode_and_verify_proof(super::Config {
-            trie_root_hash: &trie_root,
             proof,
         })
         .unwrap();
@@ -1325,7 +1322,7 @@ mod tests {
         let requested_key =
             hex::decode("f0c365c3cf59d671eb72da0e7a4113c49f1f0515f462cdcf84e0f1d6045dfcbb")
                 .unwrap();
-        let obtained = decoded.storage_value(&requested_key).unwrap();
+        let obtained = decoded.storage_value(&trie_root, &requested_key).unwrap();
 
         assert_eq!(obtained.unwrap().0, &[80, 82, 127, 41, 119, 1, 0, 0][..]);
     }
@@ -1337,29 +1334,31 @@ mod tests {
             4, 64, 66, 3, 52, 120, 31, 215, 222, 245, 16, 76, 51, 181, 0, 245, 192, 194,
         ];
 
-        super::decode_and_verify_proof(super::Config {
+        let proof = super::decode_and_verify_proof(super::Config {
             proof,
-            trie_root_hash: &[
-                83, 2, 191, 235, 8, 252, 233, 114, 129, 199, 229, 115, 221, 238, 15, 205, 193, 110,
-                145, 107, 12, 3, 10, 145, 117, 211, 203, 151, 182, 147, 221, 178,
-            ],
         })
         .unwrap();
+
+        assert!(proof.closest_descendant_merkle_value(&[
+            83, 2, 191, 235, 8, 252, 233, 114, 129, 199, 229, 115, 221, 238, 15, 205, 193, 110,
+            145, 107, 12, 3, 10, 145, 117, 211, 203, 151, 182, 147, 221, 178,
+        ], &[]).is_some());
     }
 
     #[test]
     fn identical_inline_nodes() {
         // One root node with two identical inlined children.
-        super::decode_and_verify_proof(super::Config {
+        let proof = super::decode_and_verify_proof(super::Config {
             proof: &[
                 4, 60, 128, 3, 0, 20, 65, 0, 8, 104, 105, 20, 65, 0, 8, 104, 105,
             ],
-            trie_root_hash: &[
-                15, 224, 134, 90, 11, 145, 174, 197, 185, 253, 233, 197, 95, 101, 197, 10, 78, 28,
-                137, 217, 102, 198, 242, 100, 90, 96, 9, 204, 213, 69, 174, 4,
-            ],
         })
         .unwrap();
+
+        assert!(proof.closest_descendant_merkle_value( &[
+            15, 224, 134, 90, 11, 145, 174, 197, 185, 253, 233, 197, 95, 101, 197, 10, 78, 28,
+            137, 217, 102, 198, 242, 100, 90, 96, 9, 204, 213, 69, 174, 4,
+        ], &[]).is_some());
     }
 
     #[test]
@@ -1385,10 +1384,6 @@ mod tests {
                     108, 117, 101, 32, 105, 115, 32, 109, 111, 114, 101, 32, 116, 104, 97, 110, 32,
                     51, 50, 32, 98, 121, 116, 101, 115, 32, 108, 111, 110, 103
                 ],
-                trie_root_hash: &[
-                    198, 201, 55, 96, 115, 79, 43, 132, 215, 236, 180, 232, 125, 60, 98, 103, 17,
-                    46, 150, 56, 154, 235, 33, 17, 222, 105, 142, 178, 235, 61, 88, 52,
-                ],
             }),
             Err(super::Error::DuplicateProofEntry)
         ));
@@ -1407,10 +1402,6 @@ mod tests {
                 111, 100, 101, 32, 118, 97, 108, 117, 101, 32, 105, 115, 32, 109, 111, 114, 101,
                 32, 116, 104, 97, 110, 32, 51, 50, 32, 98, 121, 116, 101, 115, 32, 108, 111, 110,
                 103,
-            ],
-            trie_root_hash: &[
-                198, 201, 55, 96, 115, 79, 43, 132, 215, 236, 180, 232, 125, 60, 98, 103, 17, 46,
-                150, 56, 154, 235, 33, 17, 222, 105, 142, 178, 235, 61, 88, 52,
             ],
         })
         .unwrap();
