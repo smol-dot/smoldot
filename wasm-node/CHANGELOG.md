@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- A `validated` event is now properly generated when watching a transaction using `transaction_unstable_submitAndWatch`.
+- A `validated` event is now properly generated when watching a transaction using `transaction_unstable_submitAndWatch`. ([#676](https://github.com/smol-dot/smoldot/pull/676))
 
 ## 1.0.8 - 2023-06-05
 
