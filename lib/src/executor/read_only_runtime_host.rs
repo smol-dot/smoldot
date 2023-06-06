@@ -24,6 +24,8 @@ use crate::executor::{self, host, vm};
 use alloc::{string::String, vec::Vec};
 use core::fmt;
 
+pub use host::Trie;
+
 /// Configuration for [`run`].
 pub struct Config<'a, TParams> {
     /// Virtual machine to be run.
@@ -156,8 +158,27 @@ impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
     pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
         match &self.inner.vm {
-            host::HostVm::ExternalStorageGet(req) => req.key(),
+            host::HostVm::ExternalStorageGet(req) => either::Left(req.key()),
+            host::HostVm::ExternalStorageRoot(req) => {
+                let Trie::ChildTrieDefault { child_trie } = req.trie()
+                    else { unreachable!() };
+                // TODO: allocation here, but probably not problematic
+                const PREFIX: &[u8] = b":child_storage:default:";
+                let mut key = Vec::with_capacity(PREFIX.len() + child_trie.as_ref().len());
+                key.extend_from_slice(PREFIX);
+                key.extend_from_slice(child_trie.as_ref());
+                either::Right(key)
+            }
             // We only create a `StorageGet` if the state is one of the above.
+            _ => unreachable!(),
+        }
+    }
+
+    /// Returns the trie that must be read from.
+    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+        match &self.inner.vm {
+            host::HostVm::ExternalStorageGet(req) => req.trie(),
+            host::HostVm::ExternalStorageRoot(_) => Trie::MainTrie,
             _ => unreachable!(),
         }
     }
@@ -181,6 +202,14 @@ impl StorageGet {
                 self.inner.vm = req.resume_full_value(value.as_ref().map(|v| &v[..]));
             }
 
+            host::HostVm::ExternalStorageRoot(req) => {
+                // TODO: what if length isn't 32 bytes? I guess we error?
+                let hash = value
+                    .as_ref()
+                    .and_then(|v| <&[u8; 32]>::try_from(&v[..]).ok());
+                self.inner.vm = req.resume(hash);
+            }
+
             // We only create a `StorageGet` if the state is one of the above.
             _ => unreachable!(),
         };
@@ -200,6 +229,14 @@ impl NextKey {
     pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
         match &self.inner.vm {
             host::HostVm::ExternalStorageNextKey(req) => req.key(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Returns the trie that must be read from.
+    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+        match &self.inner.vm {
+            host::HostVm::ExternalStorageNextKey(req) => req.trie(),
             _ => unreachable!(),
         }
     }
@@ -244,7 +281,7 @@ impl NextKey {
     }
 }
 
-/// Fetching the storage trie root is required in order to continue.
+/// Fetching the storage trie root of the main trie is required in order to continue.
 #[must_use]
 pub struct StorageRoot {
     inner: Inner,
@@ -386,23 +423,13 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageGet(req) => {
-                    if matches!(req.trie(), host::Trie::MainTrie) {
-                        self.vm = req.into();
-                        return RuntimeHostVm::StorageGet(StorageGet { inner: self });
-                    } else {
-                        // TODO: this is a dummy implementation and child tries are not implemented properly
-                        self.vm = req.resume(None)
-                    }
+                    self.vm = req.into();
+                    return RuntimeHostVm::StorageGet(StorageGet { inner: self });
                 }
 
                 host::HostVm::ExternalStorageNextKey(req) => {
-                    if matches!(req.trie(), host::Trie::MainTrie) {
-                        self.vm = req.into();
-                        return RuntimeHostVm::NextKey(NextKey { inner: self });
-                    } else {
-                        // TODO: this is a dummy implementation and child tries are not implemented properly
-                        self.vm = req.resume(None)
-                    }
+                    self.vm = req.into();
+                    return RuntimeHostVm::NextKey(NextKey { inner: self });
                 }
 
                 host::HostVm::SignatureVerification(req) => {
@@ -443,8 +470,10 @@ impl Inner {
                         self.vm = req.into();
                         return RuntimeHostVm::StorageRoot(StorageRoot { inner: self });
                     } else {
-                        // TODO: this is a dummy implementation and child tries are not implemented properly
-                        self.vm = req.resume(None)
+                        // For child tries, we fetch the value from the main trie.
+                        // TODO: is this a correct way to do it? is it not a punch through the layers of abstraction? is the runtime even supposed to call this function?
+                        self.vm = req.into();
+                        return RuntimeHostVm::StorageGet(StorageGet { inner: self });
                     }
                 }
 
