@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fix `author_submitAndWatchExtrinsic` generating `transaction_unstable_watchEvent` notifications, and `transaction_unstable_submitAndWatch` generating `author_extrinsicUpdate` notifications. ([#677](https://github.com/smol-dot/smoldot/pull/677))
+- Fix `author_submitAndWatchExtrinsic` erroneously generating `transaction_unstable_watchEvent` notifications, and `transaction_unstable_submitAndWatch` erroneously generating `author_extrinsicUpdate` notifications. ([#677](https://github.com/smol-dot/smoldot/pull/677))
 
 ## 1.0.8 - 2023-06-05
 
