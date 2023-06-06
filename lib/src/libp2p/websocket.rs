@@ -18,8 +18,8 @@
 //! Implementation of a WebSocket client that wraps around an abstract representation of a TCP
 //! socket through the `AsyncRead` and `AsyncWrite` traits.
 
-#![cfg(all(feature = "std"))]
-#![cfg_attr(docsrs, doc(cfg(all(feature = "std"))))]
+#![cfg(feature = "std")]
+#![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
 use futures_util::{future, AsyncRead, AsyncWrite, Future as _};
 
