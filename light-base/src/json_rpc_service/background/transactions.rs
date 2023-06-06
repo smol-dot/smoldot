@@ -269,7 +269,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     };
 
                     let update = match (status_update, is_legacy) {
-                        (transactions_service::TransactionStatus::Broadcast(peers), false) => {
+                        (transactions_service::TransactionStatus::Broadcast(peers), true) => {
                             methods::ServerToClient::author_extrinsicUpdate {
                                 subscription: (&subscription_id).into(),
                                 result: methods::TransactionStatus::Broadcast(
@@ -278,7 +278,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                             }
                             .to_json_call_object_parameters(None)
                         }
-                        (transactions_service::TransactionStatus::Broadcast(peers), true) => {
+                        (transactions_service::TransactionStatus::Broadcast(peers), false) => {
                             num_broadcasted_peers += peers.len();
                             methods::ServerToClient::transaction_unstable_watchEvent {
                                 subscription: (&subscription_id).into(),
