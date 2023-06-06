@@ -2696,6 +2696,18 @@ pub enum Trie<T> {
     ChildTrieDefault { child_trie: T },
 }
 
+impl<T> Trie<T> {
+    /// Converts the child trie into a different type, similar to `Option::map` for example.
+    pub fn map<U>(self, conv: impl FnOnce(T) -> U) -> Trie<U> {
+        match self {
+            Trie::MainTrie => Trie::MainTrie,
+            Trie::ChildTrieDefault { child_trie } => Trie::ChildTrieDefault {
+                child_trie: conv(child_trie),
+            },
+        }
+    }
+}
+
 /// Must provide the storage key that follows, in lexicographic order, a specific one.
 pub struct ExternalStorageNextKey {
     inner: Inner,
