@@ -234,6 +234,10 @@ pub enum TransactionStatus {
     /// Transaction has been broadcasted to the given peers.
     Broadcast(Vec<PeerId>),
 
+    /// Transaction is now known to be valid. If it ever becomes invalid in the future, a
+    /// [`TransactionStatus::Dropped`] will be generated.
+    Validated,
+
     /// The block in which a block is included has changed.
     IncludedBlockUpdate {
         /// If `Some`, the transaction is included in the block of the best chain with the given
@@ -831,6 +835,11 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                                 "Successfully validated transaction {}",
                                 HashDisplay(&tx_hash)
                             );
+
+                            worker
+                                .pending_transactions
+                                .transaction_user_data_mut(maybe_validated_tx_id).unwrap_or_else(|| unreachable!())
+                                .update_status(TransactionStatus::Validated);
 
                             // Schedule this transaction for announcement.
                             worker.next_reannounce.push(async move {
