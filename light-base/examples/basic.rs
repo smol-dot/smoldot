@@ -28,12 +28,11 @@ fn main() {
     // example, we provide `DefaultPlatform`, which are the "plug and play" default platform.
     // Any advance usage, such as embedding a client in WebAssembly, will likely require a custom
     // implementation of these bindings.
-    let mut client = smoldot_light::Client::new(
-        smoldot_light::platform::default::DefaultPlatform::new(
+    let mut client =
+        smoldot_light::Client::new(smoldot_light::platform::default::DefaultPlatform::new(
             env!("CARGO_PKG_NAME").into(),
             env!("CARGO_PKG_VERSION").into(),
-        ),
-    );
+        ));
 
     // Ask the client to connect to a chain.
     let smoldot_light::AddChainSuccess {
