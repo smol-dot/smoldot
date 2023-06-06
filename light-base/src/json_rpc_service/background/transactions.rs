@@ -175,8 +175,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 let mut included_block = None;
                 let mut num_broadcasted_peers = 0;
 
-                // TODO: doesn't reported `validated` events
-
                 let requests_subscriptions = {
                     let weak = Arc::downgrade(&requests_subscriptions);
                     drop(requests_subscriptions);
@@ -286,6 +284,17 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                     num_peers: u32::try_from(num_broadcasted_peers)
                                         .unwrap_or(u32::max_value()),
                                 },
+                            }
+                            .to_json_call_object_parameters(None)
+                        }
+
+                        (transactions_service::TransactionStatus::Validated, true) => {
+                            continue;
+                        }
+                        (transactions_service::TransactionStatus::Validated, false) => {
+                            methods::ServerToClient::transaction_unstable_watchEvent {
+                                subscription: (&subscription_id).into(),
+                                result: methods::TransactionWatchEvent::Validated {},
                             }
                             .to_json_call_object_parameters(None)
                         }

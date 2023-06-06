@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- A `validated` event is now properly generated when watching a transaction using `transaction_unstable_submitAndWatch`.
+
 ## 1.0.8 - 2023-06-05
 
 ### Changed
