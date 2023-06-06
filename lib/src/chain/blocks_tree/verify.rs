@@ -34,7 +34,7 @@ use super::{
 use alloc::boxed::Box;
 use core::cmp::Ordering;
 
-pub use verify::header_body::{Nibble, TrieEntryVersion};
+pub use verify::header_body::{Nibble, Trie, TrieEntryVersion};
 
 impl<T> NonFinalizedTree<T> {
     /// Verifies the given block.
@@ -924,6 +924,11 @@ impl<T> StorageGet<T> {
         self.inner.key()
     }
 
+    /// Returns the trie that must be read from.
+    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+        self.inner.trie()
+    }
+
     /// Access to the Nth ancestor's information and hierarchy. Returns `None` if `n` is too
     /// large. A value of `0` for `n` corresponds to the parent block. A value of `1` corresponds
     /// to the parent's parent. And so on.
@@ -984,6 +989,11 @@ impl<T> StorageClosestDescendantMerkleValue<T> {
         self.inner.key()
     }
 
+    /// Returns the trie that must be read from.
+    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+        self.inner.trie()
+    }
+
     /// Indicate that the value is unknown and resume the calculation.
     ///
     /// This function be used if you are unaware of the Merkle value. The algorithm will perform
@@ -1011,6 +1021,11 @@ impl<T> StorageNextKey<T> {
     /// Returns the key whose next key must be passed back.
     pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.key()
+    }
+
+    /// Returns the trie that must be read from.
+    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+        self.inner.trie()
     }
 
     /// If `true`, then the provided value must the one superior or equal to the requested key.

@@ -25,7 +25,7 @@ use crate::{
 use alloc::{string::String, vec::Vec};
 use core::{iter, num::NonZeroU64, time::Duration};
 
-pub use runtime_host::{Nibble, TrieEntryVersion};
+pub use runtime_host::{Nibble, Trie, TrieEntryVersion};
 
 /// Configuration for a block verification.
 pub struct Config<'a, TBody> {
@@ -614,6 +614,14 @@ impl StorageGet {
         }
     }
 
+    /// Returns the trie that must be read from.
+    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+        match &self.inner {
+            StorageGetInner::Execution { inner, .. } => inner.trie(),
+            StorageGetInner::ParentCode { .. } => Trie::MainTrie,
+        }
+    }
+
     /// Injects the corresponding storage value.
     pub fn inject_value(
         self,
@@ -659,6 +667,11 @@ impl StorageClosestDescendantMerkleValue {
         self.inner.key()
     }
 
+    /// Returns the trie that must be read from.
+    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+        self.inner.trie()
+    }
+
     /// Indicate that the value is unknown and resume the calculation.
     ///
     /// This function be used if you are unaware of the Merkle value. The algorithm will perform
@@ -696,6 +709,11 @@ impl StorageNextKey {
     /// Returns the key whose next key must be passed back.
     pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.key()
+    }
+
+    /// Returns the trie that must be read from.
+    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+        self.inner.trie()
     }
 
     /// If `true`, then the provided value must the one superior or equal to the requested key.

@@ -25,7 +25,7 @@ use crate::{
 use alloc::{borrow::ToOwned as _, vec::Vec};
 use core::{iter, num::NonZeroU64};
 
-pub use runtime_host::{Nibble, TrieEntryVersion};
+pub use runtime_host::{Nibble, Trie, TrieEntryVersion};
 
 /// Configuration for a transaction validation process.
 pub struct Config<'a, TTx> {
@@ -584,6 +584,14 @@ impl StorageGet {
         }
     }
 
+    /// Returns the trie that must be read from.
+    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+        match &self.0 {
+            StorageGetInner::Stage1(inner, _) => inner.trie().map(either::Left),
+            StorageGetInner::Stage2(inner, _) => inner.trie().map(either::Right),
+        }
+    }
+
     /// Injects the corresponding storage value.
     pub fn inject_value(
         self,
@@ -617,6 +625,14 @@ impl ClosestDescendantMerkleValue {
         match &self.0 {
             MerkleValueInner::Stage1(inner, _) => either::Left(inner.key()),
             MerkleValueInner::Stage2(inner, _) => either::Right(inner.key()),
+        }
+    }
+
+    /// Returns the trie that must be read from.
+    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+        match &self.0 {
+            MerkleValueInner::Stage1(inner, _) => inner.trie().map(either::Left),
+            MerkleValueInner::Stage2(inner, _) => inner.trie().map(either::Right),
         }
     }
 
@@ -663,6 +679,14 @@ impl NextKey {
         match &self.0 {
             NextKeyInner::Stage1(inner, _) => either::Left(inner.key()),
             NextKeyInner::Stage2(inner, _) => either::Right(inner.key()),
+        }
+    }
+
+    /// Returns the trie that must be read from.
+    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+        match &self.0 {
+            NextKeyInner::Stage1(inner, _) => inner.trie().map(either::Left),
+            NextKeyInner::Stage2(inner, _) => inner.trie().map(either::Right),
         }
     }
 

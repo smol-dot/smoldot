@@ -64,7 +64,7 @@ use core::{
 };
 use hashbrown::HashMap;
 
-pub use blocks_tree::{Nibble, TrieEntryVersion};
+pub use blocks_tree::{Nibble, Trie, TrieEntryVersion};
 
 mod verification_queue;
 
@@ -1350,6 +1350,11 @@ impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
         self.inner.key()
     }
 
+    /// Returns the trie that must be read from.
+    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+        self.inner.trie()
+    }
+
     /// Injects the corresponding storage value.
     pub fn inject_value(
         self,
@@ -1374,6 +1379,11 @@ impl<TRq, TSrc, TBl> StorageClosestDescendantMerkleValue<TRq, TSrc, TBl> {
     /// Returns the key whose closest descendant Merkle value must be passed back.
     pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.key()
+    }
+
+    /// Returns the trie that must be read from.
+    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+        self.inner.trie()
     }
 
     /// Indicate that the value is unknown and resume the calculation.
@@ -1402,6 +1412,11 @@ pub struct StorageNextKey<TRq, TSrc, TBl> {
 impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
     pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.key()
+    }
+
+    /// Returns the trie that must be read from.
+    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+        self.inner.trie()
     }
 
     /// If `true`, then the provided value must the one superior or equal to the requested key.

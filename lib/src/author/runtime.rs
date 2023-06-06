@@ -56,7 +56,7 @@ use crate::{
 use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
 use core::{iter, mem};
 
-pub use runtime_host::{Nibble, TrieEntryVersion};
+pub use runtime_host::{Nibble, Trie, TrieEntryVersion};
 
 /// Configuration for a block generation.
 pub struct Config<'a> {
@@ -620,6 +620,11 @@ impl StorageGet {
         self.0.key()
     }
 
+    /// Returns the trie that must be read from.
+    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+        self.0.trie()
+    }
+
     /// Injects the corresponding storage value.
     pub fn inject_value(
         self,
@@ -639,6 +644,11 @@ impl ClosestDescendantMerkleValue {
     /// [`ClosestDescendantMerkleValue::inject_merkle_value`].
     pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.0.key()
+    }
+
+    /// Returns the trie that must be read from.
+    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+        self.0.trie()
     }
 
     /// Indicate that the value is unknown and resume the calculation.
@@ -664,6 +674,11 @@ impl NextKey {
     /// Returns the key whose next key must be passed back.
     pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.0.key()
+    }
+
+    /// Returns the trie that must be read from.
+    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+        self.0.trie()
     }
 
     /// If `true`, then the provided value must the one superior or equal to the requested key.
