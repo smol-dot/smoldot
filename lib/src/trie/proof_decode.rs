@@ -147,7 +147,7 @@ where
             let Ok(decoded) = trie_node::decode(node_value)
                 else {
                     maybe_trie_roots.remove(hash);
-                    continue 
+                    continue
                 };
             for child in decoded.children.into_iter().flatten() {
                 if let Ok(child) = &<[u8; 32]>::try_from(child) {
@@ -577,10 +577,19 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
             &'a (StorageValueInner, ops::Range<usize>, u16),
         )>,
     > {
-        // If the proof is empty, then we have no information about the node whatsoever.
+        // If the proof doesn't contain any entry for the requested trie, then we have no
+        // information about the node whatsoever.
         // This check is necessary because we assume below that a lack of ancestor means that the
         // key is outside of the trie.
-        if self.entries.is_empty() {
+        if self
+            .entries
+            .range((
+                ops::Bound::Included((*trie_root_merkle_value, Vec::new())),
+                ops::Bound::Unbounded,
+            ))
+            .next()
+            .map_or(true, |((h, _), _)| h != trie_root_merkle_value)
+        {
             return None;
         }
 
@@ -1149,10 +1158,7 @@ impl<'a> fmt::Binary for Children<'a> {
 mod tests {
     #[test]
     fn empty_is_valid() {
-        let _ = super::decode_and_verify_proof(super::Config {
-            proof: &[0],
-        })
-        .unwrap();
+        let _ = super::decode_and_verify_proof(super::Config { proof: &[0] }).unwrap();
     }
 
     #[test]
@@ -1263,10 +1269,7 @@ mod tests {
             <[u8; 32]>::try_from(&bytes[..]).unwrap()
         };
 
-        let decoded = super::decode_and_verify_proof(super::Config {
-            proof,
-        })
-        .unwrap();
+        let decoded = super::decode_and_verify_proof(super::Config { proof }).unwrap();
 
         let requested_key = hex::decode("9c5d795d0297be56027a4b2464e3339763e6d3c1fb15805edfd024172ea4817d7081542596adb05d6140c170ac479edf7cfd5aa35357590acfe5d11a804d944e").unwrap();
         let obtained = decoded.storage_value(&trie_root, &requested_key).unwrap();
@@ -1314,10 +1317,7 @@ mod tests {
             215, 134, 15, 252, 135, 67, 129, 21, 16, 20, 211, 97, 217,
         ];
 
-        let decoded = super::decode_and_verify_proof(super::Config {
-            proof,
-        })
-        .unwrap();
+        let decoded = super::decode_and_verify_proof(super::Config { proof }).unwrap();
 
         let requested_key =
             hex::decode("f0c365c3cf59d671eb72da0e7a4113c49f1f0515f462cdcf84e0f1d6045dfcbb")
@@ -1334,15 +1334,17 @@ mod tests {
             4, 64, 66, 3, 52, 120, 31, 215, 222, 245, 16, 76, 51, 181, 0, 245, 192, 194,
         ];
 
-        let proof = super::decode_and_verify_proof(super::Config {
-            proof,
-        })
-        .unwrap();
+        let proof = super::decode_and_verify_proof(super::Config { proof }).unwrap();
 
-        assert!(proof.closest_descendant_merkle_value(&[
-            83, 2, 191, 235, 8, 252, 233, 114, 129, 199, 229, 115, 221, 238, 15, 205, 193, 110,
-            145, 107, 12, 3, 10, 145, 117, 211, 203, 151, 182, 147, 221, 178,
-        ], &[]).is_some());
+        assert!(proof
+            .closest_descendant_merkle_value(
+                &[
+                    83, 2, 191, 235, 8, 252, 233, 114, 129, 199, 229, 115, 221, 238, 15, 205, 193,
+                    110, 145, 107, 12, 3, 10, 145, 117, 211, 203, 151, 182, 147, 221, 178,
+                ],
+                &[]
+            )
+            .is_some());
     }
 
     #[test]
@@ -1355,10 +1357,15 @@ mod tests {
         })
         .unwrap();
 
-        assert!(proof.closest_descendant_merkle_value( &[
-            15, 224, 134, 90, 11, 145, 174, 197, 185, 253, 233, 197, 95, 101, 197, 10, 78, 28,
-            137, 217, 102, 198, 242, 100, 90, 96, 9, 204, 213, 69, 174, 4,
-        ], &[]).is_some());
+        assert!(proof
+            .closest_descendant_merkle_value(
+                &[
+                    15, 224, 134, 90, 11, 145, 174, 197, 185, 253, 233, 197, 95, 101, 197, 10, 78,
+                    28, 137, 217, 102, 198, 242, 100, 90, 96, 9, 204, 213, 69, 174, 4,
+                ],
+                &[]
+            )
+            .is_some());
     }
 
     #[test]
