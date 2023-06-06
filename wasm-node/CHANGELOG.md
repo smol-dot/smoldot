@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix `author_submitAndWatchExtrinsic` generating `transaction_unstable_watchEvent` notifications, and `transaction_unstable_submitAndWatch` generating `author_extrinsicUpdate` notifications.
+
 ## 1.0.8 - 2023-06-05
 
 ### Changed
