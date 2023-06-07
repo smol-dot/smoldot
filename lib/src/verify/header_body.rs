@@ -614,6 +614,14 @@ impl StorageGet {
         }
     }
 
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        match &self.inner {
+            StorageGetInner::Execution { inner, .. } => inner.child_trie(),
+            StorageGetInner::ParentCode { .. } => None,
+        }
+    }
+
     /// Injects the corresponding storage value.
     pub fn inject_value(
         self,
@@ -659,6 +667,11 @@ impl StorageClosestDescendantMerkleValue {
         self.inner.key()
     }
 
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.inner.child_trie()
+    }
+
     /// Indicate that the value is unknown and resume the calculation.
     ///
     /// This function be used if you are unaware of the Merkle value. The algorithm will perform
@@ -673,7 +686,10 @@ impl StorageClosestDescendantMerkleValue {
     }
 
     /// Injects the corresponding Merkle value.
-    pub fn inject_merkle_value(self, merkle_value: &[u8]) -> Verify {
+    ///
+    /// `None` can be passed if there is no descendant or, in the case of a child trie read, in
+    /// order to indicate that the child trie does not exist.
+    pub fn inject_merkle_value(self, merkle_value: Option<&[u8]>) -> Verify {
         VerifyInner {
             inner: self.inner.inject_merkle_value(merkle_value),
             phase: self.phase,
@@ -696,6 +712,11 @@ impl StorageNextKey {
     /// Returns the key whose next key must be passed back.
     pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.key()
+    }
+
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.inner.child_trie()
     }
 
     /// If `true`, then the provided value must the one superior or equal to the requested key.

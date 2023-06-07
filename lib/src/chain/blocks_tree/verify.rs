@@ -924,6 +924,11 @@ impl<T> StorageGet<T> {
         self.inner.key()
     }
 
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.inner.child_trie()
+    }
+
     /// Access to the Nth ancestor's information and hierarchy. Returns `None` if `n` is too
     /// large. A value of `0` for `n` corresponds to the parent block. A value of `1` corresponds
     /// to the parent's parent. And so on.
@@ -984,6 +989,11 @@ impl<T> StorageClosestDescendantMerkleValue<T> {
         self.inner.key()
     }
 
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.inner.child_trie()
+    }
+
     /// Indicate that the value is unknown and resume the calculation.
     ///
     /// This function be used if you are unaware of the Merkle value. The algorithm will perform
@@ -994,7 +1004,10 @@ impl<T> StorageClosestDescendantMerkleValue<T> {
     }
 
     /// Injects the corresponding Merkle value.
-    pub fn inject_merkle_value(self, merkle_value: &[u8]) -> BodyVerifyStep2<T> {
+    ///
+    /// `None` can be passed if there is no descendant or, in the case of a child trie read, in
+    /// order to indicate that the child trie does not exist.
+    pub fn inject_merkle_value(self, merkle_value: Option<&[u8]>) -> BodyVerifyStep2<T> {
         let inner = self.inner.inject_merkle_value(merkle_value);
         self.context.with_body_verify(inner)
     }
@@ -1011,6 +1024,11 @@ impl<T> StorageNextKey<T> {
     /// Returns the key whose next key must be passed back.
     pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.key()
+    }
+
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.inner.child_trie()
     }
 
     /// If `true`, then the provided value must the one superior or equal to the requested key.

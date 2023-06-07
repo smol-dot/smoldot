@@ -1350,6 +1350,11 @@ impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
         self.inner.key()
     }
 
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.inner.child_trie()
+    }
+
     /// Injects the corresponding storage value.
     pub fn inject_value(
         self,
@@ -1376,6 +1381,11 @@ impl<TRq, TSrc, TBl> StorageClosestDescendantMerkleValue<TRq, TSrc, TBl> {
         self.inner.key()
     }
 
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.inner.child_trie()
+    }
+
     /// Indicate that the value is unknown and resume the calculation.
     ///
     /// This function be used if you are unaware of the Merkle value. The algorithm will perform
@@ -1386,7 +1396,13 @@ impl<TRq, TSrc, TBl> StorageClosestDescendantMerkleValue<TRq, TSrc, TBl> {
     }
 
     /// Injects the corresponding Merkle value.
-    pub fn inject_merkle_value(self, merkle_value: &[u8]) -> BlockVerification<TRq, TSrc, TBl> {
+    ///
+    /// `None` can be passed if there is no descendant or, in the case of a child trie read, in
+    /// order to indicate that the child trie does not exist.
+    pub fn inject_merkle_value(
+        self,
+        merkle_value: Option<&[u8]>,
+    ) -> BlockVerification<TRq, TSrc, TBl> {
         let inner = self.inner.inject_merkle_value(merkle_value);
         BlockVerification::from(Inner::Step2(inner), self.shared)
     }
@@ -1402,6 +1418,11 @@ pub struct StorageNextKey<TRq, TSrc, TBl> {
 impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
     pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.key()
+    }
+
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.inner.child_trie()
     }
 
     /// If `true`, then the provided value must the one superior or equal to the requested key.

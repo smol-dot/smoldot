@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Add support for child tries, meaning that errors will no longer be returned when performing runtime calls on chains that use child tries. In practice, this typically concerns contracts chains. ([#680](https://github.com/smol-dot/smoldot/pull/680), [#684](https://github.com/smol-dot/smoldot/pull/684))
+
 ### Fixed
 
 - A `validated` event is now properly generated when watching a transaction using `transaction_unstable_submitAndWatch`. ([#676](https://github.com/smol-dot/smoldot/pull/676))

@@ -848,11 +848,15 @@ impl<'a> RuntimeCall<'a> {
 
     /// Finds the given key in the call proof and returns the associated storage value.
     ///
+    /// If `child_trie` is `Some`, look for the key in the given child trie. If it is `None`, look
+    /// for the key in the main trie.
+    ///
     /// Returns an error if the key couldn't be found in the proof, meaning that the proof is
     /// invalid.
     // TODO: if proof is invalid, we should give the option to fetch another call proof
     pub fn storage_entry(
         &self,
+        child_trie: Option<&[u8]>,
         requested_key: &[u8],
     ) -> Result<Option<(&[u8], TrieEntryVersion)>, RuntimeCallError> {
         let call_proof = match &self.call_proof {
@@ -860,13 +864,26 @@ impl<'a> RuntimeCall<'a> {
             Err(err) => return Err(err.clone()),
         };
 
-        match call_proof.storage_value(&self.block_state_root_hash, requested_key) {
+        let trie_root = match child_trie {
+            Some(child_trie) => {
+                match Self::child_trie_root(call_proof, &self.block_state_root_hash, child_trie)? {
+                    Some(h) => h,
+                    None => return Ok(None),
+                }
+            }
+            None => self.block_state_root_hash,
+        };
+
+        match call_proof.storage_value(&trie_root, requested_key) {
             Some(v) => Ok(v),
             None => Err(RuntimeCallError::MissingProofEntry),
         }
     }
 
     /// Find in the proof the trie node that follows `key_before` in lexicographic order.
+    ///
+    /// If `child_trie` is `Some`, look for the key in the given child trie. If it is `None`, look
+    /// for the key in the main trie.
     ///
     /// If `or_equal` is `true`, then `key_before` is returned if it is equal to a node in the
     /// trie. If `false`, then only keys that are strictly superior are returned.
@@ -880,6 +897,7 @@ impl<'a> RuntimeCall<'a> {
     /// invalid.
     pub fn next_key(
         &'_ self,
+        child_trie: Option<&[u8]>,
         key_before: &[trie::Nibble],
         or_equal: bool,
         prefix: &[trie::Nibble],
@@ -890,13 +908,17 @@ impl<'a> RuntimeCall<'a> {
             Err(err) => return Err(err.clone()),
         };
 
-        match call_proof.next_key(
-            &self.block_state_root_hash,
-            key_before,
-            or_equal,
-            prefix,
-            branch_nodes,
-        ) {
+        let trie_root = match child_trie {
+            Some(child_trie) => {
+                match Self::child_trie_root(call_proof, &self.block_state_root_hash, child_trie)? {
+                    Some(h) => h,
+                    None => return Ok(None),
+                }
+            }
+            None => self.block_state_root_hash,
+        };
+
+        match call_proof.next_key(&trie_root, key_before, or_equal, prefix, branch_nodes) {
             Some(v) => Ok(v),
             None => Err(RuntimeCallError::MissingProofEntry),
         }
@@ -905,19 +927,36 @@ impl<'a> RuntimeCall<'a> {
     /// Find in the proof the closest trie node that descends from `key` and returns its Merkle
     /// value.
     ///
+    /// If `child_trie` is `Some`, look for the key in the given child trie. If it is `None`, look
+    /// for the key in the main trie.
+    ///
     /// Returns an error if the proof doesn't contain enough information, meaning that the proof is
     /// invalid.
+    ///
+    /// Returns `None` only if the child trie is known to not exist. Otherwise, always returns
+    /// `Some`.
     pub fn closest_descendant_merkle_value(
         &'_ self,
+        child_trie: Option<&[u8]>,
         key: &[trie::Nibble],
-    ) -> Result<&'_ [u8], RuntimeCallError> {
+    ) -> Result<Option<&'_ [u8]>, RuntimeCallError> {
         let call_proof = match &self.call_proof {
             Ok(p) => p,
             Err(err) => return Err(err.clone()),
         };
 
-        match call_proof.closest_descendant_merkle_value(&self.block_state_root_hash, key) {
-            Some(Some(v)) => Ok(v),
+        let trie_root = match child_trie {
+            Some(child_trie) => {
+                match Self::child_trie_root(call_proof, &self.block_state_root_hash, child_trie)? {
+                    Some(h) => h,
+                    None => return Ok(None),
+                }
+            }
+            None => self.block_state_root_hash,
+        };
+
+        match call_proof.closest_descendant_merkle_value(&trie_root, key) {
+            Some(Some(v)) => Ok(Some(v)),
             Some(None) | None => Err(RuntimeCallError::MissingProofEntry),
         }
     }
@@ -928,6 +967,27 @@ impl<'a> RuntimeCall<'a> {
     pub fn unlock(mut self, vm: executor::host::HostVmPrototype) {
         debug_assert!(self.guarded.is_none());
         *self.guarded = Some(vm);
+    }
+
+    fn child_trie_root(
+        proof: &proof_decode::DecodedTrieProof<Vec<u8>>,
+        main_trie_root: &[u8; 32],
+        child_trie: &[u8],
+    ) -> Result<Option<[u8; 32]>, RuntimeCallError> {
+        // TODO: allocation here, but probably not problematic
+        const PREFIX: &[u8] = b":child_storage:default:";
+        let mut key = Vec::with_capacity(PREFIX.len() + child_trie.as_ref().len());
+        key.extend_from_slice(PREFIX);
+        key.extend_from_slice(child_trie.as_ref());
+
+        match proof.storage_value(&main_trie_root, &key) {
+            None => Err(RuntimeCallError::MissingProofEntry),
+            Some(None) => Ok(None),
+            Some(Some((value, _))) => match <[u8; 32]>::try_from(value) {
+                Ok(hash) => Ok(Some(hash)),
+                Err(_) => Err(RuntimeCallError::InvalidChildTrieRoot),
+            },
+        }
     }
 }
 
@@ -953,6 +1013,8 @@ pub enum RuntimeCallError {
     StorageRetrieval(proof_decode::Error),
     /// One or more entries are missing from the call proof.
     MissingProofEntry,
+    /// Call proof contains a reference to a child trie whose hash isn't 32 bytes.
+    InvalidChildTrieRoot,
     /// Error while retrieving the call proof from the network.
     #[display(fmt = "Error when retrieving the call proof: {_0}")]
     CallProof(sync_service::CallProofQueryError),
@@ -969,6 +1031,7 @@ impl RuntimeCallError {
             RuntimeCallError::InvalidRuntime(_) => false,
             RuntimeCallError::StorageRetrieval(_) => false,
             RuntimeCallError::MissingProofEntry => false,
+            RuntimeCallError::InvalidChildTrieRoot => false,
             RuntimeCallError::CallProof(err) => err.is_network_problem(),
             RuntimeCallError::StorageQuery(err) => err.is_network_problem(),
         }

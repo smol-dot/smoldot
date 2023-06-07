@@ -280,6 +280,11 @@ impl StorageGet {
         self.0.key()
     }
 
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.0.child_trie()
+    }
+
     /// Injects the corresponding storage value.
     pub fn inject_value(
         self,
@@ -302,6 +307,11 @@ impl NextKey {
     /// Returns the key whose next key must be passed back.
     pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
         self.0.key()
+    }
+
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.0.child_trie()
     }
 
     /// If `true`, then the provided value must the one superior or equal to the requested key.

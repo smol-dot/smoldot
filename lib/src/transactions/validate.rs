@@ -584,6 +584,14 @@ impl StorageGet {
         }
     }
 
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        match &self.0 {
+            StorageGetInner::Stage1(inner, _) => inner.child_trie().map(either::Left),
+            StorageGetInner::Stage2(inner, _) => inner.child_trie().map(either::Right),
+        }
+    }
+
     /// Injects the corresponding storage value.
     pub fn inject_value(
         self,
@@ -620,6 +628,14 @@ impl ClosestDescendantMerkleValue {
         }
     }
 
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        match &self.0 {
+            MerkleValueInner::Stage1(inner, _) => inner.child_trie().map(either::Left),
+            MerkleValueInner::Stage2(inner, _) => inner.child_trie().map(either::Right),
+        }
+    }
+
     /// Indicate that the value is unknown and resume the calculation.
     ///
     /// This function be used if you are unaware of the Merkle value. The algorithm will perform
@@ -636,7 +652,10 @@ impl ClosestDescendantMerkleValue {
     }
 
     /// Injects the corresponding Merkle value.
-    pub fn inject_merkle_value(self, merkle_value: &[u8]) -> Query {
+    ///
+    /// `None` can be passed if there is no descendant or, in the case of a child trie read, in
+    /// order to indicate that the child trie does not exist.
+    pub fn inject_merkle_value(self, merkle_value: Option<&[u8]>) -> Query {
         match self.0 {
             MerkleValueInner::Stage1(inner, stage1) => {
                 Query::from_step1(inner.inject_merkle_value(merkle_value), stage1)
@@ -663,6 +682,14 @@ impl NextKey {
         match &self.0 {
             NextKeyInner::Stage1(inner, _) => either::Left(inner.key()),
             NextKeyInner::Stage2(inner, _) => either::Right(inner.key()),
+        }
+    }
+
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        match &self.0 {
+            NextKeyInner::Stage1(inner, _) => inner.child_trie().map(either::Left),
+            NextKeyInner::Stage2(inner, _) => inner.child_trie().map(either::Right),
         }
     }
 

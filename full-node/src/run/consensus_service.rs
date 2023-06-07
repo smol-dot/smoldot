@@ -824,6 +824,14 @@ impl SyncBackground {
 
                     // Access to the best block storage.
                     author::build::BuilderAuthoring::StorageGet(req) => {
+                        // TODO: child tries not supported
+                        if req.child_trie().is_some() {
+                            log::warn!("child-tries-not-supported");
+                            block_authoring =
+                                req.inject_value(None::<(iter::Empty<&'static [u8]>, _)>);
+                            continue;
+                        }
+
                         let key = req.key().as_ref().to_vec();
                         let value = self
                             .database
@@ -844,6 +852,13 @@ impl SyncBackground {
                         block_authoring = req.resume_unknown();
                     }
                     author::build::BuilderAuthoring::NextKey(req) => {
+                        // TODO: child tries not supported
+                        if req.child_trie().is_some() {
+                            log::warn!("child-tries-not-supported");
+                            block_authoring = req.inject_key(None::<iter::Empty<_>>);
+                            continue;
+                        }
+
                         let search_params = trie::branch_search::Config {
                             key_before: req.key().collect::<Vec<_>>().into_iter(),
                             or_equal: req.or_equal(),

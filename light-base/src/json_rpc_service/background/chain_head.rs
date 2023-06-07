@@ -1818,8 +1818,10 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                         }
                                         runtime_host::RuntimeHostVm::StorageGet(get) => {
                                             // TODO: what if the remote lied to us?
-                                            let storage_value =
-                                                runtime_call_lock.storage_entry(get.key().as_ref());
+                                            let storage_value = {
+                                                let child_trie = get.child_trie();
+                                                runtime_call_lock.storage_entry(child_trie.as_ref().map(|c| c.as_ref()), get.key().as_ref())
+                                            };
                                             let storage_value = match storage_value {
                                                 Ok(v) => v,
                                                 Err(error) => {
@@ -1845,8 +1847,11 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                         }
                                         runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv) => {
                                             // TODO: what if the remote lied to us?
-                                            let merkle_value = runtime_call_lock
-                                                .closest_descendant_merkle_value(&mv.key().collect::<Vec<_>>());
+                                            let merkle_value = {
+                                                let child_trie = mv.child_trie();
+                                                runtime_call_lock
+                                                    .closest_descendant_merkle_value(child_trie.as_ref().map(|c| c.as_ref()), &mv.key().collect::<Vec<_>>())
+                                            };
                                             let merkle_value = match merkle_value {
                                                 Ok(v) => v,
                                                 Err(error) => {
@@ -1869,12 +1874,16 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                         }
                                         runtime_host::RuntimeHostVm::NextKey(nk) => {
                                             // TODO: what if the remote lied to us?
-                                            let next_key = runtime_call_lock.next_key(
-                                                &nk.key().collect::<Vec<_>>(),
-                                                nk.or_equal(),
-                                                &nk.prefix().collect::<Vec<_>>(),
-                                                nk.branch_nodes(),
-                                            );
+                                            let next_key = {
+                                                let child_trie = nk.child_trie();
+                                                runtime_call_lock.next_key(
+                                                    child_trie.as_ref().map(|c| c.as_ref()),
+                                                    &nk.key().collect::<Vec<_>>(),
+                                                    nk.or_equal(),
+                                                    &nk.prefix().collect::<Vec<_>>(),
+                                                    nk.branch_nodes(),
+                                                )
+                                            };
                                             let next_key = match next_key {
                                                 Ok(v) => v,
                                                 Err(error) => {
@@ -1926,6 +1935,15 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             subscription: (&subscription_id).into(),
                             result: methods::ChainHeadCallEvent::Error {
                                 error: "incomplete call proof".into(),
+                            },
+                        }
+                        .to_json_call_object_parameters(None)
+                    }
+                    Some(Err(runtime_service::RuntimeCallError::InvalidChildTrieRoot)) => {
+                        methods::ServerToClient::chainHead_unstable_callEvent {
+                            subscription: (&subscription_id).into(),
+                            result: methods::ChainHeadCallEvent::Error {
+                                error: "invalid call proof".into(),
                             },
                         }
                         .to_json_call_object_parameters(None)

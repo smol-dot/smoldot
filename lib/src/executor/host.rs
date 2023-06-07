@@ -2157,17 +2157,17 @@ impl ExternalStorageGet {
             .unwrap()
     }
 
-    /// Returns the trie that must be read from.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         if let Some((child_trie_ptr, child_trie_size)) = self.child_trie_ptr_size {
             let child_trie = self
                 .inner
                 .vm
                 .read_memory(child_trie_ptr, child_trie_size)
                 .unwrap();
-            Trie::ChildTrieDefault { child_trie }
+            Some(child_trie)
         } else {
-            Trie::MainTrie
+            None
         }
     }
 
@@ -2384,21 +2384,21 @@ impl ExternalStorageSet {
         }
     }
 
-    /// Returns the trie that must be written to.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+    /// If `Some`, write to the given child trie. If `None`, write to the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         match &self.write_inner {
             ExternalStorageSetInner::Regular {
                 child_trie_ptr_size: Some((ptr, size)),
                 ..
             } => {
                 let child_trie = self.inner.vm.read_memory(*ptr, *size).unwrap();
-                Trie::ChildTrieDefault { child_trie }
+                Some(child_trie)
             }
             ExternalStorageSetInner::Regular {
                 child_trie_ptr_size: None,
                 ..
-            } => Trie::MainTrie,
-            ExternalStorageSetInner::ChildTrieRootCommit { .. } => Trie::MainTrie,
+            } => None,
+            ExternalStorageSetInner::ChildTrieRootCommit { .. } => None,
         }
     }
 
@@ -2497,13 +2497,13 @@ impl ExternalStorageAppend {
             .unwrap()
     }
 
-    /// Returns the trie that must be written to.
+    /// If `Some`, write to the given child trie. If `None`, write to the main trie.
     ///
-    /// > **Note**: At the moment, this function always returns [`Trie::MainTrie`], as there is
-    /// >           no host function that appends to a child trie storage.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+    /// > **Note**: At the moment, this function always returns None, as there is no host function
+    /// >           that appends to a child trie storage.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         // Note that there is no equivalent of this host function for child tries.
-        Trie::<&'static [u8]>::MainTrie
+        None::<&'static [u8]>
     }
 
     /// Returns the value to append.
@@ -2558,17 +2558,17 @@ impl ExternalStorageClearPrefix {
         }
     }
 
-    /// Returns the trie that must be written to.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+    /// If `Some`, write to the given child trie. If `None`, write to the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         if let Some((child_trie_ptr, child_trie_size)) = self.child_trie_ptr_size {
             let child_trie = self
                 .inner
                 .vm
                 .read_memory(child_trie_ptr, child_trie_size)
                 .unwrap();
-            Trie::ChildTrieDefault { child_trie }
+            Some(child_trie)
         } else {
-            Trie::MainTrie
+            None
         }
     }
 
@@ -2637,23 +2637,23 @@ pub struct ExternalStorageRoot {
 
 impl ExternalStorageRoot {
     /// Returns the trie whose root hash must be provided.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         if let Some((ptr, size)) = self.child_trie_ptr_size {
             let child_trie = self.inner.vm.read_memory(ptr, size).unwrap();
-            Trie::ChildTrieDefault { child_trie }
+            Some(child_trie)
         } else {
-            Trie::MainTrie
+            None
         }
     }
 
     /// Writes the trie root hash to the Wasm VM and prepares it for resume.
     ///
-    /// Must be passed `None` if [`ExternalStorageRoot::trie`] returned [`Trie::ChildTrieDefault`]
-    /// and the trie doesn't exist.
+    /// Must be passed `None` if [`ExternalStorageRoot::child_trie`] returned `Some` and the trie
+    /// doesn't exist.
     ///
     /// # Panic
     ///
-    /// Panics if `None` is passed and [`ExternalStorageRoot::trie`] returned [`Trie::MainTrie`].
+    /// Panics if `None` is passed and [`ExternalStorageRoot::child_trie`] returned `None`.
     ///
     pub fn resume(self, hash: Option<&[u8; 32]>) -> HostVm {
         let host_fn = match self.inner.registered_functions[self.calling] {
@@ -2690,12 +2690,6 @@ impl fmt::Debug for ExternalStorageRoot {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum Trie<T> {
-    MainTrie,
-    ChildTrieDefault { child_trie: T },
-}
-
 /// Must provide the storage key that follows, in lexicographic order, a specific one.
 pub struct ExternalStorageNextKey {
     inner: Inner,
@@ -2721,17 +2715,17 @@ impl ExternalStorageNextKey {
             .unwrap()
     }
 
-    /// Returns the trie that must be read from.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         if let Some((child_trie_ptr, child_trie_size)) = self.child_trie_ptr_size {
             let child_trie = self
                 .inner
                 .vm
                 .read_memory(child_trie_ptr, child_trie_size)
                 .unwrap();
-            Trie::ChildTrieDefault { child_trie }
+            Some(child_trie)
         } else {
-            Trie::MainTrie
+            None
         }
     }
 
