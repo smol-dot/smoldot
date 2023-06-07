@@ -564,11 +564,7 @@ fn try_to_call_global() {
         .unwrap();
         assert!(matches!(
             prototype.prepare().start("hello", &[]),
-            // TODO: wasmi doesn't properly detect NotAFunction at the moment
-            Err((
-                super::StartErr::NotAFunction | super::StartErr::FunctionNotFound,
-                _
-            ))
+            Err((super::StartErr::NotAFunction, _))
         ));
     }
 }
