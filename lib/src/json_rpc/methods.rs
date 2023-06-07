@@ -18,7 +18,7 @@
 //! List of requests and how to answer them.
 
 use super::parse;
-use crate::header;
+use crate::{header, identity::ss58};
 
 use alloc::{
     borrow::Cow,
@@ -614,7 +614,7 @@ pub enum RemoveMetadataLengthPrefixError {
 ///
 /// The deserialization involves decoding an SS58 address into this public key.
 #[derive(Debug, Clone)]
-pub struct AccountId(pub [u8; 32]);
+pub struct AccountId(pub Vec<u8>);
 
 impl serde::Serialize for AccountId {
     fn serialize<S>(&self, _: S) -> Result<S::Ok, S::Error>
@@ -632,25 +632,14 @@ impl<'a> serde::Deserialize<'a> for AccountId {
         D: serde::Deserializer<'a>,
     {
         let string = <&str>::deserialize(deserializer)?;
-        let decoded = match bs58::decode(&string).into_vec() {
-            // TODO: don't use into_vec
+        let decoded = match ss58::decode(string) {
             Ok(d) => d,
-            Err(_) => return Err(serde::de::Error::custom("AccountId isn't in base58 format")),
+            Err(err) => return Err(serde::de::Error::custom(err.to_string())),
         };
 
-        // TODO: retrieve the actual prefix length of the current chain
-        if decoded.len() < 35 {
-            return Err(serde::de::Error::custom("unexpected length for AccountId"));
-        }
+        // TODO: check the prefix against the one of the current chain?
 
-        // TODO: finish implementing this properly ; must notably check checksum
-        // see https://github.com/paritytech/substrate/blob/74a50abd6cbaad1253daf3585d5cdaa4592e9184/primitives/core/src/crypto.rs#L228
-
-        // TODO: retrieve and use the actual prefix length of the current chain
-        let account_id =
-            <[u8; 32]>::try_from(&decoded[(decoded.len() - 34)..(decoded.len() - 2)]).unwrap();
-
-        Ok(AccountId(account_id))
+        Ok(AccountId(decoded.public_key.as_ref().to_vec()))
     }
 }
 
