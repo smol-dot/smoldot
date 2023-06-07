@@ -356,46 +356,59 @@ pub struct DecodedTrieProof<T> {
 impl<T: AsRef<[u8]>> fmt::Debug for DecodedTrieProof<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_map()
-            .entries(
-                self.iter_ordered()
-                    .map(|((trie_root_hash, nibbles), entry)| {
-                        struct DummyHash<'a>(&'a [u8]);
-                        impl<'a> fmt::Debug for DummyHash<'a> {
-                            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                                if self.0.is_empty() {
-                                    write!(f, "∅")?
-                                }
-                                for byte in self.0 {
-                                    write!(f, "{:02x}", *byte)?
-                                }
-                                Ok(())
+            .entries(self.iter_ordered().map(
+                |(
+                    EntryKey {
+                        trie_root_hash,
+                        key,
+                    },
+                    entry,
+                )| {
+                    struct DummyHash<'a>(&'a [u8]);
+                    impl<'a> fmt::Debug for DummyHash<'a> {
+                        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                            if self.0.is_empty() {
+                                write!(f, "∅")?
                             }
-                        }
-
-                        struct DummyNibbles<'a>(&'a [nibble::Nibble]);
-                        impl<'a> fmt::Debug for DummyNibbles<'a> {
-                            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                                if self.0.is_empty() {
-                                    write!(f, "∅")?
-                                }
-                                for nibble in self.0 {
-                                    write!(f, "{:x}", *nibble)?
-                                }
-                                Ok(())
+                            for byte in self.0 {
+                                write!(f, "{:02x}", *byte)?
                             }
+                            Ok(())
                         }
+                    }
 
+                    struct DummyNibbles<'a>(&'a [nibble::Nibble]);
+                    impl<'a> fmt::Debug for DummyNibbles<'a> {
+                        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                            if self.0.is_empty() {
+                                write!(f, "∅")?
+                            }
+                            for nibble in self.0 {
+                                write!(f, "{:x}", *nibble)?
+                            }
+                            Ok(())
+                        }
+                    }
+
+                    (
+                        (DummyHash(trie_root_hash), DummyNibbles(key)),
                         (
-                            (DummyHash(trie_root_hash), DummyNibbles(nibbles)),
-                            (
-                                entry.trie_node_info.children,
-                                entry.trie_node_info.storage_value,
-                            ),
-                        )
-                    }),
-            )
+                            entry.trie_node_info.children,
+                            entry.trie_node_info.storage_value,
+                        ),
+                    )
+                },
+            ))
             .finish()
     }
+}
+
+/// Identifier for an entry within a decoded proof.
+pub struct EntryKey<'a, K> {
+    /// Hash of the root of the trie the key is in.
+    pub trie_root_hash: &'a [u8; 32],
+    /// The trie node key.
+    pub key: K,
 }
 
 impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
@@ -449,9 +462,15 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     ///
     pub fn iter_runtime_context_ordered(
         &'_ self,
-    ) -> impl Iterator<Item = ((&'_ [u8; 32], Vec<u8>), StorageValue<'_>)> + '_ {
-        self.iter_ordered()
-            .filter_map(|((trie_root_hash, key), entry)| {
+    ) -> impl Iterator<Item = (EntryKey<'_, Vec<u8>>, StorageValue<'_>)> + '_ {
+        self.iter_ordered().filter_map(
+            |(
+                EntryKey {
+                    trie_root_hash,
+                    key,
+                },
+                entry,
+            )| {
                 let value = entry.trie_node_info.storage_value;
 
                 if key.len() % 2 != 0 {
@@ -459,8 +478,15 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                 }
 
                 let key = nibble::nibbles_to_bytes_suffix_extend(key.iter().copied()).collect();
-                Some(((trie_root_hash, key), value))
-            })
+                Some((
+                    EntryKey {
+                        trie_root_hash,
+                        key,
+                    },
+                    value,
+                ))
+            },
+        )
     }
 
     /// Returns a list of all elements of the proof, ordered by key in lexicographic order.
@@ -468,7 +494,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// The iterator includes branch nodes.
     pub fn iter_ordered(
         &'_ self,
-    ) -> impl Iterator<Item = ((&'_ [u8; 32], &'_ [nibble::Nibble]), ProofEntry<'_>)> + '_ {
+    ) -> impl Iterator<Item = (EntryKey<'_, &'_ [nibble::Nibble]>, ProofEntry<'_>)> + '_ {
         self.entries.iter().map(
             |((trie_root_hash, key), (storage_value_inner, node_value_range, children_bitmap))| {
                 let storage_value = match storage_value_inner {
@@ -490,7 +516,10 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                 };
 
                 (
-                    (trie_root_hash, &key[..]),
+                    EntryKey {
+                        trie_root_hash,
+                        key: &key[..],
+                    },
                     ProofEntry {
                         node_value: &self.proof.as_ref()[node_value_range.clone()],
                         unhashed_storage_value: match storage_value_inner {
