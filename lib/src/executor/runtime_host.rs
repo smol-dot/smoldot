@@ -560,7 +560,7 @@ impl ClosestDescendantMerkleValue {
                 // We don't properly handle the situation where there's no descendant or no child
                 // trie.
                 request.resume_unknown()
-            },
+            }
         });
         self.inner.run()
     }

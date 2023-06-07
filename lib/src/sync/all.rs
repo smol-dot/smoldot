@@ -3008,7 +3008,10 @@ impl<TRq, TSrc, TBl> StorageClosestDescendantMerkleValue<TRq, TSrc, TBl> {
     ///
     /// `None` can be passed if there is no descendant or, in the case of a child trie read, in
     /// order to indicate that the child trie does not exist.
-    pub fn inject_merkle_value(self, merkle_value: Option<&[u8]>) -> BlockVerification<TRq, TSrc, TBl> {
+    pub fn inject_merkle_value(
+        self,
+        merkle_value: Option<&[u8]>,
+    ) -> BlockVerification<TRq, TSrc, TBl> {
         let inner = self.inner.inject_merkle_value(merkle_value);
         BlockVerification::from_inner(inner, self.shared, self.user_data)
     }
