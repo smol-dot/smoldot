@@ -191,7 +191,8 @@ impl VirtualMachinePrototype {
 
     /// Returns the value of a global that the module exports.
     ///
-    /// The global variable must be a `u32`, otherwise an error is returned.
+    /// The global variable must be a `i32`, otherwise an error is returned. Negative values are
+    /// silently reinterpreted as an unsigned integer.
     pub fn global_value(&mut self, name: &str) -> Result<u32, GlobalValueErr> {
         match &mut self.inner {
             #[cfg(all(
