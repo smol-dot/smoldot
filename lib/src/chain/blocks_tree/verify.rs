@@ -1004,7 +1004,15 @@ impl<T> StorageClosestDescendantMerkleValue<T> {
     }
 
     /// Injects the corresponding Merkle value.
-    pub fn inject_merkle_value(self, merkle_value: &[u8]) -> BodyVerifyStep2<T> {
+    ///
+    /// `None` must only be passed in the case of a child trie read in order to indicate that
+    /// the child trie is known to not exist.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `None` is passed but `child_trie()` returns `None`.
+    ///
+    pub fn inject_merkle_value(self, merkle_value: Option<&[u8]>) -> BodyVerifyStep2<T> {
         let inner = self.inner.inject_merkle_value(merkle_value);
         self.context.with_body_verify(inner)
     }

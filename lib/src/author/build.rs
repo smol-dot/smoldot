@@ -357,7 +357,15 @@ impl ClosestDescendantMerkleValue {
     }
 
     /// Injects the corresponding Merkle value.
-    pub fn inject_merkle_value(self, merkle_value: &[u8]) -> BuilderAuthoring {
+    ///
+    /// `None` must only be passed in the case of a child trie read in order to indicate that
+    /// the child trie is known to not exist.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `None` is passed but `child_trie()` returns `None`.
+    ///
+    pub fn inject_merkle_value(self, merkle_value: Option<&[u8]>) -> BuilderAuthoring {
         self.1
             .with_runtime_inner(self.0.inject_merkle_value(merkle_value))
     }

@@ -1349,7 +1349,13 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     break Err(RuntimeCallError::RuntimeError(error.detail));
                 }
                 runtime_host::RuntimeHostVm::StorageGet(get) => {
-                    let storage_value = runtime_call_lock.storage_entry(get.key().as_ref());
+                    let storage_value = {
+                        let child_trie = get.child_trie();
+                        runtime_call_lock.storage_entry(
+                            child_trie.as_ref().map(|c| c.as_ref()),
+                            get.key().as_ref(),
+                        )
+                    };
                     let storage_value = match storage_value {
                         Ok(v) => v,
                         Err(err) => {
@@ -1363,8 +1369,13 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         get.inject_value(storage_value.map(|(val, vers)| (iter::once(val), vers)));
                 }
                 runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv) => {
-                    let merkle_value = runtime_call_lock
-                        .closest_descendant_merkle_value(&mv.key().collect::<Vec<_>>());
+                    let merkle_value = {
+                        let child_trie = mv.child_trie();
+                        runtime_call_lock.closest_descendant_merkle_value(
+                            child_trie.as_ref().map(|c| c.as_ref()),
+                            &mv.key().collect::<Vec<_>>(),
+                        )
+                    };
                     let merkle_value = match merkle_value {
                         Ok(v) => v,
                         Err(err) => {
@@ -1378,12 +1389,16 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     runtime_call = mv.inject_merkle_value(merkle_value);
                 }
                 runtime_host::RuntimeHostVm::NextKey(nk) => {
-                    let next_key = runtime_call_lock.next_key(
-                        &nk.key().collect::<Vec<_>>(),
-                        nk.or_equal(),
-                        &nk.prefix().collect::<Vec<_>>(),
-                        nk.branch_nodes(),
-                    );
+                    let next_key = {
+                        let child_trie = nk.child_trie();
+                        runtime_call_lock.next_key(
+                            child_trie.as_ref().map(|c| c.as_ref()),
+                            &nk.key().collect::<Vec<_>>(),
+                            nk.or_equal(),
+                            &nk.prefix().collect::<Vec<_>>(),
+                            nk.branch_nodes(),
+                        )
+                    };
                     let next_key = match next_key {
                         Ok(v) => v,
                         Err(err) => {
