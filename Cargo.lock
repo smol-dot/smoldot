@@ -2464,7 +2464,6 @@ name = "smoldot-light"
 version = "0.5.0"
 dependencies = [
  "async-lock",
- "async-std",
  "blake2-rfc",
  "derive_more",
  "either",
@@ -2484,6 +2483,7 @@ dependencies = [
  "serde_json",
  "siphasher",
  "slab",
+ "smol",
  "smoldot",
 ]
 

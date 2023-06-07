@@ -73,7 +73,7 @@ impl PlatformRef for Arc<DefaultPlatform> {
     }
 
     fn sleep(&self, duration: Duration) -> Self::Delay {
-        async_std::task::sleep(duration).boxed()
+        smol::Timer::after(duration).map(|_| ()).boxed()
     }
 
     fn sleep_until(&self, when: Self::Instant) -> Self::Delay {
@@ -82,7 +82,7 @@ impl PlatformRef for Arc<DefaultPlatform> {
     }
 
     fn spawn_task(&self, _task_name: Cow<str>, task: future::BoxFuture<'static, ()>) {
-        async_std::task::spawn(task);
+        smol::spawn(task).detach();
     }
 
     fn client_name(&self) -> Cow<str> {
@@ -172,10 +172,8 @@ impl PlatformRef for Arc<DefaultPlatform> {
             };
 
             let tcp_socket = match addr {
-                either::Left(socket_addr) => async_std::net::TcpStream::connect(socket_addr).await,
-                either::Right((dns, port)) => {
-                    async_std::net::TcpStream::connect((&dns[..], port)).await
-                }
+                either::Left(socket_addr) => smol::net::TcpStream::connect(socket_addr).await,
+                either::Right((dns, port)) => smol::net::TcpStream::connect((&dns[..], port)).await,
             };
 
             if let Ok(tcp_socket) = &tcp_socket {
@@ -433,5 +431,4 @@ enum StreamWriteBuffer {
     Closed,
 }
 
-type TcpOrWs =
-    future::Either<async_std::net::TcpStream, websocket::Connection<async_std::net::TcpStream>>;
+type TcpOrWs = future::Either<smol::net::TcpStream, websocket::Connection<smol::net::TcpStream>>;

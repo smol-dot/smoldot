@@ -103,7 +103,7 @@ fn main() {
 
     // Now block the execution forever and print the responses received on the channel of
     // JSON-RPC responses.
-    async_std::task::block_on(async move {
+    smol::block_on(async move {
         loop {
             let response = json_rpc_responses.next().await.unwrap();
             println!("JSON-RPC response: {response}");
