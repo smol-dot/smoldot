@@ -653,13 +653,8 @@ impl ClosestDescendantMerkleValue {
 
     /// Injects the corresponding Merkle value.
     ///
-    /// `None` must only be passed in the case of a child trie read in order to indicate that
-    /// the child trie is known to not exist.
-    ///
-    /// # Panic
-    ///
-    /// Panics if `None` is passed but `child_trie()` returns `None`.
-    ///
+    /// `None` can be passed if there is no descendant or, in the case of a child trie read, in
+    /// order to indicate that the child trie does not exist.
     pub fn inject_merkle_value(self, merkle_value: Option<&[u8]>) -> Query {
         match self.0 {
             MerkleValueInner::Stage1(inner, stage1) => {

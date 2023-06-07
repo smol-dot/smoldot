@@ -542,13 +542,8 @@ impl ClosestDescendantMerkleValue {
 
     /// Injects the corresponding Merkle value.
     ///
-    /// `None` must only be passed in the case of a child trie read in order to indicate that
-    /// the child trie is known to not exist.
-    ///
-    /// # Panic
-    ///
-    /// Panics if `None` is passed but `child_trie()` returns `None`.
-    ///
+    /// `None` can be passed if there is no descendant or, in the case of a child trie read, in
+    /// order to indicate that the child trie does not exist.
     pub fn inject_merkle_value(mut self, merkle_value: Option<&[u8]>) -> RuntimeHostVm {
         debug_assert!(matches!(
             &self.inner.vm,
@@ -562,11 +557,10 @@ impl ClosestDescendantMerkleValue {
         self.inner.root_calculation = Some(match merkle_value {
             Some(merkle_value) => request.inject_merkle_value(merkle_value),
             None => {
-                let host::HostVm::ExternalStorageRoot(req) = &self.inner.vm
-                    else { unreachable!() };
-                assert!(req.child_trie().is_some());
+                // We don't properly handle the situation where there's no descendant or no child
+                // trie.
                 request.resume_unknown()
-            }
+            },
         });
         self.inner.run()
     }
