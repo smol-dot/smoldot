@@ -21,7 +21,7 @@ use futures_util::io::{BufReader, BufWriter};
 
 #[test]
 fn basic_works() {
-    async_std::task::block_on(async move {
+    smol::block_on(async move {
         let mut server: WsServer<i32> = WsServer::new(Config {
             bind_address: "127.0.0.1:0".parse().unwrap(),
             max_frame_size: 1024 * 1024,
@@ -33,12 +33,10 @@ fn basic_works() {
 
         let server_addr = server.local_addr().unwrap();
 
-        let client_task = async_std::task::spawn(async move {
+        let client_task = smol::spawn(async move {
             let (mut sender, mut receiver) = {
                 let mut client = {
-                    let socket = async_std::net::TcpStream::connect(server_addr)
-                        .await
-                        .unwrap();
+                    let socket = smol::net::TcpStream::connect(server_addr).await.unwrap();
                     let io = BufReader::new(BufWriter::new(socket));
                     soketto::handshake::Client::new(io, "example.com", "/")
                 };
