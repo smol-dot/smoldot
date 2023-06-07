@@ -1204,7 +1204,6 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             let decoded_downloaded_runtime =
                 match proof_decode::decode_and_verify_proof(proof_decode::Config {
                     proof: &downloaded_runtime[..],
-                    trie_root_hash: &header.state_root,
                 }) {
                     Ok(p) => p,
                     Err(err) => {
@@ -1221,33 +1220,34 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     }
                 };
 
-            let finalized_storage_code = match decoded_downloaded_runtime.storage_value(b":code") {
-                Some(Some((code, _))) => code,
-                Some(None) => {
-                    self.inner.phase = Phase::DownloadFragments {
-                        previous_verifier_values: Some((
-                            header.clone(),
-                            chain_information_finality.clone(),
-                        )),
-                    };
-                    return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
-                }
-                None => {
-                    self.inner.phase = Phase::DownloadFragments {
-                        previous_verifier_values: Some((
-                            header.clone(),
-                            chain_information_finality.clone(),
-                        )),
-                    };
-                    return (
-                        WarpSync::InProgress(self.inner),
-                        Some(Error::MerkleProofEntriesMissing),
-                    );
-                }
-            };
+            let finalized_storage_code =
+                match decoded_downloaded_runtime.storage_value(&header.state_root, b":code") {
+                    Some(Some((code, _))) => code,
+                    Some(None) => {
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: Some((
+                                header.clone(),
+                                chain_information_finality.clone(),
+                            )),
+                        };
+                        return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
+                    }
+                    None => {
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: Some((
+                                header.clone(),
+                                chain_information_finality.clone(),
+                            )),
+                        };
+                        return (
+                            WarpSync::InProgress(self.inner),
+                            Some(Error::MerkleProofEntriesMissing),
+                        );
+                    }
+                };
 
             let finalized_storage_heappages =
-                match decoded_downloaded_runtime.storage_value(b":heappages") {
+                match decoded_downloaded_runtime.storage_value(&header.state_root, b":heappages") {
                     Some(val) => val.map(|(v, _)| v),
                     None => {
                         self.inner.phase = Phase::DownloadFragments {
@@ -1421,7 +1421,6 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     let proof = proof.take().unwrap();
                     let decoded_proof =
                         match proof_decode::decode_and_verify_proof(proof_decode::Config {
-                            trie_root_hash: &header.state_root,
                             proof: proof.into_iter(),
                         }) {
                             Ok(d) => d,
@@ -1450,21 +1449,22 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                 match chain_info_builder {
                     chain_information::build::InProgress::StorageGet(get) => {
                         let proof = calls.get(&get.call_in_progress()).unwrap();
-                        let value = match proof.storage_value(get.key().as_ref()) {
-                            Some(v) => v.map(|(v, _)| v),
-                            None => {
-                                self.inner.phase = Phase::DownloadFragments {
-                                    previous_verifier_values: Some((
-                                        header.clone(),
-                                        chain_information_finality.clone(),
-                                    )),
-                                };
-                                return (
-                                    WarpSync::InProgress(self.inner),
-                                    Some(Error::MerkleProofEntriesMissing),
-                                );
-                            }
-                        };
+                        let value =
+                            match proof.storage_value(&header.state_root, get.key().as_ref()) {
+                                Some(v) => v.map(|(v, _)| v),
+                                None => {
+                                    self.inner.phase = Phase::DownloadFragments {
+                                        previous_verifier_values: Some((
+                                            header.clone(),
+                                            chain_information_finality.clone(),
+                                        )),
+                                    };
+                                    return (
+                                        WarpSync::InProgress(self.inner),
+                                        Some(Error::MerkleProofEntriesMissing),
+                                    );
+                                }
+                            };
 
                         match get.inject_value(value.map(iter::once)) {
                             chain_information::build::ChainInformationBuild::Finished {

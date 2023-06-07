@@ -431,7 +431,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     let decoded = outcome.decode();
                     let decoded = proof_decode::decode_and_verify_proof(proof_decode::Config {
                         proof: decoded,
-                        trie_root_hash: storage_trie_root,
                     })
                     .map_err(StorageQueryErrorDetail::ProofVerification)?;
 
@@ -439,7 +438,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     for key in requested_keys.clone() {
                         result.push(
                             decoded
-                                .storage_value(key.as_ref())
+                                .storage_value(storage_trie_root, key.as_ref())
                                 .ok_or(StorageQueryErrorDetail::MissingProofEntry)?
                                 .map(|(v, _)| v.to_owned()),
                         );

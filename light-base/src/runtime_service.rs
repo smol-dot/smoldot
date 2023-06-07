@@ -807,7 +807,6 @@ impl<TPlat: PlatformRef> RuntimeAccess<TPlat> {
         let call_proof = call_proof.and_then(|call_proof| {
             proof_decode::decode_and_verify_proof(proof_decode::Config {
                 proof: call_proof.decode().to_owned(), // TODO: to_owned() inefficiency, need some help from the networking to obtain the owned data
-                trie_root_hash: &self.block_state_root_hash,
             })
             .map_err(RuntimeCallError::StorageRetrieval)
         });
@@ -861,7 +860,7 @@ impl<'a> RuntimeCall<'a> {
             Err(err) => return Err(err.clone()),
         };
 
-        match call_proof.storage_value(requested_key) {
+        match call_proof.storage_value(&self.block_state_root_hash, requested_key) {
             Some(v) => Ok(v),
             None => Err(RuntimeCallError::MissingProofEntry),
         }
@@ -891,7 +890,13 @@ impl<'a> RuntimeCall<'a> {
             Err(err) => return Err(err.clone()),
         };
 
-        match call_proof.next_key(key_before, or_equal, prefix, branch_nodes) {
+        match call_proof.next_key(
+            &self.block_state_root_hash,
+            key_before,
+            or_equal,
+            prefix,
+            branch_nodes,
+        ) {
             Some(v) => Ok(v),
             None => Err(RuntimeCallError::MissingProofEntry),
         }
@@ -911,7 +916,7 @@ impl<'a> RuntimeCall<'a> {
             Err(err) => return Err(err.clone()),
         };
 
-        match call_proof.closest_descendant_merkle_value(key) {
+        match call_proof.closest_descendant_merkle_value(&self.block_state_root_hash, key) {
             Some(Some(v)) => Ok(v),
             Some(None) | None => Err(RuntimeCallError::MissingProofEntry),
         }
