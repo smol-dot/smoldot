@@ -95,7 +95,7 @@ wasmtime = { version = "9.0.3", default-features = false, features = ["async", "
 async-std = "1.12.0"
 criterion = "0.5.1"
 futures-executor = { version = "0.3.28", default-features = false }
-tempfile = "3.5.0"
+tempfile = "3.6.0"
 wat = "1.0.66"
 
 [package.metadata.docs.rs]
