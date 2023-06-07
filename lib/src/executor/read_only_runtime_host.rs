@@ -156,12 +156,7 @@ impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
     pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
         match &self.inner.vm {
-            host::HostVm::ExternalStorageGet(req) => match req.key() {
-                // TODO: child tries are not implemented correctly
-                host::StorageKey::MainTrie { key } => key,
-                _ => unreachable!(),
-            },
-
+            host::HostVm::ExternalStorageGet(req) => req.key(),
             // We only create a `StorageGet` if the state is one of the above.
             _ => unreachable!(),
         }
@@ -204,11 +199,7 @@ impl NextKey {
     /// Returns the key whose next key must be passed back.
     pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
         match &self.inner.vm {
-            host::HostVm::ExternalStorageNextKey(req) => match req.key() {
-                // TODO: child tries are not implemented correctly
-                host::StorageKey::MainTrie { key } => key,
-                _ => unreachable!(),
-            },
+            host::HostVm::ExternalStorageNextKey(req) => req.key(),
             _ => unreachable!(),
         }
     }
@@ -395,8 +386,7 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageGet(req) => {
-                    let is_main_trie = matches!(req.key(), host::StorageKey::MainTrie { .. });
-                    if is_main_trie {
+                    if matches!(req.trie(), host::Trie::MainTrie) {
                         self.vm = req.into();
                         return RuntimeHostVm::StorageGet(StorageGet { inner: self });
                     } else {
@@ -406,19 +396,13 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageNextKey(req) => {
-                    let is_main_trie = matches!(req.key(), host::StorageKey::MainTrie { .. });
-                    if is_main_trie {
+                    if matches!(req.trie(), host::Trie::MainTrie) {
                         self.vm = req.into();
                         return RuntimeHostVm::NextKey(NextKey { inner: self });
                     } else {
                         // TODO: this is a dummy implementation and child tries are not implemented properly
                         self.vm = req.resume(None)
                     }
-                }
-
-                host::HostVm::ExternalStorageNextChildTrie(req) => {
-                    // TODO: this is a dummy implementation and child tries are not implemented properly
-                    self.vm = req.resume(None);
                 }
 
                 host::HostVm::SignatureVerification(req) => {

@@ -979,7 +979,7 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
 
     /// Obtaining the Merkle value of a trie node of the parent block storage is required in order
     /// to continue.
-    ParentStorageMerkleValue(StorageMerkleValue<TRq, TSrc, TBl>),
+    ParentStorageMerkleValue(StorageClosestDescendantMerkleValue<TRq, TSrc, TBl>),
 
     /// Fetching the key of the parent block storage that follows a given one is required in
     /// order to continue.
@@ -1099,13 +1099,14 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     break BlockVerification::ParentStorageGet(StorageGet { inner: req, shared });
                 }
 
-                Inner::Step2(blocks_tree::BodyVerifyStep2::StorageMerkleValue(req)) => {
+                Inner::Step2(
+                    blocks_tree::BodyVerifyStep2::StorageClosestDescendantMerkleValue(req),
+                ) => {
                     // The underlying verification process is asking for the Merkle value of a
                     // trie node.
-                    break BlockVerification::ParentStorageMerkleValue(StorageMerkleValue {
-                        inner: req,
-                        shared,
-                    });
+                    break BlockVerification::ParentStorageMerkleValue(
+                        StorageClosestDescendantMerkleValue { inner: req, shared },
+                    );
                 }
 
                 Inner::Step2(blocks_tree::BodyVerifyStep2::StorageNextKey(req)) => {
@@ -1361,17 +1362,16 @@ impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
     }
 }
 
-/// Obtaining the Merkle value of a trie node is required in order to continue.
+/// Obtaining the Merkle value of the closest descendant of a trie node is required in order to
+/// continue.
 #[must_use]
-pub struct StorageMerkleValue<TRq, TSrc, TBl> {
-    inner: blocks_tree::StorageMerkleValue<Block<TBl>>,
+pub struct StorageClosestDescendantMerkleValue<TRq, TSrc, TBl> {
+    inner: blocks_tree::StorageClosestDescendantMerkleValue<Block<TBl>>,
     shared: BlockVerificationShared<TRq, TSrc, TBl>,
 }
 
-impl<TRq, TSrc, TBl> StorageMerkleValue<TRq, TSrc, TBl> {
-    /// Returns the key whose Merkle value must be passed back.
-    ///
-    /// The key is guaranteed to have been injected through [`StorageNextKey::inject_key`] earlier.
+impl<TRq, TSrc, TBl> StorageClosestDescendantMerkleValue<TRq, TSrc, TBl> {
+    /// Returns the key whose closest descendant Merkle value must be passed back.
     pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.key()
     }
@@ -1386,10 +1386,6 @@ impl<TRq, TSrc, TBl> StorageMerkleValue<TRq, TSrc, TBl> {
     }
 
     /// Injects the corresponding Merkle value.
-    ///
-    /// Note that there is no way to indicate that the trie node doesn't exist. This is because
-    /// the node is guaranteed to have been injected through [`StorageNextKey::inject_key`]
-    /// earlier.
     pub fn inject_merkle_value(self, merkle_value: &[u8]) -> BlockVerification<TRq, TSrc, TBl> {
         let inner = self.inner.inject_merkle_value(merkle_value);
         BlockVerification::from(Inner::Step2(inner), self.shared)

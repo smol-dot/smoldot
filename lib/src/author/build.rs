@@ -144,8 +144,9 @@ pub enum BuilderAuthoring {
     /// Loading a storage value from the parent storage is required in order to continue.
     StorageGet(StorageGet),
 
-    /// Obtaining the Merkle value of a trie node is required in order to continue.
-    MerkleValue(MerkleValue),
+    /// Obtaining the Merkle value of the closest descendant of a trie node is required in order
+    /// to continue.
+    ClosestDescendantMerkleValue(ClosestDescendantMerkleValue),
 
     /// Fetching the key that follows a given one in the parent storage is required in order to
     /// continue.
@@ -325,14 +326,14 @@ impl StorageGet {
     }
 }
 
-/// Obtaining the Merkle value of a trie node is required in order to continue.
+/// Obtaining the Merkle value of the closest descendant of a trie node is required in order
+/// to continue.
 #[must_use]
-pub struct MerkleValue(runtime::MerkleValue, Shared);
+pub struct ClosestDescendantMerkleValue(runtime::ClosestDescendantMerkleValue, Shared);
 
-impl MerkleValue {
-    /// Returns the key whose Merkle value must be passed to [`MerkleValue::inject_merkle_value`].
-    ///
-    /// The key is guaranteed to have been injected through [`NextKey::inject_key`] earlier.
+impl ClosestDescendantMerkleValue {
+    /// Returns the key whose closest descendant Merkle value must be passed to
+    /// [`ClosestDescendantMerkleValue::inject_merkle_value`].
     pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.0.key()
     }
@@ -346,9 +347,6 @@ impl MerkleValue {
     }
 
     /// Injects the corresponding Merkle value.
-    ///
-    /// Note that there is no way to indicate that the trie node doesn't exist. This is because
-    /// the node is guaranteed to have been injected through [`NextKey::inject_key`] earlier.
     pub fn inject_merkle_value(self, merkle_value: &[u8]) -> BuilderAuthoring {
         self.1
             .with_runtime_inner(self.0.inject_merkle_value(merkle_value))
@@ -534,8 +532,10 @@ impl Shared {
                 runtime::BlockBuild::StorageGet(inner) => {
                     break BuilderAuthoring::StorageGet(StorageGet(inner, self))
                 }
-                runtime::BlockBuild::MerkleValue(inner) => {
-                    break BuilderAuthoring::MerkleValue(MerkleValue(inner, self))
+                runtime::BlockBuild::ClosestDescendantMerkleValue(inner) => {
+                    break BuilderAuthoring::ClosestDescendantMerkleValue(
+                        ClosestDescendantMerkleValue(inner, self),
+                    )
                 }
                 runtime::BlockBuild::NextKey(inner) => {
                     break BuilderAuthoring::NextKey(NextKey(inner, self))

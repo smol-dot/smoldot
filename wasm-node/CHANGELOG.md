@@ -2,15 +2,27 @@
 
 ## Unreleased
 
+### Fixed
+
+- A `validated` event is now properly generated when watching a transaction using `transaction_unstable_submitAndWatch`. ([#676](https://github.com/smol-dot/smoldot/pull/676))
+- Fix `author_submitAndWatchExtrinsic` erroneously generating `transaction_unstable_watchEvent` notifications, and `transaction_unstable_submitAndWatch` erroneously generating `author_extrinsicUpdate` notifications. ([#677](https://github.com/smol-dot/smoldot/pull/677))
+
 ### Changed
 
+- TCP NODELAY is now enabled on Deno. The minimum required Deno version is now v1.29.0, which was released on 2022-12-14.
+
+## 1.0.8 - 2023-06-05
+
+### Changed
+
+- Instead of manually decompressing the WebAssembly bytecode in JavaScript, smoldot will now use the native `DecompressionStream` API within browsers and the native `zlib.inflate` function in NodeJS. This should speed up the initialization and reduce the size of the package. The new `DecompressionStream` API has been stable since February 2020 on Chrome and Edge, since March 2023 on Safari, and since May 2023 on Firefox. ([#640](https://github.com/smol-dot/smoldot/pull/640))
 - The parameter of `chainHead_unstable_follow` has been renamed from `runtimeUpdates` to `withRuntime` in accordance with the latest JSON-RPC specification changes. ([#624](https://github.com/smol-dot/smoldot/pull/624))
 - Errors while building the runtime and errors while building the consensus-related information that can happen during the warp syncing process are now printed in the logs. ([#644](https://github.com/smol-dot/smoldot/pull/644))
 - The `chainHead_unstable_storage` JSON-RPC method has been updated according to the latest changes to the JSON-RPC specification. These changes can be found [here](https://github.com/paritytech/json-rpc-interface-spec/pull/37). The `descendants-values`, `descendants-hashes`, and `closest-ancestor-merkle-value` types aren't implemented yet and produce an error. ([#647](https://github.com/smol-dot/smoldot/pull/647))
-- TCP NODELAY is now enabled on Deno. The minimum required Deno version is now v1.29.0, which was released on 2022-12-14.
 
 ### Fixed
 
+- Smoldot will no longer produce errors when calling a runtime function (such as with `state_call` or `chainHead_unstable_call`) that calls the `ext_storage_root` host function. ([#670](https://github.com/smol-dot/smoldot/pull/670))
 - Fix panic when receiving a networking request of a protocol not supported by smoldot. ([#635](https://github.com/smol-dot/smoldot/pull/635))
 - Fix `chainHead_unstable_stopStorage` and `chainHead_unstable_stopBody` being mixed. In other words, storage requests were interrupted by `chainHead_unstable_stopBody` and body requests were interrupted by `chainHead_unstable_stopStorage` ([#648](https://github.com/smol-dot/smoldot/pull/648))
 

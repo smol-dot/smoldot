@@ -404,8 +404,9 @@ pub enum Query {
     },
     /// Loading a storage value is required in order to continue.
     StorageGet(StorageGet),
-    /// Obtaining the Merkle value of a trie node is required in order to continue.
-    MerkleValue(MerkleValue),
+    /// Obtaining the Merkle value of the closest descendant of a trie node is required in order
+    /// to continue.
+    ClosestDescendantMerkleValue(ClosestDescendantMerkleValue),
     /// Fetching the key that follows a given one is required in order to continue.
     NextKey(NextKey),
 }
@@ -423,12 +424,12 @@ impl Query {
             Query::StorageGet(StorageGet(StorageGetInner::Stage2(inner, _))) => {
                 runtime_host::RuntimeHostVm::StorageGet(inner).into_prototype()
             }
-            Query::MerkleValue(MerkleValue(MerkleValueInner::Stage1(inner, _))) => {
-                runtime_host::RuntimeHostVm::MerkleValue(inner).into_prototype()
-            }
-            Query::MerkleValue(MerkleValue(MerkleValueInner::Stage2(inner, _))) => {
-                runtime_host::RuntimeHostVm::MerkleValue(inner).into_prototype()
-            }
+            Query::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue(
+                MerkleValueInner::Stage1(inner, _),
+            )) => runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(inner).into_prototype(),
+            Query::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue(
+                MerkleValueInner::Stage2(inner, _),
+            )) => runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(inner).into_prototype(),
             Query::NextKey(NextKey(NextKeyInner::Stage1(inner, _))) => {
                 runtime_host::RuntimeHostVm::NextKey(inner).into_prototype()
             }
@@ -477,8 +478,10 @@ impl Query {
                 runtime_host::RuntimeHostVm::StorageGet(i) => {
                     Query::StorageGet(StorageGet(StorageGetInner::Stage1(i, info)))
                 }
-                runtime_host::RuntimeHostVm::MerkleValue(inner) => {
-                    Query::MerkleValue(MerkleValue(MerkleValueInner::Stage1(inner, info)))
+                runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(inner) => {
+                    Query::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue(
+                        MerkleValueInner::Stage1(inner, info),
+                    ))
                 }
                 runtime_host::RuntimeHostVm::NextKey(inner) => {
                     Query::NextKey(NextKey(NextKeyInner::Stage1(inner, info)))
@@ -535,8 +538,10 @@ impl Query {
                 runtime_host::RuntimeHostVm::StorageGet(i) => {
                     Query::StorageGet(StorageGet(StorageGetInner::Stage2(i, info)))
                 }
-                runtime_host::RuntimeHostVm::MerkleValue(inner) => {
-                    Query::MerkleValue(MerkleValue(MerkleValueInner::Stage2(inner, info)))
+                runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(inner) => {
+                    Query::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue(
+                        MerkleValueInner::Stage2(inner, info),
+                    ))
                 }
                 runtime_host::RuntimeHostVm::NextKey(inner) => {
                     Query::NextKey(NextKey(NextKeyInner::Stage2(inner, info)))
@@ -595,19 +600,19 @@ impl StorageGet {
     }
 }
 
-/// Obtaining the Merkle value of a trie node is required in order to continue.
+/// Obtaining the Merkle value of the closest descendant of a trie node is required in order
+/// to continue.
 #[must_use]
-pub struct MerkleValue(MerkleValueInner);
+pub struct ClosestDescendantMerkleValue(MerkleValueInner);
 
 enum MerkleValueInner {
-    Stage1(runtime_host::MerkleValue, Stage1),
-    Stage2(runtime_host::MerkleValue, Stage2),
+    Stage1(runtime_host::ClosestDescendantMerkleValue, Stage1),
+    Stage2(runtime_host::ClosestDescendantMerkleValue, Stage2),
 }
 
-impl MerkleValue {
-    /// Returns the key whose Merkle value must be passed to [`MerkleValue::inject_merkle_value`].
-    ///
-    /// The key is guaranteed to have been injected through [`NextKey::inject_key`] earlier.
+impl ClosestDescendantMerkleValue {
+    /// Returns the key whose closest descendant Merkle value must be passed to
+    /// [`ClosestDescendantMerkleValue::inject_merkle_value`].
     pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         match &self.0 {
             MerkleValueInner::Stage1(inner, _) => either::Left(inner.key()),
@@ -631,9 +636,6 @@ impl MerkleValue {
     }
 
     /// Injects the corresponding Merkle value.
-    ///
-    /// Note that there is no way to indicate that the trie node doesn't exist. This is because
-    /// the node is guaranteed to have been injected through [`NextKey::inject_key`] earlier.
     pub fn inject_merkle_value(self, merkle_value: &[u8]) -> Query {
         match self.0 {
             MerkleValueInner::Stage1(inner, stage1) => {

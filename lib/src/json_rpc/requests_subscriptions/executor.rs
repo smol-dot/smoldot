@@ -294,8 +294,8 @@ mod tests {
             }
 
             // Then drop the queue and make sure that there's no clone of `counter` remaining.
-            let _ = Arc::try_unwrap(queue).unwrap();
-            let () = Arc::try_unwrap(counter).unwrap();
+            let _ = Arc::into_inner(queue).unwrap();
+            let () = Arc::into_inner(counter).unwrap();
         })
     }
 }

@@ -401,8 +401,9 @@ pub enum Verify {
     RuntimeCompilation(RuntimeCompilation),
     /// Loading a storage value is required in order to continue.
     StorageGet(StorageGet),
-    /// Obtaining the Merkle value of a trie node is required in order to continue.
-    StorageMerkleValue(StorageMerkleValue),
+    /// Obtaining the Merkle value of the closest descendant of a trie node is required in order
+    /// to continue.
+    StorageClosestDescendantMerkleValue(StorageClosestDescendantMerkleValue),
     /// Fetching the key that follows a given one is required in order to continue.
     StorageNextKey(StorageNextKey),
 }
@@ -561,12 +562,14 @@ impl VerifyInner {
                         consensus_success: self.consensus_success,
                     })
                 }
-                (runtime_host::RuntimeHostVm::MerkleValue(inner), phase) => {
-                    break Verify::StorageMerkleValue(StorageMerkleValue {
-                        inner,
-                        phase,
-                        consensus_success: self.consensus_success,
-                    })
+                (runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(inner), phase) => {
+                    break Verify::StorageClosestDescendantMerkleValue(
+                        StorageClosestDescendantMerkleValue {
+                            inner,
+                            phase,
+                            consensus_success: self.consensus_success,
+                        },
+                    )
                 }
                 (runtime_host::RuntimeHostVm::NextKey(inner), phase) => {
                     break Verify::StorageNextKey(StorageNextKey {
@@ -640,19 +643,18 @@ impl StorageGet {
     }
 }
 
-/// Obtaining the Merkle value of a trie node is required in order to continue.
+/// Obtaining the Merkle value of the closest descendant of a trie node is required in order
+/// to continue.
 #[must_use]
-pub struct StorageMerkleValue {
-    inner: runtime_host::MerkleValue,
+pub struct StorageClosestDescendantMerkleValue {
+    inner: runtime_host::ClosestDescendantMerkleValue,
     /// See [`VerifyInner::phase`].
     phase: VerifyInnerPhase,
     consensus_success: SuccessConsensus,
 }
 
-impl StorageMerkleValue {
-    /// Returns the key whose Merkle value must be passed back.
-    ///
-    /// The key is guaranteed to have been injected through [`StorageNextKey::inject_key`] earlier.
+impl StorageClosestDescendantMerkleValue {
+    /// Returns the key whose closest descendant Merkle value must be passed back.
     pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.key()
     }
@@ -671,10 +673,6 @@ impl StorageMerkleValue {
     }
 
     /// Injects the corresponding Merkle value.
-    ///
-    /// Note that there is no way to indicate that the trie node doesn't exist. This is because
-    /// the node is guaranteed to have been injected through [`StorageNextKey::inject_key`]
-    /// earlier.
     pub fn inject_merkle_value(self, merkle_value: &[u8]) -> Verify {
         VerifyInner {
             inner: self.inner.inject_merkle_value(merkle_value),

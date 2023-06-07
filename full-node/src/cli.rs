@@ -36,7 +36,7 @@ use smoldot::{
         PeerId,
     },
 };
-use std::{net::SocketAddr, path::PathBuf};
+use std::{io, net::SocketAddr, path::PathBuf};
 
 // Note: the doc-comments applied to this struct and its field are visible when the binary is
 // started with `--help`.
@@ -140,7 +140,7 @@ impl core::str::FromStr for ColorChoice {
         if s == "always" {
             Ok(ColorChoice::Always)
         } else if s == "auto" {
-            if atty::is(atty::Stream::Stderr) {
+            if io::IsTerminal::is_terminal(&io::stderr()) {
                 Ok(ColorChoice::Always)
             } else {
                 Ok(ColorChoice::Never)

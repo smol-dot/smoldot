@@ -15,7 +15,7 @@ edition = "2021"
 repository = "https://github.com/smol-dot/smoldot"
 
 [profile.dev]
-debug = 1    # Default value is `2`, which contains the full debug info. `1` is enough for stack traces.
+debug = 1    # Default value is `2`, which contains the full debug info. `1` is enough for stack traces.  # TODO: use the named version after Cargo v1.71
 opt-level = 2
 panic = "abort"
 [profile.dev.package."*"]

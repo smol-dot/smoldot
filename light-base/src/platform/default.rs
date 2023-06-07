@@ -34,22 +34,22 @@ use std::{
     net::{IpAddr, SocketAddr},
 };
 
-/// Implementation of the [`PlatformRef`] trait that uses the `async-std` library and provides TCP
-/// and WebSocket connections.
-#[derive(Clone)]
-pub struct AsyncStdTcpWebSocket {
-    client_name_version: Arc<(String, String)>,
+/// Implementation of the [`PlatformRef`] trait that leverages the operating system.
+pub struct DefaultPlatform {
+    client_name: String,
+    client_version: String,
 }
 
-impl AsyncStdTcpWebSocket {
-    pub fn new(client_name: String, client_version: String) -> Self {
-        AsyncStdTcpWebSocket {
-            client_name_version: Arc::new((client_name, client_version)),
-        }
+impl DefaultPlatform {
+    pub fn new(client_name: String, client_version: String) -> Arc<Self> {
+        Arc::new(DefaultPlatform {
+            client_name,
+            client_version,
+        })
     }
 }
 
-impl PlatformRef for AsyncStdTcpWebSocket {
+impl PlatformRef for Arc<DefaultPlatform> {
     type Delay = future::BoxFuture<'static, ()>;
     type Yield = future::Ready<()>;
     type Instant = std::time::Instant;
@@ -86,11 +86,11 @@ impl PlatformRef for AsyncStdTcpWebSocket {
     }
 
     fn client_name(&self) -> Cow<str> {
-        Cow::Borrowed(&self.client_name_version.0)
+        Cow::Borrowed(&self.client_name)
     }
 
     fn client_version(&self) -> Cow<str> {
-        Cow::Borrowed(&self.client_name_version.1)
+        Cow::Borrowed(&self.client_version)
     }
 
     fn yield_after_cpu_intensive(&self) -> Self::Yield {
@@ -409,7 +409,7 @@ impl PlatformRef for AsyncStdTcpWebSocket {
     }
 }
 
-/// Implementation detail of [`AsyncStdTcpWebSocket`].
+/// Implementation detail of [`DefaultPlatform`].
 pub struct Stream {
     socket: TcpOrWs,
     /// Read and write buffers of the connection, or `None` if the socket has been reset.

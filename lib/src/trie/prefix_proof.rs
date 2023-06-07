@@ -122,14 +122,16 @@ impl PrefixScan {
                         (Some(info), QueryTy::Exact) => info,
                         (Some(info), QueryTy::Direction) => {
                             match info.children.child(query_key[query_key.len() - 1]) {
-                                proof_decode::Child::InProof { child_key } => {
+                                proof_decode::Child::InProof { child_key, .. } => {
                                     // Rather than complicate this code, we just add the child to
                                     // `next` (this time an `Exact` query) and process it during
                                     // the next iteration.
                                     next.push((child_key.to_owned(), QueryTy::Exact));
                                     continue;
                                 }
-                                proof_decode::Child::AbsentFromProof if !is_first_iteration => {
+                                proof_decode::Child::AbsentFromProof { .. }
+                                    if !is_first_iteration =>
+                                {
                                     // Node not in the proof. There's no point in adding this node
                                     // to `next` as we will fail again if we try to verify the
                                     // proof again.
@@ -138,7 +140,7 @@ impl PrefixScan {
                                     self.next_queries.push((query_key, QueryTy::Direction));
                                     continue;
                                 }
-                                proof_decode::Child::AbsentFromProof => {
+                                proof_decode::Child::AbsentFromProof { .. } => {
                                     // Push all the non-processed queries back to `next_queries`
                                     // before returning the error, so that we can try again.
                                     self.next_queries.push((query_key, QueryTy::Direction));
@@ -193,14 +195,14 @@ impl PrefixScan {
                 for (nibble, child) in info.children.children().enumerate() {
                     match child {
                         proof_decode::Child::NoChild => continue,
-                        proof_decode::Child::AbsentFromProof => {
+                        proof_decode::Child::AbsentFromProof { .. } => {
                             let mut direction = query_key.clone();
                             direction.push(
                                 nibble::Nibble::try_from(u8::try_from(nibble).unwrap()).unwrap(),
                             );
                             next.push((direction, QueryTy::Direction));
                         }
-                        proof_decode::Child::InProof { child_key } => {
+                        proof_decode::Child::InProof { child_key, .. } => {
                             next.push((child_key.to_owned(), QueryTy::Exact))
                         }
                     }

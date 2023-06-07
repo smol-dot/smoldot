@@ -56,7 +56,7 @@ jobs:
   build-js-doc:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.69
+      image: rust:1.70
     steps:
       - uses: actions/checkout@v3
         with:
@@ -82,7 +82,7 @@ jobs:
   build-rust-doc:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.69
+      image: rust:1.70
     steps:
       - uses: actions/checkout@v3
         with:
@@ -103,7 +103,7 @@ jobs:
   build-tests-coverage:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.69
+      image: rust:1.70
     steps:
       - run: apt update && apt install -y jq
       - run: rustup component add llvm-tools-preview
@@ -173,7 +173,7 @@ jobs:
   npm-publish:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.69
+      image: rust:1.70
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-node@v3.6.0

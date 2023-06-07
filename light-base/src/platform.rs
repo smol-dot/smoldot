@@ -19,7 +19,7 @@ use alloc::{borrow::Cow, string::String, vec::Vec};
 use core::{future::Future, ops, str, time::Duration};
 use futures_util::future;
 
-pub mod async_std;
+pub mod default;
 
 /// Access to a platform's capabilities.
 ///

@@ -40,8 +40,8 @@ fn empty_trie_works() {
             InProgress::ClosestDescendant(req) => {
                 calculation = req.inject(None::<iter::Empty<_>>);
             }
-            InProgress::MerkleValue(_) => {
-                unreachable!()
+            InProgress::ClosestDescendantMerkleValue(req) => {
+                calculation = req.resume_unknown();
             }
             InProgress::StorageValue(req) => {
                 calculation = req.inject_value(None);
@@ -80,8 +80,8 @@ fn one_inserted_node_in_diff() {
             InProgress::ClosestDescendant(req) => {
                 calculation = req.inject(None::<iter::Empty<_>>);
             }
-            InProgress::MerkleValue(_) => {
-                unreachable!()
+            InProgress::ClosestDescendantMerkleValue(req) => {
+                calculation = req.resume_unknown();
             }
             InProgress::StorageValue(req) => {
                 calculation = req.inject_value(None);
@@ -295,16 +295,40 @@ fn fuzzing() {
                             next_node.map(|n| trie_before_diff.node_full_key_by_index(n).unwrap()),
                         );
                     }
-                    InProgress::MerkleValue(req) => {
+                    InProgress::ClosestDescendantMerkleValue(req) => {
                         if rand::random::<bool>() {
-                            let merkle_value = if let trie::trie_structure::Entry::Occupied(e) =
-                                trie_before_diff.node(req.key_as_vec().into_iter())
-                            {
-                                e.into_user_data().1.as_ref().unwrap().clone()
+                            let mut next_node = trie_before_diff
+                                .range_iter(
+                                    ops::Bound::Included(req.key_as_vec().into_iter()),
+                                    ops::Bound::Unbounded::<iter::Empty<trie::Nibble>>,
+                                )
+                                .next();
+                            // Set `next_node` to `None` if it isn't a descendant of the demanded key.
+                            if next_node.map_or(false, |n| {
+                                !trie_before_diff
+                                    .node_full_key_by_index(n)
+                                    .unwrap()
+                                    .collect::<Vec<_>>()
+                                    .starts_with(&req.key_as_vec())
+                            }) {
+                                next_node = None;
+                            }
+
+                            if let Some(next_node) = next_node {
+                                calculator = req.inject_merkle_value(
+                                    trie_before_diff
+                                        .node_by_index(next_node)
+                                        .unwrap()
+                                        .into_user_data()
+                                        .1
+                                        .as_ref()
+                                        .unwrap()
+                                        .clone()
+                                        .as_ref(),
+                                );
                             } else {
-                                unreachable!()
-                            };
-                            calculator = req.inject_merkle_value(merkle_value.as_ref());
+                                calculator = req.resume_unknown();
+                            }
                         } else {
                             calculator = req.resume_unknown()
                         }
