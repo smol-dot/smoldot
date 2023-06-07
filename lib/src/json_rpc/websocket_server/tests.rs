@@ -36,9 +36,7 @@ fn basic_works() {
         let client_task = smol::spawn(async move {
             let (mut sender, mut receiver) = {
                 let mut client = {
-                    let socket = smol::net::TcpStream::connect(server_addr)
-                        .await
-                        .unwrap();
+                    let socket = smol::net::TcpStream::connect(server_addr).await.unwrap();
                     let io = BufReader::new(BufWriter::new(socket));
                     soketto::handshake::Client::new(io, "example.com", "/")
                 };
