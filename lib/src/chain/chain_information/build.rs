@@ -29,8 +29,6 @@ use crate::{
     header, trie,
 };
 
-pub use read_only_runtime_host::Trie;
-
 /// Configuration to provide to [`ChainInformationBuild::new`].
 pub struct Config {
     /// Header of the finalized block, whose chain information is to retrieve.
@@ -282,9 +280,9 @@ impl StorageGet {
         self.0.key()
     }
 
-    /// Returns the trie that must be read from.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
-        self.0.trie()
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.0.child_trie()
     }
 
     /// Injects the corresponding storage value.
@@ -311,9 +309,9 @@ impl NextKey {
         self.0.key()
     }
 
-    /// Returns the trie that must be read from.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
-        self.0.trie()
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.0.child_trie()
     }
 
     /// If `true`, then the provided value must the one superior or equal to the requested key.

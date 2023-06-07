@@ -25,7 +25,7 @@ use crate::{
 use alloc::{borrow::ToOwned as _, vec::Vec};
 use core::{iter, num::NonZeroU64};
 
-pub use runtime_host::{Nibble, Trie, TrieEntryVersion};
+pub use runtime_host::{Nibble, TrieEntryVersion};
 
 /// Configuration for a transaction validation process.
 pub struct Config<'a, TTx> {
@@ -584,11 +584,11 @@ impl StorageGet {
         }
     }
 
-    /// Returns the trie that must be read from.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         match &self.0 {
-            StorageGetInner::Stage1(inner, _) => inner.trie().map(either::Left),
-            StorageGetInner::Stage2(inner, _) => inner.trie().map(either::Right),
+            StorageGetInner::Stage1(inner, _) => inner.child_trie().map(either::Left),
+            StorageGetInner::Stage2(inner, _) => inner.child_trie().map(either::Right),
         }
     }
 
@@ -628,11 +628,11 @@ impl ClosestDescendantMerkleValue {
         }
     }
 
-    /// Returns the trie that must be read from.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         match &self.0 {
-            MerkleValueInner::Stage1(inner, _) => inner.trie().map(either::Left),
-            MerkleValueInner::Stage2(inner, _) => inner.trie().map(either::Right),
+            MerkleValueInner::Stage1(inner, _) => inner.child_trie().map(either::Left),
+            MerkleValueInner::Stage2(inner, _) => inner.child_trie().map(either::Right),
         }
     }
 
@@ -682,11 +682,11 @@ impl NextKey {
         }
     }
 
-    /// Returns the trie that must be read from.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         match &self.0 {
-            NextKeyInner::Stage1(inner, _) => inner.trie().map(either::Left),
-            NextKeyInner::Stage2(inner, _) => inner.trie().map(either::Right),
+            NextKeyInner::Stage1(inner, _) => inner.child_trie().map(either::Left),
+            NextKeyInner::Stage2(inner, _) => inner.child_trie().map(either::Right),
         }
     }
 

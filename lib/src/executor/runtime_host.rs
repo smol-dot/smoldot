@@ -45,7 +45,6 @@ use crate::{
 use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
 use core::{fmt, iter};
 
-pub use host::Trie;
 pub use trie::{Nibble, TrieEntryVersion};
 
 /// Configuration for [`run`].
@@ -257,8 +256,8 @@ impl StorageGet {
         }
     }
 
-    /// Returns the trie that must be read from.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         enum Three<A, B, C> {
             A(A),
             B(B),
@@ -276,9 +275,9 @@ impl StorageGet {
         }
 
         match &self.inner.vm {
-            host::HostVm::ExternalStorageGet(req) => req.trie().map(Three::A),
-            host::HostVm::ExternalStorageAppend(req) => req.trie().map(Three::B),
-            host::HostVm::ExternalStorageRoot(req) => req.trie().map(Three::C),
+            host::HostVm::ExternalStorageGet(req) => req.child_trie().map(Three::A),
+            host::HostVm::ExternalStorageAppend(req) => req.child_trie().map(Three::B),
+            host::HostVm::ExternalStorageRoot(req) => req.child_trie().map(Three::C),
             // We only create a `StorageGet` if the state is one of the above.
             _ => unreachable!(),
         }
@@ -372,11 +371,11 @@ impl NextKey {
         })
     }
 
-    /// Returns the trie that must be read from.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         match &self.inner.vm {
-            host::HostVm::ExternalStorageNextKey(req) => req.trie().map(either::Left),
-            host::HostVm::ExternalStorageRoot(req) => req.trie().map(either::Right),
+            host::HostVm::ExternalStorageNextKey(req) => req.child_trie().map(either::Left),
+            host::HostVm::ExternalStorageRoot(req) => req.child_trie().map(either::Right),
             _ => unreachable!(),
         }
     }
@@ -516,11 +515,11 @@ impl ClosestDescendantMerkleValue {
         request.key().flat_map(util::as_ref_iter)
     }
 
-    /// Returns the trie that must be read from.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         let host::HostVm::ExternalStorageRoot(req) = &self.inner.vm
             else { unreachable!() };
-        req.trie()
+        req.child_trie()
     }
 
     /// Indicate that the value is unknown and resume the calculation.
@@ -714,11 +713,9 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageGet(req) => {
-                    let diff_search = match req.trie() {
-                        Trie::MainTrie => {
-                            Some(self.storage_changes.main_trie.diff_get(req.key().as_ref()))
-                        }
-                        Trie::ChildTrieDefault { child_trie } => match self
+                    let diff_search = match req.child_trie() {
+                        None => Some(self.storage_changes.main_trie.diff_get(req.key().as_ref())),
+                        Some(child_trie) => match self
                             .storage_changes
                             .default_child_tries
                             .get(child_trie.as_ref())
@@ -746,9 +743,9 @@ impl Inner {
 
                 host::HostVm::ExternalStorageSet(req) => {
                     if let Some(value) = req.value() {
-                        let trie = match req.trie() {
-                            Trie::MainTrie => &mut self.storage_changes.main_trie,
-                            Trie::ChildTrieDefault { child_trie } => self
+                        let trie = match req.child_trie() {
+                            None => &mut self.storage_changes.main_trie,
+                            Some(child_trie) => self
                                 .storage_changes
                                 .default_child_tries
                                 .entry(child_trie.as_ref().to_vec())
@@ -758,9 +755,9 @@ impl Inner {
 
                         trie.diff_insert(req.key().as_ref(), value.as_ref(), ());
                     } else {
-                        let trie = match req.trie() {
-                            Trie::MainTrie => Some(&mut self.storage_changes.main_trie),
-                            Trie::ChildTrieDefault { child_trie } => self
+                        let trie = match req.child_trie() {
+                            None => Some(&mut self.storage_changes.main_trie),
+                            Some(child_trie) => self
                                 .storage_changes
                                 .default_child_tries
                                 .entry(child_trie.as_ref().to_vec())
@@ -777,13 +774,13 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageAppend(req) => {
-                    let current_value = match req.trie() {
-                        Trie::MainTrie => self
+                    let current_value = match req.child_trie() {
+                        None => self
                             .storage_changes
                             .main_trie
                             .diff_get(req.key().as_ref())
                             .map(|(v, _)| v),
-                        Trie::ChildTrieDefault { child_trie } => self
+                        Some(child_trie) => self
                             .storage_changes
                             .default_child_tries
                             .get(child_trie.as_ref())
@@ -823,9 +820,9 @@ impl Inner {
                 host::HostVm::ExternalStorageRoot(req) => {
                     if self.root_calculation.is_none() {
                         // TODO: don't clone?
-                        let diff = match req.trie() {
-                            Trie::MainTrie => Some(self.storage_changes.main_trie.clone()),
-                            Trie::ChildTrieDefault { child_trie } => match self
+                        let diff = match req.child_trie() {
+                            None => Some(self.storage_changes.main_trie.clone()),
+                            Some(child_trie) => match self
                                 .storage_changes
                                 .default_child_tries
                                 .get(child_trie.as_ref())

@@ -56,7 +56,7 @@ use crate::{
 use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
 use core::{iter, mem};
 
-pub use runtime_host::{Nibble, Trie, TrieEntryVersion};
+pub use runtime_host::{Nibble, TrieEntryVersion};
 
 /// Configuration for a block generation.
 pub struct Config<'a> {
@@ -620,9 +620,9 @@ impl StorageGet {
         self.0.key()
     }
 
-    /// Returns the trie that must be read from.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
-        self.0.trie()
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.0.child_trie()
     }
 
     /// Injects the corresponding storage value.
@@ -646,9 +646,9 @@ impl ClosestDescendantMerkleValue {
         self.0.key()
     }
 
-    /// Returns the trie that must be read from.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
-        self.0.trie()
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.0.child_trie()
     }
 
     /// Indicate that the value is unknown and resume the calculation.
@@ -676,9 +676,9 @@ impl NextKey {
         self.0.key()
     }
 
-    /// Returns the trie that must be read from.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
-        self.0.trie()
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.0.child_trie()
     }
 
     /// If `true`, then the provided value must the one superior or equal to the requested key.

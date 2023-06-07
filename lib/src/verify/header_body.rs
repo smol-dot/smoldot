@@ -25,7 +25,7 @@ use crate::{
 use alloc::{string::String, vec::Vec};
 use core::{iter, num::NonZeroU64, time::Duration};
 
-pub use runtime_host::{Nibble, Trie, TrieEntryVersion};
+pub use runtime_host::{Nibble, TrieEntryVersion};
 
 /// Configuration for a block verification.
 pub struct Config<'a, TBody> {
@@ -614,11 +614,11 @@ impl StorageGet {
         }
     }
 
-    /// Returns the trie that must be read from.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         match &self.inner {
-            StorageGetInner::Execution { inner, .. } => inner.trie(),
-            StorageGetInner::ParentCode { .. } => Trie::MainTrie,
+            StorageGetInner::Execution { inner, .. } => inner.child_trie(),
+            StorageGetInner::ParentCode { .. } => None,
         }
     }
 
@@ -667,9 +667,9 @@ impl StorageClosestDescendantMerkleValue {
         self.inner.key()
     }
 
-    /// Returns the trie that must be read from.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
-        self.inner.trie()
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.inner.child_trie()
     }
 
     /// Indicate that the value is unknown and resume the calculation.
@@ -711,9 +711,9 @@ impl StorageNextKey {
         self.inner.key()
     }
 
-    /// Returns the trie that must be read from.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
-        self.inner.trie()
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.inner.child_trie()
     }
 
     /// If `true`, then the provided value must the one superior or equal to the requested key.

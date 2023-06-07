@@ -24,8 +24,6 @@ use crate::executor::{self, host, vm};
 use alloc::{string::String, vec::Vec};
 use core::fmt;
 
-pub use host::Trie;
-
 /// Configuration for [`run`].
 pub struct Config<'a, TParams> {
     /// Virtual machine to be run.
@@ -160,7 +158,7 @@ impl StorageGet {
         match &self.inner.vm {
             host::HostVm::ExternalStorageGet(req) => either::Left(req.key()),
             host::HostVm::ExternalStorageRoot(req) => {
-                let Trie::ChildTrieDefault { child_trie } = req.trie()
+                let Some(child_trie) = req.child_trie()
                     else { unreachable!() };
                 // TODO: allocation here, but probably not problematic
                 const PREFIX: &[u8] = b":child_storage:default:";
@@ -174,11 +172,11 @@ impl StorageGet {
         }
     }
 
-    /// Returns the trie that must be read from.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         match &self.inner.vm {
-            host::HostVm::ExternalStorageGet(req) => req.trie(),
-            host::HostVm::ExternalStorageRoot(_) => Trie::MainTrie,
+            host::HostVm::ExternalStorageGet(req) => req.child_trie(),
+            host::HostVm::ExternalStorageRoot(_) => None,
             _ => unreachable!(),
         }
     }
@@ -233,10 +231,10 @@ impl NextKey {
         }
     }
 
-    /// Returns the trie that must be read from.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         match &self.inner.vm {
-            host::HostVm::ExternalStorageNextKey(req) => req.trie(),
+            host::HostVm::ExternalStorageNextKey(req) => req.child_trie(),
             _ => unreachable!(),
         }
     }
@@ -465,7 +463,7 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageRoot(req) => {
-                    let is_main_trie = matches!(req.trie(), host::Trie::MainTrie);
+                    let is_main_trie = req.child_trie().is_none();
                     if is_main_trie {
                         self.vm = req.into();
                         return RuntimeHostVm::StorageRoot(StorageRoot { inner: self });

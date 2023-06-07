@@ -34,7 +34,7 @@ use super::{
 use alloc::boxed::Box;
 use core::cmp::Ordering;
 
-pub use verify::header_body::{Nibble, Trie, TrieEntryVersion};
+pub use verify::header_body::{Nibble, TrieEntryVersion};
 
 impl<T> NonFinalizedTree<T> {
     /// Verifies the given block.
@@ -924,9 +924,9 @@ impl<T> StorageGet<T> {
         self.inner.key()
     }
 
-    /// Returns the trie that must be read from.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
-        self.inner.trie()
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.inner.child_trie()
     }
 
     /// Access to the Nth ancestor's information and hierarchy. Returns `None` if `n` is too
@@ -989,9 +989,9 @@ impl<T> StorageClosestDescendantMerkleValue<T> {
         self.inner.key()
     }
 
-    /// Returns the trie that must be read from.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
-        self.inner.trie()
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.inner.child_trie()
     }
 
     /// Indicate that the value is unknown and resume the calculation.
@@ -1023,9 +1023,9 @@ impl<T> StorageNextKey<T> {
         self.inner.key()
     }
 
-    /// Returns the trie that must be read from.
-    pub fn trie(&'_ self) -> Trie<impl AsRef<[u8]> + '_> {
-        self.inner.trie()
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.inner.child_trie()
     }
 
     /// If `true`, then the provided value must the one superior or equal to the requested key.
