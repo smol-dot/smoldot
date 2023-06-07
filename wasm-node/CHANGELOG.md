@@ -9,7 +9,7 @@
 
 ### Changed
 
-- TCP NODELAY is now enabled on Deno. The minimum required Deno version is now v1.29.0, which was released on 2022-12-14.
+- TCP NODELAY is now enabled on Deno. The minimum required Deno version is now v1.29.0, which was released on 2022-12-14. ([#665](https://github.com/smol-dot/smoldot/pull/665))
 
 ## 1.0.8 - 2023-06-05
 
