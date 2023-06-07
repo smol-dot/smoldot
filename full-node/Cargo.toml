@@ -25,7 +25,7 @@ event-listener = "2.5.3"
 fnv = { version = "1.0.7", default-features = false }
 futures-channel = "0.3.27"
 futures-util = { version = "0.3.27", default-features = false }
-hashbrown = { version = "0.13.2", default-features = false }
+hashbrown = { version = "0.14.0", default-features = false }
 hex = { version = "0.4.3", default-features = false }
 log = { version = "0.4.18", default-features = false }
 mick-jaeger = "0.1.8"
