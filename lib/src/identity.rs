@@ -85,5 +85,4 @@
 
 pub mod keystore;
 pub mod seed_phrase;
-
-// TODO: implement ss58
+pub mod ss58;
