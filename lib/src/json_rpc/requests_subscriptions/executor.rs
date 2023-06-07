@@ -217,7 +217,7 @@ mod tests {
     fn no_race_condition() {
         // Push a lot of tasks in the queue. Each task sleeps a couple times then increments a
         // counter. We check, at the end, that the counter has the expected value.
-        async_std::task::block_on(async move {
+        smol::block_on(async move {
             let queue = super::TasksQueue::new();
             let counter = Arc::new(atomic::AtomicUsize::new(0));
 
@@ -226,9 +226,9 @@ mod tests {
             // Spawn background tasks that will run the futures.
             // A message is sent on `finished_tx` as soon as one executor detects that the
             // counter has reached the target value.
-            // Note that we use a `ThreadPool` rather that spawn futures with
-            // `async_std::task::spawn`, as at the end of the test all executors but one will be
-            // stuck sleeping, and we preferably don't want them to leak.
+            // Note that we use a `ThreadPool` rather that spawn futures with `smol::spawn`, as at
+            // the end of the test all executors but one will be stuck sleeping, and we preferably
+            // don't want them to leak.
             let threads_pool = futures_executor::ThreadPool::new().unwrap();
             let (finished_tx, mut finished_rx) = futures_channel::mpsc::channel::<()>(0);
             for _ in 0..4 {
@@ -253,10 +253,10 @@ mod tests {
                     // Note that the randomness doesn't have uniform distrib, but we don't care.
                     for _ in 0..(rand::random::<usize>() % 5) {
                         if (rand::random::<usize>() % 10) == 0 {
-                            async_std::task::yield_now().await;
+                            smol::future::yield_now().await;
                         }
                         let num_us = rand::random::<u64>() % 50000;
-                        async_std::task::sleep(core::time::Duration::from_micros(num_us)).await;
+                        smol::Timer::after(core::time::Duration::from_micros(num_us)).await;
                     }
 
                     counter.fetch_add(1, atomic::Ordering::SeqCst);
@@ -274,7 +274,7 @@ mod tests {
     fn tasks_destroyed_when_queue_destroyed() {
         // Push infinite tasks in the queue. These tasks share an `Arc`. Destroy the queue. Verify
         // that the `Arc` is stale.
-        async_std::task::block_on(async move {
+        smol::block_on(async move {
             let queue = super::TasksQueue::new();
             let counter = Arc::new(());
 
@@ -283,7 +283,7 @@ mod tests {
                 let counter = counter.clone();
                 queue.push(Box::pin(async move {
                     // Sleep for twelve hours, which basically means infinitely.
-                    async_std::task::sleep(core::time::Duration::from_secs(12 * 3600)).await;
+                    smol::Timer::after(core::time::Duration::from_secs(12 * 3600)).await;
                     drop(counter);
                 }));
             }
