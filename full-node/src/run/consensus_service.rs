@@ -825,7 +825,7 @@ impl SyncBackground {
                     // Access to the best block storage.
                     author::build::BuilderAuthoring::StorageGet(req) => {
                         // TODO: child tries not supported
-                        if !matches!(req.child_trie(), author::build::Trie::MainTrie) {
+                        if req.child_trie().is_some() {
                             log::warn!("child-tries-not-supported");
                             block_authoring =
                                 req.inject_value(None::<(iter::Empty<&'static [u8]>, _)>);
@@ -853,7 +853,7 @@ impl SyncBackground {
                     }
                     author::build::BuilderAuthoring::NextKey(req) => {
                         // TODO: child tries not supported
-                        if !matches!(req.child_trie(), author::build::Trie::MainTrie) {
+                        if req.child_trie().is_some() {
                             log::warn!("child-tries-not-supported");
                             block_authoring = req.inject_key(None::<iter::Empty<_>>);
                             continue;
