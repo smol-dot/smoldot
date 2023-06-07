@@ -209,14 +209,11 @@ impl InterpreterPrototype {
         let value = self
             .instance
             .get_global(&self.store, name)
-            .ok_or(GlobalValueErr::NotFound)? // TODO: we don't differentiate between "missing" and "invalid"
+            .ok_or(GlobalValueErr::NotFound)?
             .get(&self.store);
 
         match value {
-            wasmi::Value::I32(v) => match u32::try_from(v) {
-                Ok(v) => Ok(v),
-                Err(_) => Err(GlobalValueErr::Invalid), // Negative value.
-            },
+            wasmi::Value::I32(v) => Ok(u32::from_ne_bytes(v.to_ne_bytes())),
             _ => Err(GlobalValueErr::Invalid),
         }
     }
