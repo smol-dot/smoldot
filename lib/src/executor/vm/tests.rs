@@ -517,6 +517,32 @@ fn global_wrong_type() {
 }
 
 #[test]
+fn global_isnt_global() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 0 4096))
+        (func (export "test") (result i32) i32.const 0)
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let mut prototype = super::VirtualMachinePrototype::new(super::Config {
+            module_bytes: &module_bytes,
+            exec_hint,
+            symbols: &mut |_, _, _| Ok(0),
+        })
+        .unwrap();
+        assert!(matches!(
+            prototype.global_value("test"),
+            Err(super::GlobalValueErr::NotFound)
+        ));
+    }
+}
+
+#[test]
 fn global_negative_value_works() {
     let module_bytes = wat::parse_str(
         r#"
