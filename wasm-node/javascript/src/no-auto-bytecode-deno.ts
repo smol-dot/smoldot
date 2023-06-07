@@ -148,11 +148,10 @@ function connect(config: ConnectionConfig): Connection {
         };
 
         socket.inner = socket.inner.then((established) => {
-            // TODO: at the time of writing of this comment, `setNoDelay` is still unstable
-            //established.setNoDelay();
-
             if (socket.destroyed)
                 return established;
+
+            established?.setNoDelay();
             config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: 1024 * 1024, writeClosable: true });
 
             // Spawns an asynchronous task that continuously reads from the socket.
@@ -396,16 +395,12 @@ declare namespace Deno {
 
     export interface TcpConn extends Conn {
         /**
-         * **UNSTABLE**: new API, see https://github.com/denoland/deno/issues/13617.
+         * Enable/disable the use of Nagle's algorithm.
          *
-         * Enable/disable the use of Nagle's algorithm. Defaults to true.
+         * @param [noDelay=true]
          */
-        setNoDelay(nodelay?: boolean): void;
-        /**
-         * **UNSTABLE**: new API, see https://github.com/denoland/deno/issues/13617.
-         *
-         * Enable/disable keep-alive functionality.
-         */
-        setKeepAlive(keepalive?: boolean): void;
+        setNoDelay(noDelay?: boolean): void;
+        /** Enable/disable keep-alive functionality. */
+        setKeepAlive(keepAlive?: boolean): void;
     }
 }
