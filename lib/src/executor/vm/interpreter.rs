@@ -350,9 +350,9 @@ impl Prepare {
         let func_to_call = match self
             .inner
             .instance
-            .get_func(&self.inner.store, function_name)
+            .get_export(&self.inner.store, function_name)
         {
-            Some(function) => {
+            Some(wasmi::Extern::Func(function)) => {
                 // Try to convert the signature of the function to call, in order to make sure
                 // that the type of parameters and return value are supported.
                 let Ok(signature) = Signature::try_from(function.ty(&self.inner.store)) else {
@@ -373,7 +373,8 @@ impl Prepare {
 
                 function
             }
-            None => return Err((StartErr::FunctionNotFound, self.inner)), // TODO: we don't differentiate between `FunctionNotFound` and `NotAFunction` here
+            Some(_) => return Err((StartErr::NotAFunction, self.inner)),
+            None => return Err((StartErr::FunctionNotFound, self.inner)),
         };
 
         let dummy_output_value = {
