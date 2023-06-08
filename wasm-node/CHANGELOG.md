@@ -6,7 +6,7 @@
 
 - Add support for child tries, meaning that errors will no longer be returned when performing runtime calls on chains that use child tries. In practice, this typically concerns contracts chains. ([#680](https://github.com/smol-dot/smoldot/pull/680), [#684](https://github.com/smol-dot/smoldot/pull/684))
 - The checksum of the SS58 address passed to the `system_accountNextIndex` JSON-RPC function is now verified. Note that its prefix isn't compared against the one of the current chain, because there is no straight-forward way for smoldot to determine the SS58 prefix of the chain that it is running. ([#691](https://github.com/smol-dot/smoldot/pull/691))
-- Add `AddChainOptions.jsonRpcMaxPendingRequests` and `AddChainOptions.jsonRpcMaxSubscriptions`, allowing you to specify the maximum number of pending JSON-RPC requests and the maximum number of active JSON-RPC subscriptions. These two limits were previously implicitly set to respectively 128 and 1024. Not passing any value defaults to "infinity". You are strongly encouraged to specify a value for these two options if the source of the JSON-RPC requests is untrusted.
+- Add `AddChainOptions.jsonRpcMaxPendingRequests` and `AddChainOptions.jsonRpcMaxSubscriptions`, allowing you to specify the maximum number of pending JSON-RPC requests and the maximum number of active JSON-RPC subscriptions. These two limits were previously implicitly set to respectively 128 and 1024. Not passing any value defaults to "infinity". You are strongly encouraged to specify a value for these two options if the source of the JSON-RPC requests is untrusted. ([#694](https://github.com/smol-dot/smoldot/pull/694))
 
 ### Fixed
 
