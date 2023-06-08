@@ -491,13 +491,35 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 }
             }
 
+            // Sanitize `jsonRpcMaxPendingRequests`.
+            let jsonRpcMaxPendingRequests = options.jsonRpcMaxPendingRequests === undefined ? Infinity : options.jsonRpcMaxPendingRequests;
+            jsonRpcMaxPendingRequests = Math.floor(jsonRpcMaxPendingRequests);
+            if (jsonRpcMaxPendingRequests <= 0 || isNaN(jsonRpcMaxPendingRequests)) {
+                throw new AddChainError("Invalid value for `jsonRpcMaxPendingRequests`");
+            }
+            if (jsonRpcMaxPendingRequests > 0xffffffff) {
+                jsonRpcMaxPendingRequests = 0xffffffff
+            }
+
+            // Sanitize `jsonRpcMaxSubscriptions`.
+            let jsonRpcMaxSubscriptions = options.jsonRpcMaxSubscriptions === undefined ? Infinity : options.jsonRpcMaxSubscriptions;
+            jsonRpcMaxSubscriptions = Math.floor(jsonRpcMaxSubscriptions);
+            if (jsonRpcMaxSubscriptions <= 0 || isNaN(jsonRpcMaxSubscriptions)) {
+                throw new AddChainError("Invalid value for `jsonRpcMaxSubscriptions`");
+            }
+            if (jsonRpcMaxSubscriptions > 0xffffffff) {
+                jsonRpcMaxSubscriptions = 0xffffffff
+            }
+
             const promise = new Promise<{ success: true, chainId: number } | { success: false, error: string }>((resolve) => state.addChainResults.push(resolve));
 
             state.instance.instance.addChain(
                 options.chainSpec,
                 typeof options.databaseContent === 'string' ? options.databaseContent : "",
                 potentialRelayChainsIds,
-                !!options.disableJsonRpc
+                !!options.disableJsonRpc,
+                jsonRpcMaxPendingRequests,
+                jsonRpcMaxSubscriptions
             );
 
             const outcome = await promise;
