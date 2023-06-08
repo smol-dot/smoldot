@@ -69,12 +69,7 @@ impl Delay {
             waker: None,
         });
 
-        let time_zero = lock.time_zero.get_or_insert_with(Instant::now);
-        let when_from_time_zero = when - *time_zero;
-        lock.timers_queue.insert(QueuedTimer {
-            when_from_time_zero,
-            timer_id,
-        });
+        lock.timers_queue.insert(QueuedTimer { when, timer_id });
 
         // If the timer that has just been inserted is the one that ends the soonest, then
         // actually start the callback that will process timers.
@@ -144,7 +139,6 @@ impl Drop for Delay {
 static TIMERS: Mutex<Timers> = Mutex::new(Timers {
     timers_queue: BTreeSet::new(),
     timers: slab::Slab::new(),
-    time_zero: None,
 });
 
 struct Timers {
@@ -155,11 +149,6 @@ struct Timers {
 
     /// List of all timers.
     timers: slab::Slab<Timer>,
-
-    /// Arbitrary point in time set at initialization and that never changes. All moments in time
-    /// are represented by `Duration`s relative to this value.
-    /// Initially set to `None` and initialized to `now` the first time a timer is created.
-    time_zero: Option<Instant>,
 }
 
 struct Timer {
@@ -173,7 +162,7 @@ struct Timer {
 }
 
 struct QueuedTimer {
-    when_from_time_zero: Duration,
+    when: Instant,
 
     // Entry in `TIMERS::timers`. Guaranteed to always have `is_finished` equal to `false`.
     timer_id: usize,
@@ -195,8 +184,8 @@ impl PartialOrd for QueuedTimer {
 
 impl Ord for QueuedTimer {
     fn cmp(&self, other: &Self) -> Ordering {
-        // `when_from_time_zero` takes higher priority in the ordering.
-        match self.when_from_time_zero.cmp(&other.when_from_time_zero) {
+        // `when` takes higher priority in the ordering.
+        match self.when.cmp(&other.when) {
             Ordering::Equal => self.timer_id.cmp(&other.timer_id),
             ord => ord,
         }
@@ -209,9 +198,6 @@ fn process_timers() {
     let mut lock = TIMERS.try_lock().unwrap();
     let lock = &mut *lock;
 
-    // `lock.time_zero` is initialized the first time a timer is created. We never process timers
-    // before a timer is created.
-    let time_zero = lock.time_zero.as_ref().unwrap_or_else(|| unreachable!());
     let now = Instant::now();
 
     // Note that this function can be called spuriously.
@@ -219,10 +205,10 @@ fn process_timers() {
     // first call leads to both timers being finished, after which the second call will be
     // spurious.
 
-    // We remove all the queued timers whose `when_from_time_zero` is inferior to `now`.
+    // We remove all the queued timers whose `when` is inferior to `now`.
     let expired_timers = {
         let timers_remaining = lock.timers_queue.split_off(&QueuedTimer {
-            when_from_time_zero: now - *time_zero,
+            when: now,
             // Note that `split_off` returns values greater or equal, meaning that if a timer had
             // a `timer_id` equal to `max_value()` it would erroneously be returned instead of being
             // left in the collection as expected. For obvious reasons, a `timer_id` of
@@ -235,7 +221,7 @@ fn process_timers() {
 
     // Wake up the expired timers.
     for timer in expired_timers {
-        debug_assert!(timer.when_from_time_zero <= now - *time_zero);
+        debug_assert!(timer.when <= now);
         debug_assert!(!lock.timers[timer.timer_id].is_finished);
         lock.timers[timer.timer_id].is_finished = true;
         if let Some(waker) = lock.timers[timer.timer_id].waker.take() {
@@ -243,10 +229,10 @@ fn process_timers() {
         }
     }
 
-    // Figure out the next time (relative to `time_zero`) we should call `process_timers`.
+    // Figure out the next time we should call `process_timers`.
     //
     // This iterates through all the elements in `timers_queue` until a valid one is found.
-    let next_wakeup: Option<Duration> = loop {
+    let next_wakeup: Option<Instant> = loop {
         let next_timer = match lock.timers_queue.first() {
             Some(t) => t,
             None => break None,
@@ -264,11 +250,11 @@ fn process_timers() {
         }
 
         // Iterated timer is not ready.
-        break Some(next_timer.when_from_time_zero);
+        break Some(next_timer.when);
     };
 
     if let Some(next_wakeup) = next_wakeup {
-        start_timer(*time_zero + next_wakeup - now);
+        start_timer(next_wakeup - now);
     } else {
         // Clean up memory a bit. Hopefully this doesn't impact performances too much.
         if !lock.timers.is_empty() && lock.timers.capacity() > lock.timers.len() * 8 {
