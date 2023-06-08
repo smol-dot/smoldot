@@ -141,13 +141,11 @@ impl Drop for Delay {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref TIMERS: Mutex<Timers> = Mutex::new(Timers {
-        timers_queue: BTreeSet::new(),
-        timers: slab::Slab::new(),
-        time_zero: None,
-    });
-}
+static TIMERS: Mutex<Timers> = Mutex::new(Timers {
+    timers_queue: BTreeSet::new(),
+    timers: slab::Slab::new(),
+    time_zero: None,
+});
 
 struct Timers {
     /// Same entries as `timer`, but ordered based on when they're finished (from soonest to
