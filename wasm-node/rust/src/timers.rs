@@ -209,8 +209,8 @@ fn process_timers() {
     let mut lock = TIMERS.try_lock().unwrap();
     let lock = &mut *lock;
 
-    // `time_zero` is initialized the first time a timer is created. We never process timers before
-    // a timer is created.
+    // `lock.time_zero` is initialized the first time a timer is created. We never process timers
+    // before a timer is created.
     let time_zero = lock.time_zero.as_ref().unwrap_or_else(|| unreachable!());
     let now = Instant::now();
 
@@ -224,7 +224,7 @@ fn process_timers() {
         let timers_remaining = lock.timers_queue.split_off(&QueuedTimer {
             when_from_time_zero: now - *time_zero,
             // Note that `split_off` returns values greater or equal, meaning that if a timer had
-            // a `timer_id` equal to `max_value()` it could erroneously be returned instead of being
+            // a `timer_id` equal to `max_value()` it would erroneously be returned instead of being
             // left in the collection as expected. For obvious reasons, a `timer_id` of
             // `usize::max_value()` is impossible, so this isn't a problem.
             timer_id: usize::max_value(),
@@ -242,6 +242,8 @@ fn process_timers() {
     }
 
     // Figure out the next time (relative to `time_zero`) we should call `process_timers`.
+    //
+    // This iterates through all the elements in `timers_queue` until a valid one is found.
     let next_wakeup: Option<Duration> = loop {
         let next_timer = match lock.timers_queue.first() {
             Some(t) => t,
