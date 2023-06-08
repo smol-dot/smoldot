@@ -630,12 +630,19 @@ impl Drop for ConnectionWrapper {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref STATE: Mutex<NetworkState> = Mutex::new(NetworkState {
-        next_connection_id: 0,
-        connections: hashbrown::HashMap::with_capacity_and_hasher(32, Default::default()),
-        streams: BTreeMap::new(),
-    });
+static STATE: Mutex<NetworkState> = Mutex::new(NetworkState {
+    next_connection_id: 0,
+    connections: hashbrown::HashMap::with_hasher(FnvBuildHasher),
+    streams: BTreeMap::new(),
+});
+
+// TODO: we use a custom `FnvBuildHasher` because it's not possible to create `fnv::FnvBuildHasher` in a `const` context
+struct FnvBuildHasher;
+impl core::hash::BuildHasher for FnvBuildHasher {
+    type Hasher = fnv::FnvHasher;
+    fn build_hasher(&self) -> fnv::FnvHasher {
+        fnv::FnvHasher::default()
+    }
 }
 
 /// All the connections and streams that are alive.
@@ -645,7 +652,7 @@ lazy_static::lazy_static! {
 /// Multi-stream connections have one entry in `connections` and zero or more entries in `streams`.
 struct NetworkState {
     next_connection_id: u32,
-    connections: hashbrown::HashMap<u32, Connection, fnv::FnvBuildHasher>,
+    connections: hashbrown::HashMap<u32, Connection, FnvBuildHasher>,
     streams: BTreeMap<(u32, Option<u32>), Stream>,
 }
 
