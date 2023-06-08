@@ -12,7 +12,11 @@ jobs:
       image: rust:1.70
     steps:
     - uses: actions/checkout@v3
-    - run: cargo update --workspace
+    # Note: `cargo update --workspace` doesn't seem to have any effect.
+    - run: cargo update
+      working-directory: wasm-node/rust
+    - run: cargo update
+      working-directory: full-node
     - run: cargo update
       working-directory: fuzz
     - uses: peter-evans/create-pull-request@v5
