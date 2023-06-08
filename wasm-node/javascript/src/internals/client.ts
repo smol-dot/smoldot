@@ -504,7 +504,7 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
             // Sanitize `jsonRpcMaxSubscriptions`.
             let jsonRpcMaxSubscriptions = options.jsonRpcMaxSubscriptions === undefined ? Infinity : options.jsonRpcMaxSubscriptions;
             jsonRpcMaxSubscriptions = Math.floor(jsonRpcMaxSubscriptions);
-            if (jsonRpcMaxSubscriptions <= 0 || isNaN(jsonRpcMaxSubscriptions)) {
+            if (jsonRpcMaxSubscriptions < 0 || isNaN(jsonRpcMaxSubscriptions)) {
                 throw new AddChainError("Invalid value for `jsonRpcMaxSubscriptions`");
             }
             if (jsonRpcMaxSubscriptions > 0xffffffff) {
