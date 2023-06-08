@@ -26,12 +26,12 @@ use crate::bindings;
 
 use core::{
     cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd},
-    future,
+    future, mem,
     pin::Pin,
     task::{Context, Poll, Waker},
     time::Duration,
 };
-use std::{collections::BinaryHeap, sync::Mutex, time::Instant};
+use std::{collections::BTreeSet, sync::Mutex, time::Instant};
 
 pub(crate) fn timer_finished() {
     process_timers();
@@ -70,7 +70,7 @@ impl Delay {
         });
 
         let when_from_time_zero = when - lock.time_zero;
-        lock.timers_queue.push(QueuedTimer {
+        lock.timers_queue.insert(QueuedTimer {
             when_from_time_zero,
             timer_id,
         });
@@ -79,7 +79,13 @@ impl Delay {
         // actually start the callback that will process timers.
         // Ideally we would instead cancel or update the deadline of the previous call to
         // `start_timer`, but this isn't possible.
-        if lock.timers_queue.peek().unwrap().timer_id == timer_id {
+        if lock
+            .timers_queue
+            .first()
+            .unwrap_or_else(|| unreachable!())
+            .timer_id
+            == timer_id
+        {
             start_timer(when - now);
         }
 
@@ -136,16 +142,17 @@ impl Drop for Delay {
 
 lazy_static::lazy_static! {
     static ref TIMERS: Mutex<Timers> = Mutex::new(Timers {
-        timers_queue: BinaryHeap::new(),
+        timers_queue: BTreeSet::new(),
         timers: slab::Slab::new(),
         time_zero: Instant::now(),
     });
 }
 
 struct Timers {
-    /// Same entries as `timer`, but ordered based on when they're finished. Items are only ever
-    /// removed from [`process_timers`], even if the corresponding [`Delay`] is destroyed.
-    timers_queue: BinaryHeap<QueuedTimer>,
+    /// Same entries as `timer`, but ordered based on when they're finished (from soonest to
+    /// latest). Items are only ever removed from [`process_timers`] when they finish, even if
+    /// the corresponding [`Delay`] is destroyed.
+    timers_queue: BTreeSet<QueuedTimer>,
 
     /// List of all timers.
     timers: slab::Slab<Timer>,
@@ -174,7 +181,7 @@ struct QueuedTimer {
 
 impl PartialEq for QueuedTimer {
     fn eq(&self, other: &Self) -> bool {
-        self.when_from_time_zero == other.when_from_time_zero
+        matches!(self.cmp(other), Ordering::Equal)
     }
 }
 
@@ -188,11 +195,11 @@ impl PartialOrd for QueuedTimer {
 
 impl Ord for QueuedTimer {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Since the `BinaryHeap` puts the highest item first, we reverse the ordering so that
-        // the minimum `when_from_time_zero` is actually first.
-        self.when_from_time_zero
-            .cmp(&other.when_from_time_zero)
-            .reverse()
+        // `when_from_time_zero` takes higher priority in the ordering.
+        match self.when_from_time_zero.cmp(&other.when_from_time_zero) {
+            Ordering::Equal => self.timer_id.cmp(&other.timer_id),
+            ord => ord,
+        }
     }
 }
 
@@ -200,6 +207,7 @@ impl Ord for QueuedTimer {
 fn process_timers() {
     // Because we're in a single-threaded environment, `try_lock()` should always succeed.
     let mut lock = TIMERS.try_lock().unwrap();
+    let lock = &mut *lock;
     let now = Instant::now();
 
     // Note that this function can be called spuriously.
@@ -207,11 +215,31 @@ fn process_timers() {
     // first call leads to both timers being finished, after which the second call will be
     // spurious.
 
+    // We remove all the queued timers whose `when_from_time_zero` is inferior to `now`.
+    let expired_timers = {
+        let timers_remaining = lock.timers_queue.split_off(&QueuedTimer {
+            when_from_time_zero: now - lock.time_zero,
+            // Note that `split_off` returns values greater or equal, meaning that if a timer had
+            // a `timer_id` equal to `max_value()` it could erroneously be returned instead of being
+            // left in the collection as expected. For obvious reasons, a `timer_id` of
+            // `usize::max_value()` is impossible, so this isn't a problem.
+            timer_id: usize::max_value(),
+        });
+
+        mem::replace(&mut lock.timers_queue, timers_remaining)
+    };
+
+    // Wake up the expired timers.
+    for timer in expired_timers {
+        lock.timers[timer.timer_id].is_finished = true;
+        if let Some(waker) = lock.timers[timer.timer_id].waker.take() {
+            waker.wake();
+        }
+    }
+
     // Figure out the next time (relative to `time_zero`) we should call `process_timers`.
-    //
-    // This iterates through all the elements in `timers_queue` until a valid one is found.
     let next_wakeup: Option<Duration> = loop {
-        let next_timer = match lock.timers_queue.peek() {
+        let next_timer = match lock.timers_queue.first() {
             Some(t) => t,
             None => break None,
         };
@@ -221,19 +249,9 @@ fn process_timers() {
         if lock.timers[next_timer.timer_id].is_obsolete {
             let next_timer_id = next_timer.timer_id;
             lock.timers.remove(next_timer_id);
-            lock.timers_queue.pop().unwrap();
-            continue;
-        }
-
-        // Iterated timer is ready. Wake up the `Waker`, remove from the queue, and `continue`.
-        if lock.time_zero + next_timer.when_from_time_zero <= now {
-            let next_timer_id = next_timer.timer_id;
-            debug_assert!(!lock.timers[next_timer_id].is_obsolete);
-            lock.timers[next_timer_id].is_finished = true;
-            if let Some(waker) = lock.timers[next_timer_id].waker.take() {
-                waker.wake();
-            }
-            let _ = lock.timers_queue.pop().unwrap();
+            lock.timers_queue
+                .pop_first()
+                .unwrap_or_else(|| unreachable!());
             continue;
         }
 
@@ -245,8 +263,9 @@ fn process_timers() {
         start_timer(lock.time_zero + next_wakeup - now);
     } else {
         // Clean up memory a bit. Hopefully this doesn't impact performances too much.
-        lock.timers_queue.shrink_to_fit();
-        lock.timers.shrink_to_fit();
+        if !lock.timers.is_empty() && lock.timers.capacity() > lock.timers.len() * 8 {
+            lock.timers.shrink_to_fit();
+        }
     }
 }
 
