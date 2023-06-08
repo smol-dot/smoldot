@@ -69,7 +69,8 @@ impl Delay {
             waker: None,
         });
 
-        let when_from_time_zero = when - lock.time_zero;
+        let time_zero = lock.time_zero.get_or_insert_with(Instant::now);
+        let when_from_time_zero = when - *time_zero;
         lock.timers_queue.insert(QueuedTimer {
             when_from_time_zero,
             timer_id,
@@ -144,7 +145,7 @@ lazy_static::lazy_static! {
     static ref TIMERS: Mutex<Timers> = Mutex::new(Timers {
         timers_queue: BTreeSet::new(),
         timers: slab::Slab::new(),
-        time_zero: Instant::now(),
+        time_zero: None,
     });
 }
 
@@ -159,7 +160,8 @@ struct Timers {
 
     /// Arbitrary point in time set at initialization and that never changes. All moments in time
     /// are represented by `Duration`s relative to this value.
-    time_zero: Instant,
+    /// Initially set to `None` and initialized to `now` the first time a timer is created.
+    time_zero: Option<Instant>,
 }
 
 struct Timer {
@@ -208,6 +210,10 @@ fn process_timers() {
     // Because we're in a single-threaded environment, `try_lock()` should always succeed.
     let mut lock = TIMERS.try_lock().unwrap();
     let lock = &mut *lock;
+
+    // `time_zero` is initialized the first time a timer is created. We never process timers before
+    // a timer is created.
+    let time_zero = lock.time_zero.as_ref().unwrap_or_else(|| unreachable!());
     let now = Instant::now();
 
     // Note that this function can be called spuriously.
@@ -218,7 +224,7 @@ fn process_timers() {
     // We remove all the queued timers whose `when_from_time_zero` is inferior to `now`.
     let expired_timers = {
         let timers_remaining = lock.timers_queue.split_off(&QueuedTimer {
-            when_from_time_zero: now - lock.time_zero,
+            when_from_time_zero: now - *time_zero,
             // Note that `split_off` returns values greater or equal, meaning that if a timer had
             // a `timer_id` equal to `max_value()` it could erroneously be returned instead of being
             // left in the collection as expected. For obvious reasons, a `timer_id` of
@@ -260,7 +266,7 @@ fn process_timers() {
     };
 
     if let Some(next_wakeup) = next_wakeup {
-        start_timer(lock.time_zero + next_wakeup - now);
+        start_timer(*time_zero + next_wakeup - now);
     } else {
         // Clean up memory a bit. Hopefully this doesn't impact performances too much.
         if !lock.timers.is_empty() && lock.timers.capacity() > lock.timers.len() * 8 {
