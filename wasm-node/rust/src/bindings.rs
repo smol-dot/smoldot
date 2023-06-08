@@ -317,8 +317,13 @@ pub extern "C" fn advance_execution() {
 /// ids. If the chain specification refer to a parachain, these chain ids are the ones that will be
 /// looked up to find the corresponding relay chain.
 ///
-/// If `json_rpc_running` is 0, then no JSON-RPC service will be started and it is forbidden to
-/// send JSON-RPC requests targeting this chain. This can be used to save up resources.
+/// `json_rpc_max_pending_requests` indicates the size of the queue of JSON-RPC requests that
+/// haven't been answered yet.
+/// If `json_rpc_max_pending_requests` is 0, then no JSON-RPC service will be started and it is
+/// forbidden to send JSON-RPC requests targeting this chain. This can be used to save up
+/// resources.
+/// If `json_rpc_max_pending_requests` is 0, then the value of `json_rpc_max_subscriptions` is
+/// ignored.
 ///
 /// If an error happens during the creation of the chain, a chain id will be allocated
 /// nonetheless, and must later be de-allocated by calling [`remove_chain`]. This allocated chain,
@@ -329,13 +334,15 @@ pub extern "C" fn advance_execution() {
 pub extern "C" fn add_chain(
     chain_spec_buffer_index: u32,
     database_content_buffer_index: u32,
-    json_rpc_running: u32,
+    json_rpc_max_pending_requests: u32,
+    json_rpc_max_subscriptions: u32,
     potential_relay_chains_buffer_index: u32,
 ) -> u32 {
     super::add_chain(
         get_buffer(chain_spec_buffer_index),
         get_buffer(database_content_buffer_index),
-        json_rpc_running,
+        json_rpc_max_pending_requests,
+        json_rpc_max_subscriptions,
         get_buffer(potential_relay_chains_buffer_index),
     )
 }

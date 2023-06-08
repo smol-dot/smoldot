@@ -284,15 +284,18 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
             total_requests_in_fly: AtomicUsize::new(0),
             guarded: Mutex::new(ClientInnerGuarded {
                 pending_requests: hashbrown::HashSet::with_capacity_and_hasher(
-                    self.max_requests_per_client,
+                    cmp::min(self.max_requests_per_client, 64),
                     Default::default(),
                 ),
-                responses_send_back: VecDeque::with_capacity(self.max_requests_per_client),
+                responses_send_back: VecDeque::with_capacity(cmp::min(
+                    self.max_requests_per_client,
+                    64,
+                )),
                 notification_messages: BTreeMap::new(),
                 responses_send_back_pushed_or_dead: event_listener::Event::new(),
                 notification_messages_popped_or_dead: event_listener::Event::new(),
                 active_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
-                    self.max_subscriptions_per_client,
+                    cmp::min(self.max_subscriptions_per_client, 128),
                     Default::default(),
                 ),
                 num_inactive_alive_subscriptions: 0,
@@ -400,7 +403,9 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
 
                 debug_assert!(
                     guarded_lock.responses_send_back.len()
-                        <= self.max_requests_per_client + guarded_lock.notification_messages.len(),
+                        <= self
+                            .max_requests_per_client
+                            .saturating_add(guarded_lock.notification_messages.len()),
                 );
 
                 match guarded_lock.responses_send_back.pop_front() {
