@@ -235,6 +235,8 @@ fn process_timers() {
 
     // Wake up the expired timers.
     for timer in expired_timers {
+        debug_assert!(timer.when_from_time_zero <= now - *time_zero);
+        debug_assert!(!lock.timers[timer.timer_id].is_finished);
         lock.timers[timer.timer_id].is_finished = true;
         if let Some(waker) = lock.timers[timer.timer_id].waker.take() {
             waker.wake();
