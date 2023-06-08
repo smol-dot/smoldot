@@ -403,7 +403,7 @@ impl<TSubMsg: Send + Sync + 'static> RequestsSubscriptions<TSubMsg> {
 
                 debug_assert!(
                     guarded_lock.responses_send_back.len()
-                        <= self.max_requests_per_client + guarded_lock.notification_messages.len(),
+                        <= self.max_requests_per_client.saturating_add(guarded_lock.notification_messages.len()),
                 );
 
                 match guarded_lock.responses_send_back.pop_front() {
