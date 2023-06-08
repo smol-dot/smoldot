@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.9 - 2023-06-08
+
 ### Added
 
 - Add support for child tries, meaning that errors will no longer be returned when performing runtime calls on chains that use child tries. In practice, this typically concerns contracts chains. ([#680](https://github.com/smol-dot/smoldot/pull/680), [#684](https://github.com/smol-dot/smoldot/pull/684))
