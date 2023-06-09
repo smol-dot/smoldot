@@ -14,4 +14,5 @@ LABEL maintainer "Pierre Krieger <pierre.krieger1708@gmail.com>"
 COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/full-node /usr/local/bin
 
 EXPOSE 30333
-CMD ["/usr/local/bin/full-node"]
+ENTRYPOINT ["/usr/local/bin/full-node"]
+CMD ["run"]
