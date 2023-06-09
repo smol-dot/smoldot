@@ -234,7 +234,7 @@ fn fuzzing() {
                 // checking difficulties.
                 let storage_value_hashed = match node_access.user_data().0.as_ref() {
                     Some((v, TrieEntryVersion::V1)) => {
-                        if v.len() >= 32 {
+                        if v.len() >= 33 {
                             Some(blake2_rfc::blake2b::blake2b(32, &[], v))
                         } else {
                             None
