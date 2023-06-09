@@ -934,9 +934,7 @@ pub enum RequestResult {
     State(Result<EncodedStateResponse, StateRequestError>),
     StorageProof(Result<EncodedMerkleProof, StorageProofRequestError>),
     CallProof(Result<EncodedMerkleProof, CallProofRequestError>),
-    KademliaFindNode(
-        Result<Vec<(peer_id::PeerId, Vec<Vec<u8>>)>, KademliaFindNodeError>,
-    ),
+    KademliaFindNode(Result<Vec<(peer_id::PeerId, Vec<Vec<u8>>)>, KademliaFindNodeError>),
 }
 
 /// Undecoded but valid block announce.
