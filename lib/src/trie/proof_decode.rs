@@ -671,7 +671,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     ///
     /// Returns an error if the proof doesn't contain enough information about this trie node.
     ///
-    /// This function might return `Some` even if there is no node in the trie for `key`, in which
+    /// This function will return `Ok` even if there is no node in the trie for `key`, in which
     /// case the returned [`TrieNodeInfo`] will indicate no storage value and no children.
     pub fn trie_node_info(
         &'_ self,
