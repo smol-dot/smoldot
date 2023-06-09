@@ -390,9 +390,11 @@ impl<'a> GenesisStorageItems<'a> {
 
     /// Find the storage key that immediately follows `key_before` in the list of storage items.
     ///
-    /// If `or_equal` is `true`, then `key_before` might be returned as well.
+    /// If `or_equal` is `true`, then `key_before` is returned if it corresponds to a key in the
+    /// storage.
     ///
-    /// Returns `None` if the next key doesn't start with the given prefix.
+    /// Returns `None` if no next key could be found, or if the next key doesn't start with the
+    /// given prefix.
     pub fn next_key(
         &self,
         key_before: impl Iterator<Item = u8>,
