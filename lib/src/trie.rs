@@ -173,11 +173,10 @@ pub fn empty_trie_merkle_value() -> [u8; 32] {
 /// Returns the Merkle value of a trie containing the entries passed as parameter. The entries
 /// passed as parameter are `(key, value)`.
 ///
-/// The complexity of this method is `O(n²)` where `n` is the number of entries.
-// TODO: improve complexity?
+/// The entries do not need to be ordered.
 pub fn trie_root(
     version: TrieEntryVersion,
-    entries: &[(impl AsRef<[u8]>, impl AsRef<[u8]>)],
+    unordered_entries: &[(impl AsRef<[u8]>, impl AsRef<[u8]>)],
 ) -> [u8; 32] {
     // Stack of nodes whose value is currently being calculated.
     let mut stack: Vec<Node> = Vec::with_capacity(8);
@@ -215,7 +214,7 @@ pub fn trie_root(
 
             // Find the storage value of this element, if any.
             // TODO: O(n) complexity
-            let storage_value = entries
+            let storage_value = unordered_entries
                 .iter()
                 .find(|(k, _)| {
                     bytes_to_nibbles(k.as_ref().iter().copied())
@@ -283,7 +282,7 @@ pub fn trie_root(
                     branch_search::BranchSearch::NextKey(next_key) => {
                         let mut maybe_next = None;
                         // TODO: O(n)
-                        for (k, _) in entries {
+                        for (k, _) in unordered_entries {
                             if maybe_next
                                 .as_ref()
                                 .map_or(false, |m| AsRef::as_ref(*m) <= k.as_ref())
@@ -323,7 +322,7 @@ pub fn trie_root(
             stack_top.children.push(None);
         } else {
             // Trie is completely empty.
-            debug_assert!(entries.is_empty());
+            debug_assert!(unordered_entries.is_empty());
             break empty_trie_merkle_value();
         }
     }
