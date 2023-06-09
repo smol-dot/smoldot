@@ -54,6 +54,11 @@ impl Multiaddr {
         self.bytes.clone()
     }
 
+    /// Returns the serialized version of this `Multiaddr`.
+    pub fn into_vec(self) -> Vec<u8> {
+        self.bytes
+    }
+
     /// Returns the list of components of the multiaddress.
     pub fn iter(&'_ self) -> impl Iterator<Item = ProtocolRef<'_>> + '_ {
         let mut iter =
