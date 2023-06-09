@@ -600,11 +600,12 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
         &'a self,
         trie_root_merkle_value: &[u8; 32],
         key: &[nibble::Nibble],
-    ) -> Option<
+    ) -> Result<
         Option<(
             &'a [nibble::Nibble],
             &'a (StorageValueInner, ops::Range<usize>, u16),
         )>,
+        IncompleteProofError,
     > {
         // If the proof doesn't contain any entry for the requested trie, then we have no
         // information about the node whatsoever.
@@ -619,7 +620,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
             .next()
             .map_or(true, |((h, _), _)| h != trie_root_merkle_value)
         {
-            return None;
+            return Err(IncompleteProofError());
         }
 
         // Search for the key in the proof that is an ancestor or equal to the requested key.
@@ -642,11 +643,11 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                     // The requested key doesn't have any ancestor in the trie. This means that
                     // it doesn't share any prefix with any other entry in the trie. This means
                     // that it doesn't exist.
-                    return Some(None);
+                    return Ok(None);
                 }
                 Some(((_, found_key), value)) if key.starts_with(found_key) => {
                     // Requested key is a descendant of an entry found in the proof. Returning.
-                    return Some(Some((found_key, value)));
+                    return Ok(Some((found_key, value)));
                 }
                 Some(((_, found_key), _)) => {
                     // ̀`found_key` is somewhere between the ancestor of the requested key and the
@@ -668,7 +669,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
 
     /// Returns information about a trie node.
     ///
-    /// Returns `None` if the proof doesn't contain enough information about this trie node.
+    /// Returns an error if the proof doesn't contain enough information about this trie node.
     ///
     /// This function might return `Some` even if there is no node in the trie for `key`, in which
     /// case the returned [`TrieNodeInfo`] will indicate no storage value and no children.
@@ -676,23 +677,22 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
         &'_ self,
         trie_root_merkle_value: &[u8; 32],
         key: &[nibble::Nibble],
-    ) -> Option<TrieNodeInfo<'_>> {
-        match self.closest_ancestor(trie_root_merkle_value, key) {
-            None => None,
-            Some(None) => {
+    ) -> Result<TrieNodeInfo<'_>, IncompleteProofError> {
+        match self.closest_ancestor(trie_root_merkle_value, key)? {
+            None => {
                 // Node is known to not exist.
-                Some(TrieNodeInfo {
+                Ok(TrieNodeInfo {
                     storage_value: StorageValue::None,
                     children: Children {
                         children: [Child::NoChild; 16],
                     },
                 })
             }
-            Some(Some((ancestor_key, (storage_value, node_value_range, children_bitmap))))
+            Some((ancestor_key, (storage_value, node_value_range, children_bitmap)))
                 if ancestor_key == key =>
             {
                 // Found exact match.
-                return Some(TrieNodeInfo {
+                return Ok(TrieNodeInfo {
                     storage_value: match storage_value {
                         StorageValueInner::Known {
                             offset,
@@ -719,14 +719,14 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                     ),
                 });
             }
-            Some(Some((ancestor_key, (_, _, children_bitmap)))) => {
+            Some((ancestor_key, (_, _, children_bitmap))) => {
                 // Requested key is a descendant of an entry found in the proof.
                 // Check whether the entry can have a descendant in the direction towards the
                 // requested key.
                 if children_bitmap & (1 << u8::from(key[ancestor_key.len()])) == 0 {
                     // Child absent.
                     // It has been proven that the requested key doesn't exist in the trie.
-                    return Some(TrieNodeInfo {
+                    return Ok(TrieNodeInfo {
                         storage_value: StorageValue::None,
                         children: Children {
                             children: [Child::NoChild; 16],
@@ -755,7 +755,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                     // earlier. This branch node can't be missing from the proof as otherwise
                     // the proof would be invalid.
                     // Thus, the requested key doesn't exist in the trie.
-                    return Some(TrieNodeInfo {
+                    return Ok(TrieNodeInfo {
                         storage_value: StorageValue::None,
                         children: Children {
                             children: [Child::NoChild; 16],
@@ -766,25 +766,24 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                 // Child present.
                 // The request key can possibly be in the trie, but we have no way of
                 // knowing because the proof doesn't have enough information.
-                None
+                Err(IncompleteProofError())
             }
         }
     }
 
     /// Queries from the proof the storage value at the given key.
     ///
-    /// Returns `None` if the storage value couldn't be determined from the proof. Returns
-    /// `Some(None)` if the storage value is known to have no value.
+    /// Returns an error if the storage value couldn't be determined from the proof. Returns
+    /// `Ok(None)` if the storage value is known to have no value.
     ///
     /// > **Note**: This function is a convenient wrapper around
     /// >           [`DecodedTrieProof::trie_node_info`].
-    // TODO: return a Result instead of Option?
     // TODO: accept param as iterator rather than slice?
     pub fn storage_value(
         &'_ self,
         trie_root_merkle_value: &[u8; 32],
         key: &[u8],
-    ) -> Option<Option<(&'_ [u8], TrieEntryVersion)>> {
+    ) -> Result<Option<(&'_ [u8], TrieEntryVersion)>, IncompleteProofError> {
         // Annoyingly we have to create a `Vec` for the key, but the API of BTreeMap gives us
         // no other choice.
         let key = nibble::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>();
@@ -792,7 +791,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
             .trie_node_info(trie_root_merkle_value, &key)?
             .storage_value
         {
-            StorageValue::Known { value, inline } => Some(Some((
+            StorageValue::Known { value, inline } => Ok(Some((
                 value,
                 if inline {
                     TrieEntryVersion::V0
@@ -800,8 +799,8 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                     TrieEntryVersion::V1
                 },
             ))),
-            StorageValue::HashKnownValueMissing(_) => None,
-            StorageValue::None => Some(None),
+            StorageValue::HashKnownValueMissing(_) => Err(IncompleteProofError()),
+            StorageValue::None => Ok(None),
         }
     }
 
@@ -811,14 +810,13 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// trie. If `false`, then only keys that are strictly superior are returned.
     ///
     /// The returned value must always start with `prefix`. Note that the value of `prefix` is
-    /// important as it can be the difference between `None` and `Some(None)`.
+    /// important as it can be the difference between `Err(IncompleteProofError)` and `Ok(None)`.
     ///
     /// If `branch_nodes` is `false`, then trie nodes that don't have a storage value are skipped.
     ///
-    /// Returns `None` if the proof doesn't contain enough information to determine the next key.
-    /// Returns `Some(None)` if the proof indicates that there is no next key (within the given
+    /// Returns an error if the proof doesn't contain enough information to determine the next key.
+    /// Returns `Ok(None)` if the proof indicates that there is no next key (within the given
     /// prefix).
-    // TODO: return a Result instead of Option?
     // TODO: accept params as iterators rather than slices?
     pub fn next_key(
         &'_ self,
@@ -827,7 +825,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
         or_equal: bool,
         prefix: &[nibble::Nibble],
         branch_nodes: bool,
-    ) -> Option<Option<&'_ [nibble::Nibble]>> {
+    ) -> Result<Option<&'_ [nibble::Nibble]>, IncompleteProofError> {
         let mut key_before = {
             let mut k = Vec::with_capacity(key_before.len() + 4);
             k.extend_from_slice(key_before);
@@ -841,9 +839,8 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
         }
 
         loop {
-            match self.closest_ancestor(trie_root_merkle_value, &key_before) {
-                None => return None,
-                Some(None) => {
+            match self.closest_ancestor(trie_root_merkle_value, &key_before)? {
+                None => {
                     // `key_before` has no ancestor, meaning that it is either the root of the
                     // trie or out of range of the trie completely. In both cases, the only
                     // possible candidate if the root of the trie.
@@ -861,11 +858,11 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             // life easier, we just update `key_before` and loop again.
                             key_before = k.clone()
                         }
-                        Some(_) => return Some(None), // `key_before` is after every trie node.
-                        None => return Some(None),    // Empty trie.
+                        Some(_) => return Ok(None), // `key_before` is after every trie node.
+                        None => return Ok(None),    // Empty trie.
                     };
                 }
-                Some(Some((ancestor_key, (storage_value, _, _)))) if ancestor_key == key_before => {
+                Some((ancestor_key, (storage_value, _, _))) if ancestor_key == key_before => {
                     // It's a match!
 
                     // Check for `branch_nodes`.
@@ -876,12 +873,12 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                     }
 
                     if !key_before.starts_with(prefix) {
-                        return Some(None);
+                        return Ok(None);
                     } else {
-                        return Some(Some(ancestor_key));
+                        return Ok(Some(ancestor_key));
                     }
                 }
-                Some(Some((ancestor_key, (_, _, children_bitmap)))) => {
+                Some((ancestor_key, (_, _, children_bitmap))) => {
                     debug_assert!(key_before.starts_with(ancestor_key));
 
                     // Find which descendant of `ancestor_key` and that is after `key_before`
@@ -912,7 +909,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             key_before = descendant_key.clone();
                         } else {
                             // We know that there is a descendant but it is not in the proof.
-                            return None;
+                            return Err(IncompleteProofError());
                         }
                     } else {
                         // `ancestor_key` has no children that can possibly be superior
@@ -924,7 +921,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                                 else {
                                     // `key_before` is equal to `0xffff...` and thus can't
                                     // have any next sibling.
-                                    return Some(None)
+                                    return Ok(None)
                                 };
                             if let Some(new_nibble) = nibble.checked_add(1) {
                                 key_before.push(new_nibble);
@@ -940,16 +937,15 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// Find in the proof the closest trie node that descends from `key` and returns its Merkle
     /// value.
     ///
-    /// Returns `None` if the proof doesn't contain enough information to determine the Merkle
+    /// Returns an error if the proof doesn't contain enough information to determine the Merkle
     /// value.
-    /// Returns `Some(None)` if the proof indicates that there is no descendant.
-    // TODO: return a Result instead of Option?
+    /// Returns `Ok(None)` if the proof indicates that there is no descendant.
     // TODO: accept params as iterators rather than slices?
     pub fn closest_descendant_merkle_value(
         &'_ self,
         trie_root_merkle_value: &[u8; 32],
         key: &[nibble::Nibble],
-    ) -> Option<Option<&'_ [u8]>> {
+    ) -> Result<Option<&'_ [u8]>, IncompleteProofError> {
         if key.is_empty() {
             // The closest descendant of an empty key is always the root of the trie itself,
             // assuming that the proof contains this trie.
@@ -967,14 +963,14 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                         None
                     }
                 })
+                .ok_or(IncompleteProofError())
                 .map(Some);
         }
 
         // Call `closest_ancestor(parent(key))`.
-        match self.closest_ancestor(trie_root_merkle_value, &key[..key.len() - 1]) {
-            None => None,
-            Some(None) => Some(None),
-            Some(Some((parent_key, (_, parent_node_value_range, _))))
+        match self.closest_ancestor(trie_root_merkle_value, &key[..key.len() - 1])? {
+            None => Ok(None),
+            Some((parent_key, (_, parent_node_value_range, _)))
                 if parent_key.len() == key.len() - 1 =>
             {
                 // Exact match, meaning that `parent_key` is precisely one less nibble than `key`.
@@ -986,9 +982,9 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                 let parent_node_value =
                     trie_node::decode(&self.proof.as_ref()[parent_node_value_range.clone()])
                         .unwrap();
-                Some(parent_node_value.children[usize::from(u8::from(nibble))])
+                Ok(parent_node_value.children[usize::from(u8::from(nibble))])
             }
-            Some(Some((parent_key, (_, parent_node_value_range, _)))) => {
+            Some((parent_key, (_, parent_node_value_range, _))) => {
                 // The closest parent is more than one nibble away.
                 // If the proof contains a node in this direction, then we know that there's no
                 // node in the trie between `parent_key` and `key`. If the proof doesn't contain
@@ -1004,18 +1000,22 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                         h != trie_root_merkle_value || !k.starts_with(key)
                     })
                 {
-                    return Some(None);
+                    return Ok(None);
                 }
 
                 let nibble = key[parent_key.len()];
                 let parent_node_value =
                     trie_node::decode(&self.proof.as_ref()[parent_node_value_range.clone()])
                         .unwrap();
-                Some(parent_node_value.children[usize::from(u8::from(nibble))])
+                Ok(parent_node_value.children[usize::from(u8::from(nibble))])
             }
         }
     }
 }
+
+/// Proof doesn't contain enough information to answer the request.
+#[derive(Debug, Clone, derive_more::Display)]
+pub struct IncompleteProofError();
 
 /// Storage value of the node.
 #[derive(Copy, Clone)]
@@ -1373,7 +1373,7 @@ mod tests {
                 ],
                 &[]
             )
-            .is_some());
+            .is_ok());
     }
 
     #[test]
@@ -1394,7 +1394,7 @@ mod tests {
                 ],
                 &[]
             )
-            .is_some());
+            .is_ok());
     }
 
     #[test]

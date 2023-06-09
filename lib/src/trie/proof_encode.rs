@@ -607,7 +607,7 @@ mod tests {
                 proof_decode::decode_and_verify_proof(proof_decode::Config { proof }).unwrap();
             assert!(proof
                 .closest_descendant_merkle_value(&trie_root_hash, &[])
-                .is_some());
+                .is_ok());
         }
     }
 
