@@ -1930,7 +1930,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         }
                         .to_json_call_object_parameters(None)
                     }
-                    Some(Err(runtime_service::RuntimeCallError::MissingProofEntry)) => {
+                    Some(Err(runtime_service::RuntimeCallError::MissingProofEntry(_error))) => {
                         methods::ServerToClient::chainHead_unstable_callEvent {
                             subscription: (&subscription_id).into(),
                             result: methods::ChainHeadCallEvent::Error {

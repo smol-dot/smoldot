@@ -120,8 +120,8 @@ impl PrefixScan {
                         decoded_proof.trie_node_info(&self.trie_root_hash, info_of_node),
                         query_ty,
                     ) {
-                        (Some(info), QueryTy::Exact) => info,
-                        (Some(info), QueryTy::Direction) => {
+                        (Ok(info), QueryTy::Exact) => info,
+                        (Ok(info), QueryTy::Direction) => {
                             match info.children.child(query_key[query_key.len() - 1]) {
                                 proof_decode::Child::InProof { child_key, .. } => {
                                     // Rather than complicate this code, we just add the child to
@@ -156,14 +156,16 @@ impl PrefixScan {
                                 }
                             }
                         }
-                        (None, _) if !is_first_iteration => {
+                        (Err(proof_decode::IncompleteProofError { .. }), _)
+                            if !is_first_iteration =>
+                        {
                             // Node not in the proof. There's no point in adding this node to `next`
                             // as we will fail again if we try to verify the proof again.
                             // If `is_first_iteration`, it means that the proof is incorrect.
                             self.next_queries.push((query_key, query_ty));
                             continue;
                         }
-                        (None, _) => {
+                        (Err(proof_decode::IncompleteProofError { .. }), _) => {
                             // Push all the non-processed queries back to `next_queries` before
                             // returning the error, so that we can try again.
                             self.next_queries.push((query_key, query_ty));

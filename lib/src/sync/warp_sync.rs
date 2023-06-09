@@ -1222,8 +1222,8 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
 
             let finalized_storage_code =
                 match decoded_downloaded_runtime.storage_value(&header.state_root, b":code") {
-                    Some(Some((code, _))) => code,
-                    Some(None) => {
+                    Ok(Some((code, _))) => code,
+                    Ok(None) => {
                         self.inner.phase = Phase::DownloadFragments {
                             previous_verifier_values: Some((
                                 header.clone(),
@@ -1232,7 +1232,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                         };
                         return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
                     }
-                    None => {
+                    Err(proof_decode::IncompleteProofError { .. }) => {
                         self.inner.phase = Phase::DownloadFragments {
                             previous_verifier_values: Some((
                                 header.clone(),
@@ -1248,8 +1248,8 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
 
             let finalized_storage_heappages =
                 match decoded_downloaded_runtime.storage_value(&header.state_root, b":heappages") {
-                    Some(val) => val.map(|(v, _)| v),
-                    None => {
+                    Ok(val) => val.map(|(v, _)| v),
+                    Err(proof_decode::IncompleteProofError { .. }) => {
                         self.inner.phase = Phase::DownloadFragments {
                             previous_verifier_values: Some((
                                 header.clone(),
@@ -1451,8 +1451,8 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                         let proof = calls.get(&get.call_in_progress()).unwrap();
                         let value =
                             match proof.storage_value(&header.state_root, get.key().as_ref()) {
-                                Some(v) => v.map(|(v, _)| v),
-                                None => {
+                                Ok(v) => v.map(|(v, _)| v),
+                                Err(proof_decode::IncompleteProofError { .. }) => {
                                     self.inner.phase = Phase::DownloadFragments {
                                         previous_verifier_values: Some((
                                             header.clone(),
