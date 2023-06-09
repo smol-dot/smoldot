@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
+// Copyright (C) 2023  Pierre Krieger
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -18,6 +18,10 @@
 //! Freestanding function that calculates the root of a radix-16 Merkle-Patricia trie.
 //!
 //! See the parent module documentation for an explanation of what the trie is.
+//!
+//! This module is meant to be used in situations where all the nodes of the trie that have a
+//! storage value associated to them are known and easily accessible, and that no cache is
+//! available.
 //!
 //! # Usage
 //!
@@ -64,175 +68,21 @@
 //! When using a cache, be careful to properly invalidate cache entries whenever you perform
 //! modifications on the trie associated to it.
 
+use crate::trie::empty_trie_merkle_value;
+
 use super::{
-    nibble::{bytes_to_nibbles, Nibble},
-    trie_node, trie_structure, TrieEntryVersion,
+    branch_search,
+    nibble::{nibbles_to_bytes_suffix_extend, Nibble},
+    trie_node, TrieEntryVersion,
 };
 
-use core::{fmt, iter};
-
-/// Cache containing intermediate calculation steps.
-///
-/// If the storage's content is modified, you **must** call the appropriate methods to invalidate
-/// entries. Otherwise, the trie root calculation will yield an incorrect result.
-#[derive(Clone)]
-pub struct CalculationCache {
-    /// Structure of the trie.
-    /// If `Some`, the structure is either fully conforming to the trie.
-    structure: Option<trie_structure::TrieStructure<CacheEntry>>,
-}
-
-/// Custom data stored in each node in [`CalculationCache::structure`].
-#[derive(Default, Clone)]
-struct CacheEntry {
-    merkle_value: Option<trie_node::MerkleValueOutput>,
-}
-
-impl CalculationCache {
-    /// Builds a new empty cache.
-    pub const fn empty() -> Self {
-        CalculationCache { structure: None }
-    }
-
-    /// Notify the cache that a storage value at the given key has been added, modified or removed.
-    ///
-    /// `has_value` must be true if there is now a storage value at the given key.
-    pub fn storage_value_update(&mut self, key: &[u8], has_value: bool) {
-        let structure = match &mut self.structure {
-            Some(s) => s,
-            None => return,
-        };
-
-        // Update the existing structure to account for the change.
-        // The trie structure will report exactly how the trie is modified, which makes it
-        // possible to know which nodes' Merkle values need to be invalidated.
-
-        let mut node_to_invalidate = match (
-            structure.node(bytes_to_nibbles(key.iter().copied())),
-            has_value,
-        ) {
-            (trie_structure::Entry::Vacant(entry), true) => {
-                match entry.insert_storage_value() {
-                    trie_structure::PrepareInsert::One(insert) => {
-                        let inserted = insert.insert(Default::default());
-                        match inserted.into_parent() {
-                            Some(p) => p,
-                            None => return,
-                        }
-                    }
-                    trie_structure::PrepareInsert::Two(insert) => {
-                        let inserted = insert.insert(Default::default(), Default::default());
-
-                        // We additionally have to invalidate the Merkle value of the children of
-                        // the newly-inserted branch node.
-                        let mut inserted_branch = inserted.into_parent().unwrap();
-                        for idx in 0..16u8 {
-                            if let Some(mut child) =
-                                inserted_branch.child(Nibble::try_from(idx).unwrap())
-                            {
-                                child.user_data().merkle_value = None;
-                            }
-                        }
-
-                        match inserted_branch.into_parent() {
-                            Some(p) => p,
-                            None => return,
-                        }
-                    }
-                }
-            }
-            (trie_structure::Entry::Vacant(_), false) => return,
-            (trie_structure::Entry::Occupied(trie_structure::NodeAccess::Branch(entry)), true) => {
-                let entry = entry.insert_storage_value();
-                trie_structure::NodeAccess::Storage(entry)
-            }
-            (trie_structure::Entry::Occupied(trie_structure::NodeAccess::Storage(entry)), true) => {
-                trie_structure::NodeAccess::Storage(entry)
-            }
-            (trie_structure::Entry::Occupied(trie_structure::NodeAccess::Branch(_)), false) => {
-                return
-            }
-            (
-                trie_structure::Entry::Occupied(trie_structure::NodeAccess::Storage(entry)),
-                false,
-            ) => match entry.remove() {
-                trie_structure::Remove::StorageToBranch(node) => {
-                    trie_structure::NodeAccess::Branch(node)
-                }
-                trie_structure::Remove::BranchAlsoRemoved { sibling, .. } => sibling,
-                trie_structure::Remove::SingleRemoveChild { child, .. } => child,
-                trie_structure::Remove::SingleRemoveNoChild { parent, .. } => parent,
-                trie_structure::Remove::TrieNowEmpty { .. } => return,
-            },
-        };
-
-        // We invalidate the Merkle value of `node_to_invalidate` and all its ancestors.
-        node_to_invalidate.user_data().merkle_value = None;
-        let mut parent = node_to_invalidate.into_parent();
-        while let Some(mut node) = parent.take() {
-            // If the node has already had its Merkle value invalidated, then
-            // we can stop there.
-            if node.user_data().merkle_value.is_none() {
-                break;
-            }
-            node.user_data().merkle_value = None;
-            parent = node.into_parent();
-        }
-    }
-
-    /// Notify the cache that all the storage values whose key start with the given prefix have
-    /// been removed.
-    pub fn prefix_remove_update(&mut self, prefix: &[u8]) {
-        let structure = match &mut self.structure {
-            Some(s) => s,
-            None => return,
-        };
-
-        if let Some(mut node) = structure.remove_prefix(bytes_to_nibbles(prefix.iter().cloned())) {
-            node.user_data().merkle_value = None;
-            let mut parent = node.into_parent();
-            while let Some(mut p) = parent.take() {
-                p.user_data().merkle_value = None;
-                parent = p.into_parent();
-            }
-        } else if let Some(mut root_node) = structure.root_node() {
-            root_node.user_data().merkle_value = None;
-        }
-    }
-}
-
-impl Default for CalculationCache {
-    fn default() -> Self {
-        Self::empty()
-    }
-}
-
-impl fmt::Debug for CalculationCache {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // The calculation cache is so large that printing its content is basically useless.
-        f.debug_tuple("CalculationCache").finish()
-    }
-}
+use alloc::vec::Vec;
+use core::array;
 
 /// Start calculating the Merkle value of the root node.
-pub fn root_merkle_value(cache: Option<CalculationCache>) -> RootMerkleValueCalculation {
-    // The calculation that we perform relies on storing values in the cache and reloading them
-    // afterwards. If the user didn't pass any cache, we create a temporary one.
-    let cache_or_temporary = if let Some(mut cache) = cache {
-        if let Some(structure) = &mut cache.structure {
-            if structure.capacity() > structure.len().saturating_mul(2) {
-                structure.shrink_to_fit();
-            }
-        }
-        cache
-    } else {
-        CalculationCache::empty()
-    };
-
+pub fn root_merkle_value() -> RootMerkleValueCalculation {
     CalcInner {
-        cache: cache_or_temporary,
-        current: None,
-        coming_from_child: false,
+        stack: Vec::with_capacity(8),
     }
     .next()
 }
@@ -244,13 +94,11 @@ pub enum RootMerkleValueCalculation {
     Finished {
         /// Root hash that has been calculated.
         hash: [u8; 32],
-        /// Cache of the calculation that can be passed next time.
-        cache: CalculationCache,
     },
 
-    /// Request to return the list of all the keys in the trie. Call [`AllKeys::inject`] to
-    /// indicate this list.
-    AllKeys(AllKeys),
+    /// Request to return the key that follows (in lexicographic order) a given one in the storage.
+    /// Call [`NextKey::inject`] to indicate this list.
+    NextKey(NextKey),
 
     /// Request the value of the node with a specific key. Call [`StorageValue::inject`] to
     /// indicate the value.
@@ -259,176 +107,165 @@ pub enum RootMerkleValueCalculation {
 
 /// Calculation of the Merkle value is ready to continue.
 /// Shared by all the public-facing structs.
-///
-/// # Implementation notes
-///
-/// We traverse the trie in attempt to find missing Merkle values.
-/// We start with the root node. For each node, if its Merkle value is absent, we continue
-/// iterating with its first child. If its Merkle value is present, we continue iterating with
-/// the next sibling or, if it is the last sibling, the parent. In that situation where we jump
-/// from last sibling to parent, we also calculate the parent's Merkle value in the process.
-/// Due to this order of iteration, we traverse each node which lack a Merkle value twice, and
-/// the Merkle value is calculated that second time.
 struct CalcInner {
-    /// Contains the intermediary steps of the calculation. `None` if the calculation is finished.
-    cache: CalculationCache,
+    /// Stack of nodes whose value is currently being calculated.
+    stack: Vec<Node>,
+}
 
-    /// Index within `cache` of the node currently being iterated.
-    current: Option<trie_structure::NodeIndex>,
-
-    // `coming_from_child` is used to differentiate whether the previous iteration was the
-    // previous sibling of `current` or the last child of `current`.
-    coming_from_child: bool,
+#[derive(Debug)]
+struct Node {
+    /// Partial key of the node currently being calculated.
+    partial_key: Vec<Nibble>,
+    /// Merkle values of the children of the node. Filled up to 16 elements, then popped. Each
+    /// element is `Some` or `None` depending on whether a child exists.
+    children: arrayvec::ArrayVec<Option<trie_node::MerkleValueOutput>, 16>,
 }
 
 impl CalcInner {
+    /// Returns the full key of the node currently being iterated.
+    fn current_iter_node_full_key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+        self.stack.iter().flat_map(|node| {
+            let child_nibble = if node.children.len() == 16 {
+                None
+            } else {
+                Some(Nibble::try_from(u8::try_from(node.children.len()).unwrap()).unwrap())
+            };
+
+            node.partial_key
+                .iter()
+                .copied()
+                .chain(child_nibble.into_iter())
+        })
+    }
+
     /// Advances the calculation to the next step.
     fn next(mut self) -> RootMerkleValueCalculation {
-        // Make sure that `cache.structure` contains a trie structure that matches the trie.
-        if self.cache.structure.is_none() {
-            return RootMerkleValueCalculation::AllKeys(AllKeys { calculation: self });
-        }
-
-        // At this point `trie_structure` is guaranteed to match the trie, but its Merkle values
-        // might be missing and need to be filled.
-        let trie_structure = self.cache.structure.as_mut().unwrap();
-
-        // Node currently being iterated.
-        let mut current: trie_structure::NodeAccess<_> = {
-            if self.current.is_none() {
-                self.current = match trie_structure.root_node() {
-                    Some(c) => Some(c.node_index()),
-                    None => {
-                        // Trie is empty.
-                        // `calculate_merkle_value` can only return an error if the partial key
-                        // isn't empty, meaning that it is safe to unwrap.
-                        let merkle_value = trie_node::calculate_merkle_value(
-                            trie_node::Decoded {
-                                partial_key: iter::empty(),
-                                children: [None::<&'static [u8]>; 16],
-                                storage_value: trie_node::StorageValue::None,
-                            },
-                            true,
-                        )
-                        .unwrap();
-
-                        return RootMerkleValueCalculation::Finished {
-                            // Guaranteed to never panic for the root node.
-                            hash: merkle_value.try_into().unwrap_or_else(|_| panic!()),
-                            cache: self.cache,
-                        };
-                    }
-                };
-            }
-
-            trie_structure.node_by_index(self.current.unwrap()).unwrap()
-        };
-
         loop {
-            // If we already have a Merkle value, jump either to the next sibling (if any), or back
-            // to the parent.
-            if current.user_data().merkle_value.is_some() {
-                match current.into_next_sibling() {
-                    Ok(sibling) => {
-                        current = sibling;
-                        self.current = Some(current.node_index());
-                        self.coming_from_child = false;
-                        continue;
-                    }
-                    Err(curr) => {
-                        if let Some(parent) = curr.into_parent() {
-                            current = parent;
-                            self.current = Some(current.node_index());
-                            self.coming_from_child = true;
-                            continue;
-                        }
-                        // No next sibling nor parent. We have finished traversing the tree.
-                        let mut root_node = trie_structure.root_node().unwrap();
-                        let merkle_value = root_node.user_data().merkle_value.clone().unwrap();
-                        return RootMerkleValueCalculation::Finished {
-                            // Guaranteed to never panic for the root node.
-                            hash: merkle_value.try_into().unwrap_or_else(|_| panic!()),
-                            cache: self.cache,
-                        };
-                    }
+            // If all the children of the node at the end of the stack are known, calculate the Merkle
+            // value of that node. To do so, we need to ask the user for the storage value.
+            if self
+                .stack
+                .last()
+                .map_or(false, |node| node.children.len() == 16)
+            {
+                // If the key has an even number of nibbles, we need to ask the user for the
+                // storage value.
+                if self.current_iter_node_full_key().count() % 2 == 0 {
+                    break RootMerkleValueCalculation::StorageValue(StorageValue {
+                        calculation: self,
+                    });
                 }
-            }
 
-            debug_assert!(current.user_data().merkle_value.is_none());
+                // Otherwise we can calculate immediately.
+                let calculated_elem = self.stack.pop().unwrap();
 
-            // If previous iteration is from `current`'s previous sibling, we jump down to
-            // `current`'s children.
-            if !self.coming_from_child {
-                match current.into_first_child() {
-                    Err(c) => current = c,
-                    Ok(first_child) => {
-                        current = first_child;
-                        self.current = Some(current.node_index());
-                        self.coming_from_child = false;
-                        continue;
-                    }
-                }
-            }
-
-            // If we reach this, we are ready to calculate `current`'s Merkle value.
-            self.coming_from_child = true;
-
-            if !current.has_storage_value() {
                 // Calculate the Merkle value of the node.
-                // `calculate_merkle_value` returns an error if the node is invalid, which would
-                // indicate a bug in this module.
                 let merkle_value = trie_node::calculate_merkle_value(
                     trie_node::Decoded {
-                        partial_key: current.partial_key(),
-                        children: core::array::from_fn(|child_idx| {
-                            current
-                                .child_user_data(
-                                    Nibble::try_from(u8::try_from(child_idx).unwrap()).unwrap(),
-                                )
-                                .map(|child| child.merkle_value.as_ref().unwrap())
-                        }),
+                        children: array::from_fn(|n| calculated_elem.children[n].as_ref()),
+                        partial_key: calculated_elem.partial_key.iter().copied(),
                         storage_value: trie_node::StorageValue::None,
                     },
-                    current.is_root_node(),
+                    self.stack.is_empty(),
                 )
-                .unwrap();
+                .unwrap_or_else(|_| unreachable!());
 
-                current.user_data().merkle_value = Some(merkle_value);
-                continue;
+                // Insert Merkle value into the stack, or, if no parent, we have our result!
+                if let Some(parent) = self.stack.last_mut() {
+                    parent.children.push(Some(merkle_value));
+                } else {
+                    // Because we pass `is_root_node: true` in the calculation above, it is
+                    // guaranteed that the Merkle value is always 32 bytes.
+                    let hash = *<&[u8; 32]>::try_from(merkle_value.as_ref()).unwrap();
+                    break RootMerkleValueCalculation::Finished { hash };
+                }
+            } else {
+                // Need to find the closest descendant to the first unknown child at the top of the
+                // stack.
+                break RootMerkleValueCalculation::NextKey(NextKey {
+                    branch_search: branch_search::start_branch_search(branch_search::Config {
+                        key_before: self.current_iter_node_full_key(),
+                        or_equal: true,
+                        prefix: self.current_iter_node_full_key(),
+                        no_branch_search: false,
+                    }),
+                    calculation: self,
+                });
             }
-
-            return RootMerkleValueCalculation::StorageValue(StorageValue { calculation: self });
         }
     }
 }
 
-/// Request to return the list of all the keys in the storage. Call [`AllKeys::inject`] to indicate
-/// this list.
+/// Request to return the key that follows (in lexicographic order) a given one in the storage.
+/// Call [`NextKey::inject`] to indicate this list.
 #[must_use]
-pub struct AllKeys {
+pub struct NextKey {
     calculation: CalcInner,
+
+    /// Current branch search running to find the closest descendant to the node at the top of
+    /// the trie.
+    branch_search: branch_search::NextKey,
 }
 
-impl AllKeys {
-    /// Indicates the list of all keys of the trie and advances the calculation.
-    pub fn inject(
+impl NextKey {
+    /// Returns the key whose next key must be passed back.
+    pub fn key_before(&'_ self) -> impl Iterator<Item = u8> + '_ {
+        self.branch_search.key_before()
+    }
+
+    /// If `true`, then the provided value must the one superior or equal to the requested key.
+    /// If `false`, then the provided value must be strictly superior to the requested key.
+    pub fn or_equal(&self) -> bool {
+        self.branch_search.or_equal()
+    }
+
+    /// Returns the prefix the next key must start with. If the next key doesn't start with the
+    /// given prefix, then `None` should be provided.
+    pub fn prefix(&'_ self) -> impl Iterator<Item = u8> + '_ {
+        self.branch_search.prefix()
+    }
+
+    /// Injects the key.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the key passed as parameter isn't strictly superior to the requested key.
+    ///
+    pub fn inject_key(
         mut self,
-        keys: impl Iterator<Item = impl Iterator<Item = u8> + Clone>,
+        key: Option<impl Iterator<Item = u8>>,
     ) -> RootMerkleValueCalculation {
-        debug_assert!(self.calculation.cache.structure.is_none());
-        self.calculation.cache.structure = Some({
-            let mut structure = trie_structure::TrieStructure::new();
-            for key in keys {
-                structure
-                    .node(bytes_to_nibbles(key))
-                    .into_vacant()
-                    .unwrap()
-                    .insert_storage_value()
-                    .insert(Default::default(), Default::default());
+        match self.branch_search.inject(key) {
+            branch_search::BranchSearch::NextKey(next_key) => {
+                RootMerkleValueCalculation::NextKey(NextKey {
+                    calculation: self.calculation,
+                    branch_search: next_key,
+                })
             }
-            structure
-        });
-        self.calculation.next()
+            branch_search::BranchSearch::Found {
+                branch_trie_node_key,
+            } => {
+                // Add the closest descendant to the stack.
+                if let Some(branch_trie_node_key) = branch_trie_node_key {
+                    let partial_key = branch_trie_node_key
+                        .skip(self.calculation.current_iter_node_full_key().count())
+                        .collect();
+                    self.calculation.stack.push(Node {
+                        partial_key,
+                        children: arrayvec::ArrayVec::new(),
+                    });
+                    self.calculation.next()
+                } else if let Some(stack_top) = self.calculation.stack.last_mut() {
+                    stack_top.children.push(None);
+                    self.calculation.next()
+                } else {
+                    // Trie is completely empty.
+                    RootMerkleValueCalculation::Finished {
+                        hash: empty_trie_merkle_value(),
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -442,70 +279,59 @@ pub struct StorageValue {
 impl StorageValue {
     /// Returns the key whose value is being requested.
     pub fn key(&'_ self) -> impl Iterator<Item = u8> + '_ {
-        let trie_structure = self.calculation.cache.structure.as_ref().unwrap();
-        let mut full_key = trie_structure
-            .node_full_key_by_index(self.calculation.current.unwrap())
-            .unwrap();
-        iter::from_fn(move || {
-            let nibble1 = full_key.next()?;
-            let nibble2 = full_key.next().unwrap();
-            let val = (u8::from(nibble1) << 4) | u8::from(nibble2);
-            Some(val)
-        })
+        // This function can never be reached if the number of nibbles is uneven.
+        debug_assert_eq!(self.calculation.current_iter_node_full_key().count() % 2, 0);
+        nibbles_to_bytes_suffix_extend(self.calculation.current_iter_node_full_key())
     }
 
     /// Indicates the storage value and advances the calculation.
     pub fn inject(
         mut self,
-        stored_value: Option<(impl AsRef<[u8]>, TrieEntryVersion)>,
+        storage_value: Option<(impl AsRef<[u8]>, TrieEntryVersion)>,
     ) -> RootMerkleValueCalculation {
-        let trie_structure = self.calculation.cache.structure.as_mut().unwrap();
-        let mut current: trie_structure::NodeAccess<_> = trie_structure
-            .node_by_index(self.calculation.current.unwrap())
-            .unwrap();
+        let calculated_elem = self.calculation.stack.pop().unwrap();
 
-        // Due to borrowing issues, we need to build the hash of the storage value ahead of time
-        // if necessary.
-        let hashed_storage_value = match &stored_value {
-            Some((_, TrieEntryVersion::V0)) => None,
-            Some((value, TrieEntryVersion::V1)) if value.as_ref().len() >= 33 => {
+        // Due to some borrow checker troubles, we need to calculate the storage value
+        // hash ahead of time if relevant.
+        let storage_value_hash = if let Some((value, TrieEntryVersion::V1)) = storage_value.as_ref()
+        {
+            if value.as_ref().len() >= 33 {
                 Some(blake2_rfc::blake2b::blake2b(32, &[], value.as_ref()))
+            } else {
+                None
             }
-            Some((_, TrieEntryVersion::V1)) => None,
-            None => {
-                // API user misbehaved.
-                panic!("Injected no value when previously reported a value at this key")
-            }
+        } else {
+            None
         };
 
         // Calculate the Merkle value of the node.
-        // `calculate_merkle_value` can only return an error if the node is invalid, which would
-        // indicate a serious bug in this module.
         let merkle_value = trie_node::calculate_merkle_value(
             trie_node::Decoded {
-                partial_key: current.partial_key(),
-                children: core::array::from_fn(|child_idx| {
-                    current
-                        .child_user_data(
-                            Nibble::try_from(u8::try_from(child_idx).unwrap()).unwrap(),
-                        )
-                        .map(|child| child.merkle_value.as_ref().unwrap())
-                }),
-                storage_value: match &hashed_storage_value {
-                    None => {
-                        trie_node::StorageValue::Unhashed(stored_value.as_ref().unwrap().0.as_ref())
-                    }
-                    Some(hashed_storage_value) => trie_node::StorageValue::Hashed(
-                        <&[u8; 32]>::try_from(hashed_storage_value.as_bytes()).unwrap(),
+                children: array::from_fn(|n| calculated_elem.children[n].as_ref()),
+                partial_key: calculated_elem.partial_key.iter().copied(),
+                storage_value: match (storage_value.as_ref(), storage_value_hash.as_ref()) {
+                    (_, Some(storage_value_hash)) => trie_node::StorageValue::Hashed(
+                        <&[u8; 32]>::try_from(storage_value_hash.as_bytes())
+                            .unwrap_or_else(|_| unreachable!()),
                     ),
+                    (Some((value, _)), _) => trie_node::StorageValue::Unhashed(value.as_ref()),
+                    (None, _) => trie_node::StorageValue::None,
                 },
             },
-            current.is_root_node(),
+            self.calculation.stack.is_empty(),
         )
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
 
-        current.user_data().merkle_value = Some(merkle_value);
-        self.calculation.next()
+        // Insert Merkle value into the stack, or, if no parent, we have our result!
+        if let Some(parent) = self.calculation.stack.last_mut() {
+            parent.children.push(Some(merkle_value));
+            self.calculation.next()
+        } else {
+            // Because we pass `is_root_node: true` in the calculation above, it is guaranteed
+            // that the Merkle value is always 32 bytes.
+            let hash = *<&[u8; 32]>::try_from(merkle_value.as_ref()).unwrap();
+            RootMerkleValueCalculation::Finished { hash }
+        }
     }
 }
 
@@ -513,18 +339,35 @@ impl StorageValue {
 mod tests {
     use crate::trie::TrieEntryVersion;
     use alloc::collections::BTreeMap;
-    use rand::{seq::IteratorRandom as _, Rng as _};
+    use core::ops::Bound;
 
     fn calculate_root(version: TrieEntryVersion, trie: &BTreeMap<Vec<u8>, Vec<u8>>) -> [u8; 32] {
-        let mut calculation = super::root_merkle_value(None);
+        let mut calculation = super::root_merkle_value();
 
         loop {
             match calculation {
-                super::RootMerkleValueCalculation::Finished { hash, .. } => {
+                super::RootMerkleValueCalculation::Finished { hash } => {
                     return hash;
                 }
-                super::RootMerkleValueCalculation::AllKeys(keys) => {
-                    calculation = keys.inject(trie.keys().map(|k| k.iter().cloned()));
+                super::RootMerkleValueCalculation::NextKey(next_key) => {
+                    let lower_bound = if next_key.or_equal() {
+                        Bound::Included(next_key.key_before().collect::<Vec<_>>())
+                    } else {
+                        Bound::Excluded(next_key.key_before().collect::<Vec<_>>())
+                    };
+
+                    let k = trie
+                        .range((lower_bound, Bound::Unbounded))
+                        .next()
+                        .filter(|(k, _)| {
+                            k.iter()
+                                .copied()
+                                .zip(next_key.prefix())
+                                .all(|(a, b)| a == b)
+                        })
+                        .map(|(k, _)| k);
+
+                    calculation = next_key.inject_key(k.map(|k| k.iter().copied()));
                 }
                 super::RootMerkleValueCalculation::StorageValue(value) => {
                     let key = value.key().collect::<Vec<u8>>();
@@ -621,108 +464,5 @@ mod tests {
             calculate_root(TrieEntryVersion::V1, &trie),
             expected.as_bytes()
         );
-    }
-
-    #[test]
-    fn cache_up_to_date() {
-        // This test builds a random trie, then calculates its root, then randomly modifies that
-        // trie, then calculates its root again twice, with and without the cache used in the
-        // first computation, and compares the two results.
-
-        // Run the test many times, as it relies on randomness.
-        for _ in 0..1000 {
-            // Generate a random trie.
-            let mut trie = {
-                let mut trie = BTreeMap::<Vec<u8>, Vec<u8>>::new();
-
-                for _ in 0..rand::thread_rng().gen_range::<u32, _>(5..400) {
-                    let mut new_key = trie
-                        .keys()
-                        .choose(&mut rand::thread_rng())
-                        .map(|s| s.to_vec())
-                        .unwrap_or(Vec::new());
-                    for _ in 0..rand::thread_rng().gen_range::<u32, _>(1..6) {
-                        new_key.push(rand::random::<u8>());
-                    }
-                    let mut new_value = vec![0u8; 50];
-                    rand::thread_rng().fill(&mut new_value[..]);
-                    trie.insert(new_key, new_value);
-                }
-
-                trie
-            };
-
-            // Calculate its root.
-            // We don't actually care about the root hash. We just want the cache.
-            let mut cache = {
-                let mut calculation = super::root_merkle_value(None);
-                loop {
-                    match calculation {
-                        super::RootMerkleValueCalculation::Finished { cache, .. } => {
-                            break cache;
-                        }
-                        super::RootMerkleValueCalculation::AllKeys(keys) => {
-                            calculation = keys.inject(trie.keys().map(|k| k.iter().cloned()));
-                        }
-                        super::RootMerkleValueCalculation::StorageValue(value) => {
-                            let key = value.key().collect::<Vec<u8>>();
-                            calculation =
-                                value.inject(trie.get(&key).map(|v| (v, TrieEntryVersion::V1)));
-                        }
-                    }
-                }
-            };
-
-            // Now modify the first trie, flushing the corresponding cache entries.
-            // We perform very few modifications. Cache flushes removes information from the
-            // cache. The more modifications the more information is removed, and thus the higher
-            // the chances that we don't detect a bug causing obsolete information to remain in
-            // the cache.
-            // TODO: this test doesn't clear prefixes, even though it should, because `prefix_remove_update` is implemented in a dummy way that would make the test pointless
-            for _ in 0..rand::thread_rng().gen_range::<u32, _>(1..5) {
-                let key_to_tweak = match trie.keys().choose(&mut rand::thread_rng()) {
-                    Some(k) => k.to_vec(),
-                    None => break,
-                };
-
-                if rand::random() {
-                    // Modify the key.
-                    cache.storage_value_update(&key_to_tweak, true);
-                    let mut new_value = vec![0u8; 50];
-                    rand::thread_rng().fill(&mut new_value[..]);
-                    trie.insert(key_to_tweak, new_value);
-                } else {
-                    // Remove the key.
-                    cache.storage_value_update(&key_to_tweak, false);
-                    trie.remove(&key_to_tweak);
-                }
-            }
-
-            // Now calculate the root again, without a cache.
-            let root_no_cache = calculate_root(TrieEntryVersion::V1, &trie);
-
-            // Now calculate the root again, with a cache.
-            let root_with_cache = {
-                let mut calculation = super::root_merkle_value(Some(cache));
-                loop {
-                    match calculation {
-                        super::RootMerkleValueCalculation::Finished { hash, .. } => {
-                            break hash;
-                        }
-                        super::RootMerkleValueCalculation::AllKeys(keys) => {
-                            calculation = keys.inject(trie.keys().map(|k| k.iter().cloned()));
-                        }
-                        super::RootMerkleValueCalculation::StorageValue(value) => {
-                            let key = value.key().collect::<Vec<u8>>();
-                            calculation =
-                                value.inject(trie.get(&key).map(|v| (v, TrieEntryVersion::V1)));
-                        }
-                    }
-                }
-            };
-
-            // Make sure they're equal.
-            assert_eq!(root_no_cache, root_with_cache);
-        }
     }
 }

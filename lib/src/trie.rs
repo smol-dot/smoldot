@@ -109,7 +109,6 @@ mod nibble;
 
 pub mod branch_search;
 pub mod calculate_root;
-pub mod calculate_root2;
 pub mod prefix_proof;
 pub mod proof_decode;
 pub mod proof_encode;
@@ -183,19 +182,19 @@ pub fn trie_root(
     version: TrieEntryVersion,
     unordered_entries: &[(impl AsRef<[u8]>, impl AsRef<[u8]>)],
 ) -> [u8; 32] {
-    let mut calculation = calculate_root2::root_merkle_value();
+    let mut calculation = calculate_root::root_merkle_value();
 
     loop {
         match calculation {
-            calculate_root2::RootMerkleValueCalculation::Finished { hash } => return hash,
-            calculate_root2::RootMerkleValueCalculation::StorageValue(storage_value) => {
+            calculate_root::RootMerkleValueCalculation::Finished { hash } => return hash,
+            calculate_root::RootMerkleValueCalculation::StorageValue(storage_value) => {
                 let val = unordered_entries
                     .iter()
                     .find(|(k, _)| k.as_ref().iter().copied().eq(storage_value.key()))
                     .map(|(_, v)| v);
                 calculation = storage_value.inject(val.map(|v| (v, version)));
             }
-            calculate_root2::RootMerkleValueCalculation::NextKey(next_key) => {
+            calculate_root::RootMerkleValueCalculation::NextKey(next_key) => {
                 let mut maybe_next = None;
                 for (k, _) in unordered_entries {
                     if maybe_next
@@ -240,14 +239,14 @@ pub fn ordered_root(version: TrieEntryVersion, entries: &[impl AsRef<[u8]>]) -> 
         .map(|num| util::encode_scale_compact_usize(num).as_ref().to_vec())
         .collect::<BTreeSet<_>>();
 
-    let mut calculation = calculate_root2::root_merkle_value();
+    let mut calculation = calculate_root::root_merkle_value();
 
     loop {
         match calculation {
-            calculate_root2::RootMerkleValueCalculation::Finished { hash, .. } => {
+            calculate_root::RootMerkleValueCalculation::Finished { hash, .. } => {
                 return hash;
             }
-            calculate_root2::RootMerkleValueCalculation::NextKey(next_key) => {
+            calculate_root::RootMerkleValueCalculation::NextKey(next_key) => {
                 let key_before = next_key.key_before().collect::<Vec<_>>();
                 let lower_bound = if next_key.or_equal() {
                     Bound::Included(key_before)
@@ -265,7 +264,7 @@ pub fn ordered_root(version: TrieEntryVersion, entries: &[impl AsRef<[u8]>]) -> 
                     });
                 calculation = next_key.inject_key(k.map(|k| k.iter().copied()));
             }
-            calculate_root2::RootMerkleValueCalculation::StorageValue(value) => {
+            calculate_root::RootMerkleValueCalculation::StorageValue(value) => {
                 let key = value
                     .key()
                     .collect::<arrayvec::ArrayVec<u8, USIZE_COMPACT_BYTES>>();

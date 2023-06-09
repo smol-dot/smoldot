@@ -126,20 +126,20 @@ impl ChainSpec {
                     match self.genesis_storage() {
                         GenesisStorage::TrieRootHash(hash) => *hash,
                         GenesisStorage::Items(genesis_storage) => {
-                            let mut calculation = trie::calculate_root2::root_merkle_value();
+                            let mut calculation = trie::calculate_root::root_merkle_value();
 
                             loop {
                                 match calculation {
-                                    trie::calculate_root2::RootMerkleValueCalculation::Finished {
+                                    trie::calculate_root::RootMerkleValueCalculation::Finished {
                                         hash,
                                         ..
                                     } => break hash,
-                                    trie::calculate_root2::RootMerkleValueCalculation::NextKey(next_key) => {
+                                    trie::calculate_root::RootMerkleValueCalculation::NextKey(next_key) => {
                                         // TODO: borrowchecker erroneously thinks that `outcome` borrows `next_key`
                                         let outcome = genesis_storage.next_key(next_key.key_before(), next_key.or_equal(), next_key.prefix()).map(|k| k.collect::<Vec<_>>().into_iter());
                                         calculation = next_key.inject_key(outcome);
                                     }
-                                    trie::calculate_root2::RootMerkleValueCalculation::StorageValue(
+                                    trie::calculate_root::RootMerkleValueCalculation::StorageValue(
                                         val,
                                     ) => {
                                         let key: alloc::vec::Vec<u8> = val.key().collect();
