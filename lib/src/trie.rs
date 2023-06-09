@@ -102,7 +102,7 @@
 
 use crate::util;
 
-use core::iter;
+use core::{array, cmp, iter};
 
 mod nibble;
 
@@ -179,23 +179,152 @@ pub fn trie_root(
     version: TrieEntryVersion,
     entries: &[(impl AsRef<[u8]>, impl AsRef<[u8]>)],
 ) -> [u8; 32] {
-    let mut calculation = calculate_root::root_merkle_value(None);
+    // Stack of nodes whose value is currently being calculated.
+    let mut stack: Vec<Node> = Vec::with_capacity(8);
+    #[derive(Debug)]
+    struct Node {
+        /// Partial key of the node currently being calculated.
+        partial_key: Vec<Nibble>,
+        /// Merkle values of the children of the node. Filled up to 16 elements, then popped. Each
+        /// element is `Some` or `None` depending on whether a child exists.
+        children: arrayvec::ArrayVec<Option<trie_node::MerkleValueOutput>, 16>,
+    }
 
     loop {
-        match calculation {
-            calculate_root::RootMerkleValueCalculation::Finished { hash, .. } => {
-                return hash;
-            }
-            calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
-                calculation = keys.inject(entries.iter().map(|(k, _)| k.as_ref().iter().copied()));
-            }
-            calculate_root::RootMerkleValueCalculation::StorageValue(value) => {
-                let result = entries
+        // Full key of the node currently being calculated.
+        let iter_node_full_node = stack
+            .iter()
+            .flat_map(|node| {
+                let child_nibble = if node.children.len() == 16 {
+                    None
+                } else {
+                    Some(Nibble::try_from(u8::try_from(node.children.len()).unwrap()).unwrap())
+                };
+
+                node.partial_key
                     .iter()
-                    .find(|(k, _)| k.as_ref().iter().copied().eq(value.key()))
-                    .map(|(_, v)| v);
-                calculation = value.inject(result.map(move |v| (v, version)));
+                    .copied()
+                    .chain(child_nibble.into_iter())
+            })
+            .collect::<Vec<_>>();
+
+        // If all the children of the node at the end of the stack are known, calculate the Merkle
+        // value of that node.
+        if stack.last().map_or(false, |node| node.children.len() == 16) {
+            let calculated_elem = stack.pop().unwrap();
+
+            // Find the storage value of this element, if any.
+            // TODO: O(n) complexity
+            let storage_value = entries
+                .iter()
+                .find(|(k, _)| {
+                    bytes_to_nibbles(k.as_ref().iter().copied())
+                        .eq(iter_node_full_node.iter().copied())
+                })
+                .map(|(_, v)| v);
+
+            // Due to some borrow checker troubles, we need to calculate the storage value
+            // hash ahead of time if relevant.
+            let storage_value_hash =
+                if let (Some(value), TrieEntryVersion::V1) = (storage_value, version) {
+                    if value.as_ref().len() >= 33 {
+                        Some(blake2_rfc::blake2b::blake2b(32, &[], value.as_ref()))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+            // Calculate the Merkle value of the node.
+            let merkle_value = trie_node::calculate_merkle_value(
+                trie_node::Decoded {
+                    children: array::from_fn(|n| calculated_elem.children[n].as_ref()),
+                    partial_key: calculated_elem.partial_key.iter().copied(),
+                    storage_value: match (storage_value, storage_value_hash.as_ref()) {
+                        (_, Some(storage_value_hash)) => trie_node::StorageValue::Hashed(
+                            <&[u8; 32]>::try_from(storage_value_hash.as_bytes())
+                                .unwrap_or_else(|_| unreachable!()),
+                        ),
+                        (Some(value), _) => trie_node::StorageValue::Unhashed(value.as_ref()),
+                        (None, _) => trie_node::StorageValue::None,
+                    },
+                },
+                stack.is_empty(),
+            )
+            .unwrap_or_else(|_| unreachable!());
+
+            // Insert Merkle value into the stack, or, if no parent, we have our result!
+            if let Some(parent) = stack.last_mut() {
+                parent.children.push(Some(merkle_value));
+            } else {
+                // Because we pass `is_root_node: true` in the calculation above, it is guaranteed
+                // that the Merkle value is always 32 bytes.
+                break *<&[u8; 32]>::try_from(merkle_value.as_ref()).unwrap();
             }
+
+            continue;
+        }
+
+        // Need to find the closest descendant to the first unknown child at the top of the stack.
+        let closest_descendant = {
+            let mut search = branch_search::start_branch_search(branch_search::Config {
+                key_before: iter_node_full_node.iter().copied(),
+                or_equal: true,
+                prefix: iter_node_full_node.iter().copied(),
+                no_branch_search: false,
+            });
+
+            loop {
+                match search {
+                    branch_search::BranchSearch::Found {
+                        branch_trie_node_key,
+                    } => break branch_trie_node_key,
+                    branch_search::BranchSearch::NextKey(next_key) => {
+                        let mut maybe_next = None;
+                        // TODO: O(n)
+                        for (k, _) in entries {
+                            if maybe_next
+                                .as_ref()
+                                .map_or(false, |m| AsRef::as_ref(*m) <= k.as_ref())
+                            {
+                                continue;
+                            }
+                            match k.as_ref().iter().copied().cmp(next_key.key_before()) {
+                                cmp::Ordering::Less => continue,
+                                cmp::Ordering::Equal if !next_key.or_equal() => continue,
+                                _ => {}
+                            }
+                            maybe_next = Some(k);
+                        }
+                        if maybe_next.map_or(false, |m| {
+                            m.as_ref()
+                                .iter()
+                                .copied()
+                                .zip(next_key.prefix())
+                                .any(|(a, b)| a != b)
+                        }) {
+                            maybe_next = None;
+                        }
+                        search = next_key.inject(maybe_next.map(util::as_ref_iter));
+                    }
+                }
+            }
+        };
+
+        // Add the closest descendant to the stack.
+        if let Some(closest_descendant) = closest_descendant {
+            let partial_key = closest_descendant.skip(iter_node_full_node.len()).collect();
+            stack.push(Node {
+                partial_key,
+                children: arrayvec::ArrayVec::new(),
+            })
+        } else if let Some(stack_top) = stack.last_mut() {
+            stack_top.children.push(None);
+        } else {
+            // Trie is completely empty.
+            debug_assert!(entries.is_empty());
+            break empty_trie_merkle_value();
         }
     }
 }
