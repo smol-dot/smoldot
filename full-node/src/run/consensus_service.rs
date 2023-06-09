@@ -1345,8 +1345,9 @@ impl SyncBackground {
                             let next_key = self
                                 .database
                                 .with_database(move |db| {
-                                    let mut search =
-                                        trie::branch_search::start_branch_search(search_params);
+                                    let mut search = trie::branch_search::BranchSearch::NextKey(
+                                        trie::branch_search::start_branch_search(search_params),
+                                    );
 
                                     loop {
                                         match search {
