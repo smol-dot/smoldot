@@ -327,7 +327,11 @@ impl StorageValue {
                 // hash ahead of time if relevant.
                 let storage_value_hash =
                     if let Some((value, TrieEntryVersion::V1)) = maybe_storage_value {
-                        Some(blake2_rfc::blake2b::blake2b(32, &[], value))
+                        if value.len() >= 33 {
+                            Some(blake2_rfc::blake2b::blake2b(32, &[], value))
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     };
@@ -335,19 +339,15 @@ impl StorageValue {
                     trie::trie_node::Decoded {
                         children: array::from_fn(|n| calculated_elem.children[n].as_ref()),
                         partial_key: calculated_elem.partial_key.iter().copied(),
-                        storage_value: match maybe_storage_value {
-                            Some((value, TrieEntryVersion::V0)) => {
+                        storage_value: match (maybe_storage_value, storage_value_hash.as_ref()) {
+                            (_, Some(storage_value_hash)) => trie::trie_node::StorageValue::Hashed(
+                                <&[u8; 32]>::try_from(storage_value_hash.as_bytes())
+                                    .unwrap_or_else(|_| panic!()),
+                            ),
+                            (Some((value, _)), None) => {
                                 trie::trie_node::StorageValue::Unhashed(value)
                             }
-                            Some((_, TrieEntryVersion::V1)) => {
-                                trie::trie_node::StorageValue::Hashed(
-                                    <&[u8; 32]>::try_from(
-                                        storage_value_hash.as_ref().unwrap().as_bytes(),
-                                    )
-                                    .unwrap_or_else(|_| panic!()),
-                                )
-                            }
-                            None => trie::trie_node::StorageValue::None,
+                            (None, _) => trie::trie_node::StorageValue::None,
                         },
                     },
                     parent_node.is_none(),

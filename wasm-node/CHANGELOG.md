@@ -6,6 +6,10 @@
 
 - Multiaddresses that can't be parsed during the discovery process are now silently ignored instead of causing the entire list of discovered nodes to be discarded. ([#705](https://github.com/smol-dot/smoldot/pull/705))
 
+### Fixed
+
+- Fix wrong trie root hash calculation with `state_version = 1`. ([#711](https://github.com/smol-dot/smoldot/pull/711))
+
 ## 1.0.9 - 2023-06-08
 
 ### Added
