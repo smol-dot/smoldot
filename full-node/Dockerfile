@@ -15,4 +15,3 @@ COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/full-node /u
 
 EXPOSE 30333
 ENTRYPOINT ["/usr/local/bin/full-node"]
-CMD ["run"]
