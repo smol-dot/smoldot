@@ -107,7 +107,7 @@ pub enum RootMerkleValueCalculation {
     },
 
     /// Request to return the key that follows (in lexicographic order) a given one in the storage.
-    /// Call [`NextKey::inject`] to indicate this list.
+    /// Call [`NextKey::inject_key`] to indicate this list.
     NextKey(NextKey),
 
     /// Request the value of the node with a specific key. Call [`StorageValue::inject`] to
@@ -207,7 +207,7 @@ impl CalcInner {
 }
 
 /// Request to return the key that follows (in lexicographic order) a given one in the storage.
-/// Call [`NextKey::inject`] to indicate this list.
+/// Call [`NextKey::inject_key`] to indicate this list.
 #[must_use]
 pub struct NextKey {
     calculation: CalcInner,
