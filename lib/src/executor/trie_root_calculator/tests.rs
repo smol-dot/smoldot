@@ -234,19 +234,23 @@ fn fuzzing() {
                 // checking difficulties.
                 let storage_value_hashed = match node_access.user_data().0.as_ref() {
                     Some((v, TrieEntryVersion::V1)) => {
-                        Some(blake2_rfc::blake2b::blake2b(32, &[], v))
+                        if v.len() >= 32 {
+                            Some(blake2_rfc::blake2b::blake2b(32, &[], v))
+                        } else {
+                            None
+                        }
                     }
                     _ => None,
                 };
-                let storage_value = match node_access.user_data().0.as_ref() {
-                    Some((v, TrieEntryVersion::V0)) => {
-                        trie::trie_node::StorageValue::Unhashed(&v[..])
-                    }
-                    Some((_, TrieEntryVersion::V1)) => trie::trie_node::StorageValue::Hashed(
-                        <&[u8; 32]>::try_from(storage_value_hashed.as_ref().unwrap().as_bytes())
-                            .unwrap(),
+                let storage_value = match (
+                    node_access.user_data().0.as_ref(),
+                    storage_value_hashed.as_ref(),
+                ) {
+                    (_, Some(storage_value_hashed)) => trie::trie_node::StorageValue::Hashed(
+                        <&[u8; 32]>::try_from(storage_value_hashed.as_bytes()).unwrap(),
                     ),
-                    None => trie::trie_node::StorageValue::None,
+                    (Some((v, _)), None) => trie::trie_node::StorageValue::Unhashed(&v[..]),
+                    (None, _) => trie::trie_node::StorageValue::None,
                 };
 
                 let merkle_value = trie::trie_node::calculate_merkle_value(
