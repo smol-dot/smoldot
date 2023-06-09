@@ -31,7 +31,7 @@
 //! Example:
 //!
 //! ```
-//! use std::collections::BTreeMap;
+//! use std::{collections::BTreeMap, ops::Bound};
 //! use smoldot::trie::{TrieEntryVersion, calculate_root};
 //!
 //! // In this example, the storage consists in a binary tree map.
@@ -39,12 +39,28 @@
 //! storage.insert(b"foo".to_vec(), (b"bar".to_vec(), TrieEntryVersion::V1));
 //!
 //! let trie_root = {
-//!     let mut calculation = calculate_root::root_merkle_value(None);
+//!     let mut calculation = calculate_root::root_merkle_value();
 //!     loop {
 //!         match calculation {
 //!             calculate_root::RootMerkleValueCalculation::Finished { hash, .. } => break hash,
-//!             calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
-//!                 calculation = keys.inject(storage.keys().map(|k| k.iter().cloned()));
+//!             calculate_root::RootMerkleValueCalculation::NextKey(next_key) => {
+//!                 let key_before = next_key.key_before().collect::<Vec<_>>();
+//!                 let lower_bound = if next_key.or_equal() {
+//!                     Bound::Included(key_before)
+//!                 } else {
+//!                     Bound::Excluded(key_before)
+//!                 };
+//!                 let outcome = storage
+//!                     .range((lower_bound, Bound::Unbounded))
+//!                     .next()
+//!                     .filter(|(k, _)| {
+//!                         k.iter()
+//!                             .copied()
+//!                             .zip(next_key.prefix())
+//!                             .all(|(a, b)| a == b)
+//!                     })
+//!                     .map(|(k, _)| k);
+//!                 calculation = next_key.inject_key(outcome.map(|k| k.iter().copied()));
 //!             }
 //!             calculate_root::RootMerkleValueCalculation::StorageValue(value_request) => {
 //!                 let key = value_request.key().collect::<Vec<u8>>();
@@ -61,12 +77,6 @@
 //! );
 //! ```
 //!
-//! You have the possibility to pass a [`CalculationCache`] to the calculation. This cache will
-//! be filled with intermediary calculations and can later be passed again to calculate the root
-//! in a more efficient way.
-//!
-//! When using a cache, be careful to properly invalidate cache entries whenever you perform
-//! modifications on the trie associated to it.
 
 use crate::trie::empty_trie_merkle_value;
 
