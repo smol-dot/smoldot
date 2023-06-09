@@ -25,6 +25,8 @@ This repository contains the following components:
   - Has a semi-stable API that might change occasionally in minor ways.
 
 - `smoldot-full-node` (`/full-node`): A work-in-progress prototype of a full node binary that can connect to Substrate-base chains. Doesn't yet support many features that the official client supports.
+  - 🐳 <https://github.com/smol-dot/smoldot/pkgs/container/full-node>
+  - Has semi-stable CLI commands that might change occasionally in minor ways.
 
 # Frequently asked questions
 
