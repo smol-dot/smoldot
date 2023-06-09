@@ -1274,7 +1274,7 @@ pub enum Event {
 
     KademliaDiscoveryResult {
         operation_id: KademliaOperationId,
-        result: Result<Vec<(PeerId, Vec<multiaddr::Multiaddr>)>, DiscoveryError>,
+        result: Result<Vec<(PeerId, Vec<Vec<u8>>)>, DiscoveryError>,
     },
     /*Transactions {
         peer_id: PeerId,

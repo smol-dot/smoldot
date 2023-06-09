@@ -1177,11 +1177,26 @@ async fn update_round<TPlat: PlatformRef>(
                             );
 
                             for (peer_id, addrs) in nodes {
+                                let mut valid_addrs = Vec::with_capacity(addrs.len());
+                                for addr in addrs {
+                                    match Multiaddr::try_from(addr) {
+                                        Ok(a) => valid_addrs.push(a),
+                                        Err(err) => {
+                                            log::debug!(
+                                                target: "connections",
+                                                "Discovery => InvalidAddress({})",
+                                                hex::encode(&err.addr)
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                }
+
                                 guarded.network.discover(
                                     &shared.platform.now(),
                                     chain_index,
                                     peer_id,
-                                    addrs,
+                                    valid_addrs,
                                 );
                             }
                         }

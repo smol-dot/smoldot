@@ -916,11 +916,25 @@ async fn background_task(mut inner: Inner) {
                             Ok(nodes) => {
                                 log::debug!("discovered; nodes={:?}", nodes);
                                 for (peer_id, addrs) in nodes {
+                                    let mut valid_addrs = Vec::with_capacity(addrs.len());
+                                    for addr in addrs {
+                                        match Multiaddr::try_from(addr) {
+                                            Ok(a) => valid_addrs.push(a),
+                                            Err(err) => {
+                                                log::debug!(
+                                                    "discovery-invalid-address; addr={}",
+                                                    hex::encode(&err.addr)
+                                                );
+                                                continue;
+                                            }
+                                        }
+                                    }
+
                                     inner.network.discover(
                                         &Instant::now(),
                                         chain_index,
                                         peer_id,
-                                        addrs,
+                                        valid_addrs,
                                     );
                                 }
                             }

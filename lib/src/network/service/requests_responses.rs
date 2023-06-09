@@ -935,7 +935,7 @@ pub enum RequestResult {
     StorageProof(Result<EncodedMerkleProof, StorageProofRequestError>),
     CallProof(Result<EncodedMerkleProof, CallProofRequestError>),
     KademliaFindNode(
-        Result<Vec<(peer_id::PeerId, Vec<multiaddr::Multiaddr>)>, KademliaFindNodeError>,
+        Result<Vec<(peer_id::PeerId, Vec<Vec<u8>>)>, KademliaFindNodeError>,
     ),
 }
 
