@@ -102,6 +102,11 @@ pub enum InProgress {
     StorageValue(StorageValue),
     /// See [`ClosestDescendantMerkleValue`].
     ClosestDescendantMerkleValue(ClosestDescendantMerkleValue),
+    /// See [`TrieNodeInsertUpdateEvent`].
+    // TODO: consider guaranteeing an ordering in the events?
+    TrieNodeInsertUpdateEvent(TrieNodeInsertUpdateEvent),
+    /// See [`TrieNodeRemoveEvent`].
+    TrieNodeRemoveEvent(TrieNodeRemoveEvent),
 }
 
 /// In order to continue the calculation, must find in the base trie the closest descendant
@@ -187,8 +192,8 @@ impl ClosestDescendant {
                 (None, None) => {
                     // If neither the base trie nor the diff contain any descendant, then skip ahead.
                     return if let Some(parent_node) = self.inner.stack.last_mut() {
-                        // If the element has a parent, indicate that the current iterated node doesn't
-                        // exist and continue the algorithm.
+                        // If the element has a parent, indicate that the current iterated node
+                        // doesn't exist and continue the algorithm.
                         debug_assert_ne!(parent_node.children.len(), 16);
                         parent_node.children.push(None);
                         self.inner.next()
@@ -273,55 +278,73 @@ impl StorageValue {
         debug_assert!(parent_node.map_or(true, |p| p.children.len() != 16));
 
         match (
+            base_trie_storage_value,
             maybe_storage_value,
             node_num_children,
             self.0.stack.last_mut(),
         ) {
-            (None, 0, Some(parent_node)) => {
+            (_, None, 0, Some(_parent_node)) => {
                 // Trie node no longer exists after the diff has been applied.
                 // This path is only reached if the trie node has a parent, as otherwise the trie
                 // node is the trie root and thus necessarily exists.
-                parent_node.children.push(None);
-                self.0.next()
-            }
-
-            (None, 1, _parent_node) => {
-                // Trie node no longer exists after the diff has been applied, but it has exactly
-                // one child.
-                // Unfortunately, the child Merkle value is wrong as its partial key has changed.
-
-                // To handle this situation, we back jump to `ClosestDescendant` but this time
-                // make sure to skip over `calculated_elem`.
-                let child_index = calculated_elem
-                    .children
-                    .iter()
-                    .position(|c| c.is_some())
-                    .unwrap_or_else(|| panic!());
-
-                let mut partial_key = calculated_elem.partial_key;
-                partial_key.push(
-                    Nibble::try_from(u8::try_from(child_index).unwrap_or_else(|_| panic!()))
-                        .unwrap_or_else(|_| panic!()),
-                );
-
-                // Now calculate `LongestCommonDenominator(DiffInsertsNodesWithPrefix)`.
-                let (_, diff_inserts_lcd) = diff_inserts_least_common_denominator(
-                    &self.0.diff,
-                    self.0
-                        .current_node_full_key()
-                        .map(either::Left)
-                        .chain(iter::once(either::Right(&partial_key))),
-                );
-
-                InProgress::ClosestDescendant(ClosestDescendant {
+                InProgress::TrieNodeRemoveEvent(TrieNodeRemoveEvent {
                     inner: self.0,
-                    key_extra_nibbles: partial_key,
-                    diff_inserts_lcd,
+                    calculated_elem,
+                    ty: TrieNodeRemoveEventTy::NoChildrenLeft,
                 })
             }
 
-            (_, _, parent_node) => {
-                // Trie node still exists. Calculate its Merkle value.
+            (_, None, 1, _parent_node) if !calculated_elem.children_partial_key_changed => {
+                // Trie node doesn't exists after the diff has been applied because it has exactly
+                // one child.
+                // Since `children_partial_key_changed` is `true`, we know that the node existed
+                // and generate a `TrieNodeRemoveEvent`.
+                // Unfortunately, the child Merkle value is wrong as its partial key has changed
+                // and has to be recalculated.
+
+                // To handle this situation, we back jump to `ClosestDescendant` but this time
+                // make sure to skip over `calculated_elem`.
+                // This isn't done here but in `TrieNodeRemoveEvent::resume`.
+                InProgress::TrieNodeRemoveEvent(TrieNodeRemoveEvent {
+                    inner: self.0,
+                    calculated_elem,
+                    ty: TrieNodeRemoveEventTy::ReplacedWithSingleChild,
+                })
+            }
+
+            (_, None, 1, _parent_node) => {
+                // Same as the previous block, except that `children_partial_key_changed` is
+                // `false`. Therefore the node didn't exist in the base trie, and no event shall
+                // be generated. Instead, we immediately call `resume` in order to continue
+                // execution without notifying the user.
+                TrieNodeRemoveEvent {
+                    inner: self.0,
+                    calculated_elem,
+                    ty: TrieNodeRemoveEventTy::ReplacedWithSingleChild,
+                }
+                .resume()
+            }
+
+            (Some(_), None, 0, None) => {
+                // Root node of the trie was deleted and trie is now empty.
+                InProgress::TrieNodeRemoveEvent(TrieNodeRemoveEvent {
+                    inner: self.0,
+                    calculated_elem,
+                    ty: TrieNodeRemoveEventTy::NoChildrenLeft,
+                })
+            }
+
+            (None, None, 0, None) => {
+                // Trie is empty.
+                // This case is handled separately in order to not generate
+                // a `TrieNodeInsertUpdateEvent` for a node that doesn't actually exist.
+                InProgress::Finished {
+                    trie_root_hash: trie::empty_trie_merkle_value(),
+                }
+            }
+
+            (_, _, _, parent_node) => {
+                // Trie node still exists or was created. Calculate its Merkle value.
 
                 // Due to some borrow checker troubles, we need to calculate the storage value
                 // hash ahead of time if relevant.
@@ -354,17 +377,12 @@ impl StorageValue {
                 )
                 .unwrap_or_else(|_| panic!());
 
-                if let Some(parent_node) = parent_node {
-                    parent_node.children.push(Some(merkle_value));
-                    self.0.next()
-                } else {
-                    // No more node in the stack means that this was the root node. The calculated
-                    // Merkle value is the trie root hash.
-                    InProgress::Finished {
-                        // Guaranteed to never panic for the root node.
-                        trie_root_hash: merkle_value.try_into().unwrap_or_else(|_| panic!()),
-                    }
-                }
+                // The stack is updated in `TrieNodeInsertUpdateEvent::resume`.
+                InProgress::TrieNodeInsertUpdateEvent(TrieNodeInsertUpdateEvent {
+                    inner: self.0,
+                    inserted_elem_partial_key: calculated_elem.partial_key,
+                    merkle_value,
+                })
             }
         }
     }
@@ -444,6 +462,124 @@ impl ClosestDescendantMerkleValue {
             let trie_root_hash = <[u8; 32]>::try_from(AsRef::as_ref(&merkle_value))
                 .unwrap_or_else(|_| panic!("invalid node value provided"));
             InProgress::Finished { trie_root_hash }
+        }
+    }
+}
+
+/// Event indicating that a trie node has been inserted or updated.
+///
+/// The API user has nothing to do, but they can use this event to update their local version of
+/// the trie.
+pub struct TrieNodeInsertUpdateEvent {
+    inner: Box<Inner>,
+
+    /// Partial key of the node that was inserted or updated.
+    inserted_elem_partial_key: Vec<Nibble>,
+
+    /// Merkle value of the node that was inserted or updated.
+    merkle_value: trie::trie_node::MerkleValueOutput,
+}
+
+impl TrieNodeInsertUpdateEvent {
+    /// Returns the key of the trie node that was inserted or updated.
+    pub fn key(&self) -> impl Iterator<Item = impl AsRef<[Nibble]> + '_> + '_ {
+        self.inner
+            .current_node_full_key()
+            .map(either::Left)
+            .chain(iter::once(either::Right(&self.inserted_elem_partial_key)))
+    }
+
+    /// Returns the new Merkle value of the trie node that was inserted or updated.
+    pub fn merkle_value(&self) -> &[u8] {
+        self.merkle_value.as_ref()
+    }
+
+    /// Resume the computation.
+    pub fn resume(mut self) -> InProgress {
+        if let Some(parent_node) = self.inner.stack.last_mut() {
+            parent_node.children.push(Some(self.merkle_value));
+            self.inner.next()
+        } else {
+            // No more node in the stack means that this was the root node. The calculated
+            // Merkle value is the trie root hash.
+            InProgress::Finished {
+                // Guaranteed to never panic for the root node.
+                trie_root_hash: self.merkle_value.try_into().unwrap_or_else(|_| panic!()),
+            }
+        }
+    }
+}
+
+/// Event indicating that a trie node has been destroyed.
+///
+/// The API user has nothing to do, but they can use this event to update their local version of
+/// the trie.
+pub struct TrieNodeRemoveEvent {
+    inner: Box<Inner>,
+
+    /// Element that was removed from the stack and that we know no longer exists.
+    calculated_elem: InProgressNode,
+
+    /// Why the node was removed.
+    ty: TrieNodeRemoveEventTy,
+}
+
+enum TrieNodeRemoveEventTy {
+    NoChildrenLeft,
+    ReplacedWithSingleChild,
+}
+
+impl TrieNodeRemoveEvent {
+    /// Returns the key of the trie node that was removed.
+    pub fn key(&self) -> impl Iterator<Item = impl AsRef<[Nibble]> + '_> + '_ {
+        self.inner
+            .current_node_full_key()
+            .map(either::Left)
+            .chain(iter::once(either::Right(&self.calculated_elem.partial_key)))
+    }
+
+    /// Resume the computation.
+    pub fn resume(mut self) -> InProgress {
+        match self.ty {
+            TrieNodeRemoveEventTy::NoChildrenLeft => {
+                if let Some(parent_node) = self.inner.stack.last_mut() {
+                    parent_node.children.push(None);
+                    self.inner.next()
+                } else {
+                    InProgress::Finished {
+                        trie_root_hash: trie::empty_trie_merkle_value(),
+                    }
+                }
+            }
+            TrieNodeRemoveEventTy::ReplacedWithSingleChild => {
+                let child_index = self
+                    .calculated_elem
+                    .children
+                    .iter()
+                    .position(|c| c.is_some())
+                    .unwrap_or_else(|| panic!());
+
+                let mut partial_key = self.calculated_elem.partial_key;
+                partial_key.push(
+                    Nibble::try_from(u8::try_from(child_index).unwrap_or_else(|_| panic!()))
+                        .unwrap_or_else(|_| panic!()),
+                );
+
+                // Now calculate `LongestCommonDenominator(DiffInsertsNodesWithPrefix)`.
+                let (_, diff_inserts_lcd) = diff_inserts_least_common_denominator(
+                    &self.inner.diff,
+                    self.inner
+                        .current_node_full_key()
+                        .map(either::Left)
+                        .chain(iter::once(either::Right(&partial_key))),
+                );
+
+                InProgress::ClosestDescendant(ClosestDescendant {
+                    inner: self.inner,
+                    key_extra_nibbles: partial_key,
+                    diff_inserts_lcd,
+                })
+            }
         }
     }
 }

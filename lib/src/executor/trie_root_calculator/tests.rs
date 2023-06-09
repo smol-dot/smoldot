@@ -46,6 +46,8 @@ fn empty_trie_works() {
             InProgress::StorageValue(req) => {
                 calculation = req.inject_value(None);
             }
+            InProgress::TrieNodeInsertUpdateEvent(ev) => calculation = ev.resume(),
+            InProgress::TrieNodeRemoveEvent(ev) => calculation = ev.resume(),
         }
     }
 }
@@ -86,6 +88,8 @@ fn one_inserted_node_in_diff() {
             InProgress::StorageValue(req) => {
                 calculation = req.inject_value(None);
             }
+            InProgress::TrieNodeInsertUpdateEvent(ev) => calculation = ev.resume(),
+            InProgress::TrieNodeRemoveEvent(ev) => calculation = ev.resume(),
         }
     }
 }
@@ -267,6 +271,36 @@ fn fuzzing() {
             }
         }
 
+        // Build alternative linear versions of the two tries.
+        let mut trie_map = trie_before_diff
+            .iter_ordered()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|n| {
+                (
+                    trie_before_diff
+                        .node_full_key_by_index(n)
+                        .unwrap()
+                        .collect::<Vec<_>>(),
+                    trie_before_diff[n].1.clone().unwrap().as_ref().to_vec(),
+                )
+            })
+            .collect::<hashbrown::HashMap<_, _, fnv::FnvBuildHasher>>();
+        let trie_after_diff_map = trie_after_diff
+            .iter_ordered()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|n| {
+                (
+                    trie_after_diff
+                        .node_full_key_by_index(n)
+                        .unwrap()
+                        .collect::<Vec<_>>(),
+                    trie_after_diff[n].1.clone().unwrap().as_ref().to_vec(),
+                )
+            })
+            .collect::<hashbrown::HashMap<_, _, fnv::FnvBuildHasher>>();
+
         // Use the trie_root_calculator to calculate the root of `trie_after_diff`.
         let obtained_hash = {
             let mut calculator = trie_root_calculator(Config {
@@ -350,6 +384,24 @@ fn fuzzing() {
                         calculator =
                             req.inject_value(value.as_ref().map(|(val, vers)| (&val[..], *vers)));
                     }
+                    InProgress::TrieNodeInsertUpdateEvent(ev) => {
+                        trie_map.insert(
+                            ev.key()
+                                .flat_map(crate::util::as_ref_iter)
+                                .collect::<Vec<_>>(),
+                            ev.merkle_value().to_vec(),
+                        );
+                        calculator = ev.resume();
+                    }
+                    InProgress::TrieNodeRemoveEvent(ev) => {
+                        let was_in = trie_map.remove(
+                            &ev.key()
+                                .flat_map(crate::util::as_ref_iter)
+                                .collect::<Vec<_>>(),
+                        );
+                        assert!(was_in.is_some());
+                        calculator = ev.resume();
+                    }
                 }
             }
         };
@@ -363,6 +415,12 @@ fn fuzzing() {
             panic!(
                 "\nexpected = {:?}\ncalculated = {:?}\ntrie_before = {:?}\ndiff = {:?}",
                 expected_hash, obtained_hash, trie_before_diff, diff
+            );
+        }
+        if trie_map != trie_after_diff_map {
+            panic!(
+                "\nexpected = {:?}\ncalculated = {:?}\ntrie_before = {:?}\ndiff = {:?}",
+                trie_after_diff_map, trie_map, trie_before_diff, diff
             );
         }
     }
