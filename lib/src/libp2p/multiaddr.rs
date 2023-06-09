@@ -153,7 +153,7 @@ impl TryFrom<Vec<u8>> for Multiaddr {
         ))(&bytes)
         .is_err()
         {
-            return Err(FromVecError {});
+            return Err(FromVecError { addr: bytes });
         }
 
         Ok(Multiaddr { bytes })
@@ -178,7 +178,10 @@ impl fmt::Display for Multiaddr {
 
 // TODO: more doc and properly derive Display
 #[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
-pub struct FromVecError {}
+#[display(fmt = "Unable to parse multiaddress")]
+pub struct FromVecError {
+    pub addr: Vec<u8>,
+}
 
 // TODO: more doc and properly derive Display
 #[derive(Debug, derive_more::Display, Clone)]
