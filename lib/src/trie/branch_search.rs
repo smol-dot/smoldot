@@ -52,17 +52,18 @@ pub struct Config<K, P> {
 }
 
 /// Start the search algorithm.
+// TODO: maybe rename things a bit? it's weird that `NextKey` is returned
 pub fn start_branch_search(
     config: Config<impl Iterator<Item = Nibble>, impl Iterator<Item = Nibble>>,
-) -> BranchSearch {
-    BranchSearch::NextKey(NextKey {
+) -> NextKey {
+    NextKey {
         prefix: config.prefix.collect(),
         key_before: config.key_before.collect(),
         or_equal: config.or_equal,
         inner: NextKeyInner::FirstFound {
             no_branch_search: config.no_branch_search,
         },
-    })
+    }
 }
 
 /// Progress in the search algorithm.
