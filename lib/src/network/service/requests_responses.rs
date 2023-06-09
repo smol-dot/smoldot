@@ -860,17 +860,17 @@ where
     /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
     pub fn respond_identify(&mut self, request_id: InRequestId, agent_version: &str) {
         let observed_addr = match self.in_requests_types.remove(&request_id) {
-            Some(InRequestTy::Identify { observed_addr }) => observed_addr,
+            Some(InRequestTy::Identify { observed_addr }) => observed_addr.into_vec(),
             _ => panic!(),
         };
 
         let response = {
             protocol::build_identify_response(protocol::IdentifyResponse {
-                protocol_version: "/substrate/1.0", // TODO: same value as in Substrate
+                protocol_version: "/substrate/1.0", // TODO: same value as in Substrate, see also https://github.com/paritytech/substrate/issues/14331
                 agent_version,
                 ed25519_public_key: *self.inner.noise_key().libp2p_public_ed25519_key(),
                 listen_addrs: iter::empty(), // TODO:
-                observed_addr,
+                observed_addr: &observed_addr,
                 protocols: self
                     .inner
                     .request_response_protocols()
