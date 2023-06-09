@@ -76,6 +76,7 @@ use super::{
     trie_node, TrieEntryVersion,
 };
 
+use alloc::vec::Vec;
 use core::array;
 
 /// Start calculating the Merkle value of the root node.

@@ -102,7 +102,8 @@
 
 use crate::util;
 
-use core::{cmp, iter};
+use alloc::vec::Vec;
+use core::{cmp, iter, ops::Bound};
 
 mod nibble;
 
@@ -115,6 +116,7 @@ pub mod proof_encode;
 pub mod trie_node;
 pub mod trie_structure;
 
+use alloc::collections::BTreeSet;
 pub use nibble::{
     all_nibbles, bytes_to_nibbles, nibbles_to_bytes_prefix_extend, nibbles_to_bytes_suffix_extend,
     nibbles_to_bytes_truncate, BytesToNibbles, Nibble, NibbleFromU8Error,
@@ -175,6 +177,8 @@ pub fn empty_trie_merkle_value() -> [u8; 32] {
 /// passed as parameter are `(key, value)`.
 ///
 /// The entries do not need to be ordered.
+///
+/// This function has a high complexity and exists mostly for convenience.
 pub fn trie_root(
     version: TrieEntryVersion,
     unordered_entries: &[(impl AsRef<[u8]>, impl AsRef<[u8]>)],
@@ -193,7 +197,6 @@ pub fn trie_root(
             }
             calculate_root2::RootMerkleValueCalculation::NextKey(next_key) => {
                 let mut maybe_next = None;
-                // TODO: O(n)
                 for (k, _) in unordered_entries {
                     if maybe_next
                         .as_ref()
@@ -231,23 +234,38 @@ pub fn trie_root(
 pub fn ordered_root(version: TrieEntryVersion, entries: &[impl AsRef<[u8]>]) -> [u8; 32] {
     const USIZE_COMPACT_BYTES: usize = 1 + (usize::BITS as usize) / 8;
 
-    let mut calculation = calculate_root::root_merkle_value(None);
+    // Mapping numbers to SCALE-encoded numbers changes the ordering, so we have to sort the keys
+    // beforehand.
+    let trie_keys = (0..entries.len())
+        .map(|num| util::encode_scale_compact_usize(num).as_ref().to_vec())
+        .collect::<BTreeSet<_>>();
+
+    let mut calculation = calculate_root2::root_merkle_value();
 
     loop {
         match calculation {
-            calculate_root::RootMerkleValueCalculation::Finished { hash, .. } => {
+            calculate_root2::RootMerkleValueCalculation::Finished { hash, .. } => {
                 return hash;
             }
-            calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
-                calculation = keys.inject((0..entries.len()).map(|num| {
-                    arrayvec::ArrayVec::<u8, USIZE_COMPACT_BYTES>::try_from(
-                        util::encode_scale_compact_usize(num).as_ref(),
-                    )
-                    .unwrap()
-                    .into_iter()
-                }));
+            calculate_root2::RootMerkleValueCalculation::NextKey(next_key) => {
+                let key_before = next_key.key_before().collect::<Vec<_>>();
+                let lower_bound = if next_key.or_equal() {
+                    Bound::Included(key_before)
+                } else {
+                    Bound::Excluded(key_before)
+                };
+                let k = trie_keys
+                    .range((lower_bound, Bound::Unbounded))
+                    .next()
+                    .filter(|k| {
+                        k.iter()
+                            .copied()
+                            .zip(next_key.prefix())
+                            .all(|(a, b)| a == b)
+                    });
+                calculation = next_key.inject_key(k.map(|k| k.iter().copied()));
             }
-            calculate_root::RootMerkleValueCalculation::StorageValue(value) => {
+            calculate_root2::RootMerkleValueCalculation::StorageValue(value) => {
                 let key = value
                     .key()
                     .collect::<arrayvec::ArrayVec<u8, USIZE_COMPACT_BYTES>>();
