@@ -902,6 +902,14 @@ impl Inner {
                                 ClosestDescendantMerkleValue { inner: self },
                             );
                         }
+                        trie_root_calculator::InProgress::TrieNodeInsertUpdateEvent(ev) => {
+                            self.vm = req.into();
+                            self.root_calculation = Some(ev.resume());
+                        }
+                        trie_root_calculator::InProgress::TrieNodeRemoveEvent(ev) => {
+                            self.vm = req.into();
+                            self.root_calculation = Some(ev.resume());
+                        }
                         trie_root_calculator::InProgress::Finished { trie_root_hash } => {
                             self.vm = req.resume(Some(&trie_root_hash));
                         }
