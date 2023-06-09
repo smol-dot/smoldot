@@ -41,7 +41,7 @@ jobs:
       # This `if` adds an additional safety against accidental pushes.
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       with:
-        registry: docker.pkg.github.com
+        registry: ghcr.io
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     - uses: docker/build-push-action@v4.0.0
@@ -49,8 +49,8 @@ jobs:
         context: .
         file: ./full-node/Dockerfile
         load: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        tags: docker.pkg.github.com/smol-dot/smoldot/node:main
-    - run: docker push docker.pkg.github.com/smol-dot/smoldot/node:main
+        tags: ghcr.io/smol-dot/smoldot/node:main
+    - run: docker push ghcr.io/smol-dot/smoldot/node:main
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
   build-js-doc:
