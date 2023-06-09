@@ -31,9 +31,7 @@
 //! See also [the official specification](https://github.com/libp2p/specs/tree/69e57d59dc5d59d3979d79842b577ec2c483f7fa/identify).
 
 use crate::{
-    libp2p::{
-        peer_id::{FromProtobufEncodingError, PublicKey},
-    },
+    libp2p::peer_id::{FromProtobufEncodingError, PublicKey},
     util::protobuf,
 };
 
