@@ -102,7 +102,8 @@
 
 use crate::util;
 
-use core::iter;
+use alloc::vec::Vec;
+use core::{cmp, iter, ops::Bound};
 
 mod nibble;
 
@@ -114,6 +115,7 @@ pub mod proof_encode;
 pub mod trie_node;
 pub mod trie_structure;
 
+use alloc::collections::BTreeSet;
 pub use nibble::{
     all_nibbles, bytes_to_nibbles, nibbles_to_bytes_prefix_extend, nibbles_to_bytes_suffix_extend,
     nibbles_to_bytes_truncate, BytesToNibbles, Nibble, NibbleFromU8Error,
@@ -173,28 +175,52 @@ pub fn empty_trie_merkle_value() -> [u8; 32] {
 /// Returns the Merkle value of a trie containing the entries passed as parameter. The entries
 /// passed as parameter are `(key, value)`.
 ///
-/// The complexity of this method is `O(n²)` where `n` is the number of entries.
-// TODO: improve complexity?
+/// The entries do not need to be ordered.
+///
+/// This function has a high complexity and exists mostly for convenience.
+// TODO: this function is actually used for real by the host, should we maybe sort entries or something?
 pub fn trie_root(
     version: TrieEntryVersion,
-    entries: &[(impl AsRef<[u8]>, impl AsRef<[u8]>)],
+    unordered_entries: &[(impl AsRef<[u8]>, impl AsRef<[u8]>)],
 ) -> [u8; 32] {
-    let mut calculation = calculate_root::root_merkle_value(None);
+    let mut calculation = calculate_root::root_merkle_value();
 
     loop {
         match calculation {
-            calculate_root::RootMerkleValueCalculation::Finished { hash, .. } => {
-                return hash;
-            }
-            calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
-                calculation = keys.inject(entries.iter().map(|(k, _)| k.as_ref().iter().copied()));
-            }
-            calculate_root::RootMerkleValueCalculation::StorageValue(value) => {
-                let result = entries
+            calculate_root::RootMerkleValueCalculation::Finished { hash } => return hash,
+            calculate_root::RootMerkleValueCalculation::StorageValue(storage_value) => {
+                let val = unordered_entries
                     .iter()
-                    .find(|(k, _)| k.as_ref().iter().copied().eq(value.key()))
+                    .find(|(k, _)| k.as_ref().iter().copied().eq(storage_value.key()))
                     .map(|(_, v)| v);
-                calculation = value.inject(result.map(move |v| (v, version)));
+                calculation = storage_value.inject(val.map(|v| (v, version)));
+            }
+            calculate_root::RootMerkleValueCalculation::NextKey(next_key) => {
+                let mut maybe_next = None;
+                for (k, _) in unordered_entries {
+                    if maybe_next
+                        .as_ref()
+                        .map_or(false, |m| AsRef::as_ref(*m) <= k.as_ref())
+                    {
+                        continue;
+                    }
+                    match k.as_ref().iter().copied().cmp(next_key.key_before()) {
+                        cmp::Ordering::Less => continue,
+                        cmp::Ordering::Equal if !next_key.or_equal() => continue,
+                        _ => {}
+                    }
+                    maybe_next = Some(k);
+                }
+                if maybe_next.map_or(false, |m| {
+                    m.as_ref()
+                        .iter()
+                        .copied()
+                        .zip(next_key.prefix())
+                        .any(|(a, b)| a != b)
+                }) {
+                    maybe_next = None;
+                }
+                calculation = next_key.inject_key(maybe_next.map(util::as_ref_iter));
             }
         }
     }
@@ -208,21 +234,36 @@ pub fn trie_root(
 pub fn ordered_root(version: TrieEntryVersion, entries: &[impl AsRef<[u8]>]) -> [u8; 32] {
     const USIZE_COMPACT_BYTES: usize = 1 + (usize::BITS as usize) / 8;
 
-    let mut calculation = calculate_root::root_merkle_value(None);
+    // Mapping numbers to SCALE-encoded numbers changes the ordering, so we have to sort the keys
+    // beforehand.
+    let trie_keys = (0..entries.len())
+        .map(|num| util::encode_scale_compact_usize(num).as_ref().to_vec())
+        .collect::<BTreeSet<_>>();
+
+    let mut calculation = calculate_root::root_merkle_value();
 
     loop {
         match calculation {
             calculate_root::RootMerkleValueCalculation::Finished { hash, .. } => {
                 return hash;
             }
-            calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
-                calculation = keys.inject((0..entries.len()).map(|num| {
-                    arrayvec::ArrayVec::<u8, USIZE_COMPACT_BYTES>::try_from(
-                        util::encode_scale_compact_usize(num).as_ref(),
-                    )
-                    .unwrap()
-                    .into_iter()
-                }));
+            calculate_root::RootMerkleValueCalculation::NextKey(next_key) => {
+                let key_before = next_key.key_before().collect::<Vec<_>>();
+                let lower_bound = if next_key.or_equal() {
+                    Bound::Included(key_before)
+                } else {
+                    Bound::Excluded(key_before)
+                };
+                let k = trie_keys
+                    .range((lower_bound, Bound::Unbounded))
+                    .next()
+                    .filter(|k| {
+                        k.iter()
+                            .copied()
+                            .zip(next_key.prefix())
+                            .all(|(a, b)| a == b)
+                    });
+                calculation = next_key.inject_key(k.map(|k| k.iter().copied()));
             }
             calculate_root::RootMerkleValueCalculation::StorageValue(value) => {
                 let key = value
@@ -243,5 +284,41 @@ mod tests {
         let obtained = super::empty_trie_merkle_value();
         let expected = blake2_rfc::blake2b::blake2b(32, &[], &[0x0]);
         assert_eq!(obtained, expected.as_bytes());
+    }
+
+    #[test]
+    fn trie_root_example_v0() {
+        let obtained = super::trie_root(
+            super::TrieEntryVersion::V0,
+            &[(&b"foo"[..], &b"bar"[..]), (&b"foobar"[..], &b"baz"[..])],
+        );
+
+        assert_eq!(
+            obtained,
+            [
+                166, 24, 32, 181, 251, 169, 176, 26, 238, 16, 181, 187, 216, 74, 234, 128, 184, 35,
+                3, 24, 197, 232, 202, 20, 185, 164, 148, 12, 118, 224, 152, 21
+            ]
+        );
+    }
+
+    #[test]
+    fn trie_root_example_v1() {
+        let obtained = super::trie_root(
+            super::TrieEntryVersion::V1,
+            &[
+                (&b"bar"[..], &b"foo"[..]),
+                (&b"barfoo"[..], &b"hello"[..]),
+                (&b"anotheritem"[..], &b"anothervalue"[..]),
+            ],
+        );
+
+        assert_eq!(
+            obtained,
+            [
+                68, 24, 7, 195, 69, 202, 122, 223, 136, 189, 33, 171, 27, 60, 186, 219, 21, 97,
+                106, 187, 137, 22, 126, 185, 254, 40, 93, 213, 206, 205, 4, 200
+            ]
+        );
     }
 }

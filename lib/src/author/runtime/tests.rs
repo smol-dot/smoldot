@@ -68,13 +68,14 @@ fn block_building_works() {
                 builder = req.resume_unknown();
             }
             super::BlockBuild::NextKey(req) => {
-                let mut search =
+                let mut search = trie::branch_search::BranchSearch::NextKey(
                     trie::branch_search::start_branch_search(trie::branch_search::Config {
                         key_before: req.key().collect::<Vec<_>>().into_iter(),
                         or_equal: req.or_equal(),
                         prefix: req.prefix().collect::<Vec<_>>().into_iter(),
                         no_branch_search: !req.branch_nodes(),
-                    });
+                    }),
+                );
 
                 let next_key = loop {
                     match search {

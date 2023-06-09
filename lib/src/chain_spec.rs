@@ -43,10 +43,11 @@ use crate::{
 };
 
 use alloc::{
+    collections::BTreeSet,
     string::{String, ToString as _},
     vec::Vec,
 };
-use core::{iter, num::NonZeroU64};
+use core::{iter, num::NonZeroU64, ops::Bound};
 
 mod light_sync_state;
 mod structs;
@@ -125,27 +126,27 @@ impl ChainSpec {
                     match self.genesis_storage() {
                         GenesisStorage::TrieRootHash(hash) => *hash,
                         GenesisStorage::Items(genesis_storage) => {
-                            let mut calculation = trie::calculate_root::root_merkle_value(None);
+                            let mut calculation = trie::calculate_root::root_merkle_value();
 
                             loop {
                                 match calculation {
-                                trie::calculate_root::RootMerkleValueCalculation::Finished {
-                                    hash,
-                                    ..
-                                } => break hash,
-                                trie::calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
-                                    calculation = keys.inject(
-                                        genesis_storage.iter().map(|(k, _)| k.iter().copied()),
-                                    );
+                                    trie::calculate_root::RootMerkleValueCalculation::Finished {
+                                        hash,
+                                        ..
+                                    } => break hash,
+                                    trie::calculate_root::RootMerkleValueCalculation::NextKey(next_key) => {
+                                        // TODO: borrowchecker erroneously thinks that `outcome` borrows `next_key`
+                                        let outcome = genesis_storage.next_key(next_key.key_before(), next_key.or_equal(), next_key.prefix()).map(|k| k.collect::<Vec<_>>().into_iter());
+                                        calculation = next_key.inject_key(outcome);
+                                    }
+                                    trie::calculate_root::RootMerkleValueCalculation::StorageValue(
+                                        val,
+                                    ) => {
+                                        let key: alloc::vec::Vec<u8> = val.key().collect();
+                                        let value = genesis_storage.value(&key[..]);
+                                        calculation = val.inject(value.map(move |v| (v, state_version)));
+                                    }
                                 }
-                                trie::calculate_root::RootMerkleValueCalculation::StorageValue(
-                                    val,
-                                ) => {
-                                    let key: alloc::vec::Vec<u8> = val.key().collect();
-                                    let value = genesis_storage.value(&key[..]);
-                                    calculation = val.inject(value.map(move |v| (v, state_version)));
-                                }
-                            }
                             }
                         }
                     }
@@ -385,6 +386,34 @@ impl<'a> GenesisStorageItems<'a> {
     /// Returns the list of storage keys and values of the genesis block.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (&[u8], &[u8])> + Clone {
         self.raw.top.iter().map(|(k, v)| (&k.0[..], &v.0[..]))
+    }
+
+    /// Find the storage key that immediately follows `key_before` in the list of storage items.
+    ///
+    /// If `or_equal` is `true`, then `key_before` is returned if it corresponds to a key in the
+    /// storage.
+    ///
+    /// Returns `None` if no next key could be found, or if the next key doesn't start with the
+    /// given prefix.
+    pub fn next_key(
+        &self,
+        key_before: impl Iterator<Item = u8>,
+        or_equal: bool,
+        prefix: impl Iterator<Item = u8>,
+    ) -> Option<impl Iterator<Item = u8> + 'a> {
+        // TODO: due to this `HexString` thing, we have to create a separate BTreeSet
+        let top = self.raw.top.keys().map(|k| &k.0).collect::<BTreeSet<_>>();
+
+        let lower_bound = if or_equal {
+            Bound::Included(key_before.collect::<Vec<_>>())
+        } else {
+            Bound::Excluded(key_before.collect::<Vec<_>>())
+        };
+
+        top.range((lower_bound, Bound::Unbounded))
+            .next()
+            .filter(|k| k.iter().copied().zip(prefix).all(|(a, b)| a == b))
+            .map(|k| k.iter().copied())
     }
 
     /// Returns the genesis storage value for a specific key.

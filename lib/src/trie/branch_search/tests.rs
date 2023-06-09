@@ -106,12 +106,12 @@ fn fuzzing() {
 
             // Now find the value using the branch searcher.
             let obtained = {
-                let mut search = start_branch_search(Config {
+                let mut search = BranchSearch::NextKey(start_branch_search(Config {
                     key_before: search_params.key_before.iter().copied(),
                     or_equal: search_params.or_equal,
                     no_branch_search: search_params.no_branch_search,
                     prefix: search_params.prefix.iter().copied(),
-                });
+                }));
 
                 loop {
                     match search {
