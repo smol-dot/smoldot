@@ -244,4 +244,40 @@ mod tests {
         let expected = blake2_rfc::blake2b::blake2b(32, &[], &[0x0]);
         assert_eq!(obtained, expected.as_bytes());
     }
+
+    #[test]
+    fn trie_root_example_v0() {
+        let obtained = super::trie_root(
+            super::TrieEntryVersion::V0,
+            &[(&b"foo"[..], &b"bar"[..]), (&b"foobar"[..], &b"baz"[..])],
+        );
+
+        assert_eq!(
+            obtained,
+            [
+                166, 24, 32, 181, 251, 169, 176, 26, 238, 16, 181, 187, 216, 74, 234, 128, 184, 35,
+                3, 24, 197, 232, 202, 20, 185, 164, 148, 12, 118, 224, 152, 21
+            ]
+        );
+    }
+
+    #[test]
+    fn trie_root_example_v1() {
+        let obtained = super::trie_root(
+            super::TrieEntryVersion::V1,
+            &[
+                (&b"bar"[..], &b"foo"[..]),
+                (&b"barfoo"[..], &b"hello"[..]),
+                (&b"anotheritem"[..], &b"anothervalue"[..]),
+            ],
+        );
+
+        assert_eq!(
+            obtained,
+            [
+                68, 24, 7, 195, 69, 202, 122, 223, 136, 189, 33, 171, 27, 60, 186, 219, 21, 97,
+                106, 187, 137, 22, 126, 185, 254, 40, 93, 213, 206, 205, 4, 200
+            ]
+        );
+    }
 }
