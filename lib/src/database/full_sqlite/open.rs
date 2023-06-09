@@ -207,6 +207,20 @@ CREATE TABLE IF NOT EXISTS aura_finalized_authorities(
         )
         .map_err(InternalError)?;
 
+    // `PRAGMA` queries can't be parametrized, and thus we have to use `format!`.
+    database
+        .execute(
+            &format!(
+                "PRAGMA cache_size = {}",
+                0i64.saturating_sub_unsigned(
+                    u64::try_from((config.cache_size.saturating_sub(1) / 1024).saturating_add(1))
+                        .unwrap_or(u64::max_value()),
+                )
+            ),
+            (),
+        )
+        .map_err(InternalError)?;
+
     let is_empty = database
         .prepare_cached("SELECT COUNT(*) FROM meta WHERE key = ?")
         .map_err(InternalError)?
@@ -240,6 +254,9 @@ pub struct Config<'a> {
 
     /// Number of bytes used to encode the block number.
     pub block_number_bytes: usize,
+
+    /// Maximum allowed size, in bytes, of the SQLite cache.
+    pub cache_size: usize,
 }
 
 /// Type of database.

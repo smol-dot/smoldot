@@ -235,6 +235,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
             &chain_spec,
             genesis_chain_information.as_ref(),
             db_path,
+            256 * 1024 * 1024, // TODO: make configurable?
             matches!(cli_output, cli::Output::Informant),
         )
         .await;
@@ -252,6 +253,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 relay_chain_spec,
                 relay_genesis_chain_information.as_ref().unwrap().as_ref(),
                 relay_db_path,
+                256 * 1024 * 1024, // TODO: make configurable?
                 matches!(cli_output, cli::Output::Informant),
             )
             .await
@@ -729,12 +731,14 @@ async fn open_database(
     chain_spec: &chain_spec::ChainSpec,
     genesis_chain_information: chain::chain_information::ChainInformationRef<'_>,
     db_path: Option<PathBuf>,
+    sqlite_cache_size: usize,
     show_progress: bool,
 ) -> (full_sqlite::SqliteFullDatabase, bool) {
     // The `unwrap()` here can panic for example in case of access denied.
     match background_open_database(
         db_path.clone(),
         chain_spec.block_number_bytes().into(),
+        sqlite_cache_size,
         show_progress,
     )
     .await
@@ -799,6 +803,7 @@ async fn open_database(
 async fn background_open_database(
     path: Option<PathBuf>,
     block_number_bytes: usize,
+    sqlite_cache_size: usize,
     show_progress: bool,
 ) -> Result<full_sqlite::DatabaseOpen, full_sqlite::InternalError> {
     let (tx, rx) = oneshot::channel();
@@ -809,6 +814,7 @@ async fn background_open_database(
         move || {
             let result = full_sqlite::open(full_sqlite::Config {
                 block_number_bytes,
+                cache_size: sqlite_cache_size,
                 ty: if let Some(path) = &path {
                     full_sqlite::ConfigTy::Disk(path)
                 } else {
@@ -823,6 +829,7 @@ async fn background_open_database(
     if thread_spawn_result.is_err() {
         return full_sqlite::open(full_sqlite::Config {
             block_number_bytes,
+            cache_size: sqlite_cache_size,
             ty: if let Some(path) = &path {
                 full_sqlite::ConfigTy::Disk(path)
             } else {
