@@ -178,6 +178,7 @@ pub fn empty_trie_merkle_value() -> [u8; 32] {
 /// The entries do not need to be ordered.
 ///
 /// This function has a high complexity and exists mostly for convenience.
+// TODO: this function is actually used for real by the host, should we maybe sort entries or something?
 pub fn trie_root(
     version: TrieEntryVersion,
     unordered_entries: &[(impl AsRef<[u8]>, impl AsRef<[u8]>)],
