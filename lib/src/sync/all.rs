@@ -1411,7 +1411,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         // in the user data. It will be useful later when transitioning to another
                         // syncing strategy.
                         if is_best {
-                            let mut user_data = match inner {
+                            let user_data = match inner {
                                 warp_sync::WarpSync::InProgress(sync) => &mut sync[source_id],
                                 warp_sync::WarpSync::Finished(sync) => {
                                     let index = sync

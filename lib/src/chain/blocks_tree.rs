@@ -181,7 +181,7 @@ impl<T> NonFinalizedTree<T> {
 
     /// Removes all non-finalized blocks from the tree.
     pub fn clear(&mut self) {
-        let mut inner = self.inner.as_mut().unwrap();
+        let inner = self.inner.as_mut().unwrap();
         inner.blocks.clear();
         inner.blocks_by_hash.clear();
         inner.current_best = None;

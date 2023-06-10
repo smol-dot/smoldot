@@ -284,7 +284,7 @@ where
         substream_id: &TSubId,
         read_write: &'_ mut ReadWrite<'_, TNow>,
     ) -> SubstreamFate {
-        let mut substream = self.in_substreams.get_mut(substream_id).unwrap();
+        let substream = self.in_substreams.get_mut(substream_id).unwrap();
 
         // In WebRTC, the reading and writing side is never closed.
         assert!(read_write.incoming_buffer.is_some() && read_write.outgoing_buffer.is_some());
