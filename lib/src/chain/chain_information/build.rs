@@ -481,13 +481,12 @@ impl ChainInformationBuild {
                 (false, None, _) => chain_information::ChainInformationConsensus::Unknown,
                 (false, Some(_), ConfigFinalizedBlockHeader::NonGenesis { .. }) => {
                     chain_information::ChainInformationConsensus::Babe {
-                        finalized_block_epoch_information: Some(
+                        finalized_block_epoch_information: Some(Box::new(
                             inner.babe_current_epoch_call_output.take().unwrap(),
+                        )),
+                        finalized_next_epoch_transition: Box::new(
+                            inner.babe_next_epoch_call_output.take().unwrap(),
                         ),
-                        finalized_next_epoch_transition: inner
-                            .babe_next_epoch_call_output
-                            .take()
-                            .unwrap(),
                         slots_per_epoch: inner
                             .babe_configuration_call_output
                             .take()
@@ -500,14 +499,16 @@ impl ChainInformationBuild {
                     chain_information::ChainInformationConsensus::Babe {
                         slots_per_epoch: config.slots_per_epoch,
                         finalized_block_epoch_information: None,
-                        finalized_next_epoch_transition: chain_information::BabeEpochInformation {
-                            epoch_index: 0,
-                            start_slot_number: None,
-                            authorities: config.epoch0_information.authorities,
-                            randomness: config.epoch0_information.randomness,
-                            c: config.epoch0_configuration.c,
-                            allowed_slots: config.epoch0_configuration.allowed_slots,
-                        },
+                        finalized_next_epoch_transition: Box::new(
+                            chain_information::BabeEpochInformation {
+                                epoch_index: 0,
+                                start_slot_number: None,
+                                authorities: config.epoch0_information.authorities,
+                                randomness: config.epoch0_information.randomness,
+                                c: config.epoch0_configuration.c,
+                                allowed_slots: config.epoch0_configuration.allowed_slots,
+                            },
+                        ),
                     }
                 }
                 (true, None, _) => chain_information::ChainInformationConsensus::Aura {
@@ -584,12 +585,11 @@ impl ChainInformationBuild {
             // epochs that don't follow each other.
             let chain_information = match chain_information::ValidChainInformation::try_from(
                 chain_information::ChainInformation {
-                    finalized_block_header: header::decode(
-                        &finalized_block_header,
-                        inner.block_number_bytes,
-                    )
-                    .unwrap()
-                    .into(),
+                    finalized_block_header: Box::new(
+                        header::decode(&finalized_block_header, inner.block_number_bytes)
+                            .unwrap()
+                            .into(),
+                    ),
                     finality,
                     consensus,
                 },

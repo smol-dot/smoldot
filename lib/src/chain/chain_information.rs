@@ -119,7 +119,7 @@ impl<'a> ValidChainInformationRef<'a> {
 #[derive(Debug, Clone)]
 pub struct ChainInformation {
     /// Header of the highest known finalized block.
-    pub finalized_block_header: header::Header,
+    pub finalized_block_header: Box<header::Header>,
 
     /// Extra items that depend on the consensus engine.
     pub consensus: ChainInformationConsensus,
@@ -131,7 +131,7 @@ pub struct ChainInformation {
 impl<'a> From<ChainInformationRef<'a>> for ChainInformation {
     fn from(info: ChainInformationRef<'a>) -> ChainInformation {
         ChainInformation {
-            finalized_block_header: info.finalized_block_header.into(),
+            finalized_block_header: Box::new(info.finalized_block_header.into()),
             consensus: match info.consensus {
                 ChainInformationConsensusRef::Unknown => ChainInformationConsensus::Unknown,
                 ChainInformationConsensusRef::Aura {
@@ -150,8 +150,10 @@ impl<'a> From<ChainInformationRef<'a>> for ChainInformation {
                 } => ChainInformationConsensus::Babe {
                     slots_per_epoch,
                     finalized_block_epoch_information: finalized_block_epoch_information
-                        .map(Into::into),
-                    finalized_next_epoch_transition: finalized_next_epoch_transition.into(),
+                        .map(|i| Box::new(i.into())),
+                    finalized_next_epoch_transition: Box::new(
+                        finalized_next_epoch_transition.into(),
+                    ),
                 },
             },
             finality: info.finality.into(),
@@ -198,7 +200,7 @@ pub enum ChainInformationConsensus {
         /// >           slots, it is often not possible to know in advance whether the children
         /// >           of a block will belong to the same epoch as their parent. This is the
         /// >           reason why the "parent" (i.e. finalized block)'s information are demanded.
-        finalized_block_epoch_information: Option<BabeEpochInformation>,
+        finalized_block_epoch_information: Option<Box<BabeEpochInformation>>,
 
         /// Babe epoch information about the epoch right after the one the finalized block belongs
         /// to.
@@ -208,7 +210,7 @@ pub enum ChainInformationConsensus {
         ///
         /// If the finalized block is block #0, then this must contain the information about the
         /// epoch #0, which can be found by calling the `BabeApi_configuration` runtime function.
-        finalized_next_epoch_transition: BabeEpochInformation,
+        finalized_next_epoch_transition: Box<BabeEpochInformation>,
     },
 }
 
@@ -418,7 +420,7 @@ impl<'a> ChainInformationRef<'a> {
 impl<'a> From<&'a ChainInformation> for ChainInformationRef<'a> {
     fn from(info: &'a ChainInformation) -> ChainInformationRef<'a> {
         ChainInformationRef {
-            finalized_block_header: (&info.finalized_block_header).into(),
+            finalized_block_header: (&*info.finalized_block_header).into(),
             consensus: match &info.consensus {
                 ChainInformationConsensus::Unknown => ChainInformationConsensusRef::Unknown,
                 ChainInformationConsensus::Aura {
@@ -438,8 +440,8 @@ impl<'a> From<&'a ChainInformation> for ChainInformationRef<'a> {
                     slots_per_epoch: *slots_per_epoch,
                     finalized_block_epoch_information: finalized_block_epoch_information
                         .as_ref()
-                        .map(Into::into),
-                    finalized_next_epoch_transition: finalized_next_epoch_transition.into(),
+                        .map(|i| (&**i).into()),
+                    finalized_next_epoch_transition: (&**finalized_next_epoch_transition).into(),
                 },
             },
             finality: (&info.finality).into(),

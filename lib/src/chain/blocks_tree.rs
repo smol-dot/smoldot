@@ -163,8 +163,8 @@ impl<T> NonFinalizedTree<T> {
                         slots_per_epoch,
                     } => FinalizedConsensus::Babe {
                         slots_per_epoch,
-                        block_epoch_information: finalized_block_epoch_information.map(Arc::new),
-                        next_epoch_transition: Arc::new(finalized_next_epoch_transition),
+                        block_epoch_information: finalized_block_epoch_information.map(Arc::from),
+                        next_epoch_transition: Arc::from(finalized_next_epoch_transition),
                     },
                 },
                 blocks: fork_tree::ForkTree::with_capacity(config.blocks_capacity),

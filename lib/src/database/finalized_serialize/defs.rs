@@ -19,7 +19,7 @@
 
 use crate::{chain::chain_information, header};
 
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use core::{fmt, num::NonZeroU64};
 use hashbrown::HashMap;
 
@@ -216,22 +216,23 @@ impl SerializedChainInformationV1 {
                 slots_per_epoch: babe_slots_per_epoch
                     .ok_or(DeserializeError::MissingBabeInformation)?,
                 finalized_block_epoch_information: babe_finalized_block_epoch_information
-                    .map(Into::into),
-                finalized_next_epoch_transition: babe_finalized_next_epoch_transition
-                    .map(Into::into)
-                    .ok_or(DeserializeError::MissingBabeInformation)?,
+                    .map(|i| Box::new(i.into())),
+                finalized_next_epoch_transition: Box::new(
+                    babe_finalized_next_epoch_transition
+                        .map(Into::into)
+                        .ok_or(DeserializeError::MissingBabeInformation)?,
+                ),
             },
 
             _ => return Err(DeserializeError::ConsensusAlgorithmsMismatch),
         };
 
         let chain_information = chain_information::ChainInformation {
-            finalized_block_header: header::decode(
-                &self.finalized_block_header,
-                block_number_bytes,
-            )
-            .map_err(DeserializeError::Header)?
-            .into(),
+            finalized_block_header: Box::new(
+                header::decode(&self.finalized_block_header, block_number_bytes)
+                    .map_err(DeserializeError::Header)?
+                    .into(),
+            ),
             consensus,
             finality: if let Some(set_id) = self.grandpa_after_finalized_block_authorities_set_id {
                 chain_information::ChainInformationFinality::Grandpa {
