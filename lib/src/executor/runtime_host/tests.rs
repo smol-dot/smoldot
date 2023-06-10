@@ -124,7 +124,14 @@ fn all_tests() {
                 crate::util::encode_scale_compact_usize(test_data.block.extrinsics.len());
             crate::header::HeaderRef {
                 parent_hash: TryFrom::try_from(&test_data.block.header.parent_hash.0[..]).unwrap(),
-                number: 1, // TODO: no, use test data
+                number: {
+                    let mut num = 0u64;
+                    for byte in &test_data.block.header.number.0 {
+                        num <<= 8;
+                        num |= u64::from(*byte);
+                    }
+                    num
+                },
                 state_root: TryFrom::try_from(&test_data.block.header.state_root.0[..]).unwrap(),
                 extrinsics_root: TryFrom::try_from(&test_data.block.header.extrinsics_root.0[..])
                     .unwrap(),
