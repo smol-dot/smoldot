@@ -518,7 +518,7 @@ pub async fn run_until(config: Config<'_>, until: Pin<Box<dyn Future<Output = ()
 
     debug_assert!(network_events_receivers.next().is_none());
 
-    // Block the current thread until `ctrl-c` is invoked by the user.
+    // Run tasks in the current thread until the provided future finishes.
     let _ = executor.run(until).await;
 
     if config.show_informant {
