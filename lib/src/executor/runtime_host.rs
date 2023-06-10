@@ -42,7 +42,7 @@ use crate::{
     trie, util,
 };
 
-use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
+use alloc::{borrow::ToOwned as _, collections::BTreeMap, string::String, vec::Vec};
 use core::{fmt, iter};
 
 pub use trie::{Nibble, TrieEntryVersion};
@@ -61,7 +61,8 @@ pub struct Config<'a, TParams> {
 
     /// Initial state of [`Success::storage_main_trie_changes`]. The changes made during this
     /// execution will be pushed over the value in this field.
-    pub storage_main_trie_changes: storage_diff::TrieDiff,
+    // TODO: is this field still useful?
+    pub storage_main_trie_changes: BTreeMap<Vec<Nibble>, TrieChange>,
 
     /// Initial state of [`Success::offchain_storage_changes`]. The changes made during this
     /// execution will be pushed over the value in this field.
@@ -116,7 +117,9 @@ pub struct Success {
     /// initialization.
     pub virtual_machine: SuccessVirtualMachine,
     /// List of changes to the storage main trie that the block performs.
-    pub storage_main_trie_changes: storage_diff::TrieDiff,
+    ///
+    /// This includes the changes made by [`Config::storage_main_trie_changes`̀].
+    pub storage_main_trie_changes: BTreeMap<Vec<Nibble>, TrieChange>,
     // TODO: return child trie diffs
     /// State trie version indicated by the runtime. All the storage changes indicated by
     /// [`Success::storage_main_trie_changes`] should store this version alongside with them.
@@ -125,6 +128,38 @@ pub struct Success {
     pub offchain_storage_changes: storage_diff::TrieDiff,
     /// Concatenation of all the log messages printed by the runtime.
     pub logs: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum TrieChange {
+    /// Trie entry is either newly-created, or already existed and has a new Merkle value.
+    InsertOrUpdate {
+        /// New Merkle value associated to this trie node. Always inferior or equal to 32 bytes.
+        new_merkle_value: Vec<u8>,
+        /// New storage value (if any) of this trie node.
+        new_storage_value: Option<Vec<u8>>,
+    },
+    Remove,
+}
+
+impl TrieChange {
+    pub fn into_storage_value(self) -> Option<Vec<u8>> {
+        match self {
+            TrieChange::InsertOrUpdate {
+                new_storage_value, ..
+            } => new_storage_value,
+            TrieChange::Remove => None,
+        }
+    }
+
+    pub fn storage_value(&self) -> Option<&Vec<u8>> {
+        match self {
+            TrieChange::InsertOrUpdate {
+                new_storage_value, ..
+            } => new_storage_value.as_ref(),
+            TrieChange::Remove => None,
+        }
+    }
 }
 
 /// Function execution has succeeded. Contains the return value of the call.

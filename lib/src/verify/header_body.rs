@@ -18,14 +18,14 @@
 use crate::{
     chain::chain_information,
     executor::{self, host, runtime_host, storage_diff, vm},
-    header, util,
+    header, trie, util,
     verify::{aura, babe, inherents},
 };
 
-use alloc::{string::String, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::{iter, num::NonZeroU64, time::Duration};
 
-pub use runtime_host::{Nibble, TrieEntryVersion};
+pub use runtime_host::{Nibble, TrieChange, TrieEntryVersion};
 
 /// Configuration for a block verification.
 pub struct Config<'a, TBody> {
@@ -117,7 +117,7 @@ pub struct Success {
     pub consensus: SuccessConsensus,
 
     /// List of changes to the storage main trie that the block performs.
-    pub storage_main_trie_changes: storage_diff::TrieDiff,
+    pub storage_main_trie_changes: BTreeMap<Vec<Nibble>, TrieChange>,
 
     /// State trie version indicated by the runtime. All the storage changes indicated by
     /// [`Success::storage_main_trie_changes`] should store this version alongside with them.
@@ -488,14 +488,24 @@ impl VerifyInner {
                     }
 
                     match (
-                        success.storage_main_trie_changes.diff_get(&b":code"[..]),
+                        success
+                            .storage_main_trie_changes
+                            .get(
+                                &trie::bytes_to_nibbles(b":code".iter().copied())
+                                    .collect::<Vec<_>>(), // TODO: allocation
+                            )
+                            .map(|change| change.storage_value().map(|v| &v[..])),
                         parent_code,
                         success
                             .storage_main_trie_changes
-                            .diff_get(&b":heappages"[..]),
+                            .get(
+                                &trie::bytes_to_nibbles(b":heappages".iter().copied())
+                                    .collect::<Vec<_>>(), // TODO: allocation
+                            )
+                            .map(|change| change.storage_value().map(|v| &v[..])),
                     ) {
                         (None, _, None) => {}
-                        (Some((None, ())), _, _) => {
+                        (Some(None), _, _) => {
                             return Verify::Finished(Err((
                                 Error::CodeKeyErased,
                                 success.virtual_machine.into_prototype(),
@@ -513,12 +523,12 @@ impl VerifyInner {
                                 success.virtual_machine.into_prototype(),
                             )))
                         }
-                        (Some((Some(_), ())), parent_code, heap_pages)
+                        (Some(Some(_)), parent_code, heap_pages)
                         | (_, parent_code @ Some(Some(_)), heap_pages) => {
                             let parent_runtime = success.virtual_machine.into_prototype();
 
                             let heap_pages = match heap_pages {
-                                Some((heap_pages, ())) => {
+                                Some(heap_pages) => {
                                     match executor::storage_heap_pages_to_value(heap_pages) {
                                         Ok(hp) => hp,
                                         Err(err) => {
@@ -760,7 +770,7 @@ impl StorageNextKey {
 #[must_use]
 pub struct RuntimeCompilation {
     parent_runtime: host::HostVmPrototype,
-    storage_main_trie_changes: storage_diff::TrieDiff,
+    storage_main_trie_changes: BTreeMap<Vec<Nibble>, TrieChange>,
     state_trie_version: TrieEntryVersion,
     offchain_storage_changes: storage_diff::TrieDiff,
     logs: String,
@@ -775,8 +785,8 @@ impl RuntimeCompilation {
         // A `RuntimeCompilation` object is built only if `:code` is available.
         let code = self
             .storage_main_trie_changes
-            .diff_get(&b":code"[..])
-            .map(|(value, _)| value)
+            .get(&trie::bytes_to_nibbles(b":code".iter().copied()).collect::<Vec<_>>()) // TODO: allocation
+            .map(|change| change.storage_value().map(|v| &v[..]))
             .or(self.parent_code.as_ref().map(|v| v.as_deref()))
             .unwrap()
             .unwrap();

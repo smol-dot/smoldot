@@ -38,7 +38,7 @@ use crate::{
     verify,
 };
 
-use alloc::{borrow::Cow, vec::Vec};
+use alloc::{borrow::Cow, collections::BTreeMap, vec::Vec};
 use core::{
     cmp, iter, marker, mem,
     num::{NonZeroU32, NonZeroU64},
@@ -47,7 +47,7 @@ use core::{
 };
 
 pub use crate::executor::vm::ExecHint;
-pub use optimistic::{Nibble, TrieEntryVersion};
+pub use optimistic::{Nibble, TrieChange, TrieEntryVersion};
 pub use warp_sync::{FragmentError as WarpSyncFragmentError, WarpSyncFragment};
 
 /// Configuration for the [`AllSync`].
@@ -2785,7 +2785,7 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
         /// True if the newly-verified block is considered the new best block.
         is_new_best: bool,
         /// Changes to the storage made by this block compared to its parent.
-        storage_main_trie_changes: storage_diff::TrieDiff,
+        storage_main_trie_changes: BTreeMap<Vec<Nibble>, TrieChange>,
         /// State trie version indicated by the runtime. All the storage changes indicated by
         /// [`BlockVerification::Success::storage_main_trie_changes`] should store this version
         /// alongside with them.

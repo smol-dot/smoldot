@@ -31,10 +31,10 @@ use super::{
     FinalizedConsensus, NonFinalizedTree, NonFinalizedTreeInner, Vec,
 };
 
-use alloc::boxed::Box;
+use alloc::{boxed::Box, collections::BTreeMap};
 use core::cmp::Ordering;
 
-pub use verify::header_body::{Nibble, TrieEntryVersion};
+pub use verify::header_body::{Nibble, TrieChange, TrieEntryVersion};
 
 impl<T> NonFinalizedTree<T> {
     /// Verifies the given block.
@@ -866,7 +866,7 @@ pub enum BodyVerifyStep2<T> {
         /// been modified. Contains the new runtime.
         new_runtime: Option<host::HostVmPrototype>,
         /// List of changes to the storage main trie that the block performs.
-        storage_main_trie_changes: storage_diff::TrieDiff,
+        storage_main_trie_changes: BTreeMap<Vec<Nibble>, TrieChange>,
         /// State trie version indicated by the runtime. All the storage changes indicated by
         /// [`BodyVerifyStep2::Finished::storage_main_trie_changes`] should store this version
         /// alongside with them.

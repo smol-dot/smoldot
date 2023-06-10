@@ -48,12 +48,12 @@
 use crate::{
     chain::{blocks_tree, chain_information},
     executor::{host, storage_diff},
-    header,
+    header, trie,
 };
 
 use alloc::{
     boxed::Box,
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     vec::{self, Vec},
 };
 use core::{
@@ -64,7 +64,7 @@ use core::{
 };
 use hashbrown::HashMap;
 
-pub use blocks_tree::{Nibble, TrieEntryVersion};
+pub use blocks_tree::{Nibble, TrieChange, TrieEntryVersion};
 
 mod verification_queue;
 
@@ -991,7 +991,7 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
 
 pub struct BlockVerificationSuccessFull {
     /// Changes to the storage made by this block compared to its parent.
-    pub storage_main_trie_changes: storage_diff::TrieDiff,
+    pub storage_main_trie_changes: BTreeMap<Vec<Nibble>, TrieChange>,
 
     /// State trie version indicated by the runtime. All the storage changes indicated by
     /// [`BlockVerificationSuccessFull::storage_main_trie_changes`] should store this version
@@ -1056,9 +1056,17 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
 
                     debug_assert_eq!(
                         new_runtime.is_some(),
-                        storage_main_trie_changes.diff_get(&b":code"[..]).is_some()
+                        storage_main_trie_changes
+                            .get(
+                                &trie::bytes_to_nibbles(b":code".iter().copied())
+                                    .collect::<Vec<_>>()
+                            )
+                            .is_some()
                             || storage_main_trie_changes
-                                .diff_get(&b":heappages"[..])
+                                .get(
+                                    &trie::bytes_to_nibbles(b":heappages".iter().copied())
+                                        .collect::<Vec<_>>()
+                                )
                                 .is_some()
                     );
 

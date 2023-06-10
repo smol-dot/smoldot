@@ -53,10 +53,10 @@ use crate::{
     verify::inherents,
 };
 
-use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
+use alloc::{borrow::ToOwned as _, collections::BTreeMap, string::String, vec::Vec};
 use core::{iter, mem};
 
-pub use runtime_host::{Nibble, TrieEntryVersion};
+pub use runtime_host::{Nibble, TrieChange, TrieEntryVersion};
 
 /// Configuration for a block generation.
 pub struct Config<'a> {
@@ -113,7 +113,7 @@ pub struct Success {
     /// Runtime that was passed by [`Config`].
     pub parent_runtime: host::HostVmPrototype,
     /// List of changes to the storage main trie that the block performs.
-    pub storage_main_trie_changes: storage_diff::TrieDiff,
+    pub storage_main_trie_changes: BTreeMap<Vec<Nibble>, TrieChange>,
     /// State trie version indicated by the runtime. All the storage changes indicated by
     /// [`Success::storage_main_trie_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
@@ -498,7 +498,7 @@ enum Stage {
 pub struct InherentExtrinsics {
     shared: Shared,
     parent_runtime: host::HostVmPrototype,
-    storage_main_trie_changes: storage_diff::TrieDiff,
+    storage_main_trie_changes: BTreeMap<Vec<Nibble>, TrieChange>,
     offchain_storage_changes: storage_diff::TrieDiff,
 }
 
@@ -560,7 +560,7 @@ impl InherentExtrinsics {
 pub struct ApplyExtrinsic {
     shared: Shared,
     parent_runtime: host::HostVmPrototype,
-    storage_main_trie_changes: storage_diff::TrieDiff,
+    storage_main_trie_changes: BTreeMap<Vec<Nibble>, TrieChange>,
     offchain_storage_changes: storage_diff::TrieDiff,
 }
 
