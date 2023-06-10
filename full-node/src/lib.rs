@@ -15,7 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::cli;
+#![deny(rustdoc::broken_intra_doc_links)]
+// TODO: #![deny(unused_crate_dependencies)] doesn't work because some deps are used only by the binary, figure if this can be fixed?
 
 use futures_channel::oneshot;
 use futures_util::{stream, FutureExt as _, StreamExt as _};
@@ -32,12 +33,8 @@ use smoldot::{
     },
 };
 use std::{
-    borrow::Cow,
-    fs, io, iter,
-    path::PathBuf,
-    sync::Arc,
-    thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    borrow::Cow, future::Future, iter, net::SocketAddr, path::PathBuf, pin::Pin, sync::Arc, thread,
+    time::Duration,
 };
 
 mod consensus_service;
@@ -45,146 +42,62 @@ mod database_thread;
 mod jaeger_service;
 mod json_rpc_service;
 mod network_service;
+mod util;
+
+#[derive(Debug)]
+pub struct Config<'a> {
+    /// Chain to connect to.
+    pub chain: ChainConfig<'a>,
+    /// If [`Config::chain`] contains a parachain, this field contains the configuration of the
+    /// relay chain.
+    pub relay_chain: Option<ChainConfig<'a>>,
+    /// Ed25519 private key of network identity.
+    pub libp2p_key: [u8; 32],
+    /// List of addresses to listen on.
+    pub listen_addresses: Vec<multiaddr::Multiaddr>,
+    /// Bind point of the JSON-RPC server. If `None`, no server is started.
+    pub json_rpc_address: Option<SocketAddr>,
+    /// Address of a Jaeger agent to send traces to. If `None`, do not send Jaeger traces.
+    pub jaeger_agent: Option<SocketAddr>,
+    // TODO: option is a bit weird
+    pub show_informant: bool,
+    // TODO: option is a bit weird
+    pub informant_colors: bool,
+}
+
+#[derive(Debug)]
+pub struct ChainConfig<'a> {
+    /// Specification of the chain.
+    pub chain_spec: Cow<'a, [u8]>,
+    /// Identity and address of nodes to try to connect to on startup.
+    pub additional_bootnodes: Vec<(peer_id::PeerId, multiaddr::Multiaddr)>,
+    /// List of secret phrases to insert in the keystore of the node. Used to author blocks.
+    // TODO: also automatically add the same keys through ed25519?
+    pub keystore_memory: Vec<[u8; 64]>,
+    /// Path to the SQLite database. If `None`, the database is opened in memory.
+    pub sqlite_database_path: Option<PathBuf>,
+    /// Path to the directory where cryptographic keys are stored on disk.
+    ///
+    /// If `None`, no keys are stored in disk.
+    pub keystore_path: Option<PathBuf>,
+}
 
 /// Runs the node using the given configuration. Catches `SIGINT` signals and stops if one is
 /// detected.
-pub async fn run(cli_options: cli::CliOptionsRun) {
-    // Determine the actual CLI output by replacing `Auto` with the actual value.
-    let cli_output = if let cli::Output::Auto = cli_options.output {
-        if io::IsTerminal::is_terminal(&io::stderr()) && cli_options.log.is_empty() {
-            cli::Output::Informant
-        } else {
-            cli::Output::Logs
-        }
-    } else {
-        cli_options.output
-    };
-    debug_assert!(!matches!(cli_output, cli::Output::Auto));
-
-    // Setup the logging system of the binary.
-    if !matches!(cli_output, cli::Output::None) {
-        let mut builder = env_logger::Builder::new();
-        builder.parse_filters("cranelift=error"); // TODO: temporary work around for https://github.com/smol-dot/smoldot/issues/263
-        if matches!(cli_output, cli::Output::Informant) {
-            // TODO: display infos/warnings in a nicer way ; in particular, immediately put the informant on top of warnings
-            builder.filter_level(log::LevelFilter::Info);
-        } else {
-            builder.filter_level(log::LevelFilter::Debug);
-            for filter in &cli_options.log {
-                builder.parse_filters(filter);
-            }
-        }
-
-        if matches!(cli_output, cli::Output::LogsJson) {
-            builder.write_style(env_logger::WriteStyle::Never);
-            builder.format(|mut formatter, record| {
-                // TODO: consider using the "kv" feature of he "logs" crate and output individual fields
-                #[derive(serde::Serialize)]
-                struct Record<'a> {
-                    timestamp: u128,
-                    target: &'a str,
-                    level: &'static str,
-                    message: String,
-                }
-
-                serde_json::to_writer(
-                    &mut formatter,
-                    &Record {
-                        timestamp: SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .map(|d| d.as_millis())
-                            .unwrap_or(0),
-                        target: record.target(),
-                        level: match record.level() {
-                            log::Level::Trace => "trace",
-                            log::Level::Debug => "debug",
-                            log::Level::Info => "info",
-                            log::Level::Warn => "warn",
-                            log::Level::Error => "error",
-                        },
-                        message: format!("{}", record.args()),
-                    },
-                )
-                .map_err(|err| io::Error::new(std::io::ErrorKind::Other, err.to_string()))?;
-                io::Write::write_all(formatter, b"\n")?;
-                Ok(())
-            });
-        } else {
-            builder.write_style(match cli_options.color {
-                cli::ColorChoice::Always => env_logger::WriteStyle::Always,
-                cli::ColorChoice::Never => env_logger::WriteStyle::Never,
-            });
-        }
-
-        builder.init();
-    }
-
-    log::info!("smoldot full node");
-    log::info!("Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.");
-    log::info!("Copyright (C) 2023  Pierre Krieger.");
-    log::info!("This program comes with ABSOLUTELY NO WARRANTY.");
-    log::info!(
-        "This is free software, and you are welcome to redistribute it under certain conditions."
-    );
-
-    // This warning message should be removed if/when the full node becomes mature.
-    log::warn!(
-        "Please note that this full node is experimental. It is not feature complete and is \
-        known to panic often. Please report any panic you might encounter to \
-        <https://github.com/smol-dot/smoldot/issues>."
-    );
-
+// TODO: should return an error if something bad happens instead of panicking
+pub async fn run_until(config: Config<'_>, until: Pin<Box<dyn Future<Output = ()>>>) {
     let chain_spec = {
-        let json: Cow<[u8]> = match &cli_options.chain {
-            cli::CliChain::Polkadot => {
-                (&include_bytes!("../../demo-chain-specs/polkadot.json")[..]).into()
-            }
-            cli::CliChain::Kusama => {
-                (&include_bytes!("../../demo-chain-specs/kusama.json")[..]).into()
-            }
-            cli::CliChain::Westend => {
-                (&include_bytes!("../../demo-chain-specs/westend.json")[..]).into()
-            }
-            cli::CliChain::Custom(path) => {
-                fs::read(path).expect("Failed to read chain specs").into()
-            }
-        };
-
-        smoldot::chain_spec::ChainSpec::from_json_bytes(&json)
+        smoldot::chain_spec::ChainSpec::from_json_bytes(&config.chain.chain_spec)
             .expect("Failed to decode chain specs")
     };
 
     // TODO: don't unwrap?
     let genesis_chain_information = chain_spec.to_chain_information().unwrap().0;
 
-    // If `chain_spec` define a parachain, also load the specs of the relay chain.
-    let (relay_chain_spec, _parachain_id) =
-        if let Some((relay_chain_name, parachain_id)) = chain_spec.relay_chain() {
-            let json: Cow<[u8]> = match &cli_options.chain {
-                cli::CliChain::Custom(parachain_path) => {
-                    // TODO: this is a bit of a hack
-                    let relay_chain_path = parachain_path
-                        .parent()
-                        .unwrap()
-                        .join(format!("{relay_chain_name}.json"));
-                    fs::read(&relay_chain_path)
-                        .expect("Failed to read relay chain specs")
-                        .into()
-                }
-                _ => panic!("Unexpected relay chain specified in hard-coded specs"),
-            };
-
-            let spec = smoldot::chain_spec::ChainSpec::from_json_bytes(&json)
-                .expect("Failed to decode relay chain chain specs");
-
-            // Make sure we're not accidentally opening the same chain twice, otherwise weird
-            // interactions will happen.
-            assert_ne!(spec.id(), chain_spec.id());
-
-            (Some(spec), Some(parachain_id))
-        } else {
-            (None, None)
-        };
+    let relay_chain_spec = config.relay_chain.as_ref().map(|rc| {
+        smoldot::chain_spec::ChainSpec::from_json_bytes(&rc.chain_spec)
+            .expect("Failed to decode relay chain chain specs")
+    });
 
     // TODO: don't unwrap?
     let relay_genesis_chain_information = relay_chain_spec
@@ -210,51 +123,27 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         }
     }
 
-    // Directory where we will store everything on the disk, such as the database, secret keys,
-    // etc.
-    let base_storage_directory = if cli_options.tmp {
-        None
-    } else if let Some(base) = directories::ProjectDirs::from("io", "smoldot", "smoldot") {
-        Some(base.data_dir().to_owned())
-    } else {
-        log::warn!(
-            "Failed to fetch $HOME directory. Falling back to storing everything in memory, \
-                meaning that everything will be lost when the node stops. If this is intended, \
-                please make this explicit by passing the `--tmp` flag instead."
-        );
-        None
-    };
-
     let (database, database_existed) = {
-        // Directory supposed to contain the database.
-        let db_path = base_storage_directory
-            .as_ref()
-            .map(|d| d.join(chain_spec.id()).join("database"));
-
         let (db, existed) = open_database(
             &chain_spec,
             genesis_chain_information.as_ref(),
-            db_path,
+            config.chain.sqlite_database_path,
             256 * 1024 * 1024, // TODO: make configurable?
-            matches!(cli_output, cli::Output::Informant),
+            config.show_informant,
         )
         .await;
 
         (Arc::new(database_thread::DatabaseThread::from(db)), existed)
     };
 
-    let relay_chain_database = if let Some(relay_chain_spec) = &relay_chain_spec {
-        let relay_db_path = base_storage_directory
-            .as_ref()
-            .map(|d| d.join(relay_chain_spec.id()).join("database"));
-
+    let relay_chain_database = if let Some(relay_chain) = &config.relay_chain {
         Some(Arc::new(database_thread::DatabaseThread::from(
             open_database(
-                relay_chain_spec,
+                relay_chain_spec.as_ref().unwrap(),
                 relay_genesis_chain_information.as_ref().unwrap().as_ref(),
-                relay_db_path,
+                relay_chain.sqlite_database_path.clone(),
                 256 * 1024 * 1024, // TODO: make configurable?
-                matches!(cli_output, cli::Output::Informant),
+                config.show_informant,
             )
             .await
             .0,
@@ -279,51 +168,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     .unwrap()
     .number;
 
-    // TODO: remove; just for testing
-    /*let metadata = smoldot::metadata::metadata_from_runtime_code(
-        chain_spec
-            .genesis_storage()
-            .clone()
-            .find(|(k, _)| *k == b":code")
-            .unwrap().1,
-            1024,
-    )
-    .unwrap();
-    println!(
-        "{:#?}",
-        smoldot::metadata::decode(&metadata).unwrap()
-    );*/
-
-    // Determine which networking key to use.
-    //
-    // This is either passed as a CLI option, loaded from disk, or generated randomly.
-    let noise_key = if let Some(node_key) = cli_options.libp2p_key {
-        connection::NoiseKey::new(&node_key)
-    } else if let Some(dir) = base_storage_directory.as_ref() {
-        let path = dir.join("libp2p_ed25519_secret_key.secret");
-        let noise_key = if path.exists() {
-            let file_content =
-                fs::read_to_string(&path).expect("failed to read libp2p secret key file content");
-            let hex_decoded =
-                hex::decode(file_content).expect("invalid libp2p secret key file content");
-            let actual_key =
-                <[u8; 32]>::try_from(hex_decoded).expect("invalid libp2p secret key file content");
-            connection::NoiseKey::new(&actual_key)
-        } else {
-            let actual_key: [u8; 32] = rand::random();
-            fs::write(&path, hex::encode(actual_key))
-                .expect("failed to write libp2p secret key file");
-            connection::NoiseKey::new(&actual_key)
-        };
-        // On Unix platforms, set the permission as 0o400 (only reading and by owner is permitted).
-        // TODO: do something equivalent on Windows
-        #[cfg(unix)]
-        let _ = fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o400));
-        noise_key
-    } else {
-        connection::NoiseKey::new(&rand::random())
-    };
-
+    let noise_key = connection::NoiseKey::new(&config.libp2p_key);
     let local_peer_id =
         peer_id::PublicKey::Ed25519(*noise_key.libp2p_public_ed25519_key()).into_peer_id();
 
@@ -335,14 +180,14 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     let jaeger_service = jaeger_service::JaegerService::new(jaeger_service::Config {
         tasks_executor: &mut |task| executor.spawn(task).detach(),
         service_name: local_peer_id.to_string(),
-        jaeger_agent: cli_options.jaeger,
+        jaeger_agent: config.jaeger_agent,
     })
     .await
     .unwrap();
 
     let (network_service, network_events_receivers) =
         network_service::NetworkService::new(network_service::Config {
-            listen_addresses: cli_options.listen_addr,
+            listen_addresses: config.listen_addresses,
             num_events_receivers: 2 + if relay_chain_database.is_some() { 1 } else { 0 },
             chains: iter::once(network_service::ChainConfig {
                 fork_id: chain_spec.fork_id().map(|n| n.to_owned()),
@@ -366,7 +211,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 },
                 bootstrap_nodes: {
                     let mut list = Vec::with_capacity(
-                        chain_spec.boot_nodes().len() + cli_options.additional_bootnode.len(),
+                        chain_spec.boot_nodes().len() + config.chain.additional_bootnodes.len(),
                     );
 
                     for node in chain_spec.boot_nodes() {
@@ -387,10 +232,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                         }
                     }
 
-                    for bootnode in &cli_options.additional_bootnode {
-                        list.push((bootnode.peer_id.clone(), bootnode.address.clone()));
-                    }
-
+                    list.extend(config.chain.additional_bootnodes);
                     list
                 },
             })
@@ -465,15 +307,10 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     let mut network_events_receivers = network_events_receivers.into_iter();
 
     let keystore = Arc::new({
-        let mut keystore = keystore::Keystore::new(
-            base_storage_directory
-                .as_ref()
-                .map(|path| path.join(chain_spec.id()).join("keys")),
-            rand::random(),
-        )
-        .await
-        .unwrap();
-        for private_key in cli_options.keystore_memory {
+        let mut keystore = keystore::Keystore::new(config.chain.keystore_path, rand::random())
+            .await
+            .unwrap();
+        for private_key in config.chain.keystore_memory {
             keystore.insert_sr25519_memory(keystore::KeyNamespace::all(), &private_key);
         }
         keystore
@@ -516,16 +353,18 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 block_number_bytes: usize::from(
                     relay_chain_spec.as_ref().unwrap().block_number_bytes(),
                 ),
-                keystore: Arc::new(
-                    keystore::Keystore::new(
-                        base_storage_directory
-                            .as_ref()
-                            .map(|path| path.join(chain_spec.id()).join("keys")),
+                keystore: Arc::new({
+                    let mut keystore = keystore::Keystore::new(
+                        config.relay_chain.as_ref().unwrap().keystore_path.clone(),
                         rand::random(),
                     )
                     .await
-                    .unwrap(),
-                ),
+                    .unwrap();
+                    for private_key in &config.relay_chain.as_ref().unwrap().keystore_memory {
+                        keystore.insert_sr25519_memory(keystore::KeyNamespace::all(), private_key);
+                    }
+                    keystore
+                }),
                 jaeger_service, // TODO: consider passing a different jaeger service with a different service name
                 slot_duration_author_ratio: 43691_u16,
             })
@@ -542,7 +381,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     // preferable to fail to start the node altogether rather than make the user believe that they
     // are connected to the JSON-RPC endpoint of the node while they are in reality connected to
     // something else.
-    let _json_rpc_service = if let Some(bind_address) = cli_options.json_rpc_address.0 {
+    let _json_rpc_service = if let Some(bind_address) = config.json_rpc_address {
         let result = json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
             tasks_executor: { &mut |task| executor.spawn(task).detach() },
             bind_address,
@@ -566,23 +405,6 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         database_finalized_block_number,
     );
 
-    // Starting from here, a SIGINT (or equivalent) handler is setup. If the user does Ctrl+C,
-    // a message will be sent on `ctrlc_rx`.
-    // This should be performed after all the expensive initialization is done, as otherwise these
-    // expensive initializations aren't interrupted by Ctrl+C, which could be frustrating for the
-    // user.
-    let ctrlc_detected = {
-        let event = event_listener::Event::new();
-        let listen = event.listen();
-        if let Err(err) = ctrlc::set_handler(move || {
-            event.notify(usize::max_value());
-        }) {
-            // It is not critical to fail to setup the Ctrl-C handler.
-            log::warn!("ctrlc-handler-setup-fail; err={}", err);
-        }
-        listen
-    };
-
     // Spawn the task printing the informant.
     // This is not just a dummy task that just prints on the output, but is actually the main
     // task that holds everything else alive. Without it, all the services that we have created
@@ -591,10 +413,9 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     // inhibit the printing.
     let main_task = executor.spawn({
         let mut main_network_events_receiver = network_events_receivers.next().unwrap();
-        let has_informant = matches!(cli_output, cli::Output::Informant);
 
         async move {
-            let mut informant_timer = if has_informant {
+            let mut informant_timer = if config.show_informant {
                 smol::Timer::interval(Duration::from_millis(100))
             } else {
                 smol::Timer::never()
@@ -627,10 +448,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                         eprint!(
                             "{}\r",
                             smoldot::informant::InformantLine {
-                                enable_colors: match cli_options.color {
-                                    cli::ColorChoice::Always => true,
-                                    cli::ColorChoice::Never => false,
-                                },
+                                enable_colors: config.informant_colors,
                                 chain_name: chain_spec.name(),
                                 relay_chain: if let Some(relay_chain_spec) = &relay_chain_spec {
                                     let relay_sync_state = relay_chain_consensus_service
@@ -701,10 +519,10 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
     debug_assert!(network_events_receivers.next().is_none());
 
-    // Block the current thread until `ctrl-c` is invoked by the user.
-    let _ = executor.run(ctrlc_detected).await;
+    // Run tasks in the current thread until the provided future finishes.
+    let _ = executor.run(until).await;
 
-    if matches!(cli_output, cli::Output::Informant) {
+    if config.show_informant {
         // Adding a new line after the informant so that the user's shell doesn't
         // overwrite it.
         eprintln!();

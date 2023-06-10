@@ -408,9 +408,26 @@ impl NextKey {
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
     pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        enum Three<A, B, C> {
+            A(A),
+            B(B),
+            C(C),
+        }
+
+        impl<A: AsRef<[u8]>, B: AsRef<[u8]>, C: AsRef<[u8]>> AsRef<[u8]> for Three<A, B, C> {
+            fn as_ref(&self) -> &[u8] {
+                match self {
+                    Three::A(a) => a.as_ref(),
+                    Three::B(b) => b.as_ref(),
+                    Three::C(c) => c.as_ref(),
+                }
+            }
+        }
+
         match &self.inner.vm {
-            host::HostVm::ExternalStorageNextKey(req) => req.child_trie().map(either::Left),
-            host::HostVm::ExternalStorageRoot(req) => req.child_trie().map(either::Right),
+            host::HostVm::ExternalStorageNextKey(req) => req.child_trie().map(Three::A),
+            host::HostVm::ExternalStorageRoot(req) => req.child_trie().map(Three::B),
+            host::HostVm::ExternalStorageClearPrefix(req) => req.child_trie().map(Three::C),
             _ => unreachable!(),
         }
     }
