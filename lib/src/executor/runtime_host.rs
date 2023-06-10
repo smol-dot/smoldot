@@ -62,7 +62,7 @@ pub struct Config<'a, TParams> {
     /// Initial state of [`Success::storage_main_trie_changes`]. The changes made during this
     /// execution will be pushed over the value in this field.
     // TODO: is this field still useful?
-    pub storage_main_trie_changes: BTreeMap<Vec<Nibble>, TrieChange>,
+    pub storage_main_trie_changes: storage_diff::TrieDiff,
 
     /// Initial state of [`Success::offchain_storage_changes`]. The changes made during this
     /// execution will be pushed over the value in this field.
@@ -93,15 +93,17 @@ pub fn run(
             .virtual_machine
             .run_vectored(config.function_to_call, config.parameter)?
             .into(),
-        storage_changes: StorageChanges {
-            main_trie: config.storage_main_trie_changes,
-            default_child_tries: hashbrown::HashMap::with_capacity_and_hasher(
-                0,
-                Default::default(),
-            ),
+        storage_change: StorageChange::StorageValuesOnly {
+            changes: TrieItemsChange {
+                main_trie: config.storage_main_trie_changes,
+                default_child_tries: hashbrown::HashMap::with_capacity_and_hasher(
+                    0,
+                    Default::default(),
+                ),
+            },
+            transactions_stack: Vec::new(),
         },
         state_trie_version,
-        transactions_stack: Vec::new(),
         offchain_storage_changes: config.offchain_storage_changes,
         root_calculation: None,
         logs: String::new(),
@@ -266,7 +268,7 @@ impl StorageGet {
         match &self.inner.vm {
             host::HostVm::ExternalStorageGet(req) => Three::A(req.key()),
             host::HostVm::ExternalStorageAppend(req) => Three::B(req.key()),
-            host::HostVm::ExternalStorageRoot(_) => {
+            host::HostVm::ExternalStorageRoot(_) | host::HostVm::Finished(_) => {
                 if let trie_root_calculator::InProgress::StorageValue(value_request) =
                     self.inner.root_calculation.as_ref().unwrap()
                 {
@@ -313,6 +315,7 @@ impl StorageGet {
             host::HostVm::ExternalStorageGet(req) => req.child_trie().map(Three::A),
             host::HostVm::ExternalStorageAppend(req) => req.child_trie().map(Three::B),
             host::HostVm::ExternalStorageRoot(req) => req.child_trie().map(Three::C),
+            host::HostVm::Finished(_) => None,
             // We only create a `StorageGet` if the state is one of the above.
             _ => unreachable!(),
         }
@@ -341,7 +344,7 @@ impl StorageGet {
                 // TODO: could be less overhead?
                 let mut value = value.map(|(v, _)| v).unwrap_or_default();
                 append_to_storage_value(&mut value, req.value().as_ref());
-                self.inner.storage_changes.main_trie.diff_insert(
+                self.inner.trie_items_change.main_trie.diff_insert(
                     req.key().as_ref().to_vec(),
                     value,
                     (),
@@ -349,7 +352,7 @@ impl StorageGet {
 
                 self.inner.vm = req.resume();
             }
-            host::HostVm::ExternalStorageRoot(_) => {
+            host::HostVm::ExternalStorageRoot(_) | host::HostVm::Finished(_) => {
                 if let trie_root_calculator::InProgress::StorageValue(value_request) =
                     self.inner.root_calculation.take().unwrap()
                 {
@@ -394,7 +397,7 @@ impl NextKey {
                 either::Left(trie::bytes_to_nibbles(util::as_ref_iter(req.key())))
             }
 
-            host::HostVm::ExternalStorageRoot(_) => {
+            host::HostVm::ExternalStorageRoot(_) | host::HostVm::Finished(_) => {
                 let Some(trie_root_calculator::InProgress::ClosestDescendant(req)) = &self.inner.root_calculation
                     else { unreachable!() };
                 either::Right(req.key().flat_map(util::as_ref_iter))
@@ -427,6 +430,7 @@ impl NextKey {
         match &self.inner.vm {
             host::HostVm::ExternalStorageNextKey(req) => req.child_trie().map(Three::A),
             host::HostVm::ExternalStorageRoot(req) => req.child_trie().map(Three::B),
+            host::HostVm::Finished(_) => None,
             host::HostVm::ExternalStorageClearPrefix(req) => req.child_trie().map(Three::C),
             _ => unreachable!(),
         }
@@ -453,7 +457,9 @@ impl NextKey {
             host::HostVm::ExternalStorageClearPrefix(req) => {
                 either::Left(trie::bytes_to_nibbles(util::as_ref_iter(req.prefix())))
             }
-            host::HostVm::ExternalStorageRoot(_) => either::Right(either::Left(self.key())),
+            host::HostVm::ExternalStorageRoot(_) | host::HostVm::Finished(_) => {
+                either::Right(either::Left(self.key()))
+            }
             _ => either::Right(either::Right(iter::empty())),
         }
     }
@@ -478,7 +484,7 @@ impl NextKey {
                     } else {
                         req_key.as_ref()
                     };
-                    self.inner.storage_changes.main_trie.storage_next_key(
+                    self.inner.trie_items_change.main_trie.storage_next_key(
                         requested_key,
                         key.as_deref(),
                         false,
@@ -517,7 +523,7 @@ impl NextKey {
                         self.inner.vm = req.resume(self.keys_removed_so_far, true);
                     } else {
                         self.inner
-                            .storage_changes
+                            .trie_items_change
                             .main_trie
                             .diff_insert_erase(key.clone(), ());
                         self.keys_removed_so_far += 1;
@@ -531,7 +537,7 @@ impl NextKey {
                 }
             }
 
-            host::HostVm::ExternalStorageRoot(_) => {
+            host::HostVm::ExternalStorageRoot(_) | host::HostVm::Finished(_) => {
                 let Some(trie_root_calculator::InProgress::ClosestDescendant(req)) = self.inner.root_calculation.take()
                     else { unreachable!() };
                 self.inner.root_calculation = Some(req.inject(key));
@@ -558,7 +564,7 @@ impl ClosestDescendantMerkleValue {
     pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         debug_assert!(matches!(
             &self.inner.vm,
-            host::HostVm::ExternalStorageRoot(_)
+            host::HostVm::ExternalStorageRoot(_) | host::HostVm::Finished(_)
         ));
 
         let trie_root_calculator::InProgress::ClosestDescendantMerkleValue(request) =
@@ -569,9 +575,11 @@ impl ClosestDescendantMerkleValue {
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
     pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
-        let host::HostVm::ExternalStorageRoot(req) = &self.inner.vm
-            else { unreachable!() };
-        req.child_trie()
+        match &self.inner.vm {
+            host::HostVm::ExternalStorageRoot(req) => req.child_trie(),
+            host::HostVm::Finished(_) => None,
+            _ => unreachable!(),
+        }
     }
 
     /// Indicate that the value is unknown and resume the calculation.
@@ -581,7 +589,7 @@ impl ClosestDescendantMerkleValue {
     pub fn resume_unknown(mut self) -> RuntimeHostVm {
         debug_assert!(matches!(
             &self.inner.vm,
-            host::HostVm::ExternalStorageRoot(_)
+            host::HostVm::ExternalStorageRoot(_) | host::HostVm::Finished(_)
         ));
 
         let trie_root_calculator::InProgress::ClosestDescendantMerkleValue(request) =
@@ -599,7 +607,7 @@ impl ClosestDescendantMerkleValue {
     pub fn inject_merkle_value(mut self, merkle_value: Option<&[u8]>) -> RuntimeHostVm {
         debug_assert!(matches!(
             &self.inner.vm,
-            host::HostVm::ExternalStorageRoot(_)
+            host::HostVm::ExternalStorageRoot(_) | host::HostVm::Finished(_)
         ));
 
         let trie_root_calculator::InProgress::ClosestDescendantMerkleValue(request) =
@@ -708,15 +716,8 @@ struct Inner {
     /// Virtual machine running the call.
     vm: host::HostVm,
 
-    /// Pending changes to the storage that this execution performs.
-    storage_changes: StorageChanges,
-
-    /// Contains a copy of [`Inner::storage_changes`] at the time when the transaction started.
-    /// When the storage transaction ends, either the entry is silently discarded (to commit),
-    /// or is written over [`Inner::storage_changes`] (to rollback).
-    ///
-    /// Contains a `Vec` in case transactions are stacked.
-    transactions_stack: Vec<StorageChanges>,
+    /// Changes to the storage that this execution has performed.
+    storage_change: StorageChange,
 
     /// State trie version indicated by the runtime. All the storage changes that are performed
     /// use this version.
@@ -737,7 +738,36 @@ struct Inner {
 
 /// See [`Inner::storage_changes`].
 #[derive(Clone)]
-struct StorageChanges {
+enum StorageChange {
+    /// Populating the list of trie nodes whose storage value is being modified.
+    StorageValuesOnly {
+        /// All trie nodes whose storage value is being modified.
+        changes: TrieItemsChange,
+
+        /// Contains a copy of [`StorageChange::Items::changes`] at the time when the transaction
+        /// started. When the storage transaction ends, either the entry is silently discarded
+        /// (to commit), or is written over [`StorageChange::Items::changes`] (to rollback).
+        ///
+        /// Contains a `Vec` in case transactions are stacked.
+        transactions_stack: Vec<TrieItemsChange>,
+    },
+
+    /// Populated the list of all changes to all trie nodes.
+    StorageAndBranches {
+        /// Changes to the main trie.
+        main_trie: BTreeMap<Vec<Nibble>, TrieChange>,
+
+        /// Changes to the default child tries.
+        default_child_tries: hashbrown::HashMap<
+            Vec<u8>,
+            Option<BTreeMap<Vec<Nibble>, TrieChange>>,
+            fnv::FnvBuildHasher,
+        >,
+    },
+}
+
+#[derive(Clone)]
+struct TrieItemsChange {
     /// Changes to the main trie.
     main_trie: storage_diff::TrieDiff,
 
@@ -751,6 +781,57 @@ impl Inner {
     /// Continues the execution.
     fn run(mut self) -> RuntimeHostVm {
         loop {
+            match self.root_calculation.take() {
+                Some(trie_root_calculator::InProgress::ClosestDescendant(calc_req)) => {
+                    self.root_calculation = Some(
+                        trie_root_calculator::InProgress::ClosestDescendant(calc_req),
+                    );
+                    return RuntimeHostVm::NextKey(NextKey {
+                        inner: self,
+                        key_overwrite: None,
+                        keys_removed_so_far: 0,
+                    });
+                }
+                Some(trie_root_calculator::InProgress::StorageValue(calc_req)) => {
+                    if calc_req
+                        .key()
+                        .fold(0, |count, slice| count + slice.as_ref().len())
+                        % 2
+                        == 0
+                    {
+                        self.root_calculation =
+                            Some(trie_root_calculator::InProgress::StorageValue(calc_req));
+                        return RuntimeHostVm::StorageGet(StorageGet { inner: self });
+                    } else {
+                        // If the number of nibbles in the key is uneven, we are sure that
+                        // there exists no storage value.
+                        self.root_calculation = Some(calc_req.inject_value(None));
+                    }
+                }
+                Some(trie_root_calculator::InProgress::ClosestDescendantMerkleValue(calc_req)) => {
+                    self.root_calculation = Some(
+                        trie_root_calculator::InProgress::ClosestDescendantMerkleValue(calc_req),
+                    );
+                    return RuntimeHostVm::ClosestDescendantMerkleValue(
+                        ClosestDescendantMerkleValue { inner: self },
+                    );
+                }
+                Some(trie_root_calculator::InProgress::TrieNodeInsertUpdateEvent(ev)) => {
+                    // TODO: put in storage
+                    self.root_calculation = Some(ev.resume());
+                }
+                Some(trie_root_calculator::InProgress::TrieNodeRemoveEvent(ev)) => {
+                    // TODO: put in storage
+                    self.root_calculation = Some(ev.resume());
+                }
+                Some(trie_root_calculator::InProgress::Finished { trie_root_hash }) => {
+                    if let host::HostVm::ExternalStorageRoot(req) = self.vm {
+                        self.vm = req.resume(Some(&trie_root_hash));
+                    }
+                }
+                None => {}
+            }
+
             match self.vm {
                 host::HostVm::ReadyToRun(r) => self.vm = r.run(),
 
@@ -765,20 +846,50 @@ impl Inner {
                 }
 
                 host::HostVm::Finished(finished) => {
-                    return RuntimeHostVm::Finished(Ok(Success {
-                        virtual_machine: SuccessVirtualMachine(finished),
-                        storage_main_trie_changes: self.storage_changes.main_trie,
-                        state_trie_version: self.state_trie_version,
-                        offchain_storage_changes: self.offchain_storage_changes,
-                        logs: self.logs,
-                    }));
+                    // The storage root calculation has the side effect of calculating the changes
+                    // to all the trie nodes. If the runtime hasn't called `ExternalStorageRoot`
+                    // since the last modificatoin to the storage, we now perform this calculation.
+                    // TODO: it is unclear whether the same must be done for child tries
+                    match self.storage_change {
+                        StorageChange::StorageAndBranches {
+                            main_trie,
+                            default_child_tries,
+                        } => {
+                            return RuntimeHostVm::Finished(Ok(Success {
+                                virtual_machine: SuccessVirtualMachine(finished),
+                                storage_main_trie_changes: main_trie,
+                                state_trie_version: self.state_trie_version,
+                                offchain_storage_changes: self.offchain_storage_changes,
+                                logs: self.logs,
+                            }));
+                        }
+                        StorageChange::StorageValuesOnly {
+                            changes,
+                            transactions_stack,
+                        } => {
+                            self.vm = host::HostVm::Finished(finished);
+                            debug_assert!(transactions_stack.is_empty()); // Guaranteed by lower level code.
+                            self.root_calculation =
+                                Some(trie_root_calculator::trie_root_calculator(
+                                    trie_root_calculator::Config {
+                                        diff: changes.main_trie.clone(), // TODO: cloning :-/
+                                        diff_trie_entries_version: self.state_trie_version,
+                                        max_trie_recalculation_depth_hint: 16, // TODO: ?!
+                                    },
+                                ));
+                        }
+                    }
                 }
 
                 host::HostVm::ExternalStorageGet(req) => {
                     let diff_search = match req.child_trie() {
-                        None => Some(self.storage_changes.main_trie.diff_get(req.key().as_ref())),
+                        None => Some(
+                            self.trie_items_change
+                                .main_trie
+                                .diff_get(req.key().as_ref()),
+                        ),
                         Some(child_trie) => match self
-                            .storage_changes
+                            .trie_items_change
                             .default_child_tries
                             .get(child_trie.as_ref())
                         {
@@ -806,9 +917,9 @@ impl Inner {
                 host::HostVm::ExternalStorageSet(req) => {
                     if let Some(value) = req.value() {
                         let trie = match req.child_trie() {
-                            None => &mut self.storage_changes.main_trie,
+                            None => &mut self.trie_items_change.main_trie,
                             Some(child_trie) => self
-                                .storage_changes
+                                .trie_items_change
                                 .default_child_tries
                                 .entry(child_trie.as_ref().to_vec())
                                 .or_insert(None)
@@ -818,9 +929,9 @@ impl Inner {
                         trie.diff_insert(req.key().as_ref(), value.as_ref(), ());
                     } else {
                         let trie = match req.child_trie() {
-                            None => Some(&mut self.storage_changes.main_trie),
+                            None => Some(&mut self.trie_items_change.main_trie),
                             Some(child_trie) => self
-                                .storage_changes
+                                .trie_items_change
                                 .default_child_tries
                                 .entry(child_trie.as_ref().to_vec())
                                 .or_insert(Some(storage_diff::TrieDiff::empty()))
@@ -838,12 +949,12 @@ impl Inner {
                 host::HostVm::ExternalStorageAppend(req) => {
                     let current_value = match req.child_trie() {
                         None => self
-                            .storage_changes
+                            .trie_items_change
                             .main_trie
                             .diff_get(req.key().as_ref())
                             .map(|(v, _)| v),
                         Some(child_trie) => self
-                            .storage_changes
+                            .trie_items_change
                             .default_child_tries
                             .get(child_trie.as_ref())
                             .and_then(|insert_or_delete| match insert_or_delete {
@@ -857,7 +968,7 @@ impl Inner {
                     if let Some(current_value) = current_value {
                         let mut current_value = current_value.unwrap_or_default().to_vec();
                         append_to_storage_value(&mut current_value, req.value().as_ref());
-                        self.storage_changes.main_trie.diff_insert(
+                        self.trie_items_change.main_trie.diff_insert(
                             req.key().as_ref().to_vec(),
                             current_value,
                             (),
@@ -880,92 +991,35 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageRoot(req) => {
-                    if self.root_calculation.is_none() {
-                        // TODO: don't clone?
-                        let diff = match req.child_trie() {
-                            None => Some(self.storage_changes.main_trie.clone()),
-                            Some(child_trie) => match self
-                                .storage_changes
-                                .default_child_tries
-                                .get(child_trie.as_ref())
-                            {
-                                None => Some(storage_diff::TrieDiff::empty()), // TODO: what if the trie doesn't exist at all?
-                                Some(Some(diff)) => Some(diff.clone()),
-                                Some(None) => None,
-                            },
-                        };
+                    // TODO: don't clone?
+                    let diff = match req.child_trie() {
+                        None => Some(self.trie_items_change.main_trie.clone()),
+                        Some(child_trie) => match self
+                            .trie_items_change
+                            .default_child_tries
+                            .get(child_trie.as_ref())
+                        {
+                            None => Some(storage_diff::TrieDiff::empty()), // TODO: what if the trie doesn't exist at all?
+                            Some(Some(diff)) => Some(diff.clone()),
+                            Some(None) => None,
+                        },
+                    };
 
-                        let Some(diff) = diff
+                    let Some(diff) = diff
                             else {
                                 // Trie has been destroyed.
                                 self.vm = req.resume(None);
                                 continue;
                             };
 
-                        self.root_calculation = Some(trie_root_calculator::trie_root_calculator(
-                            trie_root_calculator::Config {
-                                diff,
-                                diff_trie_entries_version: self.state_trie_version,
-                                max_trie_recalculation_depth_hint: 16, // TODO: ?!
-                            },
-                        ));
-                    }
-
-                    match self.root_calculation.take().unwrap() {
-                        trie_root_calculator::InProgress::ClosestDescendant(calc_req) => {
-                            self.vm = req.into();
-                            self.root_calculation = Some(
-                                trie_root_calculator::InProgress::ClosestDescendant(calc_req),
-                            );
-                            return RuntimeHostVm::NextKey(NextKey {
-                                inner: self,
-                                key_overwrite: None,
-                                keys_removed_so_far: 0,
-                            });
-                        }
-                        trie_root_calculator::InProgress::StorageValue(calc_req) => {
-                            self.vm = req.into();
-
-                            if calc_req
-                                .key()
-                                .fold(0, |count, slice| count + slice.as_ref().len())
-                                % 2
-                                == 0
-                            {
-                                self.root_calculation =
-                                    Some(trie_root_calculator::InProgress::StorageValue(calc_req));
-                                return RuntimeHostVm::StorageGet(StorageGet { inner: self });
-                            } else {
-                                // If the number of nibbles in the key is uneven, we are sure that
-                                // there exists no storage value.
-                                self.root_calculation = Some(calc_req.inject_value(None));
-                            }
-                        }
-                        trie_root_calculator::InProgress::ClosestDescendantMerkleValue(
-                            calc_req,
-                        ) => {
-                            self.vm = req.into();
-                            self.root_calculation = Some(
-                                trie_root_calculator::InProgress::ClosestDescendantMerkleValue(
-                                    calc_req,
-                                ),
-                            );
-                            return RuntimeHostVm::ClosestDescendantMerkleValue(
-                                ClosestDescendantMerkleValue { inner: self },
-                            );
-                        }
-                        trie_root_calculator::InProgress::TrieNodeInsertUpdateEvent(ev) => {
-                            self.vm = req.into();
-                            self.root_calculation = Some(ev.resume());
-                        }
-                        trie_root_calculator::InProgress::TrieNodeRemoveEvent(ev) => {
-                            self.vm = req.into();
-                            self.root_calculation = Some(ev.resume());
-                        }
-                        trie_root_calculator::InProgress::Finished { trie_root_hash } => {
-                            self.vm = req.resume(Some(&trie_root_hash));
-                        }
-                    }
+                    self.vm = req.into();
+                    self.root_calculation = Some(trie_root_calculator::trie_root_calculator(
+                        trie_root_calculator::Config {
+                            diff,
+                            diff_trie_entries_version: self.state_trie_version,
+                            max_trie_recalculation_depth_hint: 16, // TODO: ?!
+                        },
+                    ));
                 }
 
                 host::HostVm::ExternalStorageNextKey(req) => {
@@ -1026,7 +1080,7 @@ impl Inner {
 
                 host::HostVm::StartStorageTransaction(tx) => {
                     // TODO: this cloning is very expensive, but providing a more optimized implementation is very complicated
-                    self.transactions_stack.push(self.storage_changes.clone());
+                    self.transactions_stack.push(self.trie_items_change.clone());
                     self.vm = tx.resume();
                 }
 
@@ -1037,7 +1091,7 @@ impl Inner {
                     let rollback_diff = self.transactions_stack.pop().unwrap();
 
                     if rollback {
-                        self.storage_changes = rollback_diff;
+                        self.trie_items_change = rollback_diff;
                     }
 
                     self.vm = resume.resume();
