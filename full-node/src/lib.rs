@@ -76,6 +76,8 @@ pub struct ChainConfig<'a> {
     pub keystore_memory: Vec<[u8; 64]>,
     /// Path to the SQLite database. If `None`, the database is opened in memory.
     pub sqlite_database_path: Option<PathBuf>,
+    /// Maximum size, in bytes, of the cache SQLite uses.
+    pub sqlite_cache_size: usize,
     /// Path to the directory where cryptographic keys are stored on disk.
     ///
     /// If `None`, no keys are stored in disk.
@@ -128,7 +130,7 @@ pub async fn run_until(config: Config<'_>, until: Pin<Box<dyn Future<Output = ()
             &chain_spec,
             genesis_chain_information.as_ref(),
             config.chain.sqlite_database_path,
-            256 * 1024 * 1024, // TODO: make configurable?
+            config.chain.sqlite_cache_size,
             config.show_informant,
         )
         .await;
@@ -142,7 +144,7 @@ pub async fn run_until(config: Config<'_>, until: Pin<Box<dyn Future<Output = ()
                 relay_chain_spec.as_ref().unwrap(),
                 relay_genesis_chain_information.as_ref().unwrap().as_ref(),
                 relay_chain.sqlite_database_path.clone(),
-                256 * 1024 * 1024, // TODO: make configurable?
+                relay_chain.sqlite_cache_size,
                 config.show_informant,
             )
             .await
