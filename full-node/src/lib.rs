@@ -84,6 +84,7 @@ pub struct ChainConfig<'a> {
 
 /// Runs the node using the given configuration. Catches `SIGINT` signals and stops if one is
 /// detected.
+// TODO: should return an error if something bad happens instead of panicking
 pub async fn run_until(config: Config<'_>, until: Pin<Box<dyn Future<Output = ()>>>) {
     let chain_spec = {
         smoldot::chain_spec::ChainSpec::from_json_bytes(&config.chain.chain_spec)
