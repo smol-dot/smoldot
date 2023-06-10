@@ -71,28 +71,33 @@ pub fn encode_chain_storage<'a>(
 /// Deserializes the information about the chain.
 ///
 /// This is the invert operation of [`encode_chain_storage`].
-pub fn decode_chain(
-    encoded: &str,
-    block_number_bytes: usize,
-) -> Result<
-    (
-        chain_information::ValidChainInformation,
-        Option<HashMap<Vec<u8>, Vec<u8>, fnv::FnvBuildHasher>>,
-    ),
-    CorruptedError,
-> {
+pub fn decode_chain(encoded: &str, block_number_bytes: usize) -> Result<Decoded, CorruptedError> {
     let encoded: defs::SerializedChainInformation =
         serde_json::from_str(encoded).map_err(|e| CorruptedError(CorruptedErrorInner::Serde(e)))?;
 
-    let (chain_info, storage) = encoded
+    let defs::Decoded {
+        chain_information,
+        storage,
+    } = encoded
         .decode(block_number_bytes)
         .map_err(|err| CorruptedError(CorruptedErrorInner::Deserialize(err)))?;
 
-    let chain_info = chain_information::ValidChainInformation::try_from(chain_info)
+    let chain_information = chain_information::ValidChainInformation::try_from(chain_information)
         .map_err(CorruptedErrorInner::InvalidChain)
         .map_err(CorruptedError)?;
 
-    Ok((chain_info, storage))
+    Ok(Decoded {
+        chain_information,
+        storage,
+    })
+}
+
+/// Outcome of [`decode_chain`].
+pub struct Decoded {
+    /// Decoded chain information.
+    pub chain_information: chain_information::ValidChainInformation,
+    /// All the keys and values found in the database. `None` if no information was found.
+    pub storage: Option<HashMap<Vec<u8>, Vec<u8>, fnv::FnvBuildHasher>>,
 }
 
 /// Opaque error indicating a corruption in the data stored in the local storage.

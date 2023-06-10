@@ -1481,7 +1481,7 @@ impl<'a, TUd> StorageNodeAccess<'a, TUd> {
     pub fn remove(self) -> Remove<'a, TUd> {
         // If the removed node has 2 or more children, then the node continues as a branch node.
         {
-            let mut node = self.trie.nodes.get_mut(self.node_index).unwrap();
+            let node = self.trie.nodes.get_mut(self.node_index).unwrap();
             if node.children.iter().filter(|c| c.is_some()).count() >= 2 {
                 node.has_storage_value = false;
                 return Remove::StorageToBranch(BranchNodeAccess {
@@ -1846,7 +1846,7 @@ impl<'a, TUd> BranchNodeAccess<'a, TUd> {
     ///
     /// The trie structure doesn't change.
     pub fn insert_storage_value(self) -> StorageNodeAccess<'a, TUd> {
-        let mut node = self.trie.nodes.get_mut(self.node_index).unwrap();
+        let node = self.trie.nodes.get_mut(self.node_index).unwrap();
         debug_assert!(!node.has_storage_value);
         node.has_storage_value = true;
 
@@ -2171,7 +2171,7 @@ impl<'a, TUd> PrepareInsertOne<'a, TUd> {
 
         // Update the children node to point to their new parent.
         for (child_index, child) in self.children.iter().enumerate() {
-            let mut child = match child {
+            let child = match child {
                 Some(c) => self.trie.nodes.get_mut(*c).unwrap(),
                 None => continue,
             };
@@ -2183,7 +2183,7 @@ impl<'a, TUd> PrepareInsertOne<'a, TUd> {
 
         // Update the parent to point to its new child.
         if let Some((parent_index, child_index)) = self.parent {
-            let mut parent = self.trie.nodes.get_mut(parent_index).unwrap();
+            let parent = self.trie.nodes.get_mut(parent_index).unwrap();
             parent.children[usize::from(u8::from(child_index))] = Some(new_node_index);
         } else {
             self.trie.root_index = Some(new_node_index);
@@ -2268,7 +2268,7 @@ impl<'a, TUd> PrepareInsertTwo<'a, TUd> {
 
         // Update the branch node's children to point to their new parent.
         for (child_index, child) in self.branch_children.iter().enumerate() {
-            let mut child = match child {
+            let child = match child {
                 Some(c) => self.trie.nodes.get_mut(*c).unwrap(),
                 None => continue,
             };
@@ -2280,7 +2280,7 @@ impl<'a, TUd> PrepareInsertTwo<'a, TUd> {
 
         // Update the branch node's parent to point to its new child.
         if let Some((parent_index, child_index)) = self.branch_parent {
-            let mut parent = self.trie.nodes.get_mut(parent_index).unwrap();
+            let parent = self.trie.nodes.get_mut(parent_index).unwrap();
             parent.children[usize::from(u8::from(child_index))] = Some(new_branch_node_index);
         } else {
             self.trie.root_index = Some(new_branch_node_index);
