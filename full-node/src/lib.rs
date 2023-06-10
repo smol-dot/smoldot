@@ -15,6 +15,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+#![deny(rustdoc::broken_intra_doc_links)]
+// TODO: #![deny(unused_crate_dependencies)] doesn't work because some deps are used only by the binary, figure if this can be fixed?
+
 use futures_channel::oneshot;
 use futures_util::{stream, FutureExt as _, StreamExt as _};
 use smol::future;
@@ -36,6 +39,7 @@ mod database_thread;
 mod jaeger_service;
 mod json_rpc_service;
 mod network_service;
+mod util;
 
 #[derive(Debug)]
 pub struct Config<'a> {

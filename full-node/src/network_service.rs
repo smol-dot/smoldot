@@ -27,10 +27,7 @@
 // TODO: doc
 // TODO: re-review this once finished
 
-use crate::{
-    run::{database_thread, jaeger_service},
-    util,
-};
+use crate::{database_thread, jaeger_service, util};
 
 use core::{cmp, future::Future, mem, pin::Pin, task::Poll, time::Duration};
 use futures_channel::oneshot;

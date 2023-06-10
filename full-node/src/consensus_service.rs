@@ -24,7 +24,7 @@
 // TODO: doc
 // TODO: re-review this once finished
 
-use crate::run::{database_thread, jaeger_service, network_service};
+use crate::{database_thread, jaeger_service, network_service};
 
 use core::num::NonZeroU32;
 use futures_channel::{mpsc, oneshot};

@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #![deny(rustdoc::broken_intra_doc_links)]
-#![deny(unused_crate_dependencies)]
+// TODO: #![deny(unused_crate_dependencies)] doesn't work because some deps are used only by the library, figure if this can be fixed?
 
 use std::{
     borrow::Cow,
@@ -25,8 +25,6 @@ use std::{
 };
 
 mod cli;
-mod run;
-mod util;
 
 fn main() {
     smol::block_on(async_main())
@@ -107,7 +105,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
             // interactions will happen.
             assert_ne!(parsed_relay_spec.id(), parsed_chain_spec.id());
 
-            Some(run::ChainConfig {
+            Some(smoldot_full_node::ChainConfig {
                 chain_spec: spec_json,
                 additional_bootnodes: Vec::new(),
                 keystore_memory: Vec::new(),
@@ -235,8 +233,8 @@ async fn run(cli_options: cli::CliOptionsRun) {
         <https://github.com/smol-dot/smoldot/issues>."
     );
 
-    run::run(run::Config {
-        chain: run::ChainConfig {
+    smoldot_full_node::run(smoldot_full_node::Config {
+        chain: smoldot_full_node::ChainConfig {
             chain_spec,
             additional_bootnodes: cli_options
                 .additional_bootnode
