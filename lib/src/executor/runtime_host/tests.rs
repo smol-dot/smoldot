@@ -157,7 +157,6 @@ fn all_tests() {
                     storage
                         .get(get.key().as_ref())
                         .map(|v| (iter::once(&v[..]), state_version))
-                    // TODO: ?!?! which entry version?
                 };
 
                 execution = get.inject_value(value);
