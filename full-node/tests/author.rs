@@ -29,6 +29,7 @@ fn basic_block_generated() {
                             .unwrap(),
                     ],
                     sqlite_database_path: None,
+                    sqlite_cache_size: 256 * 1024 * 1024,
                     keystore_path: None,
                 },
                 relay_chain: None,

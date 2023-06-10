@@ -95,6 +95,13 @@ pub struct CliOptionsRun {
     /// Do not load or store anything on disk.
     #[arg(long)]
     pub tmp: bool,
+    /// Maximum size of the cache used by the database.
+    #[arg(long, default_value = "256M", value_parser = parse_max_bytes)]
+    pub database_cache_size: MaxBytes,
+    /// Maximum size of the cache used by the database for the relay chain. Ignored if the
+    /// chain is not a parachain.
+    #[arg(long, default_value = "256M", value_parser = parse_max_bytes)]
+    pub relay_chain_database_cache_size: MaxBytes,
 }
 
 #[derive(Debug, clap::Parser)]
@@ -196,6 +203,56 @@ fn parse_bootnode(string: &str) -> Result<Bootnode, String> {
         .map_err(|(err, _)| format!("Failed to parse PeerId in bootnode: {err}"))?;
     address.pop();
     Ok(Bootnode { address, peer_id })
+}
+
+#[derive(Debug, Clone)]
+pub struct MaxBytes(pub usize);
+
+fn parse_max_bytes(string: &str) -> Result<MaxBytes, String> {
+    let (multiplier, num) = if let Some(s) = string.strip_suffix("Ti") {
+        (
+            usize::try_from(1024 * 1024 * 1024 * 1024u64).unwrap_or(usize::max_value()),
+            s,
+        )
+    } else if let Some(s) = string.strip_suffix('T') {
+        (
+            usize::try_from(1000 * 1000 * 1000 * 1000u64).unwrap_or(usize::max_value()),
+            s,
+        )
+    } else if let Some(s) = string.strip_suffix("Gi") {
+        (
+            usize::try_from(1024 * 1024 * 1024u64).unwrap_or(usize::max_value()),
+            s,
+        )
+    } else if let Some(s) = string.strip_suffix('G') {
+        (
+            usize::try_from(1000 * 1000 * 1000u64).unwrap_or(usize::max_value()),
+            s,
+        )
+    } else if let Some(s) = string.strip_suffix("Mi") {
+        (
+            usize::try_from(1024 * 1024u64).unwrap_or(usize::max_value()),
+            s,
+        )
+    } else if let Some(s) = string.strip_suffix('M') {
+        (
+            usize::try_from(1000 * 1000u64).unwrap_or(usize::max_value()),
+            s,
+        )
+    } else if let Some(s) = string.strip_suffix("ki") {
+        (1024, s)
+    } else if let Some(s) = string.strip_suffix('k') {
+        (1000, s)
+    } else {
+        (1, string)
+    };
+
+    let Ok(num) = num.parse::<usize>()
+        else { return Err("Failed to parse number of bytes".into()) };
+
+    // Because it's a maximum value it's ok to saturate rather than return an error.
+    let real_value = num.saturating_mul(multiplier);
+    Ok(MaxBytes(real_value))
 }
 
 // `clap` requires error types to implement the `std::error::Error` trait.
