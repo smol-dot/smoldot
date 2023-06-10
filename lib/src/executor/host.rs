@@ -195,8 +195,8 @@ use super::{allocator, vm};
 use crate::{trie, util};
 
 use alloc::{
-    boxed::Box,
     borrow::ToOwned as _,
+    boxed::Box,
     string::{String, ToString as _},
     vec,
     vec::Vec,
@@ -2132,7 +2132,7 @@ pub struct ExternalStorageGet {
     inner: Box<Inner>,
 
     /// Function currently being called by the Wasm code. Refers to an index within
-    /// [`Inner::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
+    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
     calling: usize,
 
     /// Used only for the `ext_storage_read_version_1` function. Stores the pointer where the
@@ -2545,7 +2545,7 @@ impl fmt::Debug for ExternalStorageAppend {
 pub struct ExternalStorageClearPrefix {
     inner: Box<Inner>,
     /// Function currently being called by the Wasm code. Refers to an index within
-    /// [`Inner::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
+    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
     calling: usize,
 
     /// Pointer and size to the prefix. `None` if `&[]`. Guaranteed to be in range.
@@ -2637,7 +2637,7 @@ pub struct ExternalStorageRoot {
     inner: Box<Inner>,
 
     /// Function currently being called by the Wasm code. Refers to an index within
-    /// [`Inner::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
+    /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
     calling: usize,
 
     /// Pointer and size of the child trie, if any. Guaranteed to be in range.
