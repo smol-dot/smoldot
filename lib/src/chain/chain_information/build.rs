@@ -191,7 +191,7 @@ impl ChainInformationBuild {
         } = &config.finalized_block_header
         {
             assert_ne!(
-                header::decode(&header, config.block_number_bytes)
+                header::decode(header, config.block_number_bytes)
                     .unwrap()
                     .number,
                 0
@@ -527,7 +527,7 @@ impl ChainInformationBuild {
                         number: 0,
                         state_root: &state_trie_root_hash,
                         extrinsics_root: &trie::empty_trie_merkle_value(),
-                        digest: header::DigestRef::empty().into(),
+                        digest: header::DigestRef::empty(),
                     }
                     .scale_encoding_vec(inner.block_number_bytes);
 
@@ -765,7 +765,7 @@ impl ChainInformationBuild {
                             scale_encoded_header: header,
                             ..
                         } => {
-                            &header::decode(header, inner.block_number_bytes)
+                            header::decode(header, inner.block_number_bytes)
                                 .unwrap()
                                 .state_root
                         }
