@@ -43,6 +43,7 @@ use crate::{
 };
 
 use alloc::{
+    boxed::Box,
     collections::BTreeSet,
     string::{String, ToString as _},
     vec::Vec,

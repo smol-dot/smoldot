@@ -20,7 +20,7 @@
 //! This module contains the [`ChainInformationBuild`] struct, a state machine that drives the
 //! process of building the chain information of a certain finalized point of a chain.
 
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use core::{fmt, iter, num::NonZeroU64};
 
 use crate::{

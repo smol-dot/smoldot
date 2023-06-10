@@ -40,7 +40,7 @@
 
 use crate::header;
 
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use core::num::NonZeroU64;
 
 pub mod build;
