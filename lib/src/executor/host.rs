@@ -245,13 +245,20 @@ pub struct Config<TModule> {
 /// >           necessary for the clone to run.
 #[derive(Clone)]
 pub struct HostVmPrototype {
+    /// Fields that are kept as is even during the execution.
+    common: Box<VmCommon>,
+
+    /// Inner virtual machine prototype.
+    vm_proto: vm::VirtualMachinePrototype,
+}
+
+/// Fields that are kept as is even during the execution.
+#[derive(Clone)]
+struct VmCommon {
     /// Runtime version of this runtime.
     ///
     /// Always `Some`, except at initialization.
     runtime_version: Option<CoreVersion>,
-
-    /// Inner virtual machine prototype.
-    vm_proto: vm::VirtualMachinePrototype,
 
     /// Initial value of the `__heap_base` global in the Wasm module. Used to initialize the memory
     /// allocator.
@@ -367,16 +374,18 @@ impl HostVmPrototype {
         }
 
         let mut host_vm_prototype = HostVmPrototype {
-            runtime_version,
             vm_proto,
-            heap_base,
-            registered_functions,
-            heap_pages: config.heap_pages,
-            memory_total_pages,
+            common: Box::new(VmCommon {
+                runtime_version,
+                heap_base,
+                registered_functions,
+                heap_pages: config.heap_pages,
+                memory_total_pages,
+            }),
         };
 
         // Call `Core_version` if no runtime version is known yet.
-        if host_vm_prototype.runtime_version.is_none() {
+        if host_vm_prototype.common.runtime_version.is_none() {
             let mut vm: HostVm = match host_vm_prototype.run_no_param("Core_version") {
                 Ok(vm) => vm.into(),
                 Err((err, _)) => return Err(NewErr::CoreVersion(CoreVersionError::Start(err))),
@@ -395,7 +404,7 @@ impl HostVmPrototype {
                             };
 
                         host_vm_prototype = finished.into_prototype();
-                        host_vm_prototype.runtime_version = Some(version);
+                        host_vm_prototype.common.runtime_version = Some(version);
                         break;
                     }
 
@@ -417,18 +426,18 @@ impl HostVmPrototype {
         }
 
         // Success!
-        debug_assert!(host_vm_prototype.runtime_version.is_some());
+        debug_assert!(host_vm_prototype.common.runtime_version.is_some());
         Ok(host_vm_prototype)
     }
 
     /// Returns the number of heap pages that were passed to [`HostVmPrototype::new`].
     pub fn heap_pages(&self) -> HeapPages {
-        self.heap_pages
+        self.common.heap_pages
     }
 
     /// Returns the runtime version found in the module.
     pub fn runtime_version(&self) -> &CoreVersion {
-        self.runtime_version.as_ref().unwrap()
+        self.common.runtime_version.as_ref().unwrap()
     }
 
     /// Starts the VM, calling the function passed as parameter.
@@ -464,7 +473,7 @@ impl HostVmPrototype {
         // Initialize the state of the memory allocator. This is the allocator that is used in
         // order to allocate space for the input data, and also later used when the Wasm code
         // requests variable-length data.
-        let mut allocator = allocator::FreeingBumpHeapAllocator::new(self.heap_base);
+        let mut allocator = allocator::FreeingBumpHeapAllocator::new(self.common.heap_base);
 
         // Prepare the virtual machine for execution.
         let mut vm = self.vm_proto.prepare();
@@ -473,7 +482,7 @@ impl HostVmPrototype {
         let data_ptr = match allocator.allocate(
             &mut MemAccess {
                 vm: MemAccessVm::Prepare(&mut vm),
-                memory_total_pages: self.memory_total_pages,
+                memory_total_pages: self.common.memory_total_pages,
             },
             data_len_u32,
         ) {
@@ -521,16 +530,12 @@ impl HostVmPrototype {
 
         Ok(ReadyToRun {
             resume_value: None,
-            inner: Inner {
-                runtime_version: self.runtime_version,
+            inner: Box::new(Inner {
+                common: self.common,
                 vm,
-                heap_base: self.heap_base,
-                heap_pages: self.heap_pages,
-                memory_total_pages: self.memory_total_pages,
-                registered_functions: self.registered_functions,
                 storage_transaction_depth: 0,
                 allocator,
-            },
+            }),
         })
     }
 }
@@ -636,7 +641,7 @@ impl HostVm {
 
 /// Virtual machine is ready to run.
 pub struct ReadyToRun {
-    inner: Inner,
+    inner: Box<Inner>,
     resume_value: Option<vm::WasmValue>,
 }
 
@@ -738,7 +743,7 @@ impl ReadyToRun {
 
         // The Wasm code has called an host_fn. The `id` is a value that we passed
         // at initialization, and corresponds to an index in `registered_functions`.
-        let host_fn = match self.inner.registered_functions.get_mut(id) {
+        let host_fn = match self.inner.common.registered_functions.get_mut(id) {
             Some(FunctionImport::Resolved(f)) => *f,
             Some(FunctionImport::Unresolved { name, module }) => {
                 return HostVm::Error {
@@ -1112,6 +1117,7 @@ impl ReadyToRun {
                 let version_param = expect_state_version!(0);
                 let version_spec = self
                     .inner
+                    .common
                     .runtime_version
                     .as_ref()
                     .unwrap()
@@ -1416,6 +1422,7 @@ impl ReadyToRun {
                 let version_param = expect_state_version!(1);
                 let version_spec = self
                     .inner
+                    .common
                     .runtime_version
                     .as_ref()
                     .unwrap()
@@ -2003,7 +2010,7 @@ impl ReadyToRun {
                 match self.inner.allocator.deallocate(
                     &mut MemAccess {
                         vm: MemAccessVm::Running(&mut self.inner.vm),
-                        memory_total_pages: self.inner.memory_total_pages,
+                        memory_total_pages: self.inner.common.memory_total_pages,
                     },
                     pointer,
                 ) {
@@ -2090,7 +2097,7 @@ impl fmt::Debug for ReadyToRun {
 
 /// Function execution has succeeded. Contains the return value of the call.
 pub struct Finished {
-    inner: Inner,
+    inner: Box<Inner>,
 
     /// Pointer to the value returned by the VM. Guaranteed to be in range.
     value_ptr: u32,
@@ -2121,7 +2128,7 @@ impl fmt::Debug for Finished {
 
 /// Must provide the value of a storage entry.
 pub struct ExternalStorageGet {
-    inner: Inner,
+    inner: Box<Inner>,
 
     /// Function currently being called by the Wasm code. Refers to an index within
     /// [`Inner::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
@@ -2244,7 +2251,7 @@ impl ExternalStorageGet {
         mut self,
         value: Option<(impl Iterator<Item = impl AsRef<[u8]>> + Clone, usize)>,
     ) -> HostVm {
-        let host_fn = match self.inner.registered_functions[self.calling] {
+        let host_fn = match self.inner.common.registered_functions[self.calling] {
             FunctionImport::Resolved(f) => f,
             FunctionImport::Unresolved { .. } => unreachable!(),
         };
@@ -2330,7 +2337,7 @@ impl fmt::Debug for ExternalStorageGet {
 // TODO: what if it's a child trie and the child trie doesn't exist? create it?
 // TODO: what if the value is None and this is the last entry in the child trie? should it be destroyed?
 pub struct ExternalStorageSet {
-    inner: Inner,
+    inner: Box<Inner>,
     write_inner: ExternalStorageSetInner,
 }
 
@@ -2424,6 +2431,7 @@ impl ExternalStorageSet {
     /// order to properly build the trie and thus the trie root node hash.
     pub fn state_trie_version(&self) -> TrieEntryVersion {
         self.inner
+            .common
             .runtime_version
             .as_ref()
             .unwrap()
@@ -2475,7 +2483,7 @@ impl fmt::Debug for ExternalStorageSet {
 /// It is not necessary to decode `value` as is assumed that is already encoded in the same
 /// way as the other items in the container.
 pub struct ExternalStorageAppend {
-    inner: Inner,
+    inner: Box<Inner>,
 
     /// Pointer to the key whose value must be set. Guaranteed to be in range.
     key_ptr: u32,
@@ -2534,7 +2542,7 @@ impl fmt::Debug for ExternalStorageAppend {
 /// to remove.
 // TODO: clarify whether the entire child trie must disappear if the prefix is []
 pub struct ExternalStorageClearPrefix {
-    inner: Inner,
+    inner: Box<Inner>,
     /// Function currently being called by the Wasm code. Refers to an index within
     /// [`Inner::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
     calling: usize,
@@ -2582,7 +2590,7 @@ impl ExternalStorageClearPrefix {
     /// Must be passed how many keys have been cleared, and whether some keys remaining to be
     /// cleared.
     pub fn resume(self, num_cleared: u32, some_keys_remain: bool) -> HostVm {
-        let host_fn = match self.inner.registered_functions[self.calling] {
+        let host_fn = match self.inner.common.registered_functions[self.calling] {
             FunctionImport::Resolved(f) => f,
             FunctionImport::Unresolved { .. } => unreachable!(),
         };
@@ -2625,7 +2633,7 @@ impl fmt::Debug for ExternalStorageClearPrefix {
 
 /// Must provide the trie root hash of the storage.
 pub struct ExternalStorageRoot {
-    inner: Inner,
+    inner: Box<Inner>,
 
     /// Function currently being called by the Wasm code. Refers to an index within
     /// [`Inner::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
@@ -2656,7 +2664,7 @@ impl ExternalStorageRoot {
     /// Panics if `None` is passed and [`ExternalStorageRoot::child_trie`] returned `None`.
     ///
     pub fn resume(self, hash: Option<&[u8; 32]>) -> HostVm {
-        let host_fn = match self.inner.registered_functions[self.calling] {
+        let host_fn = match self.inner.common.registered_functions[self.calling] {
             FunctionImport::Resolved(f) => f,
             FunctionImport::Unresolved { .. } => unreachable!(),
         };
@@ -2692,7 +2700,7 @@ impl fmt::Debug for ExternalStorageRoot {
 
 /// Must provide the storage key that follows, in lexicographic order, a specific one.
 pub struct ExternalStorageNextKey {
-    inner: Inner,
+    inner: Box<Inner>,
 
     /// Pointer to the key whose follow-up must be found. Guaranteed to be in range.
     key_ptr: u32,
@@ -2773,7 +2781,7 @@ impl fmt::Debug for ExternalStorageNextKey {
 
 /// Must verify whether a signature is correct.
 pub struct SignatureVerification {
-    inner: Inner,
+    inner: Box<Inner>,
     /// Which cryptographic algorithm.
     algorithm: SignatureVerificationAlgorithm,
     /// Pointer to the signature. The size of the signature depends on the algorithm. Guaranteed
@@ -2974,7 +2982,7 @@ impl fmt::Debug for SignatureVerification {
 /// Must provide the runtime version obtained by calling the `Core_version` entry point of a Wasm
 /// blob.
 pub struct CallRuntimeVersion {
-    inner: Inner,
+    inner: Box<Inner>,
 
     /// Pointer to the wasm code whose runtime version must be provided. Guaranteed to be in range.
     wasm_blob_ptr: u32,
@@ -3024,7 +3032,7 @@ impl fmt::Debug for CallRuntimeVersion {
 
 /// Must set the value of the off-chain storage.
 pub struct ExternalOffchainStorageSet {
-    inner: Inner,
+    inner: Box<Inner>,
 
     /// Pointer to the key whose value must be set. Guaranteed to be in range.
     key_ptr: u32,
@@ -3075,7 +3083,7 @@ impl fmt::Debug for ExternalOffchainStorageSet {
 /// Use the implementation of [`fmt::Display`] to obtain the log entry. For example, you can
 /// call [`alloc::string::ToString::to_string`] to turn it into a `String`.
 pub struct LogEmit {
-    inner: Inner,
+    inner: Box<Inner>,
     log_entry: LogEmitInner,
 }
 
@@ -3161,7 +3169,7 @@ impl fmt::Debug for LogEmit {
 
 /// Queries the maximum log level.
 pub struct GetMaxLogLevel {
-    inner: Inner,
+    inner: Box<Inner>,
 }
 
 impl GetMaxLogLevel {
@@ -3186,7 +3194,7 @@ impl fmt::Debug for GetMaxLogLevel {
 
 /// Declares the start of a transaction.
 pub struct StartStorageTransaction {
-    inner: Inner,
+    inner: Box<Inner>,
 }
 
 impl StartStorageTransaction {
@@ -3207,7 +3215,7 @@ impl fmt::Debug for StartStorageTransaction {
 
 /// Declares the end of a transaction.
 pub struct EndStorageTransaction {
-    inner: Inner,
+    inner: Box<Inner>,
 }
 
 impl EndStorageTransaction {
@@ -3234,30 +3242,17 @@ enum FunctionImport {
 
 /// Running virtual machine. Shared between all the variants in [`HostVm`].
 struct Inner {
-    /// See [`HostVmPrototype::runtime_version`].
-    runtime_version: Option<CoreVersion>,
-
     /// Inner lower-level virtual machine.
     vm: vm::VirtualMachine,
-
-    /// Initial value of the `__heap_base` global in the Wasm module. Used to initialize the memory
-    /// allocator in case we need to rebuild the VM.
-    heap_base: u32,
-
-    /// Value of `heap_pages` passed to [`HostVmPrototype::new`].
-    heap_pages: HeapPages,
-
-    /// See [`HostVmPrototype::memory_total_pages`].
-    memory_total_pages: HeapPages,
 
     /// The depth of storage transaction started with `ext_storage_start_transaction_version_1`.
     storage_transaction_depth: u32,
 
-    /// See [`HostVmPrototype::registered_functions`].
-    registered_functions: Vec<FunctionImport>,
-
     /// Memory allocator in order to answer the calls to `malloc` and `free`.
     allocator: allocator::FreeingBumpHeapAllocator,
+
+    /// Fields that are kept as is even during the execution.
+    common: Box<VmCommon>,
 }
 
 impl Inner {
@@ -3273,7 +3268,7 @@ impl Inner {
     /// Must only be called while the Wasm is handling an `host_fn`.
     ///
     fn alloc_write_and_return_pointer_size(
-        mut self,
+        mut self: Box<Self>,
         function_name: &'static str,
         data: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
     ) -> HostVm {
@@ -3322,7 +3317,7 @@ impl Inner {
     /// Must only be called while the Wasm is handling an `host_fn`.
     ///
     fn alloc_write_and_return_pointer(
-        mut self,
+        mut self: Box<Self>,
         function_name: &'static str,
         data: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
     ) -> HostVm {
@@ -3370,7 +3365,7 @@ impl Inner {
         let dest_ptr = match self.allocator.allocate(
             &mut MemAccess {
                 vm: MemAccessVm::Running(&mut self.vm),
-                memory_total_pages: self.memory_total_pages,
+                memory_total_pages: self.common.memory_total_pages,
             },
             size,
         ) {
@@ -3396,7 +3391,7 @@ impl Inner {
         // Please note the `=`. For example if we write to page 0, we want to have at least 1 page
         // allocated.
         let current_num_pages = self.vm.memory_size();
-        debug_assert!(current_num_pages <= self.memory_total_pages);
+        debug_assert!(current_num_pages <= self.common.memory_total_pages);
         if current_num_pages <= last_byte_memory_page {
             // For now, we grow the memory just enough to fit.
             // TODO: do better
@@ -3415,12 +3410,8 @@ impl Inner {
     /// Turns the virtual machine back into a prototype.
     fn into_prototype(self) -> HostVmPrototype {
         HostVmPrototype {
-            runtime_version: self.runtime_version,
             vm_proto: self.vm.into_prototype(),
-            heap_base: self.heap_base,
-            registered_functions: self.registered_functions,
-            heap_pages: self.heap_pages,
-            memory_total_pages: self.memory_total_pages,
+            common: self.common,
         }
     }
 }
