@@ -195,6 +195,7 @@ use super::{allocator, vm};
 use crate::{trie, util};
 
 use alloc::{
+    boxed::Box,
     borrow::ToOwned as _,
     string::{String, ToString as _},
     vec,
