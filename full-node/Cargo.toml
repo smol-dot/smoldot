@@ -11,7 +11,7 @@ default-run = "full-node"
 
 [[bin]]
 name = "full-node"
-path = "src/main.rs"
+path = "bin/main.rs"
 
 [dependencies]
 blake2-rfc = { version = "0.2.18", default-features = false }
