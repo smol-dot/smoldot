@@ -209,12 +209,22 @@ fn parse_bootnode(string: &str) -> Result<Bootnode, String> {
 pub struct MaxBytes(pub usize);
 
 fn parse_max_bytes(string: &str) -> Result<MaxBytes, String> {
-    let (multiplier, num) = if let Some(s) = string.strip_suffix('G') {
+    let (multiplier, num) = if let Some(s) = string.strip_suffix("Ti") {
+        (1024 * 1024 * 1024 * 1024, s)
+    } else if let Some(s) = string.strip_suffix('T') {
+        (1000 * 1000 * 1000 * 1000, s)
+    } else if let Some(s) = string.strip_suffix("Gi") {
         (1024 * 1024 * 1024, s)
-    } else if let Some(s) = string.strip_suffix('M') {
+    } else if let Some(s) = string.strip_suffix('G') {
+        (1000 * 1000 * 1000, s)
+    } else if let Some(s) = string.strip_suffix("Mi") {
         (1024 * 1024, s)
-    } else if let Some(s) = string.strip_suffix('k') {
+    } else if let Some(s) = string.strip_suffix('M') {
+        (1000 * 1000, s)
+    } else if let Some(s) = string.strip_suffix("ki") {
         (1024, s)
+    } else if let Some(s) = string.strip_suffix('k') {
+        (1000, s)
     } else {
         (1, string)
     };
