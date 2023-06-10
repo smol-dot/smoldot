@@ -32,7 +32,10 @@ use smoldot::{
         peer_id::{self, PeerId},
     },
 };
-use std::{borrow::Cow, iter, net::SocketAddr, path::PathBuf, sync::Arc, thread, time::Duration};
+use std::{
+    borrow::Cow, future::Future, iter, net::SocketAddr, path::PathBuf, pin::Pin, sync::Arc, thread,
+    time::Duration,
+};
 
 mod consensus_service;
 mod database_thread;
@@ -81,7 +84,7 @@ pub struct ChainConfig<'a> {
 
 /// Runs the node using the given configuration. Catches `SIGINT` signals and stops if one is
 /// detected.
-pub async fn run(config: Config<'_>) {
+pub async fn run_until(config: Config<'_>, until: Pin<Box<dyn Future<Output = ()>>>) {
     let chain_spec = {
         smoldot::chain_spec::ChainSpec::from_json_bytes(&config.chain.chain_spec)
             .expect("Failed to decode chain specs")
@@ -401,23 +404,6 @@ pub async fn run(config: Config<'_>) {
         database_finalized_block_number,
     );
 
-    // Starting from here, a SIGINT (or equivalent) handler is setup. If the user does Ctrl+C,
-    // a message will be sent on `ctrlc_rx`.
-    // This should be performed after all the expensive initialization is done, as otherwise these
-    // expensive initializations aren't interrupted by Ctrl+C, which could be frustrating for the
-    // user.
-    let ctrlc_detected = {
-        let event = event_listener::Event::new();
-        let listen = event.listen();
-        if let Err(err) = ctrlc::set_handler(move || {
-            event.notify(usize::max_value());
-        }) {
-            // It is not critical to fail to setup the Ctrl-C handler.
-            log::warn!("ctrlc-handler-setup-fail; err={}", err);
-        }
-        listen
-    };
-
     // Spawn the task printing the informant.
     // This is not just a dummy task that just prints on the output, but is actually the main
     // task that holds everything else alive. Without it, all the services that we have created
@@ -533,7 +519,7 @@ pub async fn run(config: Config<'_>) {
     debug_assert!(network_events_receivers.next().is_none());
 
     // Block the current thread until `ctrl-c` is invoked by the user.
-    let _ = executor.run(ctrlc_detected).await;
+    let _ = executor.run(until).await;
 
     if config.show_informant {
         // Adding a new line after the informant so that the user's shell doesn't

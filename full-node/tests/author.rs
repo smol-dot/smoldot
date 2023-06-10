@@ -19,25 +19,28 @@
 fn basic_block_generated() {
     // TODO: this test is a dummy and doesn't test anything
     smol::block_on(async move {
-        smoldot_full_node::run(smoldot_full_node::Config {
-            chain: smoldot_full_node::ChainConfig {
-                chain_spec: SUBSTRATE_NODE_TEMPLATE_CHAIN_SPEC.into(),
-                additional_bootnodes: Vec::new(),
-                keystore_memory: vec![smoldot::identity::seed_phrase::decode_sr25519_private_key(
-                    "//Alice",
-                )
-                .unwrap()],
-                sqlite_database_path: None,
-                keystore_path: None,
+        smoldot_full_node::run_until(
+            smoldot_full_node::Config {
+                chain: smoldot_full_node::ChainConfig {
+                    chain_spec: SUBSTRATE_NODE_TEMPLATE_CHAIN_SPEC.into(),
+                    additional_bootnodes: Vec::new(),
+                    keystore_memory: vec![
+                        smoldot::identity::seed_phrase::decode_sr25519_private_key("//Alice")
+                            .unwrap(),
+                    ],
+                    sqlite_database_path: None,
+                    keystore_path: None,
+                },
+                relay_chain: None,
+                libp2p_key: [0; 32],
+                listen_addresses: Vec::new(),
+                json_rpc_address: None,
+                jaeger_agent: None,
+                show_informant: false,
+                informant_colors: false,
             },
-            relay_chain: None,
-            libp2p_key: [0; 32],
-            listen_addresses: Vec::new(),
-            json_rpc_address: None,
-            jaeger_agent: None,
-            show_informant: false,
-            informant_colors: false,
-        })
+            Box::pin(async move {}),
+        )
         .await;
     });
 }

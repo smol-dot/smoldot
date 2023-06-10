@@ -233,28 +233,48 @@ async fn run(cli_options: cli::CliOptionsRun) {
         <https://github.com/smol-dot/smoldot/issues>."
     );
 
-    smoldot_full_node::run(smoldot_full_node::Config {
-        chain: smoldot_full_node::ChainConfig {
-            chain_spec,
-            additional_bootnodes: cli_options
-                .additional_bootnode
-                .iter()
-                .map(|cli::Bootnode { address, peer_id }| (peer_id.clone(), address.clone()))
-                .collect(),
-            keystore_memory: cli_options.keystore_memory,
-            sqlite_database_path,
-            keystore_path,
+    // Starting from here, a SIGINT (or equivalent) handler is setup. If the user does Ctrl+C,
+    // a message will be sent on `ctrlc_rx`.
+    // This should be performed after all the expensive initialization is done, as otherwise these
+    // expensive initializations aren't interrupted by Ctrl+C, which could be frustrating for the
+    // user.
+    let ctrlc_detected = {
+        let event = event_listener::Event::new();
+        let listen = event.listen();
+        if let Err(err) = ctrlc::set_handler(move || {
+            event.notify(usize::max_value());
+        }) {
+            // It is not critical to fail to setup the Ctrl-C handler.
+            log::warn!("ctrlc-handler-setup-fail; err={}", err);
+        }
+        listen
+    };
+
+    smoldot_full_node::run_until(
+        smoldot_full_node::Config {
+            chain: smoldot_full_node::ChainConfig {
+                chain_spec,
+                additional_bootnodes: cli_options
+                    .additional_bootnode
+                    .iter()
+                    .map(|cli::Bootnode { address, peer_id }| (peer_id.clone(), address.clone()))
+                    .collect(),
+                keystore_memory: cli_options.keystore_memory,
+                sqlite_database_path,
+                keystore_path,
+            },
+            relay_chain,
+            libp2p_key,
+            listen_addresses: cli_options.listen_addr,
+            json_rpc_address: cli_options.json_rpc_address.0,
+            jaeger_agent: cli_options.jaeger,
+            show_informant: matches!(cli_output, cli::Output::Informant),
+            informant_colors: match cli_options.color {
+                cli::ColorChoice::Always => true,
+                cli::ColorChoice::Never => false,
+            },
         },
-        relay_chain,
-        libp2p_key,
-        listen_addresses: cli_options.listen_addr,
-        json_rpc_address: cli_options.json_rpc_address.0,
-        jaeger_agent: cli_options.jaeger,
-        show_informant: matches!(cli_output, cli::Output::Informant),
-        informant_colors: match cli_options.color {
-            cli::ColorChoice::Always => true,
-            cli::ColorChoice::Never => false,
-        },
-    })
+        Box::pin(ctrlc_detected),
+    )
     .await
 }
