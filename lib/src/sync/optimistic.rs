@@ -1061,13 +1061,25 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                                 &trie::bytes_to_nibbles(b":code".iter().copied())
                                     .collect::<Vec<_>>()
                             )
-                            .is_some()
+                            .map_or(false, |change| matches!(
+                                change,
+                                blocks_tree::TrieChange::StorageValueChange {
+                                    new_storage_value: Some(_),
+                                    ..
+                                }
+                            ))
                             || storage_main_trie_changes
                                 .get(
                                     &trie::bytes_to_nibbles(b":heappages".iter().copied())
                                         .collect::<Vec<_>>()
                                 )
-                                .is_some()
+                                .map_or(false, |change| matches!(
+                                    change,
+                                    blocks_tree::TrieChange::StorageValueChange {
+                                        new_storage_value: Some(_),
+                                        ..
+                                    }
+                                ))
                     );
 
                     let chain = {
