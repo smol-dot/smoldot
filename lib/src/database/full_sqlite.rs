@@ -280,7 +280,7 @@ impl SqliteFullDatabase {
     /// performs relative to its parent.
     ///
     /// Blocks must be inserted in the correct order. An error is returned if the parent of the
-    /// newly-inserted block isn't present in the database.
+    /// newly-inserted block isn't present in the datanon_finalized_chbase.
     pub fn insert(
         &self,
         scale_encoded_header: &[u8],
@@ -346,6 +346,7 @@ impl SqliteFullDatabase {
         }
 
         // Insert the storage changes.
+        // TODO: update for tries stuff changes
         {
             let mut statement = connection
                 .prepare_cached("INSERT INTO non_finalized_changes(hash, key, value, trie_entry_version) VALUES (?, ?, ?, ?)")
@@ -498,6 +499,7 @@ impl SqliteFullDatabase {
         }
 
         // Now update the finalized block storage.
+        // TODO: update for tries stuff changes
         for height in current_finalized + 1..=new_finalized_header.number {
             let block_hash =
                 {
@@ -738,7 +740,7 @@ impl SqliteFullDatabase {
                     FROM nodes_full_keys, trie_node_child, trie_node
                     WHERE nodes_full_keys.target_node_hash = trie_node_child.hash AND trie_node_child.child_hash = trie_node.hash
                 )
-            SELECT COUNT(blocks.hash) >= 1, COUNT(nodes_full_keys.state_trie_root_hash) >= 1, nodes_full_keys.target_node_hash
+            SELECT COUNT(blocks.hash) >= 1, COUNT(nodes_full_keys.state_trie_root_hash) >= 1, nodes_full_keys.full_key_hex
             FROM blocks
             LEFT JOIN nodes_full_keys ON nodes_full_keys.state_trie_root_hash = blocks.state_trie_root_hash AND CASE :or_equal WHEN TRUE THEN nodes_full_keys.full_key_hex >= :key ELSE nodes_full_keys.full_key_hex > :key END
             WHERE blocks.hash = :block_hash
@@ -760,7 +762,7 @@ impl SqliteFullDatabase {
                 |row| {
                     let has_block = row.get::<_, i64>(0)? != 0;
                     let block_has_storage = row.get::<_, i64>(1)? != 0;
-                    let next_key = row.get::<_, Option<Vec<u8>>>(2)?;
+                    let next_key = row.get::<_, Option<String>>(2)?;
                     Ok((has_block, block_has_storage, next_key))
                 },
             )
@@ -778,7 +780,7 @@ impl SqliteFullDatabase {
             return Err(StorageAccessError::Pruned);
         }
 
-        Ok(next_key)
+        Ok(next_key.map(|k| hex::decode(k).unwrap()))
     }
 }
 
@@ -1052,11 +1054,7 @@ fn flush(database: &rusqlite::Connection) -> Result<(), AccessError> {
 }
 
 fn purge_block(database: &rusqlite::Connection, hash: &[u8; 32]) -> Result<(), AccessError> {
-    database
-        .prepare_cached("DELETE FROM non_finalized_changes WHERE hash = ?")
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
-        .execute((&hash[..],))
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+    // TODO: purge the block storage as well /!\
     database
         .prepare_cached("DELETE FROM blocks_body WHERE hash = ?")
         .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
