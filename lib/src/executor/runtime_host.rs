@@ -100,6 +100,7 @@ pub fn run(
                 Default::default(),
             ),
         },
+        main_trie_changes: Some(BTreeMap::new()), // No changes to the trie.
         state_trie_version,
         transactions_stack: Vec::new(),
         offchain_storage_changes: config.offchain_storage_changes,
@@ -132,34 +133,21 @@ pub struct Success {
 
 #[derive(Debug, Clone)]
 pub enum TrieChange {
-    /// Trie entry is either newly-created, or already existed and has a new Merkle value.
-    InsertOrUpdate {
+    /// Trie node is either newly-created, or already existed and has a new Merkle value.
+    MerkleValueChange {
+        /// New Merkle value associated to this trie node. Always inferior or equal to 32 bytes.
+        new_merkle_value: Vec<u8>,
+    },
+    /// Trie node is either newly-created, or already existed and has a new storage value and
+    /// Merkle value.
+    StorageValueChange {
         /// New Merkle value associated to this trie node. Always inferior or equal to 32 bytes.
         new_merkle_value: Vec<u8>,
         /// New storage value (if any) of this trie node.
         new_storage_value: Option<Vec<u8>>,
     },
+    /// Trie node is removed.
     Remove,
-}
-
-impl TrieChange {
-    pub fn into_storage_value(self) -> Option<Vec<u8>> {
-        match self {
-            TrieChange::InsertOrUpdate {
-                new_storage_value, ..
-            } => new_storage_value,
-            TrieChange::Remove => None,
-        }
-    }
-
-    pub fn storage_value(&self) -> Option<&Vec<u8>> {
-        match self {
-            TrieChange::InsertOrUpdate {
-                new_storage_value, ..
-            } => new_storage_value.as_ref(),
-            TrieChange::Remove => None,
-        }
-    }
 }
 
 /// Function execution has succeeded. Contains the return value of the call.
@@ -730,6 +718,9 @@ struct Inner {
     /// Contains a `Vec` in case transactions are stacked.
     transactions_stack: Vec<StorageChanges>,
 
+    // TODO: the general flow of this module is confusing
+    main_trie_changes: Option<BTreeMap<Vec<Nibble>, TrieChange>>,
+
     /// State trie version indicated by the runtime. All the storage changes that are performed
     /// use this version.
     state_trie_version: TrieEntryVersion,
@@ -800,10 +791,49 @@ impl Inner {
                     );
                 }
                 Some(trie_root_calculator::InProgress::TrieNodeInsertUpdateEvent(ev)) => {
+                    if matches!(self.vm, host::HostVm::ExternalStorageRoot(req) if req.child_trie().is_none())
+                    {
+                        // TODO: a lot of copying here
+                        let key = ev.key_as_vec();
+                        let key_as_bytes = if key.len() % 2 == 0 {
+                            Some(
+                                trie::nibbles_to_bytes_truncate(key.iter().copied())
+                                    .collect::<Vec<_>>(),
+                            )
+                        } else {
+                            None
+                        };
+
+                        if let Some((diff_entry, _)) =
+                            key_as_bytes.and_then(|k| self.storage_changes.main_trie.diff_get(&k))
+                        {
+                            self.main_trie_changes.as_mut().unwrap().insert(
+                                ev.key_as_vec(),
+                                TrieChange::StorageValueChange {
+                                    new_merkle_value: ev.merkle_value().to_vec(),
+                                    new_storage_value: diff_entry.map(|v| v.to_vec()),
+                                },
+                            );
+                        } else {
+                            self.main_trie_changes.as_mut().unwrap().insert(
+                                ev.key_as_vec(),
+                                TrieChange::MerkleValueChange {
+                                    new_merkle_value: ev.merkle_value().to_vec(),
+                                },
+                            );
+                        }
+                    }
                     self.root_calculation = Some(ev.resume());
                     continue;
                 }
                 Some(trie_root_calculator::InProgress::TrieNodeRemoveEvent(ev)) => {
+                    if matches!(self.vm, host::HostVm::ExternalStorageRoot(req) if req.child_trie().is_none())
+                    {
+                        self.main_trie_changes
+                            .as_mut()
+                            .unwrap()
+                            .insert(ev.key_as_vec(), TrieChange::Remove);
+                    }
                     self.root_calculation = Some(ev.resume());
                     continue;
                 }
@@ -830,9 +860,30 @@ impl Inner {
                 }
 
                 host::HostVm::Finished(finished) => {
+                    let storage_main_trie_changes = match self.main_trie_changes.take() {
+                        Some(c) => c,
+                        None => {
+                            // The user didn't call `ext_storage_root` after their latest changes.
+                            // Since `ext_storage_root` has the side effect of calculating the
+                            // changes in the trie, we have to perform the calculation manually
+                            // again.
+                            self.vm = host::HostVm::Finished(finished);
+                            self.main_trie_changes = Some(Default::default());
+                            self.root_calculation =
+                                Some(trie_root_calculator::trie_root_calculator(
+                                    trie_root_calculator::Config {
+                                        diff: self.storage_changes.main_trie.clone(), // TODO: clone :-/
+                                        diff_trie_entries_version: self.state_trie_version,
+                                        max_trie_recalculation_depth_hint: 16, // TODO: ?!
+                                    },
+                                ));
+                            continue;
+                        }
+                    };
+
                     return RuntimeHostVm::Finished(Ok(Success {
                         virtual_machine: SuccessVirtualMachine(finished),
-                        storage_main_trie_changes: self.storage_changes.main_trie,
+                        storage_main_trie_changes,
                         state_trie_version: self.state_trie_version,
                         offchain_storage_changes: self.offchain_storage_changes,
                         logs: self.logs,
@@ -869,6 +920,8 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageSet(req) => {
+                    self.main_trie_changes = None;
+
                     if let Some(value) = req.value() {
                         let trie = match req.child_trie() {
                             None => &mut self.storage_changes.main_trie,
@@ -901,6 +954,8 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageAppend(req) => {
+                    self.main_trie_changes = None;
+
                     let current_value = match req.child_trie() {
                         None => self
                             .storage_changes
@@ -935,6 +990,7 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageClearPrefix(req) => {
+                    self.main_trie_changes = None;
                     let prefix = req.prefix().as_ref().to_owned();
                     self.vm = req.into();
                     return RuntimeHostVm::NextKey(NextKey {
@@ -960,13 +1016,14 @@ impl Inner {
                     };
 
                     let Some(diff) = diff
-                            else {
-                                // Trie has been destroyed.
-                                self.vm = req.resume(None);
-                                continue;
-                            };
+                        else {
+                            // Trie has been destroyed.
+                            self.vm = req.resume(None);
+                            continue;
+                        };
 
                     self.vm = req.into();
+                    self.main_trie_changes = Some(Default::default());
                     self.root_calculation = Some(trie_root_calculator::trie_root_calculator(
                         trie_root_calculator::Config {
                             diff,
@@ -1045,6 +1102,7 @@ impl Inner {
                     let rollback_diff = self.transactions_stack.pop().unwrap();
 
                     if rollback {
+                        self.main_trie_changes = None;
                         self.storage_changes = rollback_diff;
                     }
 
