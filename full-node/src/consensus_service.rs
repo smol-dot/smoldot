@@ -1352,12 +1352,27 @@ impl SyncBackground {
                             verify = req.inject_value(value);
                         }
                         all::BlockVerification::ParentStorageMerkleValue(req) => {
-                            // TODO: the syncing is currently extremely slow due to this
-                            verify = req.resume_unknown();
+                            let when_database_access_started = Instant::now();
+
+                            let key = req.key().map(|n| format!("{:x}", n)).collect::<String>();
+                            let merkle_value = self
+                                .database
+                                .with_database(move |db| {
+                                    db.block_storage_main_trie_closest_descendant_merkle_value(
+                                        &parent_hash,
+                                        &key,
+                                    )
+                                })
+                                .await
+                                .expect("database access error");
+
+                            database_accesses_duration += when_database_access_started.elapsed();
+                            verify = req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
                         }
                         all::BlockVerification::ParentStorageNextKey(req) => {
                             let when_database_access_started = Instant::now();
 
+                            // TODO: remove this
                             let search_params = trie::branch_search::Config {
                                 key_before: req.key().collect::<Vec<_>>().into_iter(),
                                 or_equal: req.or_equal(),

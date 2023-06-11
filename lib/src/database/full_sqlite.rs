@@ -740,9 +740,11 @@ impl SqliteFullDatabase {
                     FROM nodes_full_keys, trie_node_child, trie_node
                     WHERE nodes_full_keys.target_node_hash = trie_node_child.hash AND trie_node_child.child_hash = trie_node.hash
                 )
-            SELECT COUNT(blocks.hash) >= 1, COUNT(nodes_full_keys.state_trie_root_hash) >= 1, nodes_full_keys.full_key_hex
+            SELECT COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1, nodes_full_keys.full_key_hex
             FROM blocks
+            LEFT JOIN trie_node ON trie_node.hash = blocks.state_trie_root_hash
             LEFT JOIN nodes_full_keys ON nodes_full_keys.state_trie_root_hash = blocks.state_trie_root_hash AND CASE :or_equal WHEN TRUE THEN nodes_full_keys.full_key_hex >= :key ELSE nodes_full_keys.full_key_hex > :key END
+            INNER JOIN trie_node_storage ON trie_node_storage.node_hash = nodes_full_keys.target_node_hash
             WHERE blocks.hash = :block_hash
             LIMIT 1"#,
             )
@@ -781,6 +783,91 @@ impl SqliteFullDatabase {
         }
 
         Ok(next_key.map(|k| hex::decode(k).unwrap()))
+    }
+
+    /// Returns the Merkle value of the trie node in the storage that is the closest descendant
+    /// of the provided key.
+    ///
+    /// `key_hex_nibbles` must be a lowercase hexadecimal string containing the nibbles of the
+    /// key.
+    ///
+    /// Returns `None` if there is no such descendant.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `key_hex_nibbles` is not in the correct format.
+    ///
+    pub fn block_storage_main_trie_closest_descendant_merkle_value(
+        &self,
+        block_hash: &[u8; 32],
+        key_hex_nibbles: &str,
+    ) -> Result<Option<Vec<u8>>, StorageAccessError> {
+        let connection = self.database.lock();
+
+        assert!(
+            key_hex_nibbles
+                .bytes()
+                .all(|c| c.is_ascii_hexdigit() && (c.is_ascii_lowercase() || c.is_ascii_digit())),
+            "invalid key provided to database search: {}",
+            key_hex_nibbles
+        );
+
+        // TODO: this doesn't seem super optimized to me
+        let mut statement = connection
+            .prepare_cached(
+                r#"
+            WITH RECURSIVE
+                nodes_full_keys(state_trie_root_hash, full_key_hex, target_node_hash) AS (
+                    SELECT hash, partial_key_hex, hash FROM trie_node
+                    UNION ALL
+                    SELECT
+                        nodes_full_keys.state_trie_root_hash,
+                        nodes_full_keys.full_key_hex || (CASE trie_node_child.child_num >= 10 WHEN TRUE THEN CHAR(97 + trie_node_child.child_num - 10) ELSE CHAR(48 + trie_node_child.child_num) END) || trie_node.partial_key_hex,
+                        trie_node.hash
+                    FROM nodes_full_keys, trie_node_child, trie_node
+                    WHERE nodes_full_keys.target_node_hash = trie_node_child.hash AND trie_node_child.child_hash = trie_node.hash
+                )
+            SELECT COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1, nodes_full_keys.target_node_hash
+            FROM blocks
+            LEFT JOIN trie_node ON trie_node.hash = blocks.state_trie_root_hash
+            LEFT JOIN nodes_full_keys ON nodes_full_keys.state_trie_root_hash = blocks.state_trie_root_hash AND nodes_full_keys.full_key_hex >= :key AND SUBSTR(nodes_full_keys.full_key_hex, 0, LENGTH(:key)) = :key
+            WHERE blocks.hash = :block_hash
+            LIMIT 1"#,
+            )
+            .map_err(|err| {
+                StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(
+                    InternalError(err),
+                )))
+            })?;
+
+        let (has_block, block_has_storage, merkle_value) = statement
+            .query_row(
+                rusqlite::named_params! {
+                    ":block_hash": &block_hash[..],
+                    ":key": key_hex_nibbles,
+                },
+                |row| {
+                    let has_block = row.get::<_, i64>(0)? != 0;
+                    let block_has_storage = row.get::<_, i64>(1)? != 0;
+                    let merkle_value = row.get::<_, Option<String>>(2)?;
+                    Ok((has_block, block_has_storage, merkle_value))
+                },
+            )
+            .map_err(|err| {
+                StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(
+                    InternalError(err),
+                )))
+            })?;
+
+        if !has_block {
+            return Err(StorageAccessError::UnknownBlock);
+        }
+
+        if !block_has_storage {
+            return Err(StorageAccessError::Pruned);
+        }
+
+        Ok(merkle_value.map(|k| hex::decode(k).unwrap()))
     }
 }
 
