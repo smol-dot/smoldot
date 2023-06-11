@@ -744,7 +744,7 @@ impl SqliteFullDatabase {
             FROM blocks
             LEFT JOIN trie_node ON trie_node.hash = blocks.state_trie_root_hash
             LEFT JOIN nodes_full_keys ON nodes_full_keys.state_trie_root_hash = blocks.state_trie_root_hash AND CASE :or_equal WHEN TRUE THEN nodes_full_keys.full_key_hex >= :key ELSE nodes_full_keys.full_key_hex > :key END
-            INNER JOIN trie_node_storage ON trie_node_storage.node_hash = nodes_full_keys.target_node_hash
+            INNER JOIN trie_node_storage ON nodes_full_keys.target_node_hash IS NULL OR trie_node_storage.node_hash = nodes_full_keys.target_node_hash
             WHERE blocks.hash = :block_hash
             LIMIT 1"#,
             )
