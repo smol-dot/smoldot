@@ -156,7 +156,7 @@ List of all known blocks, indexed by their hash or number.
 CREATE TABLE IF NOT EXISTS blocks(
     hash BLOB NOT NULL PRIMARY KEY,
     parent_hash BLOB,  -- NULL only for the genesis block
-    state_trie_root_hash BLOB NOT NULL,
+    state_trie_root_hash BLOB,  -- NULL if the block storage isn't in the database
     number INTEGER NOT NULL,
     header BLOB NOT NULL,
     justification BLOB,
