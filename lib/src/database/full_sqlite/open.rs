@@ -123,7 +123,8 @@ CREATE TABLE IF NOT EXISTS meta(
 List of all trie nodes of all blocks whose trie is stored in the database.
 */
 CREATE TABLE IF NOT EXISTS trie_node(
-    hash BLOB NOT NULL PRIMARY KEY
+    hash BLOB NOT NULL PRIMARY KEY,
+    partial_key_hex STRING NOT NULL -- Lowercase hexadecimal string
 );
 
 /*
@@ -156,13 +157,12 @@ List of all known blocks, indexed by their hash or number.
 CREATE TABLE IF NOT EXISTS blocks(
     hash BLOB NOT NULL PRIMARY KEY,
     parent_hash BLOB,  -- NULL only for the genesis block
-    state_trie_root_hash BLOB,  -- NULL if the block storage isn't in the database
+    state_trie_root_hash BLOB NOT NULL,  -- Can be a stale reference if the trie is empty or if the trie storage has been pruned from the database
     number INTEGER NOT NULL,
     header BLOB NOT NULL,
     justification BLOB,
     UNIQUE(number, hash),
-    FOREIGN KEY (parent_hash) REFERENCES blocks(hash) ON UPDATE CASCADE ON DELETE RESTRICT,
-    FOREIGN KEY (state_trie_root_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE RESTRICT
+    FOREIGN KEY (parent_hash) REFERENCES blocks(hash) ON UPDATE CASCADE ON DELETE RESTRICT
 );
 CREATE INDEX IF NOT EXISTS blocks_by_number ON blocks(number);
 
@@ -415,7 +415,7 @@ impl DatabaseEmpty {
             // Now insert the entries.
             let mut insert_node_statement = self
                 .database
-                .prepare_cached("INSERT INTO trie_node(hash) VALUES(?)")
+                .prepare_cached("INSERT INTO trie_node(hash, partial_key_hex) VALUES(?, ?)")
                 .unwrap();
             let mut insert_node_storage_statement = self
                 .database
@@ -435,9 +435,7 @@ impl DatabaseEmpty {
                 let (storage_value, Some(merkle_value)) = &trie_structure[node_index]
                     else { unreachable!() };
                 let merkle_value = merkle_value.clone(); // Cloning to solve borrow checker restriction.
-                insert_node_statement
-                    .execute((merkle_value.as_ref(),))
-                    .unwrap(); // TODO: don't unwrap
+
                 if let Some(storage_value) = storage_value {
                     insert_node_storage_statement
                         .execute((
@@ -449,6 +447,14 @@ impl DatabaseEmpty {
                 }
 
                 let mut node_access = trie_structure.node_by_index(node_index).unwrap();
+                let partial_key = node_access
+                    .partial_key()
+                    .map(|n| format!("{:x}", n))
+                    .collect::<String>();
+                insert_node_statement
+                    .execute((merkle_value.as_ref(), &partial_key))
+                    .unwrap(); // TODO: don't unwrap
+
                 for child_index in (0..16).map(|n| trie::Nibble::try_from(n).unwrap()) {
                     if let Some(mut child) = node_access.child(child_index) {
                         insert_child_statement

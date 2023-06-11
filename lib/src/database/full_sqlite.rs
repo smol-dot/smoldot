@@ -651,75 +651,59 @@ impl SqliteFullDatabase {
     ) -> Result<Option<(Vec<u8>, u8)>, StorageAccessError> {
         let connection = self.database.lock();
 
-        match block_height(&connection, block_hash)? {
-            None => return Err(StorageAccessError::UnknownBlock),
-            Some(height) if height < finalized_num(&connection)? => {
-                return Err(StorageAccessError::Pruned)
-            }
-            Some(_) => {}
-        }
-
-        let mut block_hash = *block_hash;
-        let finalized_hash = finalized_hash(&connection)?;
-
-        while block_hash != finalized_hash {
-            let maybe_value = connection
-                .prepare_cached(
-                    r#"SELECT value, trie_entry_version FROM non_finalized_changes WHERE hash = ? AND key = ?"#,
-                )
-                .map_err(|err| StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))))?
-                .query_row((&block_hash[..], key), |row| {
-                    let value = row
-                        .get::<_, Option<Vec<u8>>>(0)?;
-                    let trie_entry_version = row
-                        .get::<_, Option<i64>>(1)?;
-                    Ok((value, trie_entry_version))
-                })
-                .optional()
-                .map_err(|err| StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))))?;
-
-            if let Some((value, trie_entry_version)) = maybe_value {
-                let trie_entry_version = trie_entry_version
-                    .map(u8::try_from)
-                    .transpose()
-                    .map_err(|_| CorruptedError::InvalidTrieEntryVersion)
-                    .map_err(AccessError::Corrupted)
-                    .map_err(StorageAccessError::Access)?;
-
-                return match (value, trie_entry_version) {
-                    (None, None) => Ok(None),
-                    (Some(value), Some(trie_entry_version)) => {
-                        return Ok(Some((value, trie_entry_version)))
-                    }
-                    _ => todo!(), // TODO: errors
-                };
-            }
-
-            let parent_hash = block_parent_hash(&connection, &block_hash)?
-                .ok_or(CorruptedError::BrokenChain)
-                .map_err(AccessError::Corrupted)
-                .map_err(StorageAccessError::Access)?;
-            block_hash = parent_hash;
-        }
-
-        let finalized_value = connection
+        let mut statement = connection
             .prepare_cached(
-                r#"SELECT value, trie_entry_version FROM finalized_storage_main_trie WHERE key = ?"#,
+                r#"
+            WITH RECURSIVE
+                nodes_full_keys(state_trie_root_hash, full_key_hex, target_node_hash) AS (
+                    SELECT hash, partial_key_hex, hash FROM trie_node
+                    UNION ALL
+                    SELECT
+                        nodes_full_keys.state_trie_root_hash,
+                        nodes_full_keys.full_key_hex || (CASE trie_node_child.child_num >= 10 WHEN TRUE THEN CHAR(97 + trie_node_child.child_num - 10) ELSE CHAR(48 + trie_node_child.child_num) END) || trie_node.partial_key_hex,
+                        trie_node.hash
+                    FROM nodes_full_keys, trie_node_child, trie_node
+                    WHERE nodes_full_keys.target_node_hash = trie_node_child.hash AND trie_node_child.child_hash = trie_node.hash
+                )
+            SELECT COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1, trie_node_storage.value, trie_node_storage.trie_entry_version
+            FROM blocks
+            LEFT JOIN trie_node ON trie_node.hash = blocks.state_trie_root_hash
+            LEFT JOIN nodes_full_keys ON nodes_full_keys.state_trie_root_hash = blocks.state_trie_root_hash AND nodes_full_keys.full_key_hex = ?
+            LEFT JOIN trie_node_storage ON nodes_full_keys.target_node_hash = trie_node_storage.node_hash
+            WHERE blocks.hash = ?"#,
             )
-            .map_err(|err| StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))))?
-            .query_row((key,), |row| {
-                let value = row
-                    .get::<_, Vec<u8>>(0)?;
-                let trie_entry_version = row
-                    .get::<_, i64>(1)?;
-                Ok((value, trie_entry_version))
-            })
-            .optional()
-            .map_err(|err| StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))))?;
+            .map_err(|err| {
+                StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(
+                    InternalError(err),
+                )))
+            })?;
 
-        let Some((value, trie_entry_version)) = finalized_value
+        let (has_block, block_has_storage, value, trie_entry_version) = statement
+            .query_row((hex::encode(&key), &block_hash[..]), |row| {
+                let has_block = row.get::<_, i64>(0)? != 0;
+                let block_has_storage = row.get::<_, i64>(1)? != 0;
+                let value = row.get::<_, Option<Vec<u8>>>(2)?;
+                let trie_entry_version = row.get::<_, Option<i64>>(3)?;
+                Ok((has_block, block_has_storage, value, trie_entry_version))
+            })
+            .map_err(|err| {
+                StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(
+                    InternalError(err),
+                )))
+            })?;
+
+        if !has_block {
+            return Err(StorageAccessError::UnknownBlock);
+        }
+
+        if !block_has_storage {
+            return Err(StorageAccessError::Pruned);
+        }
+
+        let Some(value) = value
             else { return Ok(None) };
-        let trie_entry_version = u8::try_from(trie_entry_version)
+
+        let trie_entry_version = u8::try_from(trie_entry_version.unwrap())
             .map_err(|_| CorruptedError::InvalidTrieEntryVersion)
             .map_err(AccessError::Corrupted)
             .map_err(StorageAccessError::Access)?;
