@@ -24,7 +24,10 @@
 use super::{
     encode_babe_epoch_information, AccessError, CorruptedError, InternalError, SqliteFullDatabase,
 };
-use crate::chain::chain_information;
+use crate::{
+    chain::chain_information,
+    trie::{self, trie_structure},
+};
 
 use std::{fs, path::Path};
 
@@ -69,7 +72,8 @@ PRAGMA synchronous = NORMAL;
 PRAGMA locking_mode = EXCLUSIVE;
 PRAGMA auto_vacuum = FULL;
 PRAGMA encoding = 'UTF-8';
-PRAGMA trusted_schema = false; 
+PRAGMA trusted_schema = false;
+PRAGMA foreign_keys = 1;
 
 /*
 Contains all the "global" values in the database.
@@ -116,16 +120,49 @@ CREATE TABLE IF NOT EXISTS meta(
 );
 
 /*
+List of all trie nodes of all blocks whose trie is stored in the database.
+*/
+CREATE TABLE IF NOT EXISTS trie_node(
+    hash BLOB NOT NULL PRIMARY KEY
+);
+
+/*
+Storage associated to a trie node.
+For each entry in `trie_node` there exists either 0 or 1 entry in `trie_node_storage` indicating
+the storage value associated to this node.
+*/
+CREATE TABLE IF NOT EXISTS trie_node_storage(
+    node_hash BLOB NOT NULL PRIMARY KEY,
+    value BLOB NOT NULL,
+    trie_entry_version INTEGER NOT NULL,
+    FOREIGN KEY (node_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE CASCADE
+);
+
+/*
+Parent-child relationship between trie nodes.
+*/
+CREATE TABLE IF NOT EXISTS trie_node_child(
+    hash BLOB NOT NULL,
+    child_num INTEGER NOT NULL,
+    child_hash BLOB NOT NULL,
+    PRIMARY KEY (hash, child_num),
+    FOREIGN KEY (hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE CASCADE,
+    FOREIGN KEY (child_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE RESTRICT
+);
+
+/*
 List of all known blocks, indexed by their hash or number.
 */
 CREATE TABLE IF NOT EXISTS blocks(
     hash BLOB NOT NULL PRIMARY KEY,
     parent_hash BLOB,  -- NULL only for the genesis block
+    state_trie_root_hash BLOB NOT NULL,
     number INTEGER NOT NULL,
     header BLOB NOT NULL,
     justification BLOB,
     UNIQUE(number, hash),
-    CHECK(length(hash) == 32)
+    FOREIGN KEY (parent_hash) REFERENCES blocks(hash) ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (state_trie_root_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE RESTRICT
 );
 CREATE INDEX IF NOT EXISTS blocks_by_number ON blocks(number);
 
@@ -141,34 +178,6 @@ CREATE TABLE IF NOT EXISTS blocks_body(
     extrinsic BLOB NOT NULL,
     UNIQUE(hash, idx),
     CHECK(length(hash) == 32),
-    FOREIGN KEY (hash) REFERENCES blocks(hash) ON UPDATE CASCADE ON DELETE CASCADE
-);
-
-/*
-Storage at the highest block that is considered finalized.
-*/
-CREATE TABLE IF NOT EXISTS finalized_storage_main_trie(
-    key BLOB NOT NULL PRIMARY KEY,
-    value BLOB NOT NULL,
-    trie_entry_version INTEGER NOT NULL
-);
-
-/*
-For non-finalized blocks (i.e. blocks that descend from the finalized block), contains changes
-that this block performs on the storage.
-When a block gets finalized, these changes get merged into `finalized_storage_main_trie`.
-*/
-CREATE TABLE IF NOT EXISTS non_finalized_changes(
-    hash BLOB NOT NULL,
-    key BLOB NOT NULL,
-    -- `value` is NULL if the block removes the key from the storage, and NON-NULL if it inserts
-    -- or replaces the value at the key.
-    value BLOB,
-    -- Same NULL-ness remark as for `value`
-    trie_entry_version INTEGER,
-    UNIQUE(hash, key),
-    CHECK(length(hash) == 32),
-    CHECK((trie_entry_version IS NULL AND value IS NULL) OR (trie_entry_version IS NOT NULL AND value IS NOT NULL)),
     FOREIGN KEY (hash) REFERENCES blocks(hash) ON UPDATE CASCADE ON DELETE CASCADE
 );
 
@@ -317,24 +326,147 @@ impl DatabaseEmpty {
                 a
             });
 
+        // Temporarily disable foreign key checks in order to make the initial insertion easier,
+        // as we don't have to make sure that trie nodes are sorted.
+        // Note that this is immediately disabled again when we `COMMIT`.
+        self.database
+            .execute("PRAGMA defer_foreign_keys = ON", ())
+            .unwrap(); // TODO: don't unwrap
+
         {
-            let mut statement = self
-                .database
-                .prepare_cached("INSERT INTO finalized_storage_main_trie(key, value, trie_entry_version) VALUES(?, ?, ?)")
-                .unwrap();
+            // TODO: make the user build this, it's really inappropriate here
+            let mut trie_structure = trie_structure::TrieStructure::new();
             for (key, value) in finalized_block_storage_main_trie_entries {
-                statement
-                    .execute((key, value, i64::from(finalized_block_state_version)))
-                    .map_err(|err| {
-                        AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))
-                    })?;
+                match trie_structure.node(trie::bytes_to_nibbles(key.iter().copied())) {
+                    trie_structure::Entry::Vacant(e) => {
+                        e.insert_storage_value().insert(
+                            (Some(value), None::<trie::trie_node::MerkleValueOutput>),
+                            (None, None),
+                        );
+                    }
+                    trie_structure::Entry::Occupied(trie_structure::NodeAccess::Branch(mut e)) => {
+                        *e.user_data() = (Some(value), None);
+                        e.insert_storage_value();
+                    }
+                    trie_structure::Entry::Occupied(trie_structure::NodeAccess::Storage(_)) => {
+                        // Duplicate entry.
+                        panic!()
+                    }
+                }
+            }
+
+            // Calculate the Merkle values of the nodes.
+            for node_index in trie_structure
+                .iter_ordered()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+            {
+                let mut node_access = trie_structure.node_by_index(node_index).unwrap();
+
+                let children = core::array::from_fn::<_, 16, _>(|n| {
+                    node_access
+                        .child(trie::Nibble::try_from(u8::try_from(n).unwrap()).unwrap())
+                        .map(|mut child| child.user_data().1.as_ref().unwrap().clone())
+                });
+
+                let is_root_node = node_access.is_root_node();
+                let partial_key = node_access.partial_key().collect::<Vec<_>>().into_iter();
+
+                // We have to hash the storage value ahead of time if necessary due to borrow
+                // checking difficulties.
+                let storage_value_hashed = match (
+                    node_access.user_data().0.as_ref(),
+                    finalized_block_state_version,
+                ) {
+                    (Some(v), 1) => {
+                        if v.len() >= 33 {
+                            Some(blake2_rfc::blake2b::blake2b(32, &[], v))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                let storage_value = match (
+                    node_access.user_data().0.as_ref(),
+                    storage_value_hashed.as_ref(),
+                ) {
+                    (_, Some(storage_value_hashed)) => trie::trie_node::StorageValue::Hashed(
+                        <&[u8; 32]>::try_from(storage_value_hashed.as_bytes()).unwrap(),
+                    ),
+                    (Some(v), None) => trie::trie_node::StorageValue::Unhashed(&v[..]),
+                    (None, _) => trie::trie_node::StorageValue::None,
+                };
+
+                let merkle_value = trie::trie_node::calculate_merkle_value(
+                    trie::trie_node::Decoded {
+                        children,
+                        partial_key,
+                        storage_value,
+                    },
+                    is_root_node,
+                )
+                .unwrap();
+
+                node_access.into_user_data().1 = Some(merkle_value);
+            }
+
+            // Now insert the entries.
+            let mut insert_node_statement = self
+                .database
+                .prepare_cached("INSERT INTO trie_node(hash) VALUES(?)")
+                .unwrap();
+            let mut insert_node_storage_statement = self
+                .database
+                .prepare_cached("INSERT INTO trie_node_storage(node_hash, value, trie_entry_version) VALUES(?, ?, ?)")
+                .unwrap();
+            let mut insert_child_statement = self
+                .database
+                .prepare_cached(
+                    "INSERT INTO trie_node_child(hash, child_num, child_hash) VALUES(?, ?, ?)",
+                )
+                .unwrap();
+            for node_index in trie_structure
+                .iter_unordered()
+                .collect::<Vec<_>>()
+                .into_iter()
+            {
+                let (storage_value, Some(merkle_value)) = &trie_structure[node_index]
+                    else { unreachable!() };
+                let merkle_value = merkle_value.clone(); // Cloning to solve borrow checker restriction.
+                insert_node_statement
+                    .execute((merkle_value.as_ref(),))
+                    .unwrap(); // TODO: don't unwrap
+                if let Some(storage_value) = storage_value {
+                    insert_node_storage_statement
+                        .execute((
+                            merkle_value.as_ref(),
+                            storage_value,
+                            finalized_block_state_version,
+                        ))
+                        .unwrap(); // TODO: don't unwrap
+                }
+
+                let mut node_access = trie_structure.node_by_index(node_index).unwrap();
+                for child_index in (0..16).map(|n| trie::Nibble::try_from(n).unwrap()) {
+                    if let Some(mut child) = node_access.child(child_index) {
+                        insert_child_statement
+                            .execute((
+                                merkle_value.as_ref(),
+                                u8::from(child_index),
+                                child.user_data().1.as_ref().unwrap().as_ref(),
+                            ))
+                            .unwrap(); // TODO: don't unwrap
+                    }
+                }
             }
         }
 
         self
             .database
             .prepare_cached(
-                "INSERT INTO blocks(hash, parent_hash, number, header, justification) VALUES(?, ?, ?, ?, ?)",
+                "INSERT INTO blocks(hash, parent_hash, state_trie_root_hash, number, header, justification) VALUES(?, ?, ?, ?, ?, ?)",
             )
             .unwrap()
             .execute((
@@ -342,6 +474,7 @@ impl DatabaseEmpty {
                 if chain_information.finalized_block_header.number != 0 {
                     Some(&chain_information.finalized_block_header.parent_hash[..])
                 } else { None },
+                &chain_information.finalized_block_header.state_root[..],
                 i64::try_from(chain_information.finalized_block_header.number).unwrap(),
                 &scale_encoded_finalized_block_header[..],
                 finalized_block_justification.as_deref(),
