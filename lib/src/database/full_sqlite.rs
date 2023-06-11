@@ -226,11 +226,12 @@ impl SqliteFullDatabase {
             (None, Some(slots_per_epoch), Some(finalized_next_epoch)) => {
                 let slots_per_epoch = expect_nz_u64(slots_per_epoch)?;
                 let finalized_next_epoch_transition =
-                    decode_babe_epoch_information(&finalized_next_epoch)?;
+                    Box::new(decode_babe_epoch_information(&finalized_next_epoch)?);
                 let finalized_block_epoch_information =
                     meta_get_blob(&connection, "babe_finalized_epoch")?
                         .map(|v| decode_babe_epoch_information(&v))
-                        .transpose()?;
+                        .transpose()?
+                        .map(Box::new);
                 chain_information::ChainInformationConsensus::Babe {
                     finalized_block_epoch_information,
                     finalized_next_epoch_transition,
@@ -260,7 +261,7 @@ impl SqliteFullDatabase {
                         .map_err(CorruptedError::BlockHeaderCorrupted)
                         .map_err(AccessError::Corrupted)
                         .map_err(StorageAccessError::Access)?;
-                    header.into()
+                    Box::new(header.into())
                 },
                 consensus,
                 finality,

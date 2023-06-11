@@ -265,13 +265,18 @@ pub fn ordered_root(version: TrieEntryVersion, entries: &[impl AsRef<[u8]>]) -> 
                     });
                 calculation = next_key.inject_key(k.map(|k| k.iter().copied()));
             }
-            calculate_root::RootMerkleValueCalculation::StorageValue(value) => {
-                let key = value
+            calculate_root::RootMerkleValueCalculation::StorageValue(value_req) => {
+                let key = value_req
                     .key()
                     .collect::<arrayvec::ArrayVec<u8, USIZE_COMPACT_BYTES>>();
-                let (_, key) =
-                    util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(&key).unwrap();
-                calculation = value.inject(entries.get(key).map(move |v| (v, version)));
+                let value = match nom::combinator::all_consuming(
+                    util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>,
+                )(&key)
+                {
+                    Ok((_, key)) => entries.get(key).map(move |v| (v, version)),
+                    Err(_) => None,
+                };
+                calculation = value_req.inject(value);
             }
         }
     }

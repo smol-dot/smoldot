@@ -112,6 +112,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
                 sqlite_database_path: base_storage_directory
                     .as_ref()
                     .map(|d| d.join(parsed_relay_spec.id()).join("database")),
+                sqlite_cache_size: cli_options.relay_chain_database_cache_size.0,
                 keystore_path: base_storage_directory
                     .as_ref()
                     .map(|path| path.join(parsed_relay_spec.id()).join("keys")),
@@ -261,6 +262,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
                     .collect(),
                 keystore_memory: cli_options.keystore_memory,
                 sqlite_database_path,
+                sqlite_cache_size: cli_options.database_cache_size.0,
                 keystore_path,
             },
             relay_chain,

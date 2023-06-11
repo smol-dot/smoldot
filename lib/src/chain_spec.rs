@@ -43,6 +43,7 @@ use crate::{
 };
 
 use alloc::{
+    boxed::Box,
     collections::BTreeSet,
     string::{String, ToString as _},
     vec::Vec,
@@ -428,7 +429,7 @@ pub struct LightSyncState {
     inner: light_sync_state::DecodedLightSyncState,
 }
 
-fn convert_epoch(epoch: &light_sync_state::BabeEpoch) -> BabeEpochInformation {
+fn convert_epoch(epoch: &light_sync_state::BabeEpoch) -> Box<BabeEpochInformation> {
     let epoch_authorities: Vec<_> = epoch
         .authorities
         .iter()
@@ -438,14 +439,14 @@ fn convert_epoch(epoch: &light_sync_state::BabeEpoch) -> BabeEpochInformation {
         })
         .collect();
 
-    BabeEpochInformation {
+    Box::new(BabeEpochInformation {
         epoch_index: epoch.epoch_index,
         start_slot_number: Some(epoch.slot_number),
         authorities: epoch_authorities,
         randomness: epoch.randomness,
         c: epoch.config.c,
         allowed_slots: epoch.config.allowed_slots,
-    }
+    })
 }
 
 impl LightSyncState {
@@ -486,7 +487,7 @@ impl LightSyncState {
         let next_epoch = epochs[epochs.len() - 1].1;
 
         ChainInformation {
-            finalized_block_header: self.inner.finalized_block_header.clone(),
+            finalized_block_header: Box::new(self.inner.finalized_block_header.clone()),
             consensus: ChainInformationConsensus::Babe {
                 slots_per_epoch: NonZeroU64::new(next_epoch.duration)
                     .ok_or(CheckpointToChainInformationError::InvalidBabeSlotsPerEpoch)?,
