@@ -1372,7 +1372,7 @@ impl SyncBackground {
                         all::BlockVerification::ParentStorageNextKey(req) => {
                             let when_database_access_started = Instant::now();
 
-                            // TODO: remove this
+                            // TODO: remove the branch search
                             let search_params = trie::branch_search::Config {
                                 key_before: req.key().collect::<Vec<_>>().into_iter(),
                                 or_equal: req.or_equal(),

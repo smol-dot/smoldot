@@ -654,27 +654,28 @@ impl SqliteFullDatabase {
     ) -> Result<Option<(Vec<u8>, u8)>, StorageAccessError> {
         let connection = self.database.lock();
 
+        // TODO: this doesn't seem super optimized to me
         let mut statement = connection
             .prepare_cached(
                 r#"
             WITH RECURSIVE
-                nodes_full_keys(state_trie_root_hash, full_key_hex, target_node_hash) AS (
-                    SELECT hash, partial_key_hex, hash FROM trie_node
+                node_with_key(node_hash, key_remain) AS (
+                    SELECT trie_node.hash, SUBSTR(:key, LENGTH(trie_node.partial_key_hex))
+                        FROM blocks, trie_node
+                        WHERE blocks.hash = :block_hash AND blocks.state_trie_root_hash = trie_node.hash AND SUBSTR(:key, 0, LENGTH(trie_node.partial_key_hex)) = trie_node.partial_key_hex
                     UNION ALL
-                    SELECT
-                        nodes_full_keys.state_trie_root_hash,
-                        nodes_full_keys.full_key_hex || (CASE trie_node_child.child_num >= 10 WHEN TRUE THEN CHAR(97 + trie_node_child.child_num - 10) ELSE CHAR(48 + trie_node_child.child_num) END) || trie_node.partial_key_hex,
-                        trie_node.hash
-                    FROM nodes_full_keys, trie_node_child, trie_node
-                    WHERE nodes_full_keys.target_node_hash = trie_node_child.hash AND trie_node_child.child_hash = trie_node.hash
+                    SELECT trie_node.hash, SUBSTR(node_with_key.key_remain, 1 + LENGTH(trie_node.partial_key_hex))
+                        FROM node_with_key
+                        JOIN trie_node_child ON node_with_key.node_hash = trie_node_child.hash AND SUBSTR(node_with_key.key_remain, 0, 1) = (CASE trie_node_child.child_num >= 10 WHEN TRUE THEN CHAR(97 + trie_node_child.child_num - 10) ELSE CHAR(48 + trie_node_child.child_num) END)
+                        JOIN trie_node ON trie_node.hash = trie_node_child.child_hash AND SUBSTR(node_with_key.key_remain, 1, LENGTH(trie_node.partial_key_hex)) = trie_node.partial_key_hex
                 )
             SELECT COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1, trie_node_storage.value, trie_node_storage.trie_entry_version
             FROM blocks
             LEFT JOIN trie_node ON trie_node.hash = blocks.state_trie_root_hash
-            LEFT JOIN nodes_full_keys ON nodes_full_keys.state_trie_root_hash = blocks.state_trie_root_hash AND nodes_full_keys.full_key_hex = ?
-            LEFT JOIN trie_node_storage ON nodes_full_keys.target_node_hash = trie_node_storage.node_hash
-            WHERE blocks.hash = ?"#,
-            )
+            LEFT JOIN node_with_key ON node_with_key.key_remain = ""
+            LEFT JOIN trie_node_storage ON node_with_key.node_hash = trie_node_storage.node_hash
+            WHERE blocks.hash = :block_hash;
+            "#)
             .map_err(|err| {
                 StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(
                     InternalError(err),
@@ -682,13 +683,19 @@ impl SqliteFullDatabase {
             })?;
 
         let (has_block, block_has_storage, value, trie_entry_version) = statement
-            .query_row((hex::encode(key), &block_hash[..]), |row| {
-                let has_block = row.get::<_, i64>(0)? != 0;
-                let block_has_storage = row.get::<_, i64>(1)? != 0;
-                let value = row.get::<_, Option<Vec<u8>>>(2)?;
-                let trie_entry_version = row.get::<_, Option<i64>>(3)?;
-                Ok((has_block, block_has_storage, value, trie_entry_version))
-            })
+            .query_row(
+                rusqlite::named_params! {
+                ":block_hash": &block_hash[..],
+                ":key": hex::encode(key),
+                },
+                |row| {
+                    let has_block = row.get::<_, i64>(0)? != 0;
+                    let block_has_storage = row.get::<_, i64>(1)? != 0;
+                    let value = row.get::<_, Option<Vec<u8>>>(2)?;
+                    let trie_entry_version = row.get::<_, Option<i64>>(3)?;
+                    Ok((has_block, block_has_storage, value, trie_entry_version))
+                },
+            )
             .map_err(|err| {
                 StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(
                     InternalError(err),
