@@ -679,7 +679,7 @@ impl SqliteFullDatabase {
             })?;
 
         let (has_block, block_has_storage, value, trie_entry_version) = statement
-            .query_row((hex::encode(&key), &block_hash[..]), |row| {
+            .query_row((hex::encode(key), &block_hash[..]), |row| {
                 let has_block = row.get::<_, i64>(0)? != 0;
                 let block_has_storage = row.get::<_, i64>(1)? != 0;
                 let value = row.get::<_, Option<Vec<u8>>>(2)?;
@@ -722,101 +722,26 @@ impl SqliteFullDatabase {
     ) -> Result<Option<Vec<u8>>, StorageAccessError> {
         let connection = self.database.lock();
 
-        match block_height(&connection, block_hash)? {
-            None => return Err(StorageAccessError::UnknownBlock),
-            Some(height) if height < finalized_num(&connection)? => {
-                return Err(StorageAccessError::Pruned)
-            }
-            Some(_) => {}
-        }
-
-        let mut next_key = None;
-        let mut erased_keys =
-            hashbrown::HashSet::with_capacity_and_hasher(0, fnv::FnvBuildHasher::default());
-
-        let mut block_hash = *block_hash;
-        let finalized_hash = finalized_hash(&connection)?;
-
-        while block_hash != finalized_hash {
-            // TODO: add AND key < next_key?
-            let mut statement = connection
-                .prepare_cached(
-                    r#"
-                SELECT key, value IS NOT NULL FROM non_finalized_changes
-                WHERE
-                    hash = :hash AND (key > :key OR (:or_equal AND key = :key))
-                ORDER BY key ASC"#,
-                )
-                .map_err(|err| {
-                    StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(
-                        InternalError(err),
-                    )))
-                })?;
-
-            let iter = statement
-                .query_map(
-                    rusqlite::named_params! {
-                        ":hash": &block_hash[..],
-                        ":key": key,
-                        ":or_equal": if or_equal { 1 } else { 0 }
-                    },
-                    |row| {
-                        let key = row.get::<_, Vec<u8>>(0)?;
-                        let inserted = row.get::<_, i64>(1)? != 0;
-                        Ok((key, inserted))
-                    },
-                )
-                .map_err(|err| {
-                    StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(
-                        InternalError(err),
-                    )))
-                })?;
-
-            for result in iter {
-                let (key, inserted) = result.map_err(|err| {
-                    StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(
-                        InternalError(err),
-                    )))
-                })?;
-
-                // TODO: cloning the key :-/
-                if let hashbrown::hash_set::Entry::Vacant(entry) = erased_keys.entry(key.clone()) {
-                    entry.insert();
-                } else {
-                    // Key was erased by a child. Ignoring.
-                    continue;
-                }
-
-                if !inserted {
-                    continue;
-                }
-
-                match next_key {
-                    ref mut out @ None => *out = Some(key),
-                    Some(ref mut curr) if *curr > key => *curr = key,
-                    Some(_) => {}
-                }
-            }
-
-            let parent_hash = block_parent_hash(&connection, &block_hash)?
-                .ok_or(CorruptedError::BrokenChain)
-                .map_err(AccessError::Corrupted)
-                .map_err(StorageAccessError::Access)?;
-            block_hash = parent_hash;
-        }
-
-        // TODO: add AND key < next_key?
+        // TODO: this doesn't seem super optimized to me
         let mut statement = connection
-        .prepare_cached(r#"SELECT key FROM finalized_storage_main_trie WHERE key > :key OR (key = :key AND :or_equal) ORDER BY key ASC"#)
-        .map_err(|err| StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))))?;
-
-        let iter = statement
-            .query_map(
-                rusqlite::named_params! {
-                    ":key": key,
-                    ":or_equal": if or_equal { 1 } else { 0 }
-                },
-                |row| row.get::<_, Vec<u8>>(0),
+            .prepare_cached(
+                r#"
+            WITH RECURSIVE
+                nodes_full_keys(state_trie_root_hash, full_key_hex, target_node_hash) AS (
+                    SELECT hash, partial_key_hex, hash FROM trie_node
+                    UNION ALL
+                    SELECT
+                        nodes_full_keys.state_trie_root_hash,
+                        nodes_full_keys.full_key_hex || (CASE trie_node_child.child_num >= 10 WHEN TRUE THEN CHAR(97 + trie_node_child.child_num - 10) ELSE CHAR(48 + trie_node_child.child_num) END) || trie_node.partial_key_hex,
+                        trie_node.hash
+                    FROM nodes_full_keys, trie_node_child, trie_node
+                    WHERE nodes_full_keys.target_node_hash = trie_node_child.hash AND trie_node_child.child_hash = trie_node.hash
+                )
+            SELECT COUNT(blocks.hash) >= 1, COUNT(nodes_full_keys.state_trie_root_hash) >= 1, nodes_full_keys.target_node_hash
+            FROM blocks
+            LEFT JOIN nodes_full_keys ON nodes_full_keys.state_trie_root_hash = blocks.state_trie_root_hash AND CASE :or_equal WHEN TRUE THEN nodes_full_keys.full_key_hex >= :key ELSE nodes_full_keys.full_key_hex > :key END
+            WHERE blocks.hash = :block_hash
+            LIMIT 1"#,
             )
             .map_err(|err| {
                 StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(
@@ -824,23 +749,32 @@ impl SqliteFullDatabase {
                 )))
             })?;
 
-        for result in iter {
-            let key = result.map_err(|err| {
+        let (has_block, block_has_storage, next_key) = statement
+            .query_row(
+                rusqlite::named_params! {
+                    ":block_hash": &block_hash[..],
+                    ":key": hex::encode(key),
+                    ":or_equal": if or_equal { 1 } else { 0 }
+                },
+                |row| {
+                    let has_block = row.get::<_, i64>(0)? != 0;
+                    let block_has_storage = row.get::<_, i64>(1)? != 0;
+                    let next_key = row.get::<_, Option<Vec<u8>>>(2)?;
+                    Ok((has_block, block_has_storage, next_key))
+                },
+            )
+            .map_err(|err| {
                 StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(
                     InternalError(err),
                 )))
             })?;
 
-            if erased_keys.contains(&key) {
-                // Key was erased by a child. Ignoring.
-                continue;
-            }
+        if !has_block {
+            return Err(StorageAccessError::UnknownBlock);
+        }
 
-            match next_key {
-                ref mut out @ None => *out = Some(key),
-                Some(ref mut curr) if *curr > key => *curr = key,
-                Some(_) => {}
-            }
+        if !block_has_storage {
+            return Err(StorageAccessError::Pruned);
         }
 
         Ok(next_key)
