@@ -22,7 +22,7 @@ use crate::{
     header, util,
 };
 
-use alloc::{borrow::ToOwned as _, collections::BTreeMap, vec::Vec};
+use alloc::{borrow::ToOwned as _, vec::Vec};
 use core::{iter, num::NonZeroU64};
 
 pub use runtime_host::{Nibble, TrieChange, TrieEntryVersion};
@@ -332,7 +332,7 @@ pub fn validate_transaction(
                     digest: header::DigestRef::empty(),
                 }
                 .scale_encoding(config.block_number_bytes),
-                storage_main_trie_changes: BTreeMap::new(),
+                storage_main_trie_changes: storage_diff::TrieDiff::empty(),
                 offchain_storage_changes: storage_diff::TrieDiff::empty(),
                 max_log_level: config.max_log_level,
             });
@@ -369,7 +369,7 @@ pub fn validate_transaction(
                     config.source,
                     &header::hash_from_scale_encoded_header(config.scale_encoded_header),
                 ),
-                storage_main_trie_changes: BTreeMap::new(),
+                storage_main_trie_changes: storage_diff::TrieDiff::empty(),
                 offchain_storage_changes: storage_diff::TrieDiff::empty(),
                 max_log_level: config.max_log_level,
             });
@@ -458,7 +458,9 @@ impl Query {
                             iter::once(info.scale_encoded_transaction),
                             info.transaction_source,
                         ),
-                        storage_main_trie_changes: success.storage_main_trie_changes,
+                        storage_main_trie_changes: runtime_host::trie_diff_to_storage_diff(
+                            success.storage_main_trie_changes,
+                        ),
                         offchain_storage_changes: success.offchain_storage_changes,
                         max_log_level: info.max_log_level,
                     });

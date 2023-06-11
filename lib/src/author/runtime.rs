@@ -337,7 +337,9 @@ impl BlockBuild {
                         virtual_machine: success.virtual_machine.into_prototype(),
                         function_to_call: "BlockBuilder_apply_extrinsic",
                         parameter: iter::once(extrinsic),
-                        storage_main_trie_changes: success.storage_main_trie_changes,
+                        storage_main_trie_changes: runtime_host::trie_diff_to_storage_diff(
+                            success.storage_main_trie_changes,
+                        ),
                         offchain_storage_changes: success.offchain_storage_changes,
                         max_log_level: shared.max_log_level,
                     });
@@ -541,7 +543,9 @@ impl InherentExtrinsics {
                     .map(either::Left)
                     .chain(encoded_list.map(either::Right))
             },
-            storage_main_trie_changes: self.storage_main_trie_changes,
+            storage_main_trie_changes: runtime_host::trie_diff_to_storage_diff(
+                self.storage_main_trie_changes,
+            ),
             offchain_storage_changes: self.offchain_storage_changes,
             max_log_level: self.shared.max_log_level,
         });
@@ -573,7 +577,9 @@ impl ApplyExtrinsic {
             virtual_machine: self.parent_runtime,
             function_to_call: "BlockBuilder_apply_extrinsic",
             parameter: iter::once(&extrinsic),
-            storage_main_trie_changes: self.storage_main_trie_changes,
+            storage_main_trie_changes: runtime_host::trie_diff_to_storage_diff(
+                self.storage_main_trie_changes,
+            ),
             offchain_storage_changes: self.offchain_storage_changes,
             max_log_level: self.shared.max_log_level,
         });
@@ -596,7 +602,9 @@ impl ApplyExtrinsic {
             virtual_machine: self.parent_runtime,
             function_to_call: "BlockBuilder_finalize_block",
             parameter: iter::empty::<&[u8]>(),
-            storage_main_trie_changes: self.storage_main_trie_changes,
+            storage_main_trie_changes: runtime_host::trie_diff_to_storage_diff(
+                self.storage_main_trie_changes,
+            ),
             offchain_storage_changes: self.offchain_storage_changes,
             max_log_level: self.shared.max_log_level,
         });

@@ -61,7 +61,6 @@ pub struct Config<'a, TParams> {
 
     /// Initial state of [`Success::storage_main_trie_changes`]. The changes made during this
     /// execution will be pushed over the value in this field.
-    // TODO: is this field still useful?
     pub storage_main_trie_changes: storage_diff::TrieDiff,
 
     /// Initial state of [`Success::offchain_storage_changes`]. The changes made during this
@@ -75,6 +74,40 @@ pub struct Config<'a, TParams> {
     /// >           "off", `1` for "error", `2` for "warn", `3` for "info", `4` for "debug",
     /// >           and `5` for "trace".
     pub max_log_level: u32,
+}
+
+// TODO: weird APIs in general, should be cleaned up
+pub fn trie_diff_to_storage_diff(
+    changes: BTreeMap<Vec<Nibble>, TrieChange>,
+) -> storage_diff::TrieDiff {
+    let mut out = storage_diff::TrieDiff::empty();
+    for (key, change) in changes {
+        if key.len() % 2 != 0 {
+            // TODO: what if `change` contains a new merkle value?
+            continue;
+        }
+
+        let key_bytes = trie::nibbles_to_bytes_truncate(key.iter().copied()).collect::<Vec<_>>();
+
+        match change {
+            TrieChange::Remove
+            | TrieChange::StorageValueChange {
+                new_storage_value: None,
+                ..
+            } => {
+                out.diff_insert_erase(key_bytes, ());
+            }
+            TrieChange::MerkleValueChange { .. } => {}
+            TrieChange::StorageValueChange {
+                new_storage_value: Some(value),
+                ..
+            } => {
+                out.diff_insert(key_bytes, value, ());
+            }
+        }
+    }
+
+    out
 }
 
 /// Start running the WebAssembly virtual machine.
@@ -791,7 +824,7 @@ impl Inner {
                     );
                 }
                 Some(trie_root_calculator::InProgress::TrieNodeInsertUpdateEvent(ev)) => {
-                    if matches!(self.vm, host::HostVm::ExternalStorageRoot(req) if req.child_trie().is_none())
+                    if matches!(&self.vm, host::HostVm::ExternalStorageRoot(req) if req.child_trie().is_none())
                     {
                         // TODO: a lot of copying here
                         let key = ev.key_as_vec();
@@ -827,7 +860,7 @@ impl Inner {
                     continue;
                 }
                 Some(trie_root_calculator::InProgress::TrieNodeRemoveEvent(ev)) => {
-                    if matches!(self.vm, host::HostVm::ExternalStorageRoot(req) if req.child_trie().is_none())
+                    if matches!(&self.vm, host::HostVm::ExternalStorageRoot(req) if req.child_trie().is_none())
                     {
                         self.main_trie_changes
                             .as_mut()

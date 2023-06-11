@@ -456,7 +456,9 @@ impl VerifyInner {
                             virtual_machine: success.virtual_machine.into_prototype(),
                             function_to_call: "Core_execute_block",
                             parameter: iter::once(&execute_block_parameters),
-                            storage_main_trie_changes: success.storage_main_trie_changes,
+                            storage_main_trie_changes: runtime_host::trie_diff_to_storage_diff(
+                                success.storage_main_trie_changes,
+                            ),
                             offchain_storage_changes: success.offchain_storage_changes,
                             max_log_level: 0,
                         });
@@ -494,7 +496,13 @@ impl VerifyInner {
                                 &trie::bytes_to_nibbles(b":code".iter().copied())
                                     .collect::<Vec<_>>(), // TODO: allocation
                             )
-                            .map(|change| change.storage_value().map(|v| &v[..])),
+                            .and_then(|change| match &change {
+                                TrieChange::StorageValueChange {
+                                    new_storage_value, ..
+                                } => Some(new_storage_value.as_ref().map(|v| &v[..])),
+                                TrieChange::Remove => Some(None),
+                                _ => None,
+                            }),
                         parent_code,
                         success
                             .storage_main_trie_changes
@@ -502,7 +510,13 @@ impl VerifyInner {
                                 &trie::bytes_to_nibbles(b":heappages".iter().copied())
                                     .collect::<Vec<_>>(), // TODO: allocation
                             )
-                            .map(|change| change.storage_value().map(|v| &v[..])),
+                            .and_then(|change| match &change {
+                                TrieChange::StorageValueChange {
+                                    new_storage_value, ..
+                                } => Some(new_storage_value.as_ref().map(|v| &v[..])),
+                                TrieChange::Remove => Some(None),
+                                _ => None,
+                            }),
                     ) {
                         (None, _, None) => {}
                         (Some(None), _, _) => {
@@ -786,7 +800,13 @@ impl RuntimeCompilation {
         let code = self
             .storage_main_trie_changes
             .get(&trie::bytes_to_nibbles(b":code".iter().copied()).collect::<Vec<_>>()) // TODO: allocation
-            .map(|change| change.storage_value().map(|v| &v[..]))
+            .and_then(|change| match &change {
+                TrieChange::StorageValueChange {
+                    new_storage_value, ..
+                } => Some(new_storage_value.as_ref().map(|v| &v[..])),
+                TrieChange::Remove => Some(None),
+                _ => None,
+            })
             .or(self.parent_code.as_ref().map(|v| v.as_deref()))
             .unwrap()
             .unwrap();

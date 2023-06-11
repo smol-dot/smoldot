@@ -1291,9 +1291,32 @@ impl SyncBackground {
                                         &scale_encoded_header_to_verify,
                                         is_new_best,
                                         iter::empty::<Vec<u8>>(), // TODO:,no /!\
-                                        storage_main_trie_changes
-                                            .diff_iter_unordered()
-                                            .map(|(k, v, ())| (k, v)),
+                                        storage_main_trie_changes.iter().filter_map(
+                                            |(key, change)| {
+                                                if key.len() % 2 != 0 {
+                                                    // TODO: what if change contains a storage value?
+                                                    return None;
+                                                }
+
+                                                let key = trie::nibbles_to_bytes_truncate(
+                                                    key.iter().copied(),
+                                                )
+                                                .collect::<Vec<_>>();
+
+                                                let value = match change {
+                                                    all::TrieChange::Remove => None,
+                                                    all::TrieChange::MerkleValueChange {
+                                                        ..
+                                                    } => return None,
+                                                    all::TrieChange::StorageValueChange {
+                                                        new_storage_value,
+                                                        ..
+                                                    } => new_storage_value.as_ref(),
+                                                };
+
+                                                Some((key, value))
+                                            },
+                                        ),
                                         u8::from(state_trie_version),
                                     );
 
