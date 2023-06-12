@@ -380,6 +380,7 @@ impl StorageValue {
                 // The stack is updated in `TrieNodeInsertUpdateEvent::resume`.
                 InProgress::TrieNodeInsertUpdateEvent(TrieNodeInsertUpdateEvent {
                     inner: self.0,
+                    children: calculated_elem.children,
                     inserted_elem_partial_key: calculated_elem.partial_key,
                     merkle_value,
                 })
@@ -476,6 +477,9 @@ pub struct TrieNodeInsertUpdateEvent {
     /// Partial key of the node that was inserted or updated.
     inserted_elem_partial_key: Vec<Nibble>,
 
+    /// Merkle values of the children of the node that was inserted or updated.
+    children: arrayvec::ArrayVec<Option<trie::trie_node::MerkleValueOutput>, 16>,
+
     /// Merkle value of the node that was inserted or updated.
     merkle_value: trie::trie_node::MerkleValueOutput,
 }
@@ -500,6 +504,21 @@ impl TrieNodeInsertUpdateEvent {
     /// Returns the new Merkle value of the trie node that was inserted or updated.
     pub fn merkle_value(&self) -> &[u8] {
         self.merkle_value.as_ref()
+    }
+
+    /// Returns the Merkle values of the children of the trie node that was inserted or updated.
+    ///
+    /// The iterator always yields exactly 16 elements. The yielded element is `None` if there is
+    /// no child at this position.
+    pub fn children_merkle_values(&self) -> impl ExactSizeIterator<Item = Option<&[u8]>> {
+        self.children
+            .iter()
+            .map(|child| child.as_ref().map(|merkle_value| merkle_value.as_ref()))
+    }
+
+    /// Returns the partial key of the trie node that was inserted or updated.
+    pub fn partial_key(&self) -> &[Nibble] {
+        &self.inserted_elem_partial_key
     }
 
     /// Resume the computation.
