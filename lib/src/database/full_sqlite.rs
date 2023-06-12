@@ -500,7 +500,7 @@ impl SqliteFullDatabase {
         }
 
         // Now update the finalized block storage.
-        // TODO: update for tries stuff changes
+        // TODO: prune the storage of old blocks?
         for height in current_finalized + 1..=new_finalized_header.number {
             let block_hash =
                 {
@@ -519,35 +519,6 @@ impl SqliteFullDatabase {
                 .map_err(CorruptedError::BlockHeaderCorrupted)
                 .map_err(AccessError::Corrupted)
                 .map_err(SetFinalizedError::Access)?;
-
-            connection
-                .prepare_cached(
-                    "DELETE FROM finalized_storage_main_trie
-                WHERE key IN (
-                    SELECT key FROM non_finalized_changes WHERE hash = ? AND value IS NULL
-                );",
-                )
-                .unwrap()
-                .execute((&block_hash[..],))
-                .unwrap();
-
-            connection
-                .prepare_cached(
-                    "INSERT OR REPLACE INTO finalized_storage_main_trie(key, value, trie_entry_version)
-                SELECT key, value, trie_entry_version
-                FROM non_finalized_changes 
-                WHERE non_finalized_changes.hash = ? AND non_finalized_changes.value IS NOT NULL",
-                )
-                .unwrap()
-                .execute((&block_hash[..],))
-                .unwrap();
-
-            // Remove the entries from `non_finalized_changes` as they are now finalized.
-            connection
-                .prepare_cached("DELETE FROM non_finalized_changes WHERE hash = ?")
-                .unwrap()
-                .execute((&block_hash[..],))
-                .unwrap();
 
             // TODO: the code below is very verbose and redundant with other similar code in smoldot ; could be improved
 
