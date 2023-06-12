@@ -655,23 +655,14 @@ impl SqliteFullDatabase {
     ) -> Result<Option<(Vec<u8>, u8)>, StorageAccessError> {
         let connection = self.database.lock();
 
-        println!(
-            "{:?}",
-            block_hash
-                .iter()
-                .copied()
-                .map(|b| format!("{:x}", b))
-                .collect::<String>()
-        );
-
         let mut statement = connection
             .prepare_cached(
                 r#"
             WITH RECURSIVE
                 node_with_key(node_hash, search_remain) AS (
-                    SELECT trie_node.hash, SUBSTR(:key, 1 + LENGTH(trie_node.partial_key))
+                    SELECT trie_node.hash, COALESCE(SUBSTR(:key, 1 + LENGTH(trie_node.partial_key)), X'')
                         FROM blocks, trie_node
-                        WHERE blocks.hash = :block_hash AND blocks.state_trie_root_hash = trie_node.hash AND SUBSTR(:key, 1, LENGTH(trie_node.partial_key)) = trie_node.partial_key
+                        WHERE blocks.hash = :block_hash AND blocks.state_trie_root_hash = trie_node.hash AND COALESCE(SUBSTR(:key, 1, LENGTH(trie_node.partial_key)), X'') = trie_node.partial_key
                     UNION ALL
                     SELECT trie_node.hash, SUBSTR(node_with_key.search_remain, 2 + LENGTH(trie_node.partial_key))
                         FROM node_with_key
@@ -760,27 +751,27 @@ impl SqliteFullDatabase {
         let connection = self.database.lock();
 
         // TODO: this algorithm relies the fact that leaf nodes always have a storage value, which isn't exactly clear in the schema ; however not relying on this makes it way harder to write
-        // TODO: pretty slow when `branch_nodes` is `false` due to inability to
+        // TODO: pretty slow when `branch_nodes` is `false` due to inability to do a group by + min to take only the first child
         let mut statement = connection
             .prepare_cached(
                 r#"
             WITH RECURSIVE
                 next_key(node_hash, node_is_branch, node_full_key, search_remain) AS (
-                        SELECT trie_node.hash, trie_node_storage.value IS NULL, trie_node.partial_key, SUBSTR(:key, 1 + LENGTH(trie_node.partial_key))
+                        SELECT trie_node.hash, trie_node_storage.value IS NULL, trie_node.partial_key, COALESCE(SUBSTR(:key, 1 + LENGTH(trie_node.partial_key)), X'')
                         FROM blocks
                         JOIN trie_node ON blocks.state_trie_root_hash = trie_node.hash
-                            AND SUBSTR(:key, 1, LENGTH(trie_node.partial_key)) <= trie_node.partial_key
+                            AND COALESCE(SUBSTR(:key, 1, LENGTH(trie_node.partial_key)), X'') <= trie_node.partial_key
                         LEFT JOIN trie_node_storage ON trie_node_storage.node_hash = trie_node.hash
                         WHERE blocks.hash = :block_hash
                     UNION ALL
                         SELECT
                             trie_node_child.child_hash,
                             trie_node_storage.value IS NULL,
-                            next_key.node_full_key || trie_node_child.child_num || trie_node.partial_key
+                            CAST(next_key.node_full_key || trie_node_child.child_num || trie_node.partial_key AS BLOB)
                                 AS node_full_key,
                             CASE SUBSTR(next_key.search_remain, 1, 1) = trie_node_child.child_num
                                 WHEN TRUE THEN SUBSTR(next_key.search_remain, 2 + LENGTH(trie_node.partial_key))
-                                ELSE X"" END
+                                ELSE X'' END
                         FROM next_key
                         JOIN trie_node_child
                             ON next_key.node_hash = trie_node_child.hash
@@ -869,12 +860,12 @@ impl SqliteFullDatabase {
                 r#"
             WITH RECURSIVE
                 closest_descendant(node_hash, search_remain) AS (
-                    SELECT trie_node.hash, SUBSTR(:key, 1 + LENGTH(trie_node.partial_key))
+                    SELECT trie_node.hash, COALESCE(SUBSTR(:key, 1 + LENGTH(trie_node.partial_key)), X'')
                         FROM blocks, trie_node
                         WHERE blocks.hash = :block_hash AND blocks.state_trie_root_hash = trie_node.hash
                             AND (
-                                SUBSTR(trie_node.partial_key, 1, LENGTH(:key)) = :key
-                                OR SUBSTR(:key, 1, LENGTH(trie_node.partial_key)) = trie_node.partial_key
+                                COALESCE(SUBSTR(trie_node.partial_key, 1, LENGTH(:key)), X'') = :key
+                                OR COALESCE(SUBSTR(:key, 1, LENGTH(trie_node.partial_key)), X'') = trie_node.partial_key
                             )
                     UNION ALL
                     SELECT trie_node.hash, SUBSTR(closest_descendant.search_remain, 2 + LENGTH(trie_node.partial_key))
@@ -883,8 +874,8 @@ impl SqliteFullDatabase {
                             AND SUBSTR(closest_descendant.search_remain, 1, 1) = trie_node_child.child_num
                         JOIN trie_node ON trie_node.hash = trie_node_child.child_hash
                             AND (
-                                SUBSTR(trie_node.partial_key, 1, LENGTH(closest_descendant.search_remain) - 1) = SUBSTR(closest_descendant.search_remain, 2)
-                                OR SUBSTR(closest_descendant.search_remain, 2, LENGTH(trie_node.partial_key)) = trie_node.partial_key
+                                COALESCE(SUBSTR(trie_node.partial_key, 1, LENGTH(closest_descendant.search_remain) - 1), X'') = COALESCE(SUBSTR(closest_descendant.search_remain, 2), X'')
+                                OR COALESCE(SUBSTR(closest_descendant.search_remain, 2, LENGTH(trie_node.partial_key)), X'') = trie_node.partial_key
                             )
                         WHERE LENGTH(closest_descendant.search_remain) >= 1
                 )
