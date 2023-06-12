@@ -80,6 +80,12 @@ pub use open::{open, Config, ConfigTy, DatabaseEmpty, DatabaseOpen};
 
 mod open;
 
+/// Returns an opaque string representing the version number of the SQLite library this binary
+/// is using.
+pub fn sqlite_version() -> &'static str {
+    rusqlite::version()
+}
+
 /// An open database. Holds file descriptors.
 pub struct SqliteFullDatabase {
     /// The SQLite connection.

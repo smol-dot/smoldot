@@ -125,6 +125,10 @@ pub async fn run_until(config: Config<'_>, until: Pin<Box<dyn Future<Output = ()
         }
     }
 
+    // Printing the SQLite version number can be useful for debugging purposes for example in case
+    // a query fails.
+    log::debug!("sqlite-version; version={}", full_sqlite::sqlite_version());
+
     let (database, database_existed) = {
         let (db, existed) = open_database(
             &chain_spec,
