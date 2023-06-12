@@ -47,12 +47,10 @@ pub fn open(config: Config) -> Result<DatabaseOpen, InternalError> {
 
     let database = match config.ty {
         ConfigTy::Disk(path) => {
-            // We put a `/v1/` behind the path in case we change the schema.
-            let path = path.join("v1");
             // Ignoring errors in `create_dir_all`, in order to avoid making the API of this
             // function more complex. If `create_dir_all` fails, opening the database will most
             // likely fail too.
-            let _ = fs::create_dir_all(&path);
+            let _ = fs::create_dir_all(path);
             rusqlite::Connection::open_with_flags(path.join("database.sqlite"), flags)
         }
         ConfigTy::Memory => rusqlite::Connection::open_in_memory_with_flags(flags),
