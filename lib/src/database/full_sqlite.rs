@@ -750,8 +750,6 @@ impl SqliteFullDatabase {
     ) -> Result<Option<String>, StorageAccessError> {
         let connection = self.database.lock();
 
-        println!("{}, {}", hex::encode(block_hash), key_hex_nibbles);
-
         // TODO: this algorithm relies the fact that leaf nodes always have a storage value, which isn't exactly clear in the schema ; however not relying on this makes it way harder to write
         // TODO: pretty slow when `branch_nodes` is `false` due to inability to
         let mut statement = connection
