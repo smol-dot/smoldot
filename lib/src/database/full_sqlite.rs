@@ -753,6 +753,7 @@ impl SqliteFullDatabase {
         println!("{}, {}", hex::encode(block_hash), key_hex_nibbles);
 
         // TODO: this algorithm relies the fact that leaf nodes always have a storage value, which isn't exactly clear in the schema ; however not relying on this makes it way harder to write
+        // TODO: pretty slow when `branch_nodes` is `false` due to inability to
         let mut statement = connection
             .prepare_cached(
                 r#"
@@ -771,28 +772,28 @@ impl SqliteFullDatabase {
                             next_key.node_full_key || (CASE trie_node_child.child_num >= 10 WHEN TRUE THEN CHAR(97 + trie_node_child.child_num - 10) ELSE CHAR(48 + trie_node_child.child_num) END) || trie_node.partial_key_hex
                                 AS node_full_key,
                             CASE SUBSTR(next_key.search_remain, 1, 1) = (CASE trie_node_child.child_num >= 10 WHEN TRUE THEN CHAR(97 + trie_node_child.child_num - 10) ELSE CHAR(48 + trie_node_child.child_num) END)
-                            WHEN FALSE THEN ""
-                            ELSE SUBSTR(next_key.search_remain, 2 + LENGTH(trie_node.partial_key_hex)) END,
+                                WHEN TRUE THEN SUBSTR(next_key.search_remain, 2 + LENGTH(trie_node.partial_key_hex))
+                                ELSE "" END
                         FROM next_key
-                        JOIN trie_node_child ON next_key.node_hash = trie_node_child.hash
+                        JOIN trie_node_child
+                            ON next_key.node_hash = trie_node_child.hash
                             AND CASE next_key.search_remain
-                            WHEN "" THEN next_key.node_is_branch AND :skip_branches
-                            ELSE SUBSTR(next_key.search_remain, 1, 1) <= (CASE trie_node_child.child_num >= 10 WHEN TRUE THEN CHAR(97 + trie_node_child.child_num - 10) ELSE CHAR(48 + trie_node_child.child_num) END) END
+                                WHEN "" THEN next_key.node_is_branch AND :skip_branches
+                                ELSE SUBSTR(next_key.search_remain, 1, 1) <= (CASE trie_node_child.child_num >= 10 WHEN TRUE THEN CHAR(97 + trie_node_child.child_num - 10) ELSE CHAR(48 + trie_node_child.child_num) END) END
                         LEFT JOIN trie_node_storage ON trie_node_storage.node_hash = trie_node_child.child_hash
                         JOIN trie_node ON trie_node.hash = trie_node_child.child_hash
                             AND
                                 CASE SUBSTR(next_key.search_remain, 1, 1) = (CASE trie_node_child.child_num >= 10 WHEN TRUE THEN CHAR(97 + trie_node_child.child_num - 10) ELSE CHAR(48 + trie_node_child.child_num) END)
                                 WHEN TRUE THEN SUBSTR(next_key.search_remain, 2, LENGTH(trie_node.partial_key_hex)) <= trie_node.partial_key_hex
                                 ELSE TRUE END
-                        ORDER BY node_full_key ASC
-                        LIMIT 1
                 )
 
-            SELECT COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1, next_key.node_full_key
+            SELECT COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1, MIN(next_key.node_full_key)
             FROM blocks
             LEFT JOIN trie_node ON trie_node.hash = blocks.state_trie_root_hash
-            LEFT JOIN next_key ON next_key.search_remain = "" AND (NOT :skip_branches OR NOT next_key.node_is_branch)
+            LEFT JOIN next_key ON next_key.search_remain = ""
             WHERE blocks.hash = :block_hash
+            GROUP BY blocks.hash, trie_node.hash
             LIMIT 1"#,
             )
             .map_err(|err| {
