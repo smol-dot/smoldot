@@ -659,20 +659,20 @@ impl SqliteFullDatabase {
             .prepare_cached(
                 r#"
             WITH RECURSIVE
-                node_with_key(node_hash, key_remain) AS (
+                node_with_key(node_hash, search_remain) AS (
                     SELECT trie_node.hash, SUBSTR(:key, 1 + LENGTH(trie_node.partial_key_hex))
                         FROM blocks, trie_node
                         WHERE blocks.hash = :block_hash AND blocks.state_trie_root_hash = trie_node.hash AND SUBSTR(:key, 1, LENGTH(trie_node.partial_key_hex)) = trie_node.partial_key_hex
                     UNION ALL
-                    SELECT trie_node.hash, SUBSTR(node_with_key.key_remain, 2 + LENGTH(trie_node.partial_key_hex))
+                    SELECT trie_node.hash, SUBSTR(node_with_key.search_remain, 2 + LENGTH(trie_node.partial_key_hex))
                         FROM node_with_key
-                        JOIN trie_node_child ON node_with_key.node_hash = trie_node_child.hash AND SUBSTR(node_with_key.key_remain, 1, 1) = (CASE trie_node_child.child_num >= 10 WHEN TRUE THEN CHAR(97 + trie_node_child.child_num - 10) ELSE CHAR(48 + trie_node_child.child_num) END)
-                        JOIN trie_node ON trie_node.hash = trie_node_child.child_hash AND SUBSTR(node_with_key.key_remain, 2, LENGTH(trie_node.partial_key_hex)) = trie_node.partial_key_hex
+                        JOIN trie_node_child ON node_with_key.node_hash = trie_node_child.hash AND SUBSTR(node_with_key.search_remain, 1, 1) = (CASE trie_node_child.child_num >= 10 WHEN TRUE THEN CHAR(97 + trie_node_child.child_num - 10) ELSE CHAR(48 + trie_node_child.child_num) END)
+                        JOIN trie_node ON trie_node.hash = trie_node_child.child_hash AND SUBSTR(node_with_key.search_remain, 2, LENGTH(trie_node.partial_key_hex)) = trie_node.partial_key_hex
                 )
             SELECT COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1, trie_node_storage.value, trie_node_storage.trie_entry_version
             FROM blocks
             LEFT JOIN trie_node ON trie_node.hash = blocks.state_trie_root_hash
-            LEFT JOIN node_with_key ON node_with_key.key_remain = ""
+            LEFT JOIN node_with_key ON node_with_key.search_remain = ""
             LEFT JOIN trie_node_storage ON node_with_key.node_hash = trie_node_storage.node_hash
             WHERE blocks.hash = :block_hash;
             "#)
@@ -732,26 +732,41 @@ impl SqliteFullDatabase {
     ) -> Result<Option<Vec<u8>>, StorageAccessError> {
         let connection = self.database.lock();
 
-        // TODO: this doesn't seem super optimized to me
+        // TODO: this algorithm relies the fact that leaf nodes always have a storage value, which isn't exactly clear in the schema ; however not relying on this makes it way harder to write
         let mut statement = connection
             .prepare_cached(
                 r#"
             WITH RECURSIVE
-                nodes_full_keys(state_trie_root_hash, full_key_hex, target_node_hash) AS (
-                    SELECT hash, partial_key_hex, hash FROM trie_node
+                next_key(node_hash, node_is_branch, node_full_key, search_remain) AS (
+                        SELECT trie_node.hash, trie_node_storage.value IS NULL, trie_node.partial_key_hex, SUBSTR(:key, 1 + LENGTH(trie_node.partial_key_hex))
+                        FROM blocks
+                        JOIN trie_node ON blocks.state_trie_root_hash = trie_node.hash
+                            AND SUBSTR(:key, 1, LENGTH(trie_node.partial_key_hex)) <= trie_node.partial_key_hex
+                        LEFT JOIN trie_node_storage ON trie_node_storage.node_hash = trie_node.hash
+                        WHERE blocks.hash = :block_hash
                     UNION ALL
-                    SELECT
-                        nodes_full_keys.state_trie_root_hash,
-                        nodes_full_keys.full_key_hex || (CASE trie_node_child.child_num >= 10 WHEN TRUE THEN CHAR(97 + trie_node_child.child_num - 10) ELSE CHAR(48 + trie_node_child.child_num) END) || trie_node.partial_key_hex,
-                        trie_node.hash
-                    FROM nodes_full_keys, trie_node_child, trie_node
-                    WHERE nodes_full_keys.target_node_hash = trie_node_child.hash AND trie_node_child.child_hash = trie_node.hash
+                        SELECT
+                            trie_node_child.child_hash,
+                            trie_node_storage.value IS NULL,
+                            next_key.node_full_key || (CASE trie_node_child.child_num >= 10 WHEN TRUE THEN CHAR(97 + trie_node_child.child_num - 10) ELSE CHAR(48 + trie_node_child.child_num) END) || trie_node.partial_key_hex,
+                            SUBSTR(next_key.search_remain, 2 + LENGTH(trie_node_child.partial_key_hex))
+                        FROM next_key
+                        JOIN trie_node_child ON next_key.node_hash = trie_node_child.hash
+                            AND (
+                                SUBSTR(next_key.search_remain, 1, 1) = (CASE trie_node_child.child_num >= 10 WHEN TRUE THEN CHAR(97 + trie_node_child.child_num - 10) ELSE CHAR(48 + trie_node_child.child_num) END)
+                                OR (next_key.search_remain = "" AND next_key.node_is_branch AND :skip_branches)
+                            ),
+                        LEFT JOIN trie_node_storage ON trie_node_storage.node_hash = trie_node_child.child_hash
+                        LEFT JOIN trie_node ON trie_node.hash = trie_node_child.child_hash
+                            AND SUBSTR(next_key.search_remain, 2, LENGTH(trie_node.partial_key_hex)) <= trie_node.partial_key_hex
+                        ORDER BY trie_node_child.child_num ASC
+                        LIMIT 1
                 )
-            SELECT COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1, nodes_full_keys.full_key_hex
+
+            SELECT COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1, next_key.node_full_key
             FROM blocks
             LEFT JOIN trie_node ON trie_node.hash = blocks.state_trie_root_hash
-            LEFT JOIN nodes_full_keys ON nodes_full_keys.state_trie_root_hash = blocks.state_trie_root_hash AND CASE :or_equal WHEN TRUE THEN nodes_full_keys.full_key_hex >= :key ELSE nodes_full_keys.full_key_hex > :key END
-            INNER JOIN trie_node_storage ON nodes_full_keys.target_node_hash IS NULL OR trie_node_storage.node_hash = nodes_full_keys.target_node_hash
+            LEFT JOIN next_key ON next_key.search_remain = "" AND (NOT :skip_branches OR NOT next_key.node_is_branch)
             WHERE blocks.hash = :block_hash
             LIMIT 1"#,
             )
@@ -765,8 +780,8 @@ impl SqliteFullDatabase {
             .query_row(
                 rusqlite::named_params! {
                     ":block_hash": &block_hash[..],
-                    ":key": hex::encode(key),
-                    ":or_equal": if or_equal { 1 } else { 0 }
+                    ":key": { let mut k = hex::encode(key); if or_equal { k.push('0'); } k },
+                    ":skip_branches": true
                 },
                 |row| {
                     let has_block = row.get::<_, i64>(0)? != 0;
@@ -823,7 +838,7 @@ impl SqliteFullDatabase {
             .prepare_cached(
                 r#"
             WITH RECURSIVE
-                closest_descendant(node_hash, key_remain) AS (
+                closest_descendant(node_hash, search_remain) AS (
                     SELECT trie_node.hash, SUBSTR(:key, 1 + LENGTH(trie_node.partial_key_hex))
                         FROM blocks, trie_node
                         WHERE blocks.hash = :block_hash AND blocks.state_trie_root_hash = trie_node.hash
@@ -832,20 +847,20 @@ impl SqliteFullDatabase {
                                 OR SUBSTR(:key, 1, LENGTH(trie_node.partial_key_hex)) = trie_node.partial_key_hex
                             )
                     UNION ALL
-                    SELECT trie_node.hash, SUBSTR(closest_descendant.key_remain, 2 + LENGTH(trie_node.partial_key_hex))
+                    SELECT trie_node.hash, SUBSTR(closest_descendant.search_remain, 2 + LENGTH(trie_node.partial_key_hex))
                         FROM closest_descendant
                         JOIN trie_node_child ON closest_descendant.node_hash = trie_node_child.hash
-                            AND SUBSTR(closest_descendant.key_remain, 1, 1) = (CASE trie_node_child.child_num >= 10 WHEN TRUE THEN CHAR(97 + trie_node_child.child_num - 10) ELSE CHAR(48 + trie_node_child.child_num) END)
+                            AND SUBSTR(closest_descendant.search_remain, 1, 1) = (CASE trie_node_child.child_num >= 10 WHEN TRUE THEN CHAR(97 + trie_node_child.child_num - 10) ELSE CHAR(48 + trie_node_child.child_num) END)
                         JOIN trie_node ON trie_node.hash = trie_node_child.child_hash
                             AND (
-                                SUBSTR(trie_node.partial_key_hex, 1, LENGTH(closest_descendant.key_remain) - 1) = SUBSTR(closest_descendant.key_remain, 2)
-                                OR SUBSTR(closest_descendant.key_remain, 2, LENGTH(trie_node.partial_key_hex)) = trie_node.partial_key_hex
+                                SUBSTR(trie_node.partial_key_hex, 1, LENGTH(closest_descendant.search_remain) - 1) = SUBSTR(closest_descendant.search_remain, 2)
+                                OR SUBSTR(closest_descendant.search_remain, 2, LENGTH(trie_node.partial_key_hex)) = trie_node.partial_key_hex
                             )
                 )
             SELECT COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1, closest_descendant.node_hash
             FROM blocks
             LEFT JOIN trie_node ON trie_node.hash = blocks.state_trie_root_hash
-            LEFT JOIN closest_descendant ON closest_descendant.key_remain = ""
+            LEFT JOIN closest_descendant ON closest_descendant.search_remain = ""
             WHERE blocks.hash = :block_hash
             LIMIT 1"#,
             )
