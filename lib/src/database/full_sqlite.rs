@@ -720,19 +720,37 @@ impl SqliteFullDatabase {
         Ok(Some((value, trie_entry_version)))
     }
 
-    /// Returns the key in the storage that immediately follows the key passed as parameter in the
-    /// storage of either the latest finalized block or a non-finalized block.
+    /// Returns the key in the storage that immediately follows or is equal to the key passed as
+    /// parameter in the storage of the block.
     ///
-    /// If `or_equal`, then `key` itself is returned if it corresponds to a database entry.
+    /// `key_hex_nibbles` must be a lowercase hexadecimal string containing the nibbles of the
+    /// key.
+    ///
+    /// Returns `None` if there is no next key.
+    ///
+    /// The key is returned in the same format as `key_hex_nibbles`.
+    ///
+    /// If `branch_nodes` is `false`, then branch nodes (i.e. nodes with no value associated to
+    /// them) are ignored during the search.
+    ///
+    /// > **Note**: Contrary to many other similar functions in smoldot, there is no `or_equal`
+    /// >           parameter to this function. Instead, `or_equal` is implicitly `true`, and a
+    /// >           value of `false` can be easily emulated by appending a `0` at the end
+    /// >           of `key_hex_nibbles`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `key_hex_nibbles` is not in the correct format.
+    ///
     pub fn block_storage_main_trie_next_key(
         &self,
         block_hash: &[u8; 32],
-        key: &[u8],
-        or_equal: bool,
-    ) -> Result<Option<Vec<u8>>, StorageAccessError> {
+        key_hex_nibbles: &str,
+        branch_nodes: bool,
+    ) -> Result<Option<String>, StorageAccessError> {
         let connection = self.database.lock();
 
-        println!("{}, {}", hex::encode(block_hash), hex::encode(key));
+        println!("{}, {}", hex::encode(block_hash), key_hex_nibbles);
 
         // TODO: this algorithm relies the fact that leaf nodes always have a storage value, which isn't exactly clear in the schema ; however not relying on this makes it way harder to write
         let mut statement = connection
@@ -783,8 +801,8 @@ impl SqliteFullDatabase {
             .query_row(
                 rusqlite::named_params! {
                     ":block_hash": &block_hash[..],
-                    ":key": { let mut k = hex::encode(key); if or_equal { k.push('0'); } k },
-                    ":skip_branches": true
+                    ":key": key_hex_nibbles,
+                    ":skip_branches": !branch_nodes
                 },
                 |row| {
                     let has_block = row.get::<_, i64>(0)? != 0;
@@ -807,7 +825,7 @@ impl SqliteFullDatabase {
             return Err(StorageAccessError::Pruned);
         }
 
-        Ok(next_key.map(|k| hex::decode(k).unwrap()))
+        Ok(next_key)
     }
 
     /// Returns the Merkle value of the trie node in the storage that is the closest descendant
