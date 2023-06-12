@@ -1311,13 +1311,18 @@ impl SyncBackground {
 
                                                 let value = match change {
                                                     all::TrieChange::Remove => None,
-                                                    all::TrieChange::MerkleValueChange {
+                                                    all::TrieChange::InsertUpdate {
+                                                        new_storage_value:
+                                                            all::TrieChangeStorageValue::Unmodified,
                                                         ..
                                                     } => return None,
-                                                    all::TrieChange::StorageValueChange {
-                                                        new_storage_value,
+                                                    all::TrieChange::InsertUpdate {
+                                                        new_storage_value:
+                                                            all::TrieChangeStorageValue::Modified {
+                                                                new_value,
+                                                            },
                                                         ..
-                                                    } => new_storage_value.as_ref(),
+                                                    } => new_value.as_ref(),
                                                 };
 
                                                 Some((key, value))

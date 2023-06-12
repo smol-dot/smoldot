@@ -25,7 +25,7 @@ use crate::{
 use alloc::{borrow::ToOwned as _, vec::Vec};
 use core::{iter, num::NonZeroU64};
 
-pub use runtime_host::{Nibble, TrieChange, TrieEntryVersion};
+pub use runtime_host::{Nibble, TrieChange, TrieChangeStorageValue, TrieEntryVersion};
 
 /// Configuration for a transaction validation process.
 pub struct Config<'a, TTx> {

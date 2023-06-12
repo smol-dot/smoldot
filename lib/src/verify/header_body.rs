@@ -25,7 +25,7 @@ use crate::{
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::{iter, num::NonZeroU64, time::Duration};
 
-pub use runtime_host::{Nibble, TrieChange, TrieEntryVersion};
+pub use runtime_host::{Nibble, TrieChange, TrieChangeStorageValue, TrieEntryVersion};
 
 /// Configuration for a block verification.
 pub struct Config<'a, TBody> {
@@ -497,9 +497,11 @@ impl VerifyInner {
                                     .collect::<Vec<_>>(), // TODO: allocation
                             )
                             .and_then(|change| match &change {
-                                TrieChange::StorageValueChange {
-                                    new_storage_value, ..
-                                } => Some(new_storage_value.as_ref().map(|v| &v[..])),
+                                TrieChange::InsertUpdate {
+                                    new_storage_value:
+                                        TrieChangeStorageValue::Modified { new_value, .. },
+                                    ..
+                                } => Some(new_value.as_ref().map(|v| &v[..])),
                                 TrieChange::Remove => Some(None),
                                 _ => None,
                             }),
@@ -511,9 +513,11 @@ impl VerifyInner {
                                     .collect::<Vec<_>>(), // TODO: allocation
                             )
                             .and_then(|change| match &change {
-                                TrieChange::StorageValueChange {
-                                    new_storage_value, ..
-                                } => Some(new_storage_value.as_ref().map(|v| &v[..])),
+                                TrieChange::InsertUpdate {
+                                    new_storage_value:
+                                        TrieChangeStorageValue::Modified { new_value, .. },
+                                    ..
+                                } => Some(new_value.as_ref().map(|v| &v[..])),
                                 TrieChange::Remove => Some(None),
                                 _ => None,
                             }),
@@ -801,9 +805,10 @@ impl RuntimeCompilation {
             .storage_main_trie_changes
             .get(&trie::bytes_to_nibbles(b":code".iter().copied()).collect::<Vec<_>>()) // TODO: allocation
             .and_then(|change| match &change {
-                TrieChange::StorageValueChange {
-                    new_storage_value, ..
-                } => Some(new_storage_value.as_ref().map(|v| &v[..])),
+                TrieChange::InsertUpdate {
+                    new_storage_value: TrieChangeStorageValue::Modified { new_value, .. },
+                    ..
+                } => Some(new_value.as_ref().map(|v| &v[..])),
                 TrieChange::Remove => Some(None),
                 _ => None,
             })

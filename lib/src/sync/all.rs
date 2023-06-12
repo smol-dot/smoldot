@@ -47,7 +47,7 @@ use core::{
 };
 
 pub use crate::executor::vm::ExecHint;
-pub use optimistic::{Nibble, TrieChange, TrieEntryVersion};
+pub use optimistic::{Nibble, TrieChange, TrieChangeStorageValue, TrieEntryVersion};
 pub use warp_sync::{FragmentError as WarpSyncFragmentError, WarpSyncFragment};
 
 /// Configuration for the [`AllSync`].

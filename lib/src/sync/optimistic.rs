@@ -64,7 +64,7 @@ use core::{
 };
 use hashbrown::HashMap;
 
-pub use blocks_tree::{Nibble, TrieChange, TrieEntryVersion};
+pub use blocks_tree::{Nibble, TrieChange, TrieChangeStorageValue, TrieEntryVersion};
 
 mod verification_queue;
 
@@ -1063,8 +1063,9 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                             )
                             .map_or(false, |change| matches!(
                                 change,
-                                blocks_tree::TrieChange::StorageValueChange {
-                                    new_storage_value: Some(_),
+                                blocks_tree::TrieChange::InsertUpdate {
+                                    new_storage_value:
+                                        blocks_tree::TrieChangeStorageValue::Modified { .. },
                                     ..
                                 }
                             ))
@@ -1075,8 +1076,9 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                                 )
                                 .map_or(false, |change| matches!(
                                     change,
-                                    blocks_tree::TrieChange::StorageValueChange {
-                                        new_storage_value: Some(_),
+                                    blocks_tree::TrieChange::InsertUpdate {
+                                        new_storage_value:
+                                            blocks_tree::TrieChangeStorageValue::Modified { .. },
                                         ..
                                     }
                                 ))

@@ -56,7 +56,7 @@ use crate::{
 use alloc::{borrow::ToOwned as _, collections::BTreeMap, string::String, vec::Vec};
 use core::{iter, mem};
 
-pub use runtime_host::{Nibble, TrieChange, TrieEntryVersion};
+pub use runtime_host::{Nibble, TrieChange, TrieChangeStorageValue, TrieEntryVersion};
 
 /// Configuration for a block generation.
 pub struct Config<'a> {

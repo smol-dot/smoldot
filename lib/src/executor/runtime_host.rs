@@ -91,15 +91,21 @@ pub fn trie_diff_to_storage_diff(
 
         match change {
             TrieChange::Remove
-            | TrieChange::StorageValueChange {
-                new_storage_value: None,
+            | TrieChange::InsertUpdate {
+                new_storage_value: TrieChangeStorageValue::Modified { new_value: None },
                 ..
             } => {
                 out.diff_insert_erase(key_bytes, ());
             }
-            TrieChange::MerkleValueChange { .. } => {}
-            TrieChange::StorageValueChange {
-                new_storage_value: Some(value),
+            TrieChange::InsertUpdate {
+                new_storage_value: TrieChangeStorageValue::Unmodified,
+                ..
+            } => {}
+            TrieChange::InsertUpdate {
+                new_storage_value:
+                    TrieChangeStorageValue::Modified {
+                        new_value: Some(value),
+                    },
                 ..
             } => {
                 out.diff_insert(key_bytes, value, ());
@@ -167,20 +173,22 @@ pub struct Success {
 #[derive(Debug, Clone)]
 pub enum TrieChange {
     /// Trie node is either newly-created, or already existed and has a new Merkle value.
-    MerkleValueChange {
+    InsertUpdate {
         /// New Merkle value associated to this trie node. Always inferior or equal to 32 bytes.
         new_merkle_value: Vec<u8>,
-    },
-    /// Trie node is either newly-created, or already existed and has a new storage value and
-    /// Merkle value.
-    StorageValueChange {
-        /// New Merkle value associated to this trie node. Always inferior or equal to 32 bytes.
-        new_merkle_value: Vec<u8>,
-        /// New storage value (if any) of this trie node.
-        new_storage_value: Option<Vec<u8>>,
+        partial_key: Vec<Nibble>,
+        children_merkle_values: [Option<Vec<u8>>; 16],
+        /// Change to the storage value of that trie node.
+        new_storage_value: TrieChangeStorageValue,
     },
     /// Trie node is removed.
     Remove,
+}
+
+#[derive(Debug, Clone)]
+pub enum TrieChangeStorageValue {
+    Unmodified,
+    Modified { new_value: Option<Vec<u8>> },
 }
 
 /// Function execution has succeeded. Contains the return value of the call.
@@ -837,24 +845,30 @@ impl Inner {
                             None
                         };
 
-                        if let Some((diff_entry, _)) =
+                        let new_storage_value = if let Some((diff_entry, _)) =
                             key_as_bytes.and_then(|k| self.storage_changes.main_trie.diff_get(&k))
                         {
-                            self.main_trie_changes.as_mut().unwrap().insert(
-                                ev.key_as_vec(),
-                                TrieChange::StorageValueChange {
-                                    new_merkle_value: ev.merkle_value().to_vec(),
-                                    new_storage_value: diff_entry.map(|v| v.to_vec()),
-                                },
-                            );
+                            TrieChangeStorageValue::Modified {
+                                new_value: diff_entry.map(|v| v.to_vec()),
+                            }
                         } else {
-                            self.main_trie_changes.as_mut().unwrap().insert(
-                                ev.key_as_vec(),
-                                TrieChange::MerkleValueChange {
-                                    new_merkle_value: ev.merkle_value().to_vec(),
-                                },
-                            );
-                        }
+                            TrieChangeStorageValue::Unmodified
+                        };
+
+                        self.main_trie_changes.as_mut().unwrap().insert(
+                            ev.key_as_vec(),
+                            TrieChange::InsertUpdate {
+                                children_merkle_values: core::array::from_fn(|n| {
+                                    ev.children_merkle_values()
+                                        .nth(n)
+                                        .unwrap()
+                                        .map(|v| v.to_vec())
+                                }),
+                                partial_key: ev.partial_key().to_vec(),
+                                new_merkle_value: ev.merkle_value().to_vec(),
+                                new_storage_value,
+                            },
+                        );
                     }
                     self.root_calculation = Some(ev.resume());
                     continue;
