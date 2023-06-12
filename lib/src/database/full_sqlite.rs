@@ -677,6 +677,7 @@ impl SqliteFullDatabase {
                         FROM node_with_key
                         JOIN trie_node_child ON node_with_key.node_hash = trie_node_child.hash AND SUBSTR(node_with_key.search_remain, 1, 1) = trie_node_child.child_num
                         JOIN trie_node ON trie_node.hash = trie_node_child.child_hash AND SUBSTR(node_with_key.search_remain, 2, LENGTH(trie_node.partial_key)) = trie_node.partial_key
+                        WHERE LENGTH(node_with_key.search_remain) >= 1
                 )
             SELECT COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1, trie_node_storage.value, trie_node_storage.trie_entry_version
             FROM blocks
@@ -779,12 +780,12 @@ impl SqliteFullDatabase {
                                 AS node_full_key,
                             CASE SUBSTR(next_key.search_remain, 1, 1) = trie_node_child.child_num
                                 WHEN TRUE THEN SUBSTR(next_key.search_remain, 2 + LENGTH(trie_node.partial_key))
-                                ELSE "" END
+                                ELSE X"" END
                         FROM next_key
                         JOIN trie_node_child
                             ON next_key.node_hash = trie_node_child.hash
-                            AND CASE next_key.search_remain
-                                WHEN "" THEN next_key.node_is_branch AND :skip_branches
+                            AND CASE LENGTH(next_key.search_remain)
+                                WHEN 0 THEN next_key.node_is_branch AND :skip_branches
                                 ELSE SUBSTR(next_key.search_remain, 1, 1) <= trie_node_child.child_num END
                         LEFT JOIN trie_node_storage ON trie_node_storage.node_hash = trie_node_child.child_hash
                         JOIN trie_node ON trie_node.hash = trie_node_child.child_hash
@@ -885,6 +886,7 @@ impl SqliteFullDatabase {
                                 SUBSTR(trie_node.partial_key, 1, LENGTH(closest_descendant.search_remain) - 1) = SUBSTR(closest_descendant.search_remain, 2)
                                 OR SUBSTR(closest_descendant.search_remain, 2, LENGTH(trie_node.partial_key)) = trie_node.partial_key
                             )
+                        WHERE LENGTH(closest_descendant.search_remain) >= 1
                 )
             SELECT COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1, closest_descendant.node_hash
             FROM blocks
