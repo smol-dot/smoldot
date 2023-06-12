@@ -37,12 +37,12 @@ impl Nibble {
     ///
     /// Returns `None` if `digit` is out of range.
     pub fn from_ascii_hex_digit(digit: u8) -> Option<Self> {
-        if (b'0'..=b'9').contains(&digit) {
+        if digit.is_ascii_digit() {
             Some(Nibble(digit - b'0'))
         } else if (b'a'..=b'f').contains(&digit) {
-            Some(Nibble(digit - b'a'))
+            Some(Nibble(10 + digit - b'a'))
         } else if (b'A'..=b'F').contains(&digit) {
-            Some(Nibble(digit - b'A'))
+            Some(Nibble(10 + digit - b'A'))
         } else {
             None
         }
