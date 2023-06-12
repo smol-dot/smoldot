@@ -197,5 +197,32 @@ fn empty_database_fill_then_query() {
                 trie
             );
         }
+
+        // Ask random closest descendant Merkle values.
+        for _ in 0..1024 {
+            let key = (0..uniform_sample(0, 8))
+                .map(|_| trie::Nibble::try_from(uniform_sample(0u8, 15)).unwrap())
+                .collect::<Vec<_>>();
+            let actual = open_db
+                .block_storage_main_trie_closest_descendant_merkle_value(
+                    &block0_hash,
+                    key.iter().copied().map(u8::from),
+                )
+                .unwrap();
+            let expected = trie
+                .iter_ordered()
+                .find(|n| {
+                    let full_key = trie.node_full_key_by_index(*n).unwrap().collect::<Vec<_>>();
+                    full_key >= key && full_key.starts_with(&key)
+                })
+                .map(|n| trie[n].1.as_ref().unwrap().as_ref().to_vec());
+            assert_eq!(
+                actual,
+                expected,
+                "\nkey = {:?}\ntrie = {:?}",
+                key.iter().map(|n| format!("{:x}", n)).collect::<String>(),
+                trie
+            );
+        }
     }
 }

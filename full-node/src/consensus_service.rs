@@ -880,7 +880,7 @@ impl SyncBackground {
                             .collect::<Vec<_>>();
 
                         let branch_nodes = req.branch_nodes();
-                        let next_key = self
+                        let mut next_key = self
                             .database
                             .with_database(move |db| {
                                 db.block_storage_main_trie_next_key(
@@ -891,6 +891,15 @@ impl SyncBackground {
                             })
                             .await
                             .expect("database access error");
+                        // TODO: pass the prefix to SQLite
+                        if next_key.as_ref().map_or(false, |k| {
+                            k.iter()
+                                .copied()
+                                .zip(req.prefix())
+                                .any(|(a, b)| trie::Nibble::try_from(a).unwrap() != b)
+                        }) {
+                            next_key = None;
+                        }
 
                         block_authoring = req
                             .inject_key(next_key.map(|k| {
@@ -1349,7 +1358,7 @@ impl SyncBackground {
                             verify = req.inject_value(value);
                         }
                         all::BlockVerification::ParentStorageMerkleValue(req) => {
-                            let when_database_access_started = Instant::now();
+                            /*let when_database_access_started = Instant::now();
 
                             let key_nibbles = req.key().map(u8::from).collect::<Vec<_>>();
 
@@ -1365,7 +1374,8 @@ impl SyncBackground {
                                 .expect("database access error");
 
                             database_accesses_duration += when_database_access_started.elapsed();
-                            verify = req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
+                            verify = req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));*/
+                            verify = req.resume_unknown();
                         }
                         all::BlockVerification::ParentStorageNextKey(req) => {
                             let when_database_access_started = Instant::now();
@@ -1377,7 +1387,7 @@ impl SyncBackground {
                                 .collect::<Vec<_>>();
 
                             let branch_nodes = req.branch_nodes();
-                            let next_key = self
+                            let mut next_key = self
                                 .database
                                 .with_database(move |db| {
                                     db.block_storage_main_trie_next_key(
@@ -1388,6 +1398,15 @@ impl SyncBackground {
                                 })
                                 .await
                                 .expect("database access error");
+                            // TODO: pass the prefix to SQLite
+                            if next_key.as_ref().map_or(false, |k| {
+                                k.iter()
+                                    .copied()
+                                    .zip(req.prefix())
+                                    .any(|(a, b)| trie::Nibble::try_from(a).unwrap() != b)
+                            }) {
+                                next_key = None;
+                            }
 
                             database_accesses_duration += when_database_access_started.elapsed();
                             verify = req.inject_key(next_key.map(|k| {
