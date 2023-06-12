@@ -70,7 +70,6 @@ pub fn open(config: Config) -> Result<DatabaseOpen, InternalError> {
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA locking_mode = EXCLUSIVE;
-PRAGMA auto_vacuum = FULL;
 PRAGMA encoding = 'UTF-8';
 PRAGMA trusted_schema = false;
 PRAGMA foreign_keys = 1;
