@@ -33,6 +33,21 @@ impl Nibble {
         Nibble(15)
     }
 
+    /// Converts an ASCII headecimal digit (i.e. `0..9`, `a..f`, `A..F`) into a nibble.
+    ///
+    /// Returns `None` if `digit` is out of range.
+    pub fn from_ascii_hex_digit(digit: u8) -> Option<Self> {
+        if (b'0'..=b'9').contains(&digit) {
+            Some(Nibble(digit - b'0'))
+        } else if (b'a'..=b'f').contains(&digit) {
+            Some(Nibble(digit - b'a'))
+        } else if (b'A'..=b'F').contains(&digit) {
+            Some(Nibble(digit - b'A'))
+        } else {
+            None
+        }
+    }
+
     /// Add the given number to the nibble. Returns `None` on overflow.
     pub fn checked_add(self, val: u8) -> Option<Self> {
         let new_nibble = self.0.checked_add(val)?;

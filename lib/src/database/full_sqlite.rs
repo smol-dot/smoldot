@@ -773,10 +773,9 @@ impl SqliteFullDatabase {
                             SUBSTR(next_key.search_remain, 2 + LENGTH(trie_node.partial_key_hex))
                         FROM next_key
                         JOIN trie_node_child ON next_key.node_hash = trie_node_child.hash
-                            AND (
-                                SUBSTR(next_key.search_remain, 1, 1) = (CASE trie_node_child.child_num >= 10 WHEN TRUE THEN CHAR(97 + trie_node_child.child_num - 10) ELSE CHAR(48 + trie_node_child.child_num) END)
-                                OR (next_key.search_remain = "" AND next_key.node_is_branch AND :skip_branches)
-                            )
+                            AND CASE next_key.search_remain
+                            WHEN "" THEN next_key.search_remain = "" AND next_key.node_is_branch AND :skip_branches
+                            ELSE SUBSTR(next_key.search_remain, 1, 1) >= (CASE trie_node_child.child_num >= 10 WHEN TRUE THEN CHAR(97 + trie_node_child.child_num - 10) ELSE CHAR(48 + trie_node_child.child_num) END) END
                         LEFT JOIN trie_node_storage ON trie_node_storage.node_hash = trie_node_child.child_hash
                         LEFT JOIN trie_node ON trie_node.hash = trie_node_child.child_hash
                             AND SUBSTR(next_key.search_remain, 2, LENGTH(trie_node.partial_key_hex)) <= trie_node.partial_key_hex

@@ -849,7 +849,20 @@ impl SyncBackground {
                         }));
                     }
                     author::build::BuilderAuthoring::ClosestDescendantMerkleValue(req) => {
-                        block_authoring = req.resume_unknown();
+                        let key = req.key().map(|n| format!("{:x}", n)).collect::<String>();
+                        let merkle_value = self
+                            .database
+                            .with_database(move |db| {
+                                db.block_storage_main_trie_closest_descendant_merkle_value(
+                                    &parent_hash,
+                                    &key,
+                                )
+                            })
+                            .await
+                            .expect("database access error");
+
+                        block_authoring =
+                            req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
                     }
                     author::build::BuilderAuthoring::NextKey(req) => {
                         // TODO: child tries not supported
@@ -859,46 +872,44 @@ impl SyncBackground {
                             continue;
                         }
 
-                        let search_params = trie::branch_search::Config {
-                            key_before: req.key().collect::<Vec<_>>().into_iter(),
-                            or_equal: req.or_equal(),
-                            prefix: req.prefix().collect::<Vec<_>>().into_iter(),
-                            no_branch_search: !req.branch_nodes(),
-                        };
+                        let mut key = req.key().map(|n| format!("{:x}", n)).collect::<String>();
+                        if req.or_equal() {
+                            key.push('0');
+                        }
 
+                        let branch_nodes = req.branch_nodes();
                         let next_key = self
                             .database
                             .with_database(move |db| {
-                                let mut search = trie::branch_search::BranchSearch::NextKey(
-                                    trie::branch_search::start_branch_search(search_params),
-                                );
-
-                                loop {
-                                    match search {
-                                        trie::branch_search::BranchSearch::Found {
-                                            branch_trie_node_key,
-                                        } => break branch_trie_node_key,
-                                        trie::branch_search::BranchSearch::NextKey(req) => {
-                                            let mut next_key = db
-                                                .block_storage_main_trie_next_key(
-                                                    &parent_hash,
-                                                    &req.key_before().collect::<Vec<_>>(),
-                                                    req.or_equal(),
-                                                )
-                                                .expect("database access error");
-                                            if next_key.as_ref().map_or(false, |nk| {
-                                                !nk.starts_with(&req.prefix().collect::<Vec<_>>())
-                                            }) {
-                                                next_key = None;
-                                            }
-                                            search = req.inject(next_key.map(|k| k.into_iter()));
-                                        }
-                                    }
-                                }
+                                db.block_storage_main_trie_next_key(
+                                    &parent_hash,
+                                    &key,
+                                    branch_nodes,
+                                )
                             })
-                            .await;
+                            .await
+                            .expect("database access error");
 
-                        block_authoring = req.inject_key(next_key.map(|nk| nk.into_iter()));
+                        // TODO: maybe optimize to not collect?
+                        let next_key = next_key.and_then(|key| {
+                            let key_nibbles = key
+                                .as_bytes()
+                                .iter()
+                                .map(|b| trie::Nibble::from_ascii_hex_digit(*b).unwrap())
+                                .collect::<Vec<_>>();
+                            if key_nibbles
+                                .iter()
+                                .copied()
+                                .zip(req.prefix())
+                                .any(|(a, b)| a != b)
+                            {
+                                None
+                            } else {
+                                Some(key_nibbles)
+                            }
+                        });
+
+                        block_authoring = req.inject_key(next_key.map(|k| k.into_iter()));
                     }
                 }
             }
@@ -1372,51 +1383,45 @@ impl SyncBackground {
                         all::BlockVerification::ParentStorageNextKey(req) => {
                             let when_database_access_started = Instant::now();
 
-                            // TODO: remove the branch search
-                            let search_params = trie::branch_search::Config {
-                                key_before: req.key().collect::<Vec<_>>().into_iter(),
-                                or_equal: req.or_equal(),
-                                prefix: req.prefix().collect::<Vec<_>>().into_iter(),
-                                no_branch_search: !req.branch_nodes(),
-                            };
+                            let mut key = req.key().map(|n| format!("{:x}", n)).collect::<String>();
+                            if req.or_equal() {
+                                key.push('0');
+                            }
 
+                            let branch_nodes = req.branch_nodes();
                             let next_key = self
                                 .database
                                 .with_database(move |db| {
-                                    let mut search = trie::branch_search::BranchSearch::NextKey(
-                                        trie::branch_search::start_branch_search(search_params),
-                                    );
-
-                                    loop {
-                                        match search {
-                                            trie::branch_search::BranchSearch::Found {
-                                                branch_trie_node_key,
-                                            } => break branch_trie_node_key,
-                                            trie::branch_search::BranchSearch::NextKey(req) => {
-                                                let mut next_key = db
-                                                    .block_storage_main_trie_next_key(
-                                                        &parent_hash,
-                                                        &req.key_before().collect::<Vec<_>>(),
-                                                        req.or_equal(),
-                                                    )
-                                                    .expect("database access error");
-                                                if next_key.as_ref().map_or(false, |nk| {
-                                                    !nk.starts_with(
-                                                        &req.prefix().collect::<Vec<_>>(),
-                                                    )
-                                                }) {
-                                                    next_key = None;
-                                                }
-                                                search =
-                                                    req.inject(next_key.map(|k| k.into_iter()));
-                                            }
-                                        }
-                                    }
+                                    db.block_storage_main_trie_next_key(
+                                        &parent_hash,
+                                        &key,
+                                        branch_nodes,
+                                    )
                                 })
-                                .await;
+                                .await
+                                .expect("database access error");
+
+                            // TODO: maybe optimize to not collect?
+                            let next_key = next_key.and_then(|key| {
+                                let key_nibbles = key
+                                    .as_bytes()
+                                    .iter()
+                                    .map(|b| trie::Nibble::from_ascii_hex_digit(*b).unwrap())
+                                    .collect::<Vec<_>>();
+                                if key_nibbles
+                                    .iter()
+                                    .copied()
+                                    .zip(req.prefix())
+                                    .any(|(a, b)| a != b)
+                                {
+                                    None
+                                } else {
+                                    Some(key_nibbles)
+                                }
+                            });
 
                             database_accesses_duration += when_database_access_started.elapsed();
-                            verify = req.inject_key(next_key.map(|nk| nk.into_iter()));
+                            verify = req.inject_key(next_key.map(|k| k.into_iter()));
                         }
                         all::BlockVerification::RuntimeCompilation(rt) => {
                             let before_runtime_build = Instant::now();
