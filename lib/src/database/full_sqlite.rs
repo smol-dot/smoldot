@@ -903,7 +903,7 @@ impl SqliteFullDatabase {
                 |row| {
                     let has_block = row.get::<_, i64>(0)? != 0;
                     let block_has_storage = row.get::<_, i64>(1)? != 0;
-                    let merkle_value = row.get::<_, Option<String>>(2)?;
+                    let merkle_value = row.get::<_, Option<Vec<u8>>>(2)?;
                     Ok((has_block, block_has_storage, merkle_value))
                 },
             )
@@ -921,7 +921,7 @@ impl SqliteFullDatabase {
             return Err(StorageAccessError::Pruned);
         }
 
-        Ok(merkle_value.map(|k| hex::decode(k).unwrap()))
+        Ok(merkle_value)
     }
 }
 
