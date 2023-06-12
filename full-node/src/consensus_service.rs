@@ -1384,7 +1384,7 @@ impl SyncBackground {
                             let when_database_access_started = Instant::now();
 
                             let mut key = req.key().map(|n| format!("{:x}", n)).collect::<String>();
-                            if req.or_equal() {
+                            if !req.or_equal() {
                                 key.push('0');
                             }
 
