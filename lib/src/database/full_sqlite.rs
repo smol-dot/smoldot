@@ -79,6 +79,7 @@ use rusqlite::OptionalExtension as _;
 pub use open::{open, Config, ConfigTy, DatabaseEmpty, DatabaseOpen};
 
 mod open;
+mod tests;
 
 /// An open database. Holds file descriptors.
 pub struct SqliteFullDatabase {
