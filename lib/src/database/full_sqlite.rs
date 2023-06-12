@@ -732,6 +732,8 @@ impl SqliteFullDatabase {
     ) -> Result<Option<Vec<u8>>, StorageAccessError> {
         let connection = self.database.lock();
 
+        println!("{}, {}", hex::encode(block_hash), hex::encode(key));
+
         // TODO: this algorithm relies the fact that leaf nodes always have a storage value, which isn't exactly clear in the schema ; however not relying on this makes it way harder to write
         let mut statement = connection
             .prepare_cached(
@@ -748,18 +750,19 @@ impl SqliteFullDatabase {
                         SELECT
                             trie_node_child.child_hash,
                             trie_node_storage.value IS NULL,
-                            next_key.node_full_key || (CASE trie_node_child.child_num >= 10 WHEN TRUE THEN CHAR(97 + trie_node_child.child_num - 10) ELSE CHAR(48 + trie_node_child.child_num) END) || trie_node.partial_key_hex,
-                            SUBSTR(next_key.search_remain, 2 + LENGTH(trie_node_child.partial_key_hex))
+                            next_key.node_full_key || (CASE trie_node_child.child_num >= 10 WHEN TRUE THEN CHAR(97 + trie_node_child.child_num - 10) ELSE CHAR(48 + trie_node_child.child_num) END) || trie_node.partial_key_hex
+                                AS node_full_key,
+                            SUBSTR(next_key.search_remain, 2 + LENGTH(trie_node.partial_key_hex))
                         FROM next_key
                         JOIN trie_node_child ON next_key.node_hash = trie_node_child.hash
                             AND (
                                 SUBSTR(next_key.search_remain, 1, 1) = (CASE trie_node_child.child_num >= 10 WHEN TRUE THEN CHAR(97 + trie_node_child.child_num - 10) ELSE CHAR(48 + trie_node_child.child_num) END)
                                 OR (next_key.search_remain = "" AND next_key.node_is_branch AND :skip_branches)
-                            ),
+                            )
                         LEFT JOIN trie_node_storage ON trie_node_storage.node_hash = trie_node_child.child_hash
                         LEFT JOIN trie_node ON trie_node.hash = trie_node_child.child_hash
                             AND SUBSTR(next_key.search_remain, 2, LENGTH(trie_node.partial_key_hex)) <= trie_node.partial_key_hex
-                        ORDER BY trie_node_child.child_num ASC
+                        ORDER BY node_full_key ASC
                         LIMIT 1
                 )
 
