@@ -161,7 +161,13 @@ fn empty_database_fill_then_query() {
             let expected = trie
                 .node_by_full_key(trie::bytes_to_nibbles(key.iter().copied()))
                 .map(|n| (trie[n].0.as_ref().unwrap().clone(), 0u8));
-            assert_eq!(actual, expected);
+            assert_eq!(
+                actual,
+                expected,
+                "\nkey = {:?}\ntrie = {:?}",
+                key.iter().map(|n| format!("{:x}", n)).collect::<String>(),
+                trie
+            );
         }
 
         // Ask random next keys.
