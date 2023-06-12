@@ -124,7 +124,7 @@ List of all trie nodes of all blocks whose trie is stored in the database.
 */
 CREATE TABLE IF NOT EXISTS trie_node(
     hash BLOB NOT NULL PRIMARY KEY,
-    partial_key_hex STRING NOT NULL -- Lowercase hexadecimal string
+    partial_key BLOB NOT NULL    -- Each byte is a nibble, in other words all bytes are <16
 );
 
 /*
@@ -415,7 +415,7 @@ impl DatabaseEmpty {
             // Now insert the entries.
             let mut insert_node_statement = self
                 .database
-                .prepare_cached("INSERT INTO trie_node(hash, partial_key_hex) VALUES(?, ?)")
+                .prepare_cached("INSERT INTO trie_node(hash, partial_key) VALUES(?, ?)")
                 .unwrap();
             let mut insert_node_storage_statement = self
                 .database
@@ -447,10 +447,7 @@ impl DatabaseEmpty {
                 }
 
                 let mut node_access = trie_structure.node_by_index(node_index).unwrap();
-                let partial_key = node_access
-                    .partial_key()
-                    .map(|n| format!("{:x}", n))
-                    .collect::<String>();
+                let partial_key = node_access.partial_key().map(u8::from).collect::<Vec<_>>();
                 insert_node_statement
                     .execute((merkle_value.as_ref(), &partial_key))
                     .unwrap(); // TODO: don't unwrap

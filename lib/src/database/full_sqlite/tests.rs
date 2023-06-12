@@ -173,7 +173,7 @@ fn empty_database_fill_then_query() {
             let actual = open_db
                 .block_storage_main_trie_next_key(
                     &block0_hash,
-                    &key.iter().map(|n| format!("{:x}", n)).collect::<String>(),
+                    key.iter().copied().map(u8::from),
                     branch_nodes,
                 )
                 .unwrap();
@@ -181,11 +181,14 @@ fn empty_database_fill_then_query() {
                 .iter_ordered()
                 .map(|n| trie.node_full_key_by_index(n).unwrap().collect::<Vec<_>>())
                 .find(|n| *n >= key)
-                .map(|k| k.iter().map(|n| format!("{:x}", n)).collect::<String>());
+                .map(|k| k.iter().copied().map(u8::from).collect::<Vec<_>>());
             assert_eq!(
-                actual, expected,
-                "\nbranch_nodes = {:?}\ntrie = {:?}",
-                branch_nodes, trie
+                actual,
+                expected,
+                "\nkey = {:?}\nbranch_nodes = {:?}\ntrie = {:?}",
+                key.iter().map(|n| format!("{:x}", n)).collect::<String>(),
+                branch_nodes,
+                trie
             );
         }
     }

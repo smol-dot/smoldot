@@ -849,13 +849,14 @@ impl SyncBackground {
                         }));
                     }
                     author::build::BuilderAuthoring::ClosestDescendantMerkleValue(req) => {
-                        let key = req.key().map(|n| format!("{:x}", n)).collect::<String>();
+                        let key_nibbles = req.key().map(u8::from).collect::<Vec<_>>();
+
                         let merkle_value = self
                             .database
                             .with_database(move |db| {
                                 db.block_storage_main_trie_closest_descendant_merkle_value(
                                     &parent_hash,
-                                    &key,
+                                    key_nibbles.iter().copied(),
                                 )
                             })
                             .await
@@ -872,10 +873,11 @@ impl SyncBackground {
                             continue;
                         }
 
-                        let mut key = req.key().map(|n| format!("{:x}", n)).collect::<String>();
-                        if req.or_equal() {
-                            key.push('0');
-                        }
+                        let key_nibbles = req
+                            .key()
+                            .map(u8::from)
+                            .chain(if req.or_equal() { None } else { Some(0u8) })
+                            .collect::<Vec<_>>();
 
                         let branch_nodes = req.branch_nodes();
                         let next_key = self
@@ -883,33 +885,17 @@ impl SyncBackground {
                             .with_database(move |db| {
                                 db.block_storage_main_trie_next_key(
                                     &parent_hash,
-                                    &key,
+                                    key_nibbles.iter().copied(),
                                     branch_nodes,
                                 )
                             })
                             .await
                             .expect("database access error");
 
-                        // TODO: maybe optimize to not collect?
-                        let next_key = next_key.and_then(|key| {
-                            let key_nibbles = key
-                                .as_bytes()
-                                .iter()
-                                .map(|b| trie::Nibble::from_ascii_hex_digit(*b).unwrap())
-                                .collect::<Vec<_>>();
-                            if key_nibbles
-                                .iter()
-                                .copied()
-                                .zip(req.prefix())
-                                .any(|(a, b)| a != b)
-                            {
-                                None
-                            } else {
-                                Some(key_nibbles)
-                            }
-                        });
-
-                        block_authoring = req.inject_key(next_key.map(|k| k.into_iter()));
+                        block_authoring = req
+                            .inject_key(next_key.map(|k| {
+                                k.into_iter().map(|b| trie::Nibble::try_from(b).unwrap())
+                            }));
                     }
                 }
             }
@@ -1365,13 +1351,14 @@ impl SyncBackground {
                         all::BlockVerification::ParentStorageMerkleValue(req) => {
                             let when_database_access_started = Instant::now();
 
-                            let key = req.key().map(|n| format!("{:x}", n)).collect::<String>();
+                            let key_nibbles = req.key().map(u8::from).collect::<Vec<_>>();
+
                             let merkle_value = self
                                 .database
                                 .with_database(move |db| {
                                     db.block_storage_main_trie_closest_descendant_merkle_value(
                                         &parent_hash,
-                                        &key,
+                                        key_nibbles.iter().copied(),
                                     )
                                 })
                                 .await
@@ -1383,10 +1370,11 @@ impl SyncBackground {
                         all::BlockVerification::ParentStorageNextKey(req) => {
                             let when_database_access_started = Instant::now();
 
-                            let mut key = req.key().map(|n| format!("{:x}", n)).collect::<String>();
-                            if !req.or_equal() {
-                                key.push('0');
-                            }
+                            let key_nibbles = req
+                                .key()
+                                .map(u8::from)
+                                .chain(if req.or_equal() { None } else { Some(0u8) })
+                                .collect::<Vec<_>>();
 
                             let branch_nodes = req.branch_nodes();
                             let next_key = self
@@ -1394,34 +1382,17 @@ impl SyncBackground {
                                 .with_database(move |db| {
                                     db.block_storage_main_trie_next_key(
                                         &parent_hash,
-                                        &key,
+                                        key_nibbles.iter().copied(),
                                         branch_nodes,
                                     )
                                 })
                                 .await
                                 .expect("database access error");
 
-                            // TODO: maybe optimize to not collect?
-                            let next_key = next_key.and_then(|key| {
-                                let key_nibbles = key
-                                    .as_bytes()
-                                    .iter()
-                                    .map(|b| trie::Nibble::from_ascii_hex_digit(*b).unwrap())
-                                    .collect::<Vec<_>>();
-                                if key_nibbles
-                                    .iter()
-                                    .copied()
-                                    .zip(req.prefix())
-                                    .any(|(a, b)| a != b)
-                                {
-                                    None
-                                } else {
-                                    Some(key_nibbles)
-                                }
-                            });
-
                             database_accesses_duration += when_database_access_started.elapsed();
-                            verify = req.inject_key(next_key.map(|k| k.into_iter()));
+                            verify = req.inject_key(next_key.map(|k| {
+                                k.into_iter().map(|b| trie::Nibble::try_from(b).unwrap())
+                            }));
                         }
                         all::BlockVerification::RuntimeCompilation(rt) => {
                             let before_runtime_build = Instant::now();
