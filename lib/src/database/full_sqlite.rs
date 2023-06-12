@@ -769,7 +769,7 @@ impl SqliteFullDatabase {
                             trie_node_storage.value IS NULL,
                             CAST(next_key.node_full_key || trie_node_child.child_num || trie_node.partial_key AS BLOB)
                                 AS node_full_key,
-                            CASE SUBSTR(next_key.search_remain, 1, 1) = trie_node_child.child_num
+                            CASE SUBSTR(next_key.search_remain, 1, 1) = trie_node_child.child_num AND SUBSTR(next_key.search_remain, 2, LENGTH(trie_node.partial_key)) = trie_node.partial_key
                                 WHEN TRUE THEN SUBSTR(next_key.search_remain, 2 + LENGTH(trie_node.partial_key))
                                 ELSE X'' END
                         FROM next_key
