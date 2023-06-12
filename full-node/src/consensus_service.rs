@@ -1358,7 +1358,7 @@ impl SyncBackground {
                             verify = req.inject_value(value);
                         }
                         all::BlockVerification::ParentStorageMerkleValue(req) => {
-                            /*let when_database_access_started = Instant::now();
+                            let when_database_access_started = Instant::now();
 
                             let key_nibbles = req.key().map(u8::from).collect::<Vec<_>>();
 
@@ -1374,8 +1374,7 @@ impl SyncBackground {
                                 .expect("database access error");
 
                             database_accesses_duration += when_database_access_started.elapsed();
-                            verify = req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));*/
-                            verify = req.resume_unknown();
+                            verify = req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
                         }
                         all::BlockVerification::ParentStorageNextKey(req) => {
                             let when_database_access_started = Instant::now();
