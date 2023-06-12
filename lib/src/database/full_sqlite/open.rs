@@ -148,7 +148,8 @@ CREATE TABLE IF NOT EXISTS trie_node_child(
     child_hash BLOB NOT NULL,
     PRIMARY KEY (hash, child_num),
     FOREIGN KEY (hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE CASCADE,
-    FOREIGN KEY (child_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE RESTRICT
+    FOREIGN KEY (child_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE RESTRICT,
+    CHECK(LENGTH(child_num) == 1 AND HEX(child_num) < '10')
 );
 
 /*
