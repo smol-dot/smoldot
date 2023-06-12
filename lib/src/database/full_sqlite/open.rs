@@ -144,7 +144,7 @@ Parent-child relationship between trie nodes.
 */
 CREATE TABLE IF NOT EXISTS trie_node_child(
     hash BLOB NOT NULL,
-    child_num INTEGER NOT NULL,
+    child_num BLOB NOT NULL,   -- Always contains one single byte. We use `BLOB` instead of `INTEGER` because SQLite stupidly doesn't provide any way of converting between integers and blobs
     child_hash BLOB NOT NULL,
     PRIMARY KEY (hash, child_num),
     FOREIGN KEY (hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE CASCADE,
@@ -457,7 +457,7 @@ impl DatabaseEmpty {
                         insert_child_statement
                             .execute((
                                 merkle_value.as_ref(),
-                                u8::from(child_index),
+                                vec![u8::from(child_index)],
                                 child.user_data().1.as_ref().unwrap().as_ref(),
                             ))
                             .unwrap(); // TODO: don't unwrap

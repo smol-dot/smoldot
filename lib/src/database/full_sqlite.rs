@@ -655,7 +655,15 @@ impl SqliteFullDatabase {
     ) -> Result<Option<(Vec<u8>, u8)>, StorageAccessError> {
         let connection = self.database.lock();
 
-        // TODO: this doesn't seem super optimized to me
+        println!(
+            "{:?}",
+            block_hash
+                .iter()
+                .copied()
+                .map(|b| format!("{:x}", b))
+                .collect::<String>()
+        );
+
         let mut statement = connection
             .prepare_cached(
                 r#"
@@ -673,7 +681,7 @@ impl SqliteFullDatabase {
             SELECT COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1, trie_node_storage.value, trie_node_storage.trie_entry_version
             FROM blocks
             LEFT JOIN trie_node ON trie_node.hash = blocks.state_trie_root_hash
-            LEFT JOIN node_with_key ON node_with_key.search_remain = ""
+            LEFT JOIN node_with_key ON LENGTH(node_with_key.search_remain) = 0
             LEFT JOIN trie_node_storage ON node_with_key.node_hash = trie_node_storage.node_hash
             WHERE blocks.hash = :block_hash;
             "#)
@@ -686,8 +694,8 @@ impl SqliteFullDatabase {
         let (has_block, block_has_storage, value, trie_entry_version) = statement
             .query_row(
                 rusqlite::named_params! {
-                ":block_hash": &block_hash[..],
-                ":key": trie::bytes_to_nibbles(key.iter().copied()).map(u8::from).collect::<Vec<_>>(), // TODO: key parameter should be an iterator?
+                    ":block_hash": &block_hash[..],
+                    ":key": trie::bytes_to_nibbles(key.iter().copied()).map(u8::from).collect::<Vec<_>>(), // TODO: key parameter should be an iterator?
                 },
                 |row| {
                     let has_block = row.get::<_, i64>(0)? != 0;
@@ -789,7 +797,7 @@ impl SqliteFullDatabase {
             SELECT COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1, MIN(next_key.node_full_key)
             FROM blocks
             LEFT JOIN trie_node ON trie_node.hash = blocks.state_trie_root_hash
-            LEFT JOIN next_key ON next_key.search_remain = ""
+            LEFT JOIN next_key ON LENGTH(next_key.search_remain) = 0
             WHERE blocks.hash = :block_hash
             GROUP BY blocks.hash, trie_node.hash
             LIMIT 1"#,
@@ -881,7 +889,7 @@ impl SqliteFullDatabase {
             SELECT COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1, closest_descendant.node_hash
             FROM blocks
             LEFT JOIN trie_node ON trie_node.hash = blocks.state_trie_root_hash
-            LEFT JOIN closest_descendant ON closest_descendant.search_remain = ""
+            LEFT JOIN closest_descendant ON LENGTH(closest_descendant.search_remain) = 0
             WHERE blocks.hash = :block_hash
             LIMIT 1"#,
             )
