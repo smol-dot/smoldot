@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Smoldot no longer assumes that the runtime calls `ext_default_child_storage_root` in order to properly update the hashes of the child tries that have been modified. ([#743](https://github.com/smol-dot/smoldot/pull/743))
 - Fix wrong trie root hash calculation with `state_version = 1`. ([#711](https://github.com/smol-dot/smoldot/pull/711))
 - Fix bug when decoding BABE configuration produced by runtimes using version 1 of the `BabeApi` API. In practice, this should concern only old Kusama blocks. ([#739](https://github.com/smol-dot/smoldot/pull/739))
 
