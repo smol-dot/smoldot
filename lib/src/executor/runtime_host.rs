@@ -729,10 +729,8 @@ struct StorageChanges {
     /// Changes to the main trie.
     main_trie: storage_diff::TrieDiff,
 
-    /// For each default child trie, `Some` if values have been written to it or `None` if the
-    /// trie must be entirely destroyed.
-    default_child_tries:
-        hashbrown::HashMap<Vec<u8>, Option<storage_diff::TrieDiff>, fnv::FnvBuildHasher>,
+    /// For each default child trie, the values that have been written to it.
+    default_child_tries: hashbrown::HashMap<Vec<u8>, storage_diff::TrieDiff, fnv::FnvBuildHasher>,
 }
 
 /// Writing and reading keys the main trie under this prefix obeys special rules.
@@ -867,24 +865,16 @@ impl Inner {
 
                 host::HostVm::ExternalStorageGet(req) => {
                     let diff_search = match req.child_trie() {
-                        None => Some(self.storage_changes.main_trie.diff_get(req.key().as_ref())),
+                        None => self.storage_changes.main_trie.diff_get(req.key().as_ref()),
                         Some(child_trie) => match self
                             .storage_changes
                             .default_child_tries
                             .get(child_trie.as_ref())
                         {
-                            None => Some(None),
-                            Some(Some(t)) => Some(t.diff_get(req.key().as_ref())),
-                            Some(None) => None,
+                            None => None,
+                            Some(t) => t.diff_get(req.key().as_ref()),
                         },
                     };
-
-                    let Some(diff_search) = diff_search
-                        else {
-                            // Child trie got entirely destroyed.
-                            self.vm = req.resume_full_value(None);
-                            continue;
-                        };
 
                     if let Some((value_in_diff, _)) = diff_search {
                         self.vm = req.resume_full_value(value_in_diff);
@@ -916,25 +906,21 @@ impl Inner {
                                 .storage_changes
                                 .default_child_tries
                                 .entry(child_trie.as_ref().to_vec())
-                                .or_insert(None)
-                                .get_or_insert(storage_diff::TrieDiff::empty()),
+                                .or_insert(storage_diff::TrieDiff::empty()),
                         };
 
                         trie.diff_insert(req.key().as_ref(), value.as_ref(), ());
                     } else {
                         let trie = match req.child_trie() {
-                            None => Some(&mut self.storage_changes.main_trie),
+                            None => &mut self.storage_changes.main_trie,
                             Some(child_trie) => self
                                 .storage_changes
                                 .default_child_tries
                                 .entry(child_trie.as_ref().to_vec())
-                                .or_insert(Some(storage_diff::TrieDiff::empty()))
-                                .as_mut(),
+                                .or_insert(storage_diff::TrieDiff::empty()),
                         };
 
-                        if let Some(trie) = trie {
-                            trie.diff_insert_erase(req.key().as_ref(), ());
-                        }
+                        trie.diff_insert_erase(req.key().as_ref(), ());
                     }
 
                     self.vm = req.resume()
@@ -965,11 +951,8 @@ impl Inner {
                             .storage_changes
                             .default_child_tries
                             .get(child_trie.as_ref())
-                            .and_then(|insert_or_delete| match insert_or_delete {
-                                Some(insertions) => {
-                                    insertions.diff_get(req.key().as_ref()).map(|(v, _)| v)
-                                }
-                                None => Some(None),
+                            .and_then(|insertions| {
+                                insertions.diff_get(req.key().as_ref()).map(|(v, _)| v)
                             }),
                     };
 
@@ -1038,24 +1021,7 @@ impl Inner {
                                 .get(&child_trie[..])
                             {
                                 None => storage_diff::TrieDiff::empty(), // TODO: what if the trie doesn't exist at all?
-                                Some(Some(diff)) => diff.clone(),
-                                Some(None) => {
-                                    // Child trie doesn't exist anymore.
-                                    self.stale_child_tries_root_hashes.remove(child_trie);
-
-                                    let mut main_trie_key = Vec::with_capacity(
-                                        DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len()
-                                            + child_trie.len(),
-                                    );
-                                    main_trie_key
-                                        .extend_from_slice(DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX);
-                                    main_trie_key.extend_from_slice(child_trie);
-                                    self.storage_changes
-                                        .main_trie
-                                        .diff_insert_erase(main_trie_key, ());
-
-                                    continue;
-                                }
+                                Some(diff) => diff.clone(),
                             }
                         }
                     };
