@@ -1026,6 +1026,8 @@ impl Inner {
                         req.child_trie().map(|ct| ct.as_ref().to_vec())
                     };
 
+                    self.vm = req.into();
+
                     // TODO: don't clone?
                     let diff = match &trie_to_calculate {
                         None => self.storage_changes.main_trie.clone(),
@@ -1037,12 +1039,27 @@ impl Inner {
                             {
                                 None => storage_diff::TrieDiff::empty(), // TODO: what if the trie doesn't exist at all?
                                 Some(Some(diff)) => diff.clone(),
-                                Some(None) => todo!(), // TODO: /!\
+                                Some(None) => {
+                                    // Child trie doesn't exist anymore.
+                                    self.stale_child_tries_root_hashes.remove(child_trie);
+
+                                    let mut main_trie_key = Vec::with_capacity(
+                                        DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len()
+                                            + child_trie.len(),
+                                    );
+                                    main_trie_key
+                                        .extend_from_slice(DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX);
+                                    main_trie_key.extend_from_slice(child_trie);
+                                    self.storage_changes
+                                        .main_trie
+                                        .diff_insert_erase(main_trie_key, ());
+
+                                    continue;
+                                }
                             }
                         }
                     };
 
-                    self.vm = req.into();
                     self.root_calculation = Some((
                         trie_to_calculate,
                         trie_root_calculator::trie_root_calculator(trie_root_calculator::Config {
