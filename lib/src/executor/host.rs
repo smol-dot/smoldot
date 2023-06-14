@@ -1164,7 +1164,6 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_default_child_storage_storage_kill_version_1 => {
-                // TODO: also destroy the trie?!
                 let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
                 HostVm::ExternalStorageClearPrefix(ExternalStorageClearPrefix {
                     prefix_ptr_size: None,
@@ -1176,7 +1175,6 @@ impl ReadyToRun {
             }
             HostFunction::ext_default_child_storage_storage_kill_version_2
             | HostFunction::ext_default_child_storage_storage_kill_version_3 => {
-                // TODO: also destroy the trie?!
                 let (child_trie_ptr, child_trie_size) = expect_pointer_size_raw!(0);
 
                 let max_keys_to_remove = {
