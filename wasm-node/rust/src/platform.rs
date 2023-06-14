@@ -54,7 +54,10 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         Box<
             dyn future::Future<
                     Output = Result<
-                        smoldot_light::platform::PlatformConnection<Self::Stream, Self::MultiStream>,
+                        smoldot_light::platform::PlatformConnection<
+                            Self::Stream,
+                            Self::MultiStream,
+                        >,
                         ConnectError,
                     >,
                 > + Send,
