@@ -58,6 +58,20 @@ pub fn open(config: Config) -> Result<DatabaseOpen, InternalError> {
     // value superior to the number of different queries we make.
     database.set_prepared_statement_cache_capacity(64);
 
+    // Configure the database connection.
+    database
+        .execute_batch(
+            r#"
+-- See https://sqlite.org/pragma.html and https://www.sqlite.org/wal.html
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
+PRAGMA locking_mode = EXCLUSIVE;
+PRAGMA encoding = 'UTF-8';
+PRAGMA trusted_schema = false; 
+            "#,
+        )
+        .map_err(InternalError)?;
+
     // Each SQLite database contains a "user version" whose value can be used by the API user
     // (that's us!) however they want. Its value defaults to 0 for new database. We use it to
     // store the schema version.
@@ -70,13 +84,8 @@ pub fn open(config: Config) -> Result<DatabaseOpen, InternalError> {
     database
         .execute_batch(
             r#"
--- See https://sqlite.org/pragma.html and https://www.sqlite.org/wal.html
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous = NORMAL;
-PRAGMA locking_mode = EXCLUSIVE;
-PRAGMA auto_vacuum = FULL;
-PRAGMA encoding = 'UTF-8';
-PRAGMA trusted_schema = false; 
+-- `auto_vacuum` can switched between `NONE` and non-`NONE` on newly-created database.
+PRAGMA auto_vacuum = INCREMENTAL;
 
 /*
 Contains all the "global" values in the database.
