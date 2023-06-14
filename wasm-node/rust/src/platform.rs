@@ -48,7 +48,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
     type Delay = Delay;
     type Yield = Yield;
     type Instant = Instant;
-    type MultiStream = ConnectionWrapper; // Entry in the ̀`CONNECTIONS` map.
+    type MultiStream = MultiStreamWrapper; // Entry in the ̀`CONNECTIONS` map.
     type Stream = StreamWrapper; // Entry in the ̀`STREAMS` map and a read buffer.
     type ConnectFuture = pin::Pin<
         Box<
@@ -230,7 +230,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                     *connection_handles_alive += 1;
                     Ok(
                         smoldot_light::platform::PlatformConnection::MultiStreamWebRtc {
-                            connection: ConnectionWrapper(connection_id),
+                            connection: MultiStreamWrapper(connection_id),
                             local_tls_certificate_multihash: local_tls_certificate_multihash
                                 .clone(),
                             remote_tls_certificate_multihash: remote_tls_certificate_multihash
@@ -259,7 +259,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
 
     fn next_substream<'a>(
         &self,
-        ConnectionWrapper(connection_id): &'a mut Self::MultiStream,
+        MultiStreamWrapper(connection_id): &'a mut Self::MultiStream,
     ) -> Self::NextSubstreamFuture<'a> {
         let connection_id = *connection_id;
 
@@ -313,7 +313,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         })
     }
 
-    fn open_out_substream(&self, ConnectionWrapper(connection_id): &mut Self::MultiStream) {
+    fn open_out_substream(&self, MultiStreamWrapper(connection_id): &mut Self::MultiStream) {
         match STATE
             .try_lock()
             .unwrap()
@@ -600,9 +600,9 @@ impl Drop for StreamWrapper {
     }
 }
 
-pub(crate) struct ConnectionWrapper(u32);
+pub(crate) struct MultiStreamWrapper(u32);
 
-impl Drop for ConnectionWrapper {
+impl Drop for MultiStreamWrapper {
     fn drop(&mut self) {
         let mut lock = STATE.try_lock().unwrap();
 
