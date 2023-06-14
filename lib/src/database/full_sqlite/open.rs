@@ -58,6 +58,15 @@ pub fn open(config: Config) -> Result<DatabaseOpen, InternalError> {
     // value superior to the number of different queries we make.
     database.set_prepared_statement_cache_capacity(64);
 
+    // Each SQLite database contains a "user version" whose value can be used by the API user
+    // (that's us!) however they want. Its value defaults to 0 for new database. We use it to
+    // store the schema version.
+    let user_version = database
+        .prepare_cached("PRAGMA user_version")
+        .map_err(InternalError)?
+        .query_row((), |row| row.get::<_, i64>(0))
+        .map_err(InternalError)?;
+
     database
         .execute_batch(
             r#"
