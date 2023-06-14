@@ -2502,26 +2502,13 @@ impl ExternalStorageRoot {
 
     /// Writes the trie root hash to the Wasm VM and prepares it for resume.
     ///
-    /// Must be passed `None` if [`ExternalStorageRoot::child_trie`] returned `Some` and the trie
-    /// doesn't exist.
-    ///
-    /// # Panic
-    ///
-    /// Panics if `None` is passed and [`ExternalStorageRoot::child_trie`] returned `None`.
-    ///
-    pub fn resume(self, hash: Option<&[u8; 32]>) -> HostVm {
+    /// If [`ExternalStorageRoot::child_trie`] returns `Some` but the child trie doesn't exist,
+    /// the root hash of an empty trie must be provided.
+    pub fn resume(self, hash: &[u8; 32]) -> HostVm {
         let host_fn = match self.inner.common.registered_functions[self.calling] {
             FunctionImport::Resolved(f) => f,
             FunctionImport::Unresolved { .. } => unreachable!(),
         };
-
-        let Some(hash) = hash
-            else {
-                return HostVm::Error {
-                    error: Error::ChildStorageRootTrieDoesntExist,
-                    prototype: self.inner.into_prototype(),
-                };
-            };
 
         self.inner
             .alloc_write_and_return_pointer_size(host_fn.name(), iter::once(hash))

@@ -830,7 +830,7 @@ impl Inner {
                             _ => false,
                         };
                         if trie_match {
-                            self.vm = req.resume(Some(&trie_root_hash));
+                            self.vm = req.resume(&trie_root_hash);
                         } else {
                             self.vm = host::HostVm::ExternalStorageRoot(req);
                         }
