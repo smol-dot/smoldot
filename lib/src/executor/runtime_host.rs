@@ -712,6 +712,11 @@ struct StorageChanges {
         hashbrown::HashMap<Vec<u8>, Option<storage_diff::TrieDiff>, fnv::FnvBuildHasher>,
 }
 
+/// Writing and reading keys the main trie under this prefix obeys special rules.
+const CHILD_STORAGE_SPECIAL_PREFIX: &[u8] = b":child_storage:";
+/// Writing and reading keys the main trie under this prefix obeys special rules.
+const DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX: &[u8] = b":child_storage:default:";
+
 impl Inner {
     /// Continues the execution.
     fn run(mut self) -> RuntimeHostVm {
@@ -740,6 +745,8 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageGet(req) => {
+                    // TODO: handle if child trie entry in main trie
+
                     let diff_search = match req.child_trie() {
                         None => Some(self.storage_changes.main_trie.diff_get(req.key().as_ref())),
                         Some(child_trie) => match self
@@ -769,6 +776,15 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageSet(req) => {
+                    // Any attempt at writing a key that starts with `CHILD_STORAGE_SPECIAL_PREFIX`
+                    // is silently ignored, as per spec.
+                    if req.child_trie().is_none()
+                        && req.key().as_ref().starts_with(CHILD_STORAGE_SPECIAL_PREFIX)
+                    {
+                        self.vm = req.resume();
+                        continue;
+                    }
+
                     if let Some(value) = req.value() {
                         let trie = match req.child_trie() {
                             None => &mut self.storage_changes.main_trie,
@@ -801,6 +817,15 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageAppend(req) => {
+                    // Any attempt at writing a key that starts with `CHILD_STORAGE_SPECIAL_PREFIX`
+                    // is silently ignored, as per spec.
+                    if req.child_trie().is_none()
+                        && req.key().as_ref().starts_with(CHILD_STORAGE_SPECIAL_PREFIX)
+                    {
+                        self.vm = req.resume();
+                        continue;
+                    }
+
                     let current_value = match req.child_trie() {
                         None => self
                             .storage_changes
@@ -835,6 +860,15 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageClearPrefix(req) => {
+                    // Any attempt at clear a prefix that "intersects" (see code) with
+                    // `CHILD_STORAGE_SPECIAL_PREFIX` is silently ignored, as per spec.
+                    if req.child_trie().is_none()
+                        && CHILD_STORAGE_SPECIAL_PREFIX.starts_with(req.prefix().as_ref())
+                    {
+                        self.vm = req.resume(0, false); // TODO: what's the correct return value for `some_keys_remain`?
+                        continue;
+                    }
+
                     let prefix = req.prefix().as_ref().to_owned();
                     self.vm = req.into();
                     return RuntimeHostVm::NextKey(NextKey {
