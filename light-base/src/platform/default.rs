@@ -81,7 +81,11 @@ impl PlatformRef for Arc<DefaultPlatform> {
         self.sleep(duration)
     }
 
-    fn spawn_task(&self, _task_name: Cow<str>, task: future::BoxFuture<'static, ()>) {
+    fn spawn_task(
+        &self,
+        _task_name: Cow<str>,
+        task: impl future::Future<Output = ()> + Send + 'static,
+    ) {
         smol::spawn(task).detach();
     }
 

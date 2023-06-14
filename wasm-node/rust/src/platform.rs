@@ -99,7 +99,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
     fn spawn_task(
         &self,
         task_name: Cow<str>,
-        task: pin::Pin<Box<dyn future::Future<Output = ()> + Send>>,
+        task: impl future::Future<Output = ()> + Send + 'static,
     ) {
         // The code below processes tasks that have names.
         #[pin_project::pin_project]
