@@ -53,11 +53,11 @@ impl PlatformRef for Arc<DefaultPlatform> {
     type Delay = future::BoxFuture<'static, ()>;
     type Yield = future::Ready<()>;
     type Instant = std::time::Instant;
-    type Connection = std::convert::Infallible;
+    type MultiStream = std::convert::Infallible;
     type Stream = Stream;
     type ConnectFuture = future::BoxFuture<
         'static,
-        Result<PlatformConnection<Self::Stream, Self::Connection>, ConnectError>,
+        Result<PlatformConnection<Self::Stream, Self::MultiStream>, ConnectError>,
     >;
     type StreamUpdateFuture<'a> = future::BoxFuture<'a, ()>;
     type NextSubstreamFuture<'a> =
@@ -221,13 +221,13 @@ impl PlatformRef for Arc<DefaultPlatform> {
         })
     }
 
-    fn open_out_substream(&self, c: &mut Self::Connection) {
+    fn open_out_substream(&self, c: &mut Self::MultiStream) {
         // This function can only be called with so-called "multi-stream" connections. We never
         // open such connection.
         match *c {}
     }
 
-    fn next_substream(&self, c: &'_ mut Self::Connection) -> Self::NextSubstreamFuture<'_> {
+    fn next_substream(&self, c: &'_ mut Self::MultiStream) -> Self::NextSubstreamFuture<'_> {
         // This function can only be called with so-called "multi-stream" connections. We never
         // open such connection.
         match *c {}
