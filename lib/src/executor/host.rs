@@ -201,7 +201,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::{cmp, fmt, hash::Hasher as _, iter, str};
+use core::{fmt, hash::Hasher as _, iter, str};
 use sha2::Digest as _;
 use tiny_keccak::Hasher as _;
 
