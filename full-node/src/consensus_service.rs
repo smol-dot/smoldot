@@ -26,7 +26,7 @@
 
 use crate::{database_thread, jaeger_service, network_service};
 
-use core::num::NonZeroU32;
+use core::{array, num::NonZeroU32};
 use futures_channel::{mpsc, oneshot};
 use futures_util::{future, stream, FutureExt as _, SinkExt as _, StreamExt as _};
 use hashbrown::HashSet;
@@ -1299,33 +1299,37 @@ impl SyncBackground {
                                         iter::empty::<Vec<u8>>(), // TODO:,no /!\
                                         storage_main_trie_changes.iter().filter_map(
                                             |(key, change)| {
-                                                if key.len() % 2 != 0 {
-                                                    // TODO: what if change contains a storage value?
-                                                    return None;
-                                                }
+                                                let all::TrieChange::InsertUpdate {
+                                                    new_merkle_value,
+                                                    partial_key,
+                                                    children_merkle_values,
+                                                    new_storage_value
+                                                } = &change
+                                                    else { return None };
 
-                                                let key = trie::nibbles_to_bytes_truncate(
-                                                    key.iter().copied(),
-                                                )
-                                                .collect::<Vec<_>>();
-
-                                                let value = match change {
-                                                    all::TrieChange::Remove => None,
-                                                    all::TrieChange::InsertUpdate {
-                                                        new_storage_value:
-                                                            all::TrieChangeStorageValue::Unmodified,
-                                                        ..
-                                                    } => return None,
-                                                    all::TrieChange::InsertUpdate {
-                                                        new_storage_value:
-                                                            all::TrieChangeStorageValue::Modified {
-                                                                new_value,
-                                                            },
-                                                        ..
-                                                    } => new_value.as_ref(),
-                                                };
-
-                                                Some((key, value))
+                                                Some(full_sqlite::InsertTrieNode {
+                                                    merkle_value: (&new_merkle_value[..]).into(),
+                                                    children_merkle_values: array::from_fn(|n| {
+                                                        children_merkle_values[n]
+                                                            .as_ref()
+                                                            .map(|v| From::from(&v[..]))
+                                                    }),
+                                                    storage_value: match new_storage_value {
+                                                        all::TrieChangeStorageValue::Modified {
+                                                            new_value,
+                                                        } => full_sqlite::InsertTrieNodeStorageValue::Value(new_value.as_deref().map(From::from)),
+                                                        all::TrieChangeStorageValue::Unmodified => {
+                                                            full_sqlite::InsertTrieNodeStorageValue::CopyFromParent {
+                                                                key: trie::nibbles_to_bytes_truncate(key.iter().copied()).collect::<Vec<_>>()
+                                                            }
+                                                        }
+                                                    },
+                                                    partial_key_nibbles: partial_key
+                                                        .iter()
+                                                        .map(|n| u8::from(*n))
+                                                        .collect::<Vec<_>>()
+                                                        .into(),
+                                                })
                                             },
                                         ),
                                         u8::from(state_trie_version),

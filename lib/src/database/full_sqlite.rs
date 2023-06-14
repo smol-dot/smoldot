@@ -72,6 +72,7 @@
 
 use crate::{chain::chain_information, header, trie, util};
 
+use alloc::borrow::Cow;
 use core::{fmt, num::NonZeroU64};
 use parking_lot::Mutex;
 use rusqlite::OptionalExtension as _;
@@ -288,13 +289,12 @@ impl SqliteFullDatabase {
     ///
     /// Blocks must be inserted in the correct order. An error is returned if the parent of the
     /// newly-inserted block isn't present in the datanon_finalized_chbase.
-    pub fn insert(
+    pub fn insert<'a>(
         &self,
         scale_encoded_header: &[u8],
         is_new_best: bool,
         body: impl ExactSizeIterator<Item = impl AsRef<[u8]>>,
-        storage_main_trie_changes: impl Iterator<Item = (impl AsRef<[u8]>, Option<impl AsRef<[u8]>>)>
-            + Clone,
+        new_trie_nodes: impl Iterator<Item = InsertTrieNode<'a>>,
         trie_entries_version: u8,
     ) -> Result<(), InsertError> {
         // Calculate the hash of the new best block.
@@ -324,15 +324,27 @@ impl SqliteFullDatabase {
             return Err(InsertError::FinalizedNephew);
         }
 
+        // Temporarily disable foreign key checks in order to make the insertion easier, as we
+        // don't have to make sure that trie nodes are sorted.
+        // Note that this is immediately disabled again when we `COMMIT` later down below.
+        connection
+            .execute("PRAGMA defer_foreign_keys = ON", ())
+            .map_err(|err| {
+                InsertError::Access(AccessError::Corrupted(CorruptedError::Internal(
+                    InternalError(err),
+                )))
+            })?;
+
         connection
             .prepare_cached(
-                "INSERT INTO blocks(number, hash, parent_hash, header, justification) VALUES (?, ?, ?, ?, NULL)",
+                "INSERT INTO blocks(number, hash, parent_hash, state_trie_root_hash, header, justification) VALUES (?, ?, ?, ?, ?, NULL)",
             )
             .unwrap()
             .execute((
                 i64::try_from(header.number).unwrap(),
                 &block_hash[..],
                 &header.parent_hash[..],
+                &header.state_root[..],
                 scale_encoded_header
             ))
             .unwrap();
@@ -352,25 +364,79 @@ impl SqliteFullDatabase {
             }
         }
 
-        // Insert the storage changes.
-        // TODO: update for tries stuff changes
+        // Insert the changes in trie nodes.
+        // TODO: don't unwrap
+        // TODO: is it correct to have OR IGNORE everywhere?
         {
-            let mut statement = connection
-                .prepare_cached("INSERT INTO non_finalized_changes(hash, key, value, trie_entry_version) VALUES (?, ?, ?, ?)")
+            let mut insert_node_statement = connection
+                .prepare_cached("INSERT OR IGNORE INTO trie_node(hash, partial_key) VALUES(?, ?)")
                 .unwrap();
-            for (key, value) in storage_main_trie_changes {
-                statement
-                    .execute((
-                        &block_hash[..],
-                        key.as_ref(),
-                        value.as_ref().map(|v| v.as_ref()),
-                        if value.is_some() {
-                            Some(i64::from(trie_entries_version))
-                        } else {
-                            None
-                        },
-                    ))
+            let mut insert_node_storage_statement = connection
+                .prepare_cached("INSERT OR IGNORE INTO trie_node_storage(node_hash, value, trie_entry_version) VALUES(?, ?, ?)")
+                .unwrap();
+            // TODO: consider reference counting the storage values
+            // TODO: DRY with getting a value?
+            // TODO: what happens if parent has no value?
+            let mut insert_node_storage_copy_statement = connection
+                .prepare_cached(
+                    r#"
+                WITH RECURSIVE
+                    node_with_key(node_hash, search_remain) AS (
+                        SELECT trie_node.hash, COALESCE(SUBSTR(:key, 1 + LENGTH(trie_node.partial_key)), X'')
+                            FROM blocks, trie_node
+                            WHERE blocks.hash = :parent_block_hash AND blocks.state_trie_root_hash = trie_node.hash AND COALESCE(SUBSTR(:key, 1, LENGTH(trie_node.partial_key)), X'') = trie_node.partial_key
+                        UNION ALL
+                        SELECT trie_node.hash, SUBSTR(node_with_key.search_remain, 2 + LENGTH(trie_node.partial_key))
+                            FROM node_with_key
+                            JOIN trie_node_child ON node_with_key.node_hash = trie_node_child.hash AND SUBSTR(node_with_key.search_remain, 1, 1) = trie_node_child.child_num
+                            JOIN trie_node ON trie_node.hash = trie_node_child.child_hash AND SUBSTR(node_with_key.search_remain, 2, LENGTH(trie_node.partial_key)) = trie_node.partial_key
+                            WHERE LENGTH(node_with_key.search_remain) >= 1
+                    )
+                INSERT OR IGNORE INTO trie_node_storage(node_hash, value, trie_entry_version)
+                SELECT :merkle_value, trie_node_storage.value, trie_node_storage.trie_entry_version
+                FROM node_with_key
+                JOIN trie_node_storage ON node_with_key.node_hash = trie_node_storage.node_hash
+                WHERE LENGTH(node_with_key.search_remain) = 0;
+                "#)
+                .map_err(|err: rusqlite::Error| {
+                    InsertError::Access(AccessError::Corrupted(CorruptedError::Internal(
+                        InternalError(err),
+                    )))
+                })?;
+            let mut insert_child_statement = connection
+                .prepare_cached(
+                    "INSERT OR IGNORE INTO trie_node_child(hash, child_num, child_hash) VALUES(?, ?, ?)",
+                )
+                .unwrap();
+            for trie_node in new_trie_nodes {
+                assert!(trie_node.partial_key_nibbles.iter().all(|n| *n < 16)); // TODO: document
+                insert_node_statement
+                    .execute((&trie_node.merkle_value, trie_node.partial_key_nibbles))
                     .unwrap();
+                match trie_node.storage_value {
+                    InsertTrieNodeStorageValue::Value(value) => {
+                        insert_node_storage_statement
+                            .execute((&trie_node.merkle_value, &value, trie_entries_version))
+                            .unwrap();
+                    }
+                    InsertTrieNodeStorageValue::CopyFromParent { key } => {
+                        insert_node_storage_copy_statement
+                            .execute(rusqlite::named_params! {
+                                ":parent_block_hash": &header.parent_hash[..],
+                                ":merkle_value": &trie_node.merkle_value,
+                                ":key": trie::bytes_to_nibbles(key.iter().copied()).map(u8::from).collect::<Vec<_>>(),
+                            })
+                            .unwrap();
+                    }
+                }
+                for (child_num, child) in trie_node.children_merkle_values.iter().enumerate() {
+                    if let Some(child) = child {
+                        let child_num = vec![u8::try_from(child_num).unwrap()];
+                        insert_child_statement
+                            .execute((&trie_node.merkle_value, child_num, child))
+                            .unwrap();
+                    }
+                }
             }
         }
 
@@ -918,6 +984,19 @@ impl Drop for SqliteFullDatabase {
             let _ = self.database.get_mut().execute("ROLLBACK", ());
         }
     }
+}
+
+pub struct InsertTrieNode<'a> {
+    pub merkle_value: Cow<'a, [u8]>,
+    pub partial_key_nibbles: Cow<'a, [u8]>,
+    pub children_merkle_values: [Option<Cow<'a, [u8]>>; 16],
+    pub storage_value: InsertTrieNodeStorageValue<'a>,
+}
+
+pub enum InsertTrieNodeStorageValue<'a> {
+    Value(Option<Cow<'a, [u8]>>),
+    // TODO: weird API
+    CopyFromParent { key: Vec<u8> },
 }
 
 /// Error while accessing some information.
