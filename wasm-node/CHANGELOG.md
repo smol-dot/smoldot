@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fix wrong trie root hash calculation with `state_version = 1`. ([#711](https://github.com/smol-dot/smoldot/pull/711))
+- Fix bug when decoding BABE configuration produced by runtimes using version 1 of the `BabeApi` API. In practice, this should concern only old Kusama blocks. ([#739](https://github.com/smol-dot/smoldot/pull/739))
 
 ## 1.0.9 - 2023-06-08
 

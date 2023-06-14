@@ -845,6 +845,7 @@ fn decode_aura_authorities_output(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct BabeGenesisConfiguration {
     slots_per_epoch: NonZeroU64,
     epoch0_configuration: header::BabeNextConfig,
@@ -889,7 +890,7 @@ fn decode_babe_configuration_output(
                                 header::BabeAllowedSlots::PrimarySlots
                             }),
                             nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| {
-                                header::BabeAllowedSlots::PrimaryAndSecondaryVrfSlots
+                                header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots
                             }),
                         ))(b)
                     } else {
@@ -1055,6 +1056,9 @@ fn decode_grandpa_current_set_id_output(bytes: &[u8]) -> Result<u64, Error> {
 
 #[cfg(test)]
 mod tests {
+    use crate::header;
+    use core::num::NonZeroU64;
+
     #[test]
     fn decode_babe_epoch_output_sample_decode() {
         // Sample taken from an actual Westend block.
@@ -1074,5 +1078,90 @@ mod tests {
         ];
 
         super::decode_babe_epoch_output(&sample_data, true).unwrap();
+    }
+
+    #[test]
+    fn decode_babe_configuration_output_v1() {
+        let data = [
+            112, 23, 0, 0, 0, 0, 0, 0, 88, 2, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0,
+            0, 0, 0, 0, 24, 202, 35, 147, 146, 150, 4, 115, 254, 27, 198, 95, 148, 238, 39, 216,
+            144, 164, 156, 27, 32, 12, 0, 111, 245, 220, 197, 37, 51, 14, 204, 22, 119, 1, 0, 0, 0,
+            0, 0, 0, 0, 180, 111, 1, 135, 76, 231, 171, 187, 82, 32, 232, 253, 137, 190, 222, 10,
+            218, 209, 76, 115, 3, 157, 145, 226, 142, 136, 24, 35, 67, 62, 114, 63, 1, 0, 0, 0, 0,
+            0, 0, 0, 214, 132, 217, 23, 109, 110, 182, 152, 135, 84, 12, 154, 137, 250, 96, 151,
+            173, 234, 130, 252, 75, 15, 242, 109, 16, 98, 180, 136, 243, 82, 225, 121, 1, 0, 0, 0,
+            0, 0, 0, 0, 104, 25, 90, 113, 189, 222, 73, 17, 122, 97, 100, 36, 189, 198, 10, 23, 51,
+            233, 106, 203, 29, 165, 174, 171, 93, 38, 140, 242, 165, 114, 233, 65, 1, 0, 0, 0, 0,
+            0, 0, 0, 26, 5, 117, 239, 74, 226, 75, 223, 211, 31, 76, 181, 189, 97, 35, 154, 230,
+            124, 18, 212, 230, 74, 229, 26, 199, 86, 4, 74, 166, 173, 130, 0, 1, 0, 0, 0, 0, 0, 0,
+            0, 24, 22, 143, 42, 173, 0, 129, 162, 87, 40, 150, 30, 224, 6, 39, 207, 227, 94, 57,
+            131, 60, 128, 80, 22, 99, 43, 247, 193, 77, 165, 128, 9, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 1,
+        ];
+
+        assert_eq!(
+            super::decode_babe_configuration_output(&data, true).unwrap(),
+            super::BabeGenesisConfiguration {
+                slots_per_epoch: NonZeroU64::new(600).unwrap(),
+                epoch0_configuration: header::BabeNextConfig {
+                    allowed_slots: header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots,
+                    c: (1, 4),
+                },
+                epoch0_information: header::BabeNextEpoch {
+                    authorities: vec![
+                        header::BabeAuthority {
+                            public_key: [
+                                202, 35, 147, 146, 150, 4, 115, 254, 27, 198, 95, 148, 238, 39,
+                                216, 144, 164, 156, 27, 32, 12, 0, 111, 245, 220, 197, 37, 51, 14,
+                                204, 22, 119
+                            ],
+                            weight: 1
+                        },
+                        header::BabeAuthority {
+                            public_key: [
+                                180, 111, 1, 135, 76, 231, 171, 187, 82, 32, 232, 253, 137, 190,
+                                222, 10, 218, 209, 76, 115, 3, 157, 145, 226, 142, 136, 24, 35, 67,
+                                62, 114, 63
+                            ],
+                            weight: 1
+                        },
+                        header::BabeAuthority {
+                            public_key: [
+                                214, 132, 217, 23, 109, 110, 182, 152, 135, 84, 12, 154, 137, 250,
+                                96, 151, 173, 234, 130, 252, 75, 15, 242, 109, 16, 98, 180, 136,
+                                243, 82, 225, 121
+                            ],
+                            weight: 1
+                        },
+                        header::BabeAuthority {
+                            public_key: [
+                                104, 25, 90, 113, 189, 222, 73, 17, 122, 97, 100, 36, 189, 198, 10,
+                                23, 51, 233, 106, 203, 29, 165, 174, 171, 93, 38, 140, 242, 165,
+                                114, 233, 65
+                            ],
+                            weight: 1
+                        },
+                        header::BabeAuthority {
+                            public_key: [
+                                26, 5, 117, 239, 74, 226, 75, 223, 211, 31, 76, 181, 189, 97, 35,
+                                154, 230, 124, 18, 212, 230, 74, 229, 26, 199, 86, 4, 74, 166, 173,
+                                130, 0
+                            ],
+                            weight: 1
+                        },
+                        header::BabeAuthority {
+                            public_key: [
+                                24, 22, 143, 42, 173, 0, 129, 162, 87, 40, 150, 30, 224, 6, 39,
+                                207, 227, 94, 57, 131, 60, 128, 80, 22, 99, 43, 247, 193, 77, 165,
+                                128, 9
+                            ],
+                            weight: 1
+                        }
+                    ],
+                    randomness: [0; 32]
+                },
+            }
+        );
     }
 }
