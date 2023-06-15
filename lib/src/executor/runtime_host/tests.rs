@@ -20,7 +20,7 @@
 use core::{iter, ops};
 
 use super::{run, Config, RuntimeHostVm};
-use crate::{executor::host, trie};
+use crate::{executor::host, header, trie};
 use alloc::collections::BTreeMap;
 
 #[test]
@@ -112,6 +112,17 @@ fn all_tests() {
         .state_version
         .unwrap_or(host::TrieEntryVersion::V0);
 
+    let digest_items = test_data
+        .block
+        .header
+        .digest
+        .logs
+        .iter()
+        .map(|item| {
+            header::DigestItem::from(header::DigestItemRef::from_scale_encoded(&item.0, 4).unwrap())
+        })
+        .collect::<Vec<_>>();
+
     let mut execution = run(Config {
         virtual_machine,
         function_to_call: "Core_execute_block",
@@ -135,7 +146,7 @@ fn all_tests() {
                 state_root: TryFrom::try_from(&test_data.block.header.state_root.0[..]).unwrap(),
                 extrinsics_root: TryFrom::try_from(&test_data.block.header.extrinsics_root.0[..])
                     .unwrap(),
-                digest: crate::header::DigestRef::empty(), // TODO: no, use test data
+                digest: header::DigestRef::from_slice(&digest_items).unwrap(),
             }
             .scale_encoding(4)
             .map(|b| either::Right(either::Left(b)))
