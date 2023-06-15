@@ -555,6 +555,10 @@ pub enum HostVm {
     #[from]
     ReadyToRun(ReadyToRun),
     /// Function execution has succeeded. Contains the return value of the call.
+    ///
+    /// The trie root hash of all the child tries must be recalculated and written to the main trie
+    /// similar to when a [`ExternalStorageRoot`] with a `child_trie` of `None` is generated. See
+    /// the documentation of [`ExternalStorageRoot`].
     #[from]
     Finished(Finished),
     /// The Wasm blob did something that doesn't conform to the runtime environment.
@@ -576,7 +580,8 @@ pub enum HostVm {
     /// Must remove all the storage values starting with a certain prefix.
     #[from]
     ExternalStorageClearPrefix(ExternalStorageClearPrefix),
-    /// Need to provide the trie root of the storage.
+    /// Must provide the trie root hash of the storage and write the trie root hash of child tries
+    /// to the main trie.
     #[from]
     ExternalStorageRoot(ExternalStorageRoot),
     /// Need to provide the storage key that follows a specific one.
@@ -1996,6 +2001,10 @@ impl fmt::Debug for ReadyToRun {
 }
 
 /// Function execution has succeeded. Contains the return value of the call.
+///
+/// The trie root hash of all the child tries must be recalculated and written to the main trie
+/// similar to when a [`ExternalStorageRoot`] with a `child_trie` of `None` is generated. See the
+/// documentation of [`ExternalStorageRoot`].
 pub struct Finished {
     inner: Box<Inner>,
 
@@ -2052,11 +2061,6 @@ pub struct ExternalStorageGet {
 
 impl ExternalStorageGet {
     /// Returns the key whose value must be provided back with [`ExternalStorageGet::resume`].
-    ///
-    /// > **Note**: While the runtime is able to query keys from the main trie that correspond to
-    /// >           child tries and obtain a valid value, this is handled entirely internally and
-    /// >           doesn't need to be handled by the API user. Providing the value is simply about
-    /// >           looking up an entry in a map.
     pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
         self.inner
             .vm
@@ -2122,6 +2126,9 @@ impl ExternalStorageGet {
     ///
     /// If `Some`, the total size of the value, without taking [`ExternalStorageGet::offset`] or
     /// [`ExternalStorageGet::max_size`] into account, must additionally be provided.
+    ///
+    /// If [`ExternalStorageGet::child_trie`] returns `Some` but the child trie doesn't exist,
+    /// then `None` must be provided.
     ///
     /// The value must not be longer than what [`ExternalStorageGet::max_size`] returns.
     ///
@@ -2234,8 +2241,6 @@ impl fmt::Debug for ExternalStorageGet {
 }
 
 /// Must set the value of a storage entry.
-// TODO: what if it's a child trie and the child trie doesn't exist? create it?
-// TODO: what if the value is None and this is the last entry in the child trie? should it be destroyed?
 pub struct ExternalStorageSet {
     inner: Box<Inner>,
 
@@ -2261,6 +2266,11 @@ impl ExternalStorageSet {
     }
 
     /// If `Some`, write to the given child trie. If `None`, write to the main trie.
+    ///
+    /// If [`ExternalStorageSet::value`] returns `Some` and the child trie doesn't exist, it must
+    /// implicitly be created.
+    /// If [`ExternalStorageSet::value`] returns `None` and this is the last entry in the child
+    /// trie, it must implicitly be destroyed.
     pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         match &self.child_trie_ptr_size {
             Some((ptr, size)) => {
@@ -2353,6 +2363,8 @@ impl ExternalStorageAppend {
 
     /// If `Some`, write to the given child trie. If `None`, write to the main trie.
     ///
+    /// If the child trie doesn't exist, it must implicitly be created.
+    ///
     /// > **Note**: At the moment, this function always returns None, as there is no host function
     /// >           that appends to a child trie storage.
     pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
@@ -2413,6 +2425,9 @@ impl ExternalStorageClearPrefix {
     }
 
     /// If `Some`, write to the given child trie. If `None`, write to the main trie.
+    ///
+    /// If all the entries of the child trie are removed, the child trie must implicitly be
+    /// destroyed.
     pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         if let Some((child_trie_ptr, child_trie_size)) = self.child_trie_ptr_size {
             let child_trie = self
@@ -2477,7 +2492,18 @@ impl fmt::Debug for ExternalStorageClearPrefix {
     }
 }
 
-/// Must provide the trie root hash of the storage.
+/// Must provide the trie root hash of the storage and write the trie root hash of child tries
+/// to the main trie.
+///
+/// If [`ExternalStorageRoot::child_trie`] returns `Some` and the child trie is non-empty, the
+/// trie root hash of the child trie must also be written to the main trie at the key
+/// `concat(":child_storage:default:", child_trie)`.
+/// If [`ExternalStorageRoot::child_trie`] returns `Some` and the child trie is empty, the entry
+/// in the main trie at the key `concat(":child_storage:default:", child_trie)` must be removed.
+///
+/// If [`ExternalStorageRoot::child_trie`] returns `None`, the same operation as above must be
+/// done for every single child trie that has been modified in one way or the other during the
+/// runtime call.
 pub struct ExternalStorageRoot {
     inner: Box<Inner>,
 
@@ -2490,7 +2516,7 @@ pub struct ExternalStorageRoot {
 }
 
 impl ExternalStorageRoot {
-    /// Returns the trie whose root hash must be provided.
+    /// Returns the child trie whose root hash must be provided. `None` for the main trie.
     pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         if let Some((ptr, size)) = self.child_trie_ptr_size {
             let child_trie = self.inner.vm.read_memory(ptr, size).unwrap();
@@ -2535,10 +2561,6 @@ pub struct ExternalStorageNextKey {
 
 impl ExternalStorageNextKey {
     /// Returns the key whose following key must be returned.
-    ///
-    /// > **Note**: While the runtime is able to obtain keys correspond to child tries by iterating
-    /// >           over keys, this is handled internally and doesn't need any special handling by
-    /// >           by the API user.
     pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
         self.inner
             .vm
@@ -2562,8 +2584,8 @@ impl ExternalStorageNextKey {
 
     /// Writes the follow-up key in the Wasm VM memory and prepares it for execution.
     ///
-    /// Must be passed `None` if the key is the last one in the storage.
-    // TODO: what if it's a child trie and the child trie doesn't exist?
+    /// Must be passed `None` if the key is the last one in the storage or if
+    /// [`ExternalStorageNextKey`] returns `Some` and the child trie doesn't exist.
     pub fn resume(self, follow_up: Option<&[u8]>) -> HostVm {
         let key = self
             .inner
