@@ -206,8 +206,6 @@ impl StorageGet {
             }
 
             host::HostVm::ExternalStorageRoot(req) => {
-                let empty_trie = trie::empty_trie_merkle_value(); // TODO: this function should be a static
-
                 let hash = match value.as_ref() {
                     Some(v) => match <&[u8; 32]>::try_from(&v[..]) {
                         Ok(v) => v,
@@ -218,7 +216,7 @@ impl StorageGet {
                             }));
                         }
                     },
-                    None => &empty_trie,
+                    None => &trie::EMPTY_TRIE_MERKLE_VALUE,
                 };
 
                 self.inner.vm = req.resume(hash);

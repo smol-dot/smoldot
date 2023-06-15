@@ -806,8 +806,7 @@ impl Inner {
                         main_trie_key.extend_from_slice(DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX);
                         main_trie_key.extend_from_slice(child_trie);
 
-                        if trie_root_hash != trie::empty_trie_merkle_value() {
-                            // TODO: `empty_trie_merkle_value` should be a static?
+                        if trie_root_hash != trie::EMPTY_TRIE_MERKLE_VALUE {
                             self.storage_changes.main_trie.diff_insert(
                                 main_trie_key,
                                 trie_root_hash.to_vec(),
