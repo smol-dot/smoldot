@@ -78,12 +78,10 @@
 //! ```
 //!
 
-use crate::trie::empty_trie_merkle_value;
-
 use super::{
     branch_search,
     nibble::{nibbles_to_bytes_suffix_extend, Nibble},
-    trie_node, TrieEntryVersion,
+    trie_node, TrieEntryVersion, EMPTY_TRIE_MERKLE_VALUE,
 };
 
 use alloc::vec::Vec;
@@ -271,7 +269,7 @@ impl NextKey {
                 } else {
                     // Trie is completely empty.
                     RootMerkleValueCalculation::Finished {
-                        hash: empty_trie_merkle_value(),
+                        hash: EMPTY_TRIE_MERKLE_VALUE,
                     }
                 }
             }

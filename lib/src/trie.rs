@@ -103,7 +103,7 @@
 use crate::util;
 
 use alloc::vec::Vec;
-use core::{cmp, iter, ops::Bound};
+use core::{cmp, ops::Bound};
 
 mod nibble;
 
@@ -156,21 +156,11 @@ impl From<TrieEntryVersion> for u8 {
     }
 }
 
-/// Returns the Merkle value of the root of an empty trie.
-pub fn empty_trie_merkle_value() -> [u8; 32] {
-    trie_node::calculate_merkle_value(
-        trie_node::Decoded {
-            children: [None::<&'static [u8]>; 16],
-            partial_key: iter::empty(),
-            storage_value: trie_node::StorageValue::None,
-        },
-        true,
-    )
-    .unwrap_or_else(|_| panic!())
-    .try_into()
-    // Guaranteed to never panic when `is_root_node` is `true`.
-    .unwrap_or_else(|_| panic!())
-}
+/// Merkle value of the root node of an empty trie.
+pub const EMPTY_TRIE_MERKLE_VALUE: [u8; 32] = [
+    3, 23, 10, 46, 117, 151, 183, 183, 227, 216, 76, 5, 57, 29, 19, 154, 98, 177, 87, 231, 135,
+    134, 216, 192, 130, 242, 157, 207, 76, 17, 19, 20,
+];
 
 /// Returns the Merkle value of a trie containing the entries passed as parameter. The entries
 /// passed as parameter are `(key, value)`.
@@ -284,11 +274,29 @@ pub fn ordered_root(version: TrieEntryVersion, entries: &[impl AsRef<[u8]>]) -> 
 
 #[cfg(test)]
 mod tests {
+    use super::trie_node;
+    use core::iter;
+
     #[test]
     fn empty_trie() {
-        let obtained = super::empty_trie_merkle_value();
-        let expected = blake2_rfc::blake2b::blake2b(32, &[], &[0x0]);
-        assert_eq!(obtained, expected.as_bytes());
+        let calculated_through_function = *<&[u8; 32]>::try_from(
+            trie_node::calculate_merkle_value(
+                trie_node::Decoded {
+                    children: [None::<&'static [u8]>; 16],
+                    partial_key: iter::empty(),
+                    storage_value: trie_node::StorageValue::None,
+                },
+                true,
+            )
+            .unwrap()
+            .as_ref(),
+        )
+        .unwrap();
+
+        let calculated_manually = blake2_rfc::blake2b::blake2b(32, &[], &[0x0]);
+
+        assert_eq!(calculated_through_function, calculated_manually.as_bytes());
+        assert_eq!(calculated_through_function, super::EMPTY_TRIE_MERKLE_VALUE);
     }
 
     #[test]
