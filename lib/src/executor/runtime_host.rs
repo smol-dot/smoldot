@@ -854,6 +854,7 @@ impl Inner {
                 }
 
                 host::HostVm::Finished(finished) => {
+                    // TODO: must also commit all the changes to child tries in order for the returned storage diff to be correct
                     return RuntimeHostVm::Finished(Ok(Success {
                         virtual_machine: SuccessVirtualMachine(finished),
                         storage_main_trie_changes: self.storage_changes.main_trie,
