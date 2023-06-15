@@ -2242,6 +2242,9 @@ impl fmt::Debug for ExternalStorageGet {
 
 /// Must set the value of a storage entry.
 ///
+/// If [`ExternalStorageSet::child_trie`] return `None` and [`ExternalStorageSet::key`]
+/// returns a key that starts with `:child_storage:`, then the write must be silently ignored.
+///
 /// If [`ExternalStorageSet::child_trie`] and [`ExternalStorageSet::value`] return `Some` and the
 /// child trie doesn't exist, it must implicitly be created.
 /// If [`ExternalStorageSet::child_trie`] returns `Some` and [`ExternalStorageSet::value`]
@@ -2330,6 +2333,9 @@ impl fmt::Debug for ExternalStorageSet {
 /// If [`ExternalStorageAppend::child_trie`] return `Some` and the child trie doesn't exist, it
 /// must implicitly be created.
 ///
+/// If [`ExternalStorageAppend::child_trie`] return `None` and [`ExternalStorageAppend::key`]
+/// returns a key that starts with `:child_storage:`, then the write must be silently ignored.
+///
 /// If there isn't any existing value of if the existing value isn't actually a SCALE-encoded
 /// container, store a 1-size container with the `value`.
 ///
@@ -2409,6 +2415,10 @@ impl fmt::Debug for ExternalStorageAppend {
 ///
 /// If [`ExternalStorageClearPrefix::child_trie`] returns `Some` and all the entries of the child
 /// trie are removed, the child trie must implicitly be destroyed.
+///
+/// If [`ExternalStorageClearPrefix::child_trie`] return `None` and the prefix returned by
+/// [`ExternalStorageClearPrefix::prefix`] intersects with `:child_storage:`, then the clearing
+/// must be silently ignored.
 pub struct ExternalStorageClearPrefix {
     inner: Box<Inner>,
     /// Function currently being called by the Wasm code. Refers to an index within
