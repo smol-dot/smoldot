@@ -2241,6 +2241,11 @@ impl fmt::Debug for ExternalStorageGet {
 }
 
 /// Must set the value of a storage entry.
+///
+/// If [`ExternalStorageSet::child_trie`] and [`ExternalStorageSet::value`] return `Some` and the
+/// child trie doesn't exist, it must implicitly be created.
+/// If [`ExternalStorageSet::child_trie`] returns `Some` and [`ExternalStorageSet::value`]
+/// returns `None` and this is the last entry in the child trie, it must implicitly be destroyed.
 pub struct ExternalStorageSet {
     inner: Box<Inner>,
 
@@ -2322,6 +2327,9 @@ impl fmt::Debug for ExternalStorageSet {
 /// Must load a storage value, treat it as if it was a SCALE-encoded container, and put `value`
 /// at the end of the container, increasing the number of elements.
 ///
+/// If [`ExternalStorageAppend::child_trie`] return `Some` and the child trie doesn't exist, it
+/// must implicitly be created.
+///
 /// If there isn't any existing value of if the existing value isn't actually a SCALE-encoded
 /// container, store a 1-size container with the `value`.
 ///
@@ -2363,7 +2371,7 @@ impl ExternalStorageAppend {
 
     /// If `Some`, write to the given child trie. If `None`, write to the main trie.
     ///
-    /// If the child trie doesn't exist, it must implicitly be created.
+    /// If this returns `Some` and the child trie doesn't exist, it must implicitly be created.
     ///
     /// > **Note**: At the moment, this function always returns None, as there is no host function
     /// >           that appends to a child trie storage.
@@ -2398,7 +2406,9 @@ impl fmt::Debug for ExternalStorageAppend {
 /// Must remove from the storage keys which start with a certain prefix. Use
 /// [`ExternalStorageClearPrefix::max_keys_to_remove`] to determine the maximum number of keys
 /// to remove.
-// TODO: clarify whether the entire child trie must disappear if the prefix is []
+///
+/// If [`ExternalStorageClearPrefix::child_trie`] returns `Some` and all the entries of the child
+/// trie are removed, the child trie must implicitly be destroyed.
 pub struct ExternalStorageClearPrefix {
     inner: Box<Inner>,
     /// Function currently being called by the Wasm code. Refers to an index within
@@ -2426,8 +2436,8 @@ impl ExternalStorageClearPrefix {
 
     /// If `Some`, write to the given child trie. If `None`, write to the main trie.
     ///
-    /// If all the entries of the child trie are removed, the child trie must implicitly be
-    /// destroyed.
+    /// If [`ExternalStorageClearPrefix::child_trie`] returns `Some` and all the entries of the
+    /// child trie are removed, the child trie must implicitly be destroyed.
     pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         if let Some((child_trie_ptr, child_trie_size)) = self.child_trie_ptr_size {
             let child_trie = self
