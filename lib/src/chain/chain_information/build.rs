@@ -20,7 +20,7 @@
 //! This module contains the [`ChainInformationBuild`] struct, a state machine that drives the
 //! process of building the chain information of a certain finalized point of a chain.
 
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use core::{fmt, iter, num::NonZeroU64};
 
 use crate::{
@@ -191,7 +191,7 @@ impl ChainInformationBuild {
         } = &config.finalized_block_header
         {
             assert_ne!(
-                header::decode(&header, config.block_number_bytes)
+                header::decode(header, config.block_number_bytes)
                     .unwrap()
                     .number,
                 0
@@ -481,13 +481,12 @@ impl ChainInformationBuild {
                 (false, None, _) => chain_information::ChainInformationConsensus::Unknown,
                 (false, Some(_), ConfigFinalizedBlockHeader::NonGenesis { .. }) => {
                     chain_information::ChainInformationConsensus::Babe {
-                        finalized_block_epoch_information: Some(
+                        finalized_block_epoch_information: Some(Box::new(
                             inner.babe_current_epoch_call_output.take().unwrap(),
+                        )),
+                        finalized_next_epoch_transition: Box::new(
+                            inner.babe_next_epoch_call_output.take().unwrap(),
                         ),
-                        finalized_next_epoch_transition: inner
-                            .babe_next_epoch_call_output
-                            .take()
-                            .unwrap(),
                         slots_per_epoch: inner
                             .babe_configuration_call_output
                             .take()
@@ -500,14 +499,16 @@ impl ChainInformationBuild {
                     chain_information::ChainInformationConsensus::Babe {
                         slots_per_epoch: config.slots_per_epoch,
                         finalized_block_epoch_information: None,
-                        finalized_next_epoch_transition: chain_information::BabeEpochInformation {
-                            epoch_index: 0,
-                            start_slot_number: None,
-                            authorities: config.epoch0_information.authorities,
-                            randomness: config.epoch0_information.randomness,
-                            c: config.epoch0_configuration.c,
-                            allowed_slots: config.epoch0_configuration.allowed_slots,
-                        },
+                        finalized_next_epoch_transition: Box::new(
+                            chain_information::BabeEpochInformation {
+                                epoch_index: 0,
+                                start_slot_number: None,
+                                authorities: config.epoch0_information.authorities,
+                                randomness: config.epoch0_information.randomness,
+                                c: config.epoch0_configuration.c,
+                                allowed_slots: config.epoch0_configuration.allowed_slots,
+                            },
+                        ),
                     }
                 }
                 (true, None, _) => chain_information::ChainInformationConsensus::Aura {
@@ -527,7 +528,7 @@ impl ChainInformationBuild {
                         number: 0,
                         state_root: &state_trie_root_hash,
                         extrinsics_root: &trie::empty_trie_merkle_value(),
-                        digest: header::DigestRef::empty().into(),
+                        digest: header::DigestRef::empty(),
                     }
                     .scale_encoding_vec(inner.block_number_bytes);
 
@@ -584,12 +585,11 @@ impl ChainInformationBuild {
             // epochs that don't follow each other.
             let chain_information = match chain_information::ValidChainInformation::try_from(
                 chain_information::ChainInformation {
-                    finalized_block_header: header::decode(
-                        &finalized_block_header,
-                        inner.block_number_bytes,
-                    )
-                    .unwrap()
-                    .into(),
+                    finalized_block_header: Box::new(
+                        header::decode(&finalized_block_header, inner.block_number_bytes)
+                            .unwrap()
+                            .into(),
+                    ),
                     finality,
                     consensus,
                 },
@@ -765,7 +765,7 @@ impl ChainInformationBuild {
                             scale_encoded_header: header,
                             ..
                         } => {
-                            &header::decode(header, inner.block_number_bytes)
+                            header::decode(header, inner.block_number_bytes)
                                 .unwrap()
                                 .state_root
                         }
@@ -845,6 +845,7 @@ fn decode_aura_authorities_output(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct BabeGenesisConfiguration {
     slots_per_epoch: NonZeroU64,
     epoch0_configuration: header::BabeNextConfig,
@@ -889,7 +890,7 @@ fn decode_babe_configuration_output(
                                 header::BabeAllowedSlots::PrimarySlots
                             }),
                             nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| {
-                                header::BabeAllowedSlots::PrimaryAndSecondaryVrfSlots
+                                header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots
                             }),
                         ))(b)
                     } else {
@@ -1055,6 +1056,9 @@ fn decode_grandpa_current_set_id_output(bytes: &[u8]) -> Result<u64, Error> {
 
 #[cfg(test)]
 mod tests {
+    use crate::header;
+    use core::num::NonZeroU64;
+
     #[test]
     fn decode_babe_epoch_output_sample_decode() {
         // Sample taken from an actual Westend block.
@@ -1074,5 +1078,90 @@ mod tests {
         ];
 
         super::decode_babe_epoch_output(&sample_data, true).unwrap();
+    }
+
+    #[test]
+    fn decode_babe_configuration_output_v1() {
+        let data = [
+            112, 23, 0, 0, 0, 0, 0, 0, 88, 2, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0,
+            0, 0, 0, 0, 24, 202, 35, 147, 146, 150, 4, 115, 254, 27, 198, 95, 148, 238, 39, 216,
+            144, 164, 156, 27, 32, 12, 0, 111, 245, 220, 197, 37, 51, 14, 204, 22, 119, 1, 0, 0, 0,
+            0, 0, 0, 0, 180, 111, 1, 135, 76, 231, 171, 187, 82, 32, 232, 253, 137, 190, 222, 10,
+            218, 209, 76, 115, 3, 157, 145, 226, 142, 136, 24, 35, 67, 62, 114, 63, 1, 0, 0, 0, 0,
+            0, 0, 0, 214, 132, 217, 23, 109, 110, 182, 152, 135, 84, 12, 154, 137, 250, 96, 151,
+            173, 234, 130, 252, 75, 15, 242, 109, 16, 98, 180, 136, 243, 82, 225, 121, 1, 0, 0, 0,
+            0, 0, 0, 0, 104, 25, 90, 113, 189, 222, 73, 17, 122, 97, 100, 36, 189, 198, 10, 23, 51,
+            233, 106, 203, 29, 165, 174, 171, 93, 38, 140, 242, 165, 114, 233, 65, 1, 0, 0, 0, 0,
+            0, 0, 0, 26, 5, 117, 239, 74, 226, 75, 223, 211, 31, 76, 181, 189, 97, 35, 154, 230,
+            124, 18, 212, 230, 74, 229, 26, 199, 86, 4, 74, 166, 173, 130, 0, 1, 0, 0, 0, 0, 0, 0,
+            0, 24, 22, 143, 42, 173, 0, 129, 162, 87, 40, 150, 30, 224, 6, 39, 207, 227, 94, 57,
+            131, 60, 128, 80, 22, 99, 43, 247, 193, 77, 165, 128, 9, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 1,
+        ];
+
+        assert_eq!(
+            super::decode_babe_configuration_output(&data, true).unwrap(),
+            super::BabeGenesisConfiguration {
+                slots_per_epoch: NonZeroU64::new(600).unwrap(),
+                epoch0_configuration: header::BabeNextConfig {
+                    allowed_slots: header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots,
+                    c: (1, 4),
+                },
+                epoch0_information: header::BabeNextEpoch {
+                    authorities: vec![
+                        header::BabeAuthority {
+                            public_key: [
+                                202, 35, 147, 146, 150, 4, 115, 254, 27, 198, 95, 148, 238, 39,
+                                216, 144, 164, 156, 27, 32, 12, 0, 111, 245, 220, 197, 37, 51, 14,
+                                204, 22, 119
+                            ],
+                            weight: 1
+                        },
+                        header::BabeAuthority {
+                            public_key: [
+                                180, 111, 1, 135, 76, 231, 171, 187, 82, 32, 232, 253, 137, 190,
+                                222, 10, 218, 209, 76, 115, 3, 157, 145, 226, 142, 136, 24, 35, 67,
+                                62, 114, 63
+                            ],
+                            weight: 1
+                        },
+                        header::BabeAuthority {
+                            public_key: [
+                                214, 132, 217, 23, 109, 110, 182, 152, 135, 84, 12, 154, 137, 250,
+                                96, 151, 173, 234, 130, 252, 75, 15, 242, 109, 16, 98, 180, 136,
+                                243, 82, 225, 121
+                            ],
+                            weight: 1
+                        },
+                        header::BabeAuthority {
+                            public_key: [
+                                104, 25, 90, 113, 189, 222, 73, 17, 122, 97, 100, 36, 189, 198, 10,
+                                23, 51, 233, 106, 203, 29, 165, 174, 171, 93, 38, 140, 242, 165,
+                                114, 233, 65
+                            ],
+                            weight: 1
+                        },
+                        header::BabeAuthority {
+                            public_key: [
+                                26, 5, 117, 239, 74, 226, 75, 223, 211, 31, 76, 181, 189, 97, 35,
+                                154, 230, 124, 18, 212, 230, 74, 229, 26, 199, 86, 4, 74, 166, 173,
+                                130, 0
+                            ],
+                            weight: 1
+                        },
+                        header::BabeAuthority {
+                            public_key: [
+                                24, 22, 143, 42, 173, 0, 129, 162, 87, 40, 150, 30, 224, 6, 39,
+                                207, 227, 94, 57, 131, 60, 128, 80, 22, 99, 43, 247, 193, 77, 165,
+                                128, 9
+                            ],
+                            weight: 1
+                        }
+                    ],
+                    randomness: [0; 32]
+                },
+            }
+        );
     }
 }

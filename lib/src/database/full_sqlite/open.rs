@@ -43,14 +43,12 @@ pub fn open(config: Config) -> Result<DatabaseOpen, InternalError> {
         rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
 
     let database = match config.ty {
-        ConfigTy::Disk(path) => {
-            // We put a `/v1/` behind the path in case we change the schema.
-            let path = path.join("v1");
+        ConfigTy::Disk(directory_path) => {
             // Ignoring errors in `create_dir_all`, in order to avoid making the API of this
             // function more complex. If `create_dir_all` fails, opening the database will most
             // likely fail too.
-            let _ = fs::create_dir_all(&path);
-            rusqlite::Connection::open_with_flags(path.join("database.sqlite"), flags)
+            let _ = fs::create_dir_all(directory_path);
+            rusqlite::Connection::open_with_flags(directory_path.join("database.sqlite"), flags)
         }
         ConfigTy::Memory => rusqlite::Connection::open_in_memory_with_flags(flags),
     }
@@ -60,6 +58,7 @@ pub fn open(config: Config) -> Result<DatabaseOpen, InternalError> {
     // value superior to the number of different queries we make.
     database.set_prepared_statement_cache_capacity(64);
 
+    // Configure the database connection.
     database
         .execute_batch(
             r#"
@@ -67,9 +66,42 @@ pub fn open(config: Config) -> Result<DatabaseOpen, InternalError> {
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA locking_mode = EXCLUSIVE;
-PRAGMA auto_vacuum = FULL;
 PRAGMA encoding = 'UTF-8';
 PRAGMA trusted_schema = false; 
+            "#,
+        )
+        .map_err(InternalError)?;
+
+    // `PRAGMA` queries can't be parametrized, and thus we have to use `format!`.
+    database
+        .execute(
+            &format!(
+                "PRAGMA cache_size = {}",
+                0i64.saturating_sub_unsigned(
+                    u64::try_from((config.cache_size.saturating_sub(1) / 1024).saturating_add(1))
+                        .unwrap_or(u64::max_value()),
+                )
+            ),
+            (),
+        )
+        .map_err(InternalError)?;
+
+    // Each SQLite database contains a "user version" whose value can be used by the API user
+    // (that's us!) however they want. Its value defaults to 0 for new database. We use it to
+    // store the schema version.
+    let user_version = database
+        .prepare_cached("PRAGMA user_version")
+        .map_err(InternalError)?
+        .query_row((), |row| row.get::<_, i64>(0))
+        .map_err(InternalError)?;
+
+    // Migrations.
+    if user_version <= 0 {
+        database
+            .execute_batch(
+                r#"
+-- `auto_vacuum` can switched between `NONE` and non-`NONE` on newly-created database.
+PRAGMA auto_vacuum = INCREMENTAL;
 
 /*
 Contains all the "global" values in the database.
@@ -107,7 +139,7 @@ Keys in that table:
  only if the chain doesn't use Babe.
 
 */
-CREATE TABLE IF NOT EXISTS meta(
+CREATE TABLE meta(
     key STRING NOT NULL PRIMARY KEY,
     value_blob BLOB,
     value_number INTEGER,
@@ -118,7 +150,7 @@ CREATE TABLE IF NOT EXISTS meta(
 /*
 List of all known blocks, indexed by their hash or number.
 */
-CREATE TABLE IF NOT EXISTS blocks(
+CREATE TABLE blocks(
     hash BLOB NOT NULL PRIMARY KEY,
     parent_hash BLOB,  -- NULL only for the genesis block
     number INTEGER NOT NULL,
@@ -127,7 +159,7 @@ CREATE TABLE IF NOT EXISTS blocks(
     UNIQUE(number, hash),
     CHECK(length(hash) == 32)
 );
-CREATE INDEX IF NOT EXISTS blocks_by_number ON blocks(number);
+CREATE INDEX blocks_by_number ON blocks(number);
 
 /*
 Each block has a body made from 0+ extrinsics (in practice, there's always at least one extrinsic,
@@ -135,7 +167,7 @@ but the database supports 0). This table contains these extrinsics.
 The `idx` field contains the index between `0` and `num_extrinsics - 1`. The values in `idx` must
 be contiguous for each block.
 */
-CREATE TABLE IF NOT EXISTS blocks_body(
+CREATE TABLE blocks_body(
     hash BLOB NOT NULL,
     idx INTEGER NOT NULL,
     extrinsic BLOB NOT NULL,
@@ -147,7 +179,7 @@ CREATE TABLE IF NOT EXISTS blocks_body(
 /*
 Storage at the highest block that is considered finalized.
 */
-CREATE TABLE IF NOT EXISTS finalized_storage_main_trie(
+CREATE TABLE finalized_storage_main_trie(
     key BLOB NOT NULL PRIMARY KEY,
     value BLOB NOT NULL,
     trie_entry_version INTEGER NOT NULL
@@ -158,7 +190,7 @@ For non-finalized blocks (i.e. blocks that descend from the finalized block), co
 that this block performs on the storage.
 When a block gets finalized, these changes get merged into `finalized_storage_main_trie`.
 */
-CREATE TABLE IF NOT EXISTS non_finalized_changes(
+CREATE TABLE non_finalized_changes(
     hash BLOB NOT NULL,
     key BLOB NOT NULL,
     -- `value` is NULL if the block removes the key from the storage, and NON-NULL if it inserts
@@ -176,7 +208,7 @@ CREATE TABLE IF NOT EXISTS non_finalized_changes(
 List of public keys and weights of the GrandPa authorities that must finalize the children of the
 finalized block. Empty if the chain doesn't use Grandpa.
 */
-CREATE TABLE IF NOT EXISTS grandpa_triggered_authorities(
+CREATE TABLE grandpa_triggered_authorities(
     idx INTEGER NOT NULL PRIMARY KEY,
     public_key BLOB NOT NULL,
     weight INTEGER NOT NULL,
@@ -187,7 +219,7 @@ CREATE TABLE IF NOT EXISTS grandpa_triggered_authorities(
 List of public keys and weights of the GrandPa authorities that will be triggered at the block
 found in `grandpa_scheduled_target` (see `meta`). Empty if the chain doesn't use Grandpa.
 */
-CREATE TABLE IF NOT EXISTS grandpa_scheduled_authorities(
+CREATE TABLE grandpa_scheduled_authorities(
     idx INTEGER NOT NULL PRIMARY KEY,
     public_key BLOB NOT NULL,
     weight INTEGER NOT NULL,
@@ -197,29 +229,18 @@ CREATE TABLE IF NOT EXISTS grandpa_scheduled_authorities(
 /*
 List of public keys of the Aura authorities that must author the children of the finalized block.
 */
-CREATE TABLE IF NOT EXISTS aura_finalized_authorities(
+CREATE TABLE aura_finalized_authorities(
     idx INTEGER NOT NULL PRIMARY KEY,
     public_key BLOB NOT NULL,
     CHECK(length(public_key) == 32)
 );
 
-    "#,
-        )
-        .map_err(InternalError)?;
+PRAGMA user_version = 1;
 
-    // `PRAGMA` queries can't be parametrized, and thus we have to use `format!`.
-    database
-        .execute(
-            &format!(
-                "PRAGMA cache_size = {}",
-                0i64.saturating_sub_unsigned(
-                    u64::try_from((config.cache_size.saturating_sub(1) / 1024).saturating_add(1))
-                        .unwrap_or(u64::max_value()),
-                )
-            ),
-            (),
-        )
-        .map_err(InternalError)?;
+        "#,
+            )
+            .map_err(InternalError)?
+    }
 
     let is_empty = database
         .prepare_cached("SELECT COUNT(*) FROM meta WHERE key = ?")

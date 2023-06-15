@@ -35,7 +35,7 @@ wasmtime = [
 # Before adding a crate here, please make sure that it is `no_std`-compatible. If a crate should
 # theoretically be `no_std`-compatible (i.e. doesn't need the help of the operating system) but is
 # not, or if things are sketchy, please leave a comment next to it.
-arrayvec = { version = "0.7.2", default-features = false }
+arrayvec = { version = "0.7.3", default-features = false }
 async-lock = { version = "2.7.0", default-features = false }  # TODO: no-std-ize; this is has been done and is just waiting for a release: https://github.com/smol-rs/event-listener/pull/34
 atomic = { version = "0.5.3", default-features = false }
 base64 = { version = "0.21.2", default-features = false, features = ["alloc"] }
@@ -92,7 +92,7 @@ soketto = { version = "0.7.1", optional = true }
 # The arch and OS of a specific target can be found with the command `rustc +nightly -Z unstable-options --print target-spec-json --target ...`
 [target.'cfg(any(all(target_arch = "x86_64", any(target_os = "windows", target_os = "linux", target_os = "macos")), all(target_arch = "aarch64", target_os = "linux"), all(target_arch = "s390x", target_os = "linux")))'.dependencies]
 # `wasmtime` feature
-wasmtime = { version = "9.0.3", default-features = false, features = ["async", "cranelift"], optional = true }
+wasmtime = { version = "9.0.4", default-features = false, features = ["async", "cranelift"], optional = true }
 
 [dev-dependencies]
 criterion = "0.5.1"

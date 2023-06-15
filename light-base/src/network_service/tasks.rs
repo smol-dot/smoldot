@@ -402,7 +402,7 @@ async fn single_stream_connection_task<TPlat: PlatformRef>(
 /// >           general-purpose.
 // TODO: a lot of logging disappeared
 async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
-    mut connection: TPlat::Connection,
+    mut connection: TPlat::MultiStream,
     shared: Arc<Shared<TPlat>>,
     connection_id: service::ConnectionId,
     mut connection_task: service::MultiStreamConnectionTask<TPlat::Instant, usize>,

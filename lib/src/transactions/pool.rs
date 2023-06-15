@@ -431,7 +431,7 @@ impl<TTx> Pool<TTx> {
 
         // Set `included_block_height` to `None` for each of them.
         for (transaction_id, _) in &transactions_to_retract {
-            let mut tx_data = self.transactions.get_mut(transaction_id.0).unwrap();
+            let tx_data = self.transactions.get_mut(transaction_id.0).unwrap();
             debug_assert!(tx_data.included_block_height.unwrap() > self.best_block_height);
             tx_data.included_block_height = None;
         }
