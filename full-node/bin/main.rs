@@ -22,6 +22,7 @@ use std::{
     borrow::Cow,
     fs, io,
     sync::Arc,
+    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -287,6 +288,28 @@ async fn run(cli_options: cli::CliOptionsRun) {
         rand::random()
     };
 
+    // Create an executor where tasks are going to be spawned onto.
+    let executor = Arc::new(smol::Executor::new());
+    for n in 0..thread::available_parallelism()
+        .map(|n| n.get() - 1)
+        .unwrap_or(3)
+    {
+        let executor = executor.clone();
+
+        let spawn_result = thread::Builder::new()
+            .name(format!("tasks-pool-{}", n))
+            .spawn(move || smol::block_on(executor.run(future::pending::<()>())));
+
+        // Ignore a failure to spawn a thread, as we're going to run tasks on the current thread
+        // later down this function.
+        if let Err(err) = spawn_result {
+            log_callback.log(
+                smoldot_full_node::LogLevel::Warn,
+                format!("tasks-pool-thread-spawn-failure; err={err}"),
+            );
+        }
+    }
+
     // Print some general information.
     log_callback.log(
         smoldot_full_node::LogLevel::Info,
@@ -336,6 +359,10 @@ async fn run(cli_options: cli::CliOptionsRun) {
         libp2p_key,
         listen_addresses: cli_options.listen_addr,
         json_rpc_address: cli_options.json_rpc_address.0,
+        tasks_executor: {
+            let executor = executor.clone();
+            Arc::new(move |task| executor.spawn(task).detach())
+        },
         log_callback: log_callback.clone(),
         jaeger_agent: cli_options.jaeger,
         show_informant: matches!(cli_output, cli::Output::Informant),
@@ -347,7 +374,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
     // This should be performed after all the expensive initialization is done, as otherwise these
     // expensive initializations aren't interrupted by Ctrl+C, which could be frustrating for the
     // user.
-    let mut ctrlc_detected = {
+    let ctrlc_detected = {
         let event = event_listener::Event::new();
         let listen = event.listen();
         if let Err(err) = ctrlc::set_handler(move || {
@@ -362,8 +389,11 @@ async fn run(cli_options: cli::CliOptionsRun) {
         listen
     };
 
-    // TODO: consider passing an executor to the full node config and adding this task to said executor
-    smol::block_on({
+    // Spawn a task that prints the informant at a regular interval.
+    // Note that this task also holds the smoldot `client` alive, and thus we spawn it even if
+    // the informant is disabled.
+    // TODO: also print immediately after a log line?
+    let main_task = executor.spawn({
         let show_informant = matches!(cli_output, cli::Output::Informant);
         let informant_colors = match cli_options.color {
             cli::ColorChoice::Always => true,
@@ -377,65 +407,52 @@ async fn run(cli_options: cli::CliOptionsRun) {
                 smol::Timer::never()
             };
 
-            enum Event {
-                Informant,
-                CtrlC,
-            }
-
             loop {
-                match future::or(
-                    async {
-                        informant_timer.next().await;
-                        Event::Informant
-                    },
-                    async {
-                        (&mut ctrlc_detected).await;
-                        Event::CtrlC
-                    },
-                )
-                .await
-                {
-                    Event::Informant => {
-                        // We end the informant line with a `\r` so that it overwrites itself
-                        // every time. If any other line gets printed, it will overwrite the
-                        // informant, and the informant will then print itself below, which is
-                        // a fine behaviour.
-                        let sync_state = client.sync_state().await;
-                        eprint!(
-                            "{}\r",
-                            smoldot::informant::InformantLine {
-                                enable_colors: informant_colors,
-                                chain_name: parsed_chain_spec.name(),
-                                relay_chain: client.relay_chain_sync_state().await.map(
-                                    |relay_sync_state| smoldot::informant::RelayChain {
-                                        chain_name: relay_chain_name.as_ref().unwrap(),
-                                        best_number: relay_sync_state.best_block_number,
-                                    }
-                                ),
-                                max_line_width: terminal_size::terminal_size()
-                                    .map_or(80, |(w, _)| w.0.into()),
-                                num_peers: client.num_peers().await,
-                                num_network_connections: client.num_network_connections().await,
-                                best_number: sync_state.best_block_number,
-                                finalized_number: sync_state.finalized_block_number,
-                                best_hash: &sync_state.best_block_hash,
-                                finalized_hash: &sync_state.finalized_block_hash,
-                                network_known_best: client.network_known_best().await,
-                            }
-                        );
-                    }
+                let _ = informant_timer.next().await;
 
-                    Event::CtrlC => {
-                        break;
+                // We end the informant line with a `\r` so that it overwrites itself
+                // every time. If any other line gets printed, it will overwrite the
+                // informant, and the informant will then print itself below, which is
+                // a fine behaviour.
+                let sync_state = client.sync_state().await;
+                eprint!(
+                    "{}\r",
+                    smoldot::informant::InformantLine {
+                        enable_colors: informant_colors,
+                        chain_name: parsed_chain_spec.name(),
+                        relay_chain: client.relay_chain_sync_state().await.map(
+                            |relay_sync_state| smoldot::informant::RelayChain {
+                                chain_name: relay_chain_name.as_ref().unwrap(),
+                                best_number: relay_sync_state.best_block_number,
+                            }
+                        ),
+                        max_line_width: terminal_size::terminal_size()
+                            .map_or(80, |(w, _)| w.0.into()),
+                        num_peers: client.num_peers().await,
+                        num_network_connections: client.num_network_connections().await,
+                        best_number: sync_state.best_block_number,
+                        finalized_number: sync_state.finalized_block_number,
+                        best_hash: &sync_state.best_block_hash,
+                        finalized_hash: &sync_state.finalized_block_hash,
+                        network_known_best: client.network_known_best().await,
                     }
-                }
+                );
             }
         }
     });
 
+    // Now run all the tasks that have been spawned.
+    executor.run(ctrlc_detected).await;
+
+    // Add a new line after the informant so that the user's shell doesn't
+    // overwrite it.
     if matches!(cli_output, cli::Output::Informant) {
-        // Adding a new line after the informant so that the user's shell doesn't
-        // overwrite it.
         eprintln!();
     }
+
+    // After `ctrlc_detected` has triggered, we destroy `main_task`, which cancels it and destroys
+    // the smoldot client.
+    drop::<smol::Task<_>>(main_task);
+
+    // TODO: consider running the executor until all tasks shut down gracefully; unfortunately this currently hangs
 }
