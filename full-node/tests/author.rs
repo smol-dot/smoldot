@@ -21,30 +21,26 @@ use std::sync::Arc;
 fn basic_block_generated() {
     // TODO: this test is a dummy and doesn't test anything
     smol::block_on(async move {
-        smoldot_full_node::start(
-            smoldot_full_node::Config {
-                chain: smoldot_full_node::ChainConfig {
-                    chain_spec: SUBSTRATE_NODE_TEMPLATE_CHAIN_SPEC.into(),
-                    additional_bootnodes: Vec::new(),
-                    keystore_memory: vec![
-                        smoldot::identity::seed_phrase::decode_sr25519_private_key("//Alice")
-                            .unwrap(),
-                    ],
-                    sqlite_database_path: None,
-                    sqlite_cache_size: 256 * 1024 * 1024,
-                    keystore_path: None,
-                },
-                relay_chain: None,
-                libp2p_key: [0; 32],
-                listen_addresses: Vec::new(),
-                json_rpc_address: None,
-                log_callback: Arc::new(move |_, _| {}),
-                jaeger_agent: None,
-                show_informant: false,
-                informant_colors: false,
+        let _ = smoldot_full_node::start(smoldot_full_node::Config {
+            chain: smoldot_full_node::ChainConfig {
+                chain_spec: SUBSTRATE_NODE_TEMPLATE_CHAIN_SPEC.into(),
+                additional_bootnodes: Vec::new(),
+                keystore_memory: vec![smoldot::identity::seed_phrase::decode_sr25519_private_key(
+                    "//Alice",
+                )
+                .unwrap()],
+                sqlite_database_path: None,
+                sqlite_cache_size: 256 * 1024 * 1024,
+                keystore_path: None,
             },
-            Box::pin(async move {}),
-        )
+            relay_chain: None,
+            libp2p_key: [0; 32],
+            listen_addresses: Vec::new(),
+            json_rpc_address: None,
+            log_callback: Arc::new(move |_, _| {}),
+            jaeger_agent: None,
+            show_informant: false,
+        })
         .await;
     });
 }

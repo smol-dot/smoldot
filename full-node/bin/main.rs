@@ -22,8 +22,11 @@ use std::{
     borrow::Cow,
     fs, io,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+use futures_util::StreamExt as _;
+use smol::future;
 
 mod cli;
 
@@ -215,7 +218,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
         .map(|path| path.join(parsed_chain_spec.id()).join("keys"));
 
     // Build the relay chain information if relevant.
-    let relay_chain =
+    let (relay_chain, relay_chain_name) =
         if let Some((relay_chain_name, _parachain_id)) = parsed_chain_spec.relay_chain() {
             let spec_json: Cow<[u8]> = match &cli_options.chain {
                 cli::CliChain::Custom(parachain_path) => {
@@ -238,7 +241,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
             // interactions will happen.
             assert_ne!(parsed_relay_spec.id(), parsed_chain_spec.id());
 
-            Some(smoldot_full_node::ChainConfig {
+            let cfg = smoldot_full_node::ChainConfig {
                 chain_spec: spec_json,
                 additional_bootnodes: Vec::new(),
                 keystore_memory: Vec::new(),
@@ -249,9 +252,11 @@ async fn run(cli_options: cli::CliOptionsRun) {
                 keystore_path: base_storage_directory
                     .as_ref()
                     .map(|path| path.join(parsed_relay_spec.id()).join("keys")),
-            })
+            };
+
+            (Some(cfg), Some(relay_chain_name.to_owned()))
         } else {
-            None
+            (None, None)
         };
 
     // Determine which networking key to use.
@@ -314,12 +319,35 @@ async fn run(cli_options: cli::CliOptionsRun) {
             .to_string(),
     );
 
-    // Starting from here, a SIGINT (or equivalent) handler is setup. If the user does Ctrl+C,
-    // a message will be sent on `ctrlc_rx`.
+    let client = smoldot_full_node::start(smoldot_full_node::Config {
+        chain: smoldot_full_node::ChainConfig {
+            chain_spec,
+            additional_bootnodes: cli_options
+                .additional_bootnode
+                .iter()
+                .map(|cli::Bootnode { address, peer_id }| (peer_id.clone(), address.clone()))
+                .collect(),
+            keystore_memory: cli_options.keystore_memory,
+            sqlite_database_path,
+            sqlite_cache_size: cli_options.database_cache_size.0,
+            keystore_path,
+        },
+        relay_chain,
+        libp2p_key,
+        listen_addresses: cli_options.listen_addr,
+        json_rpc_address: cli_options.json_rpc_address.0,
+        log_callback: log_callback.clone(),
+        jaeger_agent: cli_options.jaeger,
+        show_informant: matches!(cli_output, cli::Output::Informant),
+    })
+    .await;
+
+    // Starting from here, a SIGINT (or equivalent) handler is set up. If the user does Ctrl+C,
+    // an event will be triggered on `ctrlc_detected`.
     // This should be performed after all the expensive initialization is done, as otherwise these
     // expensive initializations aren't interrupted by Ctrl+C, which could be frustrating for the
     // user.
-    let ctrlc_detected = {
+    let mut ctrlc_detected = {
         let event = event_listener::Event::new();
         let listen = event.listen();
         if let Err(err) = ctrlc::set_handler(move || {
@@ -334,33 +362,80 @@ async fn run(cli_options: cli::CliOptionsRun) {
         listen
     };
 
-    smoldot_full_node::start(
-        smoldot_full_node::Config {
-            chain: smoldot_full_node::ChainConfig {
-                chain_spec,
-                additional_bootnodes: cli_options
-                    .additional_bootnode
-                    .iter()
-                    .map(|cli::Bootnode { address, peer_id }| (peer_id.clone(), address.clone()))
-                    .collect(),
-                keystore_memory: cli_options.keystore_memory,
-                sqlite_database_path,
-                sqlite_cache_size: cli_options.database_cache_size.0,
-                keystore_path,
-            },
-            relay_chain,
-            libp2p_key,
-            listen_addresses: cli_options.listen_addr,
-            json_rpc_address: cli_options.json_rpc_address.0,
-            log_callback,
-            jaeger_agent: cli_options.jaeger,
-            show_informant: matches!(cli_output, cli::Output::Informant),
-            informant_colors: match cli_options.color {
-                cli::ColorChoice::Always => true,
-                cli::ColorChoice::Never => false,
-            },
-        },
-        Box::pin(ctrlc_detected),
-    )
-    .await
+    // TODO: consider passing an executor to the full node config and adding this task to said executor
+    smol::block_on({
+        let show_informant = matches!(cli_output, cli::Output::Informant);
+        let informant_colors = match cli_options.color {
+            cli::ColorChoice::Always => true,
+            cli::ColorChoice::Never => false,
+        };
+
+        async move {
+            let mut informant_timer = if show_informant {
+                smol::Timer::interval(Duration::from_millis(100))
+            } else {
+                smol::Timer::never()
+            };
+
+            enum Event {
+                Informant,
+                CtrlC,
+            }
+
+            loop {
+                match future::or(
+                    async {
+                        informant_timer.next().await;
+                        Event::Informant
+                    },
+                    async {
+                        (&mut ctrlc_detected).await;
+                        Event::CtrlC
+                    },
+                )
+                .await
+                {
+                    Event::Informant => {
+                        // We end the informant line with a `\r` so that it overwrites itself
+                        // every time. If any other line gets printed, it will overwrite the
+                        // informant, and the informant will then print itself below, which is
+                        // a fine behaviour.
+                        let sync_state = client.sync_state().await;
+                        eprint!(
+                            "{}\r",
+                            smoldot::informant::InformantLine {
+                                enable_colors: informant_colors,
+                                chain_name: parsed_chain_spec.name(),
+                                relay_chain: client.relay_chain_sync_state().await.map(
+                                    |relay_sync_state| smoldot::informant::RelayChain {
+                                        chain_name: relay_chain_name.as_ref().unwrap(),
+                                        best_number: relay_sync_state.best_block_number,
+                                    }
+                                ),
+                                max_line_width: terminal_size::terminal_size()
+                                    .map_or(80, |(w, _)| w.0.into()),
+                                num_peers: client.num_peers().await,
+                                num_network_connections: client.num_network_connections().await,
+                                best_number: sync_state.best_block_number,
+                                finalized_number: sync_state.finalized_block_number,
+                                best_hash: &sync_state.best_block_hash,
+                                finalized_hash: &sync_state.finalized_block_hash,
+                                network_known_best: client.network_known_best().await,
+                            }
+                        );
+                    }
+
+                    Event::CtrlC => {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    if matches!(cli_output, cli::Output::Informant) {
+        // Adding a new line after the informant so that the user's shell doesn't
+        // overwrite it.
+        eprintln!();
+    }
 }
