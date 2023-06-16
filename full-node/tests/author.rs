@@ -15,13 +15,12 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 #[test]
 fn basic_block_generated() {
-    // TODO: this test is a dummy and doesn't test anything
     smol::block_on(async move {
-        let _ = smoldot_full_node::start(smoldot_full_node::Config {
+        let client = smoldot_full_node::start(smoldot_full_node::Config {
             chain: smoldot_full_node::ChainConfig {
                 chain_spec: SUBSTRATE_NODE_TEMPLATE_CHAIN_SPEC.into(),
                 additional_bootnodes: Vec::new(),
@@ -42,6 +41,16 @@ fn basic_block_generated() {
             show_informant: false,
         })
         .await;
+
+        loop {
+            smol::Timer::after(Duration::from_secs(1)).await;
+
+            let client_state = client.sync_state().await;
+            if client_state.best_block_number >= 1 {
+                // Success!
+                break;
+            }
+        }
     });
 }
 
