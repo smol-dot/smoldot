@@ -47,6 +47,8 @@ use core::{fmt, iter};
 
 pub use trie::{Nibble, TrieEntryVersion};
 
+mod tests;
+
 /// Configuration for [`run`].
 pub struct Config<'a, TParams> {
     /// Virtual machine to be run.
