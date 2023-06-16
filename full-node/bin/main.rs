@@ -59,10 +59,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
     let log_callback: Arc<dyn smoldot_full_node::LogCallback + Send + Sync> = match cli_output {
         cli::Output::None => Arc::new(|_level, _message| {}),
         cli::Output::Informant | cli::Output::Logs => Arc::new(|level, message| {
-            let when = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
+            let when = humantime::format_rfc3339_millis(SystemTime::now());
 
             // TODO: restore colors
             let level_str = match level {
