@@ -25,71 +25,6 @@ use alloc::collections::BTreeMap;
 
 #[test]
 fn all_tests() {
-    #[derive(serde::Deserialize)]
-    struct Test {
-        block: Block,
-        storage: Storage,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct Block {
-        header: Header,
-        extrinsics: Vec<HexString>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct Header {
-        #[serde(rename = "parentHash")]
-        parent_hash: HexString,
-        number: HexString,
-        #[serde(rename = "stateRoot")]
-        state_root: HexString,
-        #[serde(rename = "extrinsicsRoot")]
-        extrinsics_root: HexString,
-        digest: Digest,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct Digest {
-        logs: Vec<HexString>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct Storage {
-        root: Vec<TrieEntry>,
-        child_tries: hashbrown::HashMap<HexString, Vec<TrieEntry>>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct TrieEntry {
-        key: HexString,
-        value: HexString,
-    }
-
-    #[derive(PartialEq, Eq, Hash)]
-    struct HexString(Vec<u8>);
-    impl<'a> serde::Deserialize<'a> for HexString {
-        fn deserialize<D>(deserializer: D) -> Result<HexString, D::Error>
-        where
-            D: serde::Deserializer<'a>,
-        {
-            let string = String::deserialize(deserializer)?;
-
-            if string.is_empty() {
-                return Ok(HexString(Vec::new()));
-            }
-
-            if !string.starts_with("0x") {
-                return Err(serde::de::Error::custom(
-                    "hexadecimal string doesn't start with 0x",
-                ));
-            }
-
-            let bytes = hex::decode(&string[2..]).map_err(serde::de::Error::custom)?;
-            Ok(HexString(bytes))
-        }
-    }
-
     for (test_num, test_json) in [
         include_str!("./test1.json"),
         include_str!("./test2.json"),
@@ -267,5 +202,72 @@ fn all_tests() {
                 }
             }
         }
+    }
+}
+
+// Serde structs used to decode the test fixtures.
+
+#[derive(serde::Deserialize)]
+struct Test {
+    block: Block,
+    storage: Storage,
+}
+
+#[derive(serde::Deserialize)]
+struct Block {
+    header: Header,
+    extrinsics: Vec<HexString>,
+}
+
+#[derive(serde::Deserialize)]
+struct Header {
+    #[serde(rename = "parentHash")]
+    parent_hash: HexString,
+    number: HexString,
+    #[serde(rename = "stateRoot")]
+    state_root: HexString,
+    #[serde(rename = "extrinsicsRoot")]
+    extrinsics_root: HexString,
+    digest: Digest,
+}
+
+#[derive(serde::Deserialize)]
+struct Digest {
+    logs: Vec<HexString>,
+}
+
+#[derive(serde::Deserialize)]
+struct Storage {
+    root: Vec<TrieEntry>,
+    child_tries: hashbrown::HashMap<HexString, Vec<TrieEntry>>,
+}
+
+#[derive(serde::Deserialize)]
+struct TrieEntry {
+    key: HexString,
+    value: HexString,
+}
+
+#[derive(PartialEq, Eq, Hash)]
+struct HexString(Vec<u8>);
+impl<'a> serde::Deserialize<'a> for HexString {
+    fn deserialize<D>(deserializer: D) -> Result<HexString, D::Error>
+    where
+        D: serde::Deserializer<'a>,
+    {
+        let string = String::deserialize(deserializer)?;
+
+        if string.is_empty() {
+            return Ok(HexString(Vec::new()));
+        }
+
+        if !string.starts_with("0x") {
+            return Err(serde::de::Error::custom(
+                "hexadecimal string doesn't start with 0x",
+            ));
+        }
+
+        let bytes = hex::decode(&string[2..]).map_err(serde::de::Error::custom)?;
+        Ok(HexString(bytes))
     }
 }
