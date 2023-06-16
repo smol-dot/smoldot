@@ -17,11 +17,11 @@
 
 #![cfg(test)]
 
-//! The tests in this module read various JSON files containing test fixtures and execute them.
+//! The test in this module reads various JSON files containing test fixtures and executes them.
 //!
-//! Each test contains a block (header and body), plus the storage of its parent. The test consists
-//! in executing the block, to make sure that the state trie root matches the one calculated by
-//! smoldot.
+//! Each test fixture contains a block (header and body), plus the storage of its parent. The
+//! test consists in executing the block, to make sure that the state trie root matches the one
+//! calculated by smoldot.
 
 use core::{iter, ops};
 
