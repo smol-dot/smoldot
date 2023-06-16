@@ -1448,6 +1448,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
             loop {
                 match chain_info_builder {
                     chain_information::build::InProgress::StorageGet(get) => {
+                        // TODO: child tries not supported
                         let proof = calls.get(&get.call_in_progress()).unwrap();
                         let value =
                             match proof.storage_value(&header.state_root, get.key().as_ref()) {
