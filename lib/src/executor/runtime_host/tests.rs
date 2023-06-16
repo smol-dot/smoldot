@@ -167,6 +167,7 @@ fn all_tests() {
 #[derive(serde::Deserialize)]
 struct Test {
     block: Block,
+    #[serde(rename = "parentStorage")]
     parent_storage: Storage,
 }
 
@@ -178,7 +179,9 @@ struct Block {
 
 #[derive(serde::Deserialize)]
 struct Storage {
+    #[serde(rename = "mainTrie")]
     main_trie: hashbrown::HashMap<HexString, HexString>,
+    #[serde(rename = "childTries")]
     child_tries: hashbrown::HashMap<HexString, hashbrown::HashMap<HexString, HexString>>,
 }
 
