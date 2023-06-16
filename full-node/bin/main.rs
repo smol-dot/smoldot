@@ -58,20 +58,42 @@ async fn run(cli_options: cli::CliOptionsRun) {
     // TODO: doesn't take `cli_options.log` into account
     let log_callback: Arc<dyn smoldot_full_node::LogCallback + Send + Sync> = match cli_output {
         cli::Output::None => Arc::new(|_level, _message| {}),
-        cli::Output::Informant | cli::Output::Logs => Arc::new(|level, message| {
-            let when = humantime::format_rfc3339_millis(SystemTime::now());
+        cli::Output::Informant | cli::Output::Logs => {
+            let color_choice = cli_options.color.clone();
+            Arc::new(move |level, message| {
+                // TODO: temporary
+                if matches!(level, smoldot_full_node::LogLevel::Trace) {
+                    return;
+                }
 
-            // TODO: restore colors
-            let level_str = match level {
-                smoldot_full_node::LogLevel::Trace => "trace",
-                smoldot_full_node::LogLevel::Debug => "debug",
-                smoldot_full_node::LogLevel::Info => "info",
-                smoldot_full_node::LogLevel::Warn => "warn",
-                smoldot_full_node::LogLevel::Error => "error",
-            };
+                let when = humantime::format_rfc3339_millis(SystemTime::now());
 
-            eprintln!("[{}] [{}] {}", when, level_str, message);
-        }),
+                let level_str = match (level, &color_choice) {
+                    (smoldot_full_node::LogLevel::Trace, cli::ColorChoice::Never) => "trace",
+                    (smoldot_full_node::LogLevel::Trace, cli::ColorChoice::Always) => {
+                        "\x1b[36mtrace\x1b[0m"
+                    }
+                    (smoldot_full_node::LogLevel::Debug, cli::ColorChoice::Never) => "debug",
+                    (smoldot_full_node::LogLevel::Debug, cli::ColorChoice::Always) => {
+                        "\x1b[31mdebug\x1b[0m"
+                    }
+                    (smoldot_full_node::LogLevel::Info, cli::ColorChoice::Never) => "info",
+                    (smoldot_full_node::LogLevel::Info, cli::ColorChoice::Always) => {
+                        "\x1b[32minfo\x1b[0m"
+                    }
+                    (smoldot_full_node::LogLevel::Warn, cli::ColorChoice::Never) => "warn",
+                    (smoldot_full_node::LogLevel::Warn, cli::ColorChoice::Always) => {
+                        "\x1b[33;1mwarn\x1b[0m"
+                    }
+                    (smoldot_full_node::LogLevel::Error, cli::ColorChoice::Never) => "error",
+                    (smoldot_full_node::LogLevel::Error, cli::ColorChoice::Always) => {
+                        "\x1b[31;1merror\x1b[0m"
+                    }
+                };
+
+                eprintln!("[{}] [{}] {}", when, level_str, message);
+            }) as Arc<dyn smoldot_full_node::LogCallback + Send + Sync>
+        }
         cli::Output::LogsJson => Arc::new(|level, message| {
             #[derive(serde::Serialize)]
             struct Record {
