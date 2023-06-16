@@ -20,7 +20,7 @@
 
 use futures_channel::oneshot;
 use futures_util::{stream, FutureExt as _, StreamExt as _};
-use smol::future;
+use smol::{future, lock::Mutex};
 use smoldot::{
     chain, chain_spec,
     database::full_sqlite,
@@ -32,10 +32,7 @@ use smoldot::{
         peer_id::{self, PeerId},
     },
 };
-use std::{
-    borrow::Cow, future::Future, iter, net::SocketAddr, path::PathBuf, pin::Pin, sync::Arc, thread,
-    time::Duration,
-};
+use std::{borrow::Cow, iter, net::SocketAddr, path::PathBuf, sync::Arc, thread, time::Duration};
 
 mod consensus_service;
 mod database_thread;
@@ -62,8 +59,6 @@ pub struct Config<'a> {
     pub jaeger_agent: Option<SocketAddr>,
     // TODO: option is a bit weird
     pub show_informant: bool,
-    // TODO: option is a bit weird
-    pub informant_colors: bool,
 }
 
 /// Allow generating logs.
@@ -111,10 +106,53 @@ pub struct ChainConfig<'a> {
     pub keystore_path: Option<PathBuf>,
 }
 
+/// Running client. As long as this object is alive, the client reads/writes the database and has
+/// a JSON-RPC server open.
+pub struct Client {
+    _json_rpc_service: Option<json_rpc_service::JsonRpcService>,
+    consensus_service: Arc<consensus_service::ConsensusService>,
+    relay_chain_consensus_service: Option<Arc<consensus_service::ConsensusService>>,
+    network_service: Arc<network_service::NetworkService>,
+    network_known_best: Arc<Mutex<Option<u64>>>,
+    _executor: Arc<smol::Executor<'static>>,
+}
+
+impl Client {
+    /// Returns the best block according to the networking.
+    pub async fn network_known_best(&self) -> Option<u64> {
+        *self.network_known_best.lock().await
+    }
+
+    /// Returns the current number of peers of the client.
+    pub async fn num_peers(&self) -> u64 {
+        u64::try_from(self.network_service.num_peers(0).await).unwrap_or(u64::max_value())
+    }
+
+    /// Returns the current number of network connections of the client.
+    pub async fn num_network_connections(&self) -> u64 {
+        u64::try_from(self.network_service.num_established_connections().await)
+            .unwrap_or(u64::max_value())
+    }
+
+    // TODO: not the best API
+    pub async fn sync_state(&self) -> consensus_service::SyncState {
+        self.consensus_service.sync_state().await
+    }
+
+    // TODO: not the best API
+    pub async fn relay_chain_sync_state(&self) -> Option<consensus_service::SyncState> {
+        if let Some(s) = &self.relay_chain_consensus_service {
+            Some(s.sync_state().await)
+        } else {
+            None
+        }
+    }
+}
+
 /// Runs the node using the given configuration. Catches `SIGINT` signals and stops if one is
 /// detected.
 // TODO: should return an error if something bad happens instead of panicking
-pub async fn run_until(config: Config<'_>, until: Pin<Box<dyn Future<Output = ()>>>) {
+pub async fn start(config: Config<'_>) -> Client {
     let chain_spec = {
         smoldot::chain_spec::ChainSpec::from_json_bytes(&config.chain.chain_spec)
             .expect("Failed to decode chain specs")
@@ -423,7 +461,7 @@ pub async fn run_until(config: Config<'_>, until: Pin<Box<dyn Future<Output = ()
     // preferable to fail to start the node altogether rather than make the user believe that they
     // are connected to the JSON-RPC endpoint of the node while they are in reality connected to
     // something else.
-    let _json_rpc_service = if let Some(bind_address) = config.json_rpc_address {
+    let json_rpc_service = if let Some(bind_address) = config.json_rpc_address {
         let result = json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
             tasks_executor: { &mut |task| executor.spawn(task).detach() },
             log_callback: config.log_callback.clone(),
@@ -439,11 +477,63 @@ pub async fn run_until(config: Config<'_>, until: Pin<Box<dyn Future<Output = ()
         None
     };
 
+    // Spawn the task printing the informant.
+    // This is not just a dummy task that just prints on the output, but is actually the main
+    // task that holds everything else alive. Without it, all the services that we have created
+    // above would be cleanly dropped and nothing would happen.
+    // For this reason, it must be spawned even if no informant is started, in which case we simply
+    // inhibit the printing.
+    let network_known_best = Arc::new(Mutex::new(None));
+    executor
+        .spawn({
+            let mut main_network_events_receiver = network_events_receivers.next().unwrap();
+            let network_known_best = network_known_best.clone();
+
+            // TODO: shut down this task if the client stops?
+            async move {
+                loop {
+                    let network_event = main_network_events_receiver.next().await.unwrap();
+                    let mut network_known_best = network_known_best.lock().await;
+
+                    match network_event {
+                        network_service::Event::BlockAnnounce {
+                            chain_index: 0,
+                            scale_encoded_header,
+                            ..
+                        } => match (
+                            *network_known_best,
+                            header::decode(
+                                &scale_encoded_header,
+                                usize::from(chain_spec.block_number_bytes()),
+                            ),
+                        ) {
+                            (Some(n), Ok(header)) if n >= header.number => {}
+                            (_, Ok(header)) => *network_known_best = Some(header.number),
+                            (_, Err(_)) => {
+                                // Do nothing if the block is invalid. This is just for the
+                                // informant and not for consensus-related purposes.
+                            }
+                        },
+                        network_service::Event::Connected {
+                            chain_index: 0,
+                            best_block_number,
+                            ..
+                        } => match *network_known_best {
+                            Some(n) if n >= best_block_number => {}
+                            _ => *network_known_best = Some(best_block_number),
+                        },
+                        _ => {}
+                    }
+                }
+            }
+        })
+        .detach();
+
     config.log_callback.log(
         LogLevel::Info,
         format!(
             "successful-initialization; local_peer_id={}; database_is_new={:?}; \
-            finalized_block_hash={}; finalized_block_number={}",
+                finalized_block_hash={}; finalized_block_number={}",
             local_peer_id,
             !database_existed,
             HashDisplay(&database_finalized_block_hash),
@@ -451,133 +541,15 @@ pub async fn run_until(config: Config<'_>, until: Pin<Box<dyn Future<Output = ()
         ),
     );
 
-    // Spawn the task printing the informant.
-    // This is not just a dummy task that just prints on the output, but is actually the main
-    // task that holds everything else alive. Without it, all the services that we have created
-    // above would be cleanly dropped and nothing would happen.
-    // For this reason, it must be spawned even if no informant is started, in which case we simply
-    // inhibit the printing.
-    let main_task = executor.spawn({
-        let mut main_network_events_receiver = network_events_receivers.next().unwrap();
-
-        async move {
-            let mut informant_timer = if config.show_informant {
-                smol::Timer::interval(Duration::from_millis(100))
-            } else {
-                smol::Timer::never()
-            };
-            let mut network_known_best = None;
-
-            enum Event {
-                NetworkEvent(network_service::Event),
-                Informant,
-            }
-
-            loop {
-                match future::or(
-                    async {
-                        informant_timer.next().await;
-                        Event::Informant
-                    },
-                    async {
-                        Event::NetworkEvent(main_network_events_receiver.next().await.unwrap())
-                    },
-                )
-                .await
-                {
-                    Event::Informant => {
-                        // We end the informant line with a `\r` so that it overwrites itself
-                        // every time. If any other line gets printed, it will overwrite the
-                        // informant, and the informant will then print itself below, which is
-                        // a fine behaviour.
-                        let sync_state = consensus_service.sync_state().await;
-                        eprint!(
-                            "{}\r",
-                            smoldot::informant::InformantLine {
-                                enable_colors: config.informant_colors,
-                                chain_name: chain_spec.name(),
-                                relay_chain: if let Some(relay_chain_spec) = &relay_chain_spec {
-                                    let relay_sync_state = relay_chain_consensus_service
-                                        .as_ref()
-                                        .unwrap()
-                                        .sync_state()
-                                        .await;
-                                    Some(smoldot::informant::RelayChain {
-                                        chain_name: relay_chain_spec.name(),
-                                        best_number: relay_sync_state.best_block_number,
-                                    })
-                                } else {
-                                    None
-                                },
-                                max_line_width: terminal_size::terminal_size()
-                                    .map_or(80, |(w, _)| w.0.into()),
-                                num_peers: u64::try_from(network_service.num_peers(0).await)
-                                    .unwrap_or(u64::max_value()),
-                                num_network_connections: u64::try_from(
-                                    network_service.num_established_connections().await
-                                )
-                                .unwrap_or(u64::max_value()),
-                                best_number: sync_state.best_block_number,
-                                finalized_number: sync_state.finalized_block_number,
-                                best_hash: &sync_state.best_block_hash,
-                                finalized_hash: &sync_state.finalized_block_hash,
-                                network_known_best,
-                            }
-                        );
-                    }
-
-                    Event::NetworkEvent(network_event) => {
-                        // Update `network_known_best`.
-                        match network_event {
-                            network_service::Event::BlockAnnounce {
-                                chain_index: 0,
-                                scale_encoded_header,
-                                ..
-                            } => match (
-                                network_known_best,
-                                header::decode(
-                                    &scale_encoded_header,
-                                    usize::from(chain_spec.block_number_bytes()),
-                                ),
-                            ) {
-                                (Some(n), Ok(header)) if n >= header.number => {}
-                                (_, Ok(header)) => network_known_best = Some(header.number),
-                                (_, Err(_)) => {
-                                    // Do nothing if the block is invalid. This is just for the
-                                    // informant and not for consensus-related purposes.
-                                }
-                            },
-                            network_service::Event::Connected {
-                                chain_index: 0,
-                                best_block_number,
-                                ..
-                            } => match network_known_best {
-                                Some(n) if n >= best_block_number => {}
-                                _ => network_known_best = Some(best_block_number),
-                            },
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-    });
-
     debug_assert!(network_events_receivers.next().is_none());
-
-    // Run tasks in the current thread until the provided future finishes.
-    let _ = executor.run(until).await;
-
-    if config.show_informant {
-        // Adding a new line after the informant so that the user's shell doesn't
-        // overwrite it.
-        eprintln!();
+    Client {
+        consensus_service,
+        relay_chain_consensus_service,
+        _json_rpc_service: json_rpc_service,
+        network_service,
+        network_known_best,
+        _executor: executor,
     }
-
-    // Stop the task that holds everything alive, in order to start dropping the services.
-    drop(main_task);
-
-    // TODO: consider waiting for all the tasks to have ended, unfortunately that's not really possible
 }
 
 /// Opens the database from the file system, or create a new database if none is found.
@@ -591,6 +563,7 @@ pub async fn run_until(config: Config<'_>, until: Pin<Box<dyn Future<Output = ()
 /// Panics if the database can't be open. This function is expected to be called from the `main`
 /// function.
 ///
+// TODO: `show_progress` option should be moved to the CLI
 async fn open_database(
     chain_spec: &chain_spec::ChainSpec,
     genesis_chain_information: chain::chain_information::ChainInformationRef<'_>,
