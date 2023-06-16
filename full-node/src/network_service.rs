@@ -941,6 +941,7 @@ async fn background_task(mut inner: Inner) {
                             .unwrap();
                         match result {
                             Ok(nodes) => {
+                                // TODO: very verbose display
                                 inner
                                     .log_callback
                                     .log(LogLevel::Debug, format!("discovered; nodes={:?}", nodes));
