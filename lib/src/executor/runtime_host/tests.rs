@@ -180,7 +180,7 @@ fn all_tests() {
 
         loop {
             match execution {
-                RuntimeHostVm::Finished(Ok(_)) => return, // Test successful!
+                RuntimeHostVm::Finished(Ok(_)) => break, // Test successful!
                 RuntimeHostVm::Finished(Err(err)) => panic!("{:?}", err),
                 RuntimeHostVm::SignatureVerification(sig) => execution = sig.verify_and_resume(),
                 RuntimeHostVm::ClosestDescendantMerkleValue(req) => {
