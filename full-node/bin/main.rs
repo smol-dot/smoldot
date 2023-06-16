@@ -389,7 +389,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
         listen
     };
 
-    // Spawn  a task that prints the informant at a regular interval.
+    // Spawn a task that prints the informant at a regular interval.
     // Note that this task also holds the smoldot `client` alive, and thus we spawn it even if
     // the informant is disabled.
     // TODO: also print immediately after a log line?
