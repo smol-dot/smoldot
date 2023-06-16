@@ -90,7 +90,12 @@ fn all_tests() {
         }
     }
 
-    for test_json in [include_str!("./test1.json"), include_str!("./test2.json")] {
+    for test_json in [
+        include_str!("./test1.json"),
+        include_str!("./test2.json"),
+        include_str!("./test3.json"),
+        include_str!("./test4.json"),
+    ] {
         let test_data = serde_json::from_str::<Test>(test_json).unwrap();
         // TODO: child tries
         let storage = test_data
