@@ -17,6 +17,12 @@
 
 #![cfg(test)]
 
+//! The tests in this module read various JSON files containing test fixtures and execute them.
+//!
+//! Each test contains a block (header and body), plus the storage of its parent. The test consists
+//! in executing the block, to make sure that the state trie root matches the one calculated by
+//! smoldot.
+
 use core::{iter, ops};
 
 use super::{run, Config, RuntimeHostVm};
@@ -24,7 +30,7 @@ use crate::{executor::host, trie};
 use alloc::collections::BTreeMap;
 
 #[test]
-fn all_tests() {
+fn execute_blocks() {
     // Tests ordered alphabetically.
     for (test_num, test_json) in [
         include_str!("./child-trie-create-multiple.json"),
@@ -35,8 +41,10 @@ fn all_tests() {
     .into_iter()
     .enumerate()
     {
+        // Decode the test JSON.
         let test_data = serde_json::from_str::<Test>(test_json).unwrap();
 
+        // Turn the nice-looking data into something with better access times.
         let storage = {
             let mut storage = test_data
                 .parent_storage
@@ -52,6 +60,7 @@ fn all_tests() {
             storage
         };
 
+        // Build the runtime.
         let virtual_machine = {
             let code = storage
                 .get(&(None, b":code".to_vec()))
@@ -70,12 +79,17 @@ fn all_tests() {
             .unwrap()
         };
 
+        // The runtime indicates the version of the trie items of the parent storage.
+        // While in principle each storage item could have a different version, in practice we
+        // just assume they're all the same.
         let state_version = virtual_machine
             .runtime_version()
             .decode()
             .state_version
             .unwrap_or(host::TrieEntryVersion::V0);
 
+        // Start executing `Core_execute_block`. This runtime call will verify at the end whether
+        // the trie root hash of the block matches the one calculated by smoldot.
         let mut execution = run(Config {
             virtual_machine,
             function_to_call: "Core_execute_block",
@@ -113,44 +127,51 @@ fn all_tests() {
                     execution = get.inject_value(value);
                 }
                 RuntimeHostVm::NextKey(req) => {
-                    let mut search = trie::branch_search::BranchSearch::NextKey(
-                        trie::branch_search::start_branch_search(trie::branch_search::Config {
-                            key_before: req.key().collect::<Vec<_>>().into_iter(),
-                            or_equal: req.or_equal(),
-                            prefix: req.prefix().collect::<Vec<_>>().into_iter(),
-                            no_branch_search: !req.branch_nodes(),
-                        }),
-                    );
+                    // Because `NextKey` might ask for branch nodes, and that we don't build the
+                    // trie in its entirety, we have to use an algorithm that finds the branch
+                    // nodes for us.
+                    let next_key = {
+                        let mut search = trie::branch_search::BranchSearch::NextKey(
+                            trie::branch_search::start_branch_search(trie::branch_search::Config {
+                                key_before: req.key().collect::<Vec<_>>().into_iter(),
+                                or_equal: req.or_equal(),
+                                prefix: req.prefix().collect::<Vec<_>>().into_iter(),
+                                no_branch_search: !req.branch_nodes(),
+                            }),
+                        );
 
-                    let next_key = loop {
-                        match search {
-                            trie::branch_search::BranchSearch::Found {
-                                branch_trie_node_key,
-                            } => break branch_trie_node_key,
-                            trie::branch_search::BranchSearch::NextKey(bs_req) => {
-                                let result = storage
-                                    .range((
-                                        if bs_req.or_equal() {
-                                            ops::Bound::Included((
-                                                req.child_trie().map(|c| c.as_ref().to_owned()),
-                                                bs_req.key_before().collect::<Vec<_>>(),
-                                            ))
-                                        } else {
-                                            ops::Bound::Excluded((
-                                                req.child_trie().map(|c| c.as_ref().to_owned()),
-                                                bs_req.key_before().collect::<Vec<_>>(),
-                                            ))
-                                        },
-                                        ops::Bound::Unbounded,
-                                    ))
-                                    .next()
-                                    .filter(|((trie, key), _)| {
-                                        *trie == req.child_trie().map(|c| c.as_ref().to_owned())
-                                            && key.starts_with(&bs_req.prefix().collect::<Vec<_>>())
-                                    })
-                                    .map(|((_, k), _)| k);
+                        loop {
+                            match search {
+                                trie::branch_search::BranchSearch::Found {
+                                    branch_trie_node_key,
+                                } => break branch_trie_node_key,
+                                trie::branch_search::BranchSearch::NextKey(bs_req) => {
+                                    let result = storage
+                                        .range((
+                                            if bs_req.or_equal() {
+                                                ops::Bound::Included((
+                                                    req.child_trie().map(|c| c.as_ref().to_owned()),
+                                                    bs_req.key_before().collect::<Vec<_>>(),
+                                                ))
+                                            } else {
+                                                ops::Bound::Excluded((
+                                                    req.child_trie().map(|c| c.as_ref().to_owned()),
+                                                    bs_req.key_before().collect::<Vec<_>>(),
+                                                ))
+                                            },
+                                            ops::Bound::Unbounded,
+                                        ))
+                                        .next()
+                                        .filter(|((trie, key), _)| {
+                                            *trie == req.child_trie().map(|c| c.as_ref().to_owned())
+                                                && key.starts_with(
+                                                    &bs_req.prefix().collect::<Vec<_>>(),
+                                                )
+                                        })
+                                        .map(|((_, k), _)| k);
 
-                                search = bs_req.inject(result.map(|k| k.iter().copied()));
+                                    search = bs_req.inject(result.map(|k| k.iter().copied()));
+                                }
                             }
                         }
                     };
