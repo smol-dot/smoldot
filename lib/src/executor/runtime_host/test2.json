@@ -2,7 +2,7 @@
     "block": {
         "header": {
             "parentHash": "0x25c69875f715187b47fcf3c501981aa986150df94501ba82d7b24854df1c34cd",
-            "number": "0x2",
+            "number": "0x02",
             "stateRoot": "0x7404488db250940a4418ed0b6a1869f89327b33f0c7ec4fd361461bad4b32482",
             "extrinsicsRoot": "0x6d21960ce02a8656e8f8526e4b4cb5a4ecbf44743af77c2b6dfff4d221901fd4",
             "digest": {
