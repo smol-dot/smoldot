@@ -256,9 +256,9 @@ fn all_tests() {
                                         *trie == req.child_trie().map(|c| c.as_ref().to_owned())
                                             && key.starts_with(&bs_req.prefix().collect::<Vec<_>>())
                                     })
-                                    .map(|(k, _)| k);
+                                    .map(|((_, k), _)| k);
 
-                                search = bs_req.inject(result.map(|(_, k)| k.iter().copied()));
+                                search = bs_req.inject(result.map(|k| k.iter().copied()));
                             }
                         }
                     };
