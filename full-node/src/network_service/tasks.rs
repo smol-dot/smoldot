@@ -36,7 +36,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 pub(super) trait AsyncReadWrite: AsyncRead + AsyncWrite {}
@@ -120,9 +120,10 @@ pub(super) async fn established_connection_task(
             };
 
             let outgoing_buffer_was_closed = write_buffer.is_none();
+            let now = Instant::now();
 
             let mut read_write = service::ReadWrite {
-                now: Instant::now(),
+                now,
                 incoming_buffer: read_buffer.map(|b| b.0),
                 outgoing_buffer: write_buffer,
                 read_bytes: 0,
@@ -142,7 +143,9 @@ pub(super) async fn established_connection_task(
                         "connection-activity; read={}; written={}; wake_up={:?}; write_close={:?}",
                         read_write.read_bytes,
                         read_write.written_bytes,
-                        read_write.wake_up_after,
+                        read_write
+                            .wake_up_after
+                            .map(|w| w.checked_duration_since(now).unwrap_or(Duration::new(0, 0))),
                         read_write.outgoing_buffer.is_none(),
                     ),
                 );
