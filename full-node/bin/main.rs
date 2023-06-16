@@ -93,7 +93,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
                     }
                     (smoldot_full_node::LogLevel::Debug, cli::ColorChoice::Never) => "debug",
                     (smoldot_full_node::LogLevel::Debug, cli::ColorChoice::Always) => {
-                        "\x1b[31mdebug\x1b[0m"
+                        "\x1b[34mdebug\x1b[0m"
                     }
                     (smoldot_full_node::LogLevel::Info, cli::ColorChoice::Never) => "info",
                     (smoldot_full_node::LogLevel::Info, cli::ColorChoice::Always) => {
