@@ -160,6 +160,7 @@ impl ChainSpec {
         let (chain_info, vm_prototype) = loop {
             match chain_information_build {
                 build::ChainInformationBuild::InProgress(build::InProgress::StorageGet(get)) => {
+                    // TODO: child tries not supported
                     let value = genesis_storage.value(get.key().as_ref());
                     chain_information_build = get.inject_value(value.map(iter::once));
                 }
