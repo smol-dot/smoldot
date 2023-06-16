@@ -174,7 +174,6 @@ struct Test {
 struct Block {
     header: HexString,
     body: Vec<HexString>,
-    number_bytes: u32,
 }
 
 #[derive(serde::Deserialize)]
