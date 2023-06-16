@@ -124,7 +124,7 @@ pub struct Success {
     pub state_trie_version: TrieEntryVersion,
 
     /// List of changes to the off-chain storage that this block performs.
-    pub offchain_storage_changes: storage_diff::TrieDiff,
+    pub offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
 
     /// Concatenation of all the log messages printed by the runtime.
     pub logs: String,
@@ -762,7 +762,7 @@ pub struct RuntimeCompilation {
     parent_runtime: host::HostVmPrototype,
     storage_main_trie_changes: storage_diff::TrieDiff,
     state_trie_version: TrieEntryVersion,
-    offchain_storage_changes: storage_diff::TrieDiff,
+    offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
     logs: String,
     heap_pages: vm::HeapPages,
     parent_code: Option<Option<Vec<u8>>>,

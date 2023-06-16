@@ -118,7 +118,7 @@ pub struct Success {
     /// [`Success::storage_main_trie_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
     /// List of changes to the off-chain storage that this block performs.
-    pub offchain_storage_changes: storage_diff::TrieDiff,
+    pub offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
     /// Concatenation of all the log messages printed by the runtime.
     pub logs: String,
 }
@@ -499,7 +499,7 @@ pub struct InherentExtrinsics {
     shared: Shared,
     parent_runtime: host::HostVmPrototype,
     storage_main_trie_changes: storage_diff::TrieDiff,
-    offchain_storage_changes: storage_diff::TrieDiff,
+    offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
 }
 
 impl InherentExtrinsics {
@@ -561,7 +561,7 @@ pub struct ApplyExtrinsic {
     shared: Shared,
     parent_runtime: host::HostVmPrototype,
     storage_main_trie_changes: storage_diff::TrieDiff,
-    offchain_storage_changes: storage_diff::TrieDiff,
+    offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
 }
 
 impl ApplyExtrinsic {

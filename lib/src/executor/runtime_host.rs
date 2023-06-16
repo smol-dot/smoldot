@@ -65,7 +65,7 @@ pub struct Config<'a, TParams> {
 
     /// Initial state of [`Success::offchain_storage_changes`]. The changes made during this
     /// execution will be pushed over the value in this field.
-    pub offchain_storage_changes: storage_diff::TrieDiff,
+    pub offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
 
     /// Maximum log level of the runtime.
     ///
@@ -126,7 +126,7 @@ pub struct Success {
     /// [`Success::storage_main_trie_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
     /// List of changes to the off-chain storage that this block performs.
-    pub offchain_storage_changes: storage_diff::TrieDiff,
+    pub offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
     /// Concatenation of all the log messages printed by the runtime.
     pub logs: String,
 }
@@ -675,7 +675,7 @@ struct Inner {
     state_trie_version: TrieEntryVersion,
 
     /// Pending changes to the off-chain storage that this execution performs.
-    offchain_storage_changes: storage_diff::TrieDiff,
+    offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
 
     /// Trie root calculation in progress. Contains the trie whose root is being calculated
     /// (`Some` for a child trie or `None` for the main trie) and the calculation state machine.
@@ -1044,17 +1044,10 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalOffchainStorageSet(req) => {
-                    if let Some(value) = req.value() {
-                        self.offchain_storage_changes.diff_insert(
-                            req.key().as_ref().to_vec(),
-                            value.as_ref().to_vec(),
-                            (),
-                        );
-                    } else {
-                        self.offchain_storage_changes
-                            .diff_insert_erase(req.key().as_ref().to_vec(), ());
-                    }
-
+                    self.offchain_storage_changes.insert(
+                        req.key().as_ref().to_vec(),
+                        req.value().map(|v| v.as_ref().to_owned()),
+                    );
                     self.vm = req.resume();
                 }
 

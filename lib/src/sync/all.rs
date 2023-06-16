@@ -2791,7 +2791,7 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
         /// alongside with them.
         state_trie_version: TrieEntryVersion,
         /// List of changes to the off-chain storage that this block performs.
-        offchain_storage_changes: storage_diff::TrieDiff,
+        offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
         /// Runtime of the parent, as was provided at the start of the verification.
         parent_runtime: host::HostVmPrototype,
         /// If `Some`, the block has modified the runtime compared to its parent. Contains the new

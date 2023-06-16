@@ -333,7 +333,7 @@ pub fn validate_transaction(
                 }
                 .scale_encoding(config.block_number_bytes),
                 storage_main_trie_changes: storage_diff::TrieDiff::empty(),
-                offchain_storage_changes: storage_diff::TrieDiff::empty(),
+                offchain_storage_changes: Default::default(),
                 max_log_level: config.max_log_level,
             });
 
@@ -370,7 +370,7 @@ pub fn validate_transaction(
                     &header::hash_from_scale_encoded_header(config.scale_encoded_header),
                 ),
                 storage_main_trie_changes: storage_diff::TrieDiff::empty(),
-                offchain_storage_changes: storage_diff::TrieDiff::empty(),
+                offchain_storage_changes: Default::default(),
                 max_log_level: config.max_log_level,
             });
 
