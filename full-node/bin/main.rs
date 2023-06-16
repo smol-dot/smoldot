@@ -44,7 +44,7 @@ async fn async_main() {
 async fn run(cli_options: cli::CliOptionsRun) {
     // Determine the actual CLI output by replacing `Auto` with the actual value.
     let cli_output = if let cli::Output::Auto = cli_options.output {
-        if io::IsTerminal::is_terminal(&io::stderr()) && cli_options.log.is_empty() {
+        if io::IsTerminal::is_terminal(&io::stderr()) && cli_options.log_level.is_none() {
             cli::Output::Informant
         } else {
             cli::Output::Logs
@@ -55,15 +55,33 @@ async fn run(cli_options: cli::CliOptionsRun) {
     debug_assert!(!matches!(cli_output, cli::Output::Auto));
 
     // Setup the logging system of the binary.
-    // TODO: doesn't take `cli_options.log` into account
     let log_callback: Arc<dyn smoldot_full_node::LogCallback + Send + Sync> = match cli_output {
         cli::Output::None => Arc::new(|_level, _message| {}),
         cli::Output::Informant | cli::Output::Logs => {
             let color_choice = cli_options.color.clone();
+            let log_level = cli_options.log_level.clone().unwrap_or(cli::LogLevel::Info);
             Arc::new(move |level, message| {
-                // TODO: temporary
-                if matches!(level, smoldot_full_node::LogLevel::Trace) {
-                    return;
+                match (&level, &log_level) {
+                    (_, cli::LogLevel::Off) => return,
+                    (
+                        smoldot_full_node::LogLevel::Warn
+                        | smoldot_full_node::LogLevel::Info
+                        | smoldot_full_node::LogLevel::Debug
+                        | smoldot_full_node::LogLevel::Trace,
+                        cli::LogLevel::Error,
+                    ) => return,
+                    (
+                        smoldot_full_node::LogLevel::Info
+                        | smoldot_full_node::LogLevel::Debug
+                        | smoldot_full_node::LogLevel::Trace,
+                        cli::LogLevel::Warn,
+                    ) => return,
+                    (
+                        smoldot_full_node::LogLevel::Debug | smoldot_full_node::LogLevel::Trace,
+                        cli::LogLevel::Info,
+                    ) => return,
+                    (smoldot_full_node::LogLevel::Trace, cli::LogLevel::Debug) => return,
+                    _ => {}
                 }
 
                 let when = humantime::format_rfc3339_millis(SystemTime::now());
@@ -94,37 +112,63 @@ async fn run(cli_options: cli::CliOptionsRun) {
                 eprintln!("[{}] [{}] {}", when, level_str, message);
             }) as Arc<dyn smoldot_full_node::LogCallback + Send + Sync>
         }
-        cli::Output::LogsJson => Arc::new(|level, message| {
-            #[derive(serde::Serialize)]
-            struct Record {
-                timestamp: u128,
-                level: &'static str,
-                message: String,
-            }
+        cli::Output::LogsJson => {
+            let log_level = cli_options.log_level.clone().unwrap_or(cli::LogLevel::Info);
+            Arc::new(move |level, message| {
+                match (&level, &log_level) {
+                    (_, cli::LogLevel::Off) => return,
+                    (
+                        smoldot_full_node::LogLevel::Warn
+                        | smoldot_full_node::LogLevel::Info
+                        | smoldot_full_node::LogLevel::Debug
+                        | smoldot_full_node::LogLevel::Trace,
+                        cli::LogLevel::Error,
+                    ) => return,
+                    (
+                        smoldot_full_node::LogLevel::Info
+                        | smoldot_full_node::LogLevel::Debug
+                        | smoldot_full_node::LogLevel::Trace,
+                        cli::LogLevel::Warn,
+                    ) => return,
+                    (
+                        smoldot_full_node::LogLevel::Debug | smoldot_full_node::LogLevel::Trace,
+                        cli::LogLevel::Info,
+                    ) => return,
+                    (smoldot_full_node::LogLevel::Trace, cli::LogLevel::Debug) => return,
+                    _ => {}
+                }
 
-            let mut lock = std::io::stderr().lock();
-            if serde_json::to_writer(
-                &mut lock,
-                &Record {
-                    timestamp: SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_millis())
-                        .unwrap_or(0),
-                    level: match level {
-                        smoldot_full_node::LogLevel::Trace => "trace",
-                        smoldot_full_node::LogLevel::Debug => "debug",
-                        smoldot_full_node::LogLevel::Info => "info",
-                        smoldot_full_node::LogLevel::Warn => "warn",
-                        smoldot_full_node::LogLevel::Error => "error",
+                #[derive(serde::Serialize)]
+                struct Record {
+                    timestamp: u128,
+                    level: &'static str,
+                    message: String,
+                }
+
+                let mut lock = std::io::stderr().lock();
+                if serde_json::to_writer(
+                    &mut lock,
+                    &Record {
+                        timestamp: SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0),
+                        level: match level {
+                            smoldot_full_node::LogLevel::Trace => "trace",
+                            smoldot_full_node::LogLevel::Debug => "debug",
+                            smoldot_full_node::LogLevel::Info => "info",
+                            smoldot_full_node::LogLevel::Warn => "warn",
+                            smoldot_full_node::LogLevel::Error => "error",
+                        },
+                        message,
                     },
-                    message,
-                },
-            )
-            .is_ok()
-            {
-                let _ = io::Write::write_all(&mut lock, b"\n");
-            }
-        }),
+                )
+                .is_ok()
+                {
+                    let _ = io::Write::write_all(&mut lock, b"\n");
+                }
+            })
+        }
         cli::Output::Auto => unreachable!(), // Handled above.
     };
 
