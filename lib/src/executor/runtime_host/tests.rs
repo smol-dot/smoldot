@@ -90,144 +90,160 @@ fn all_tests() {
         }
     }
 
-    let test_data = serde_json::from_str::<Test>(include_str!("./test.json")).unwrap();
-    // TODO: child tries
-    let storage = test_data
-        .storage
-        .root
-        .into_iter()
-        .map(|e| (e.key.0, e.value.0))
-        .collect::<BTreeMap<_, _>>();
+    for test_json in [include_str!("./test1.json"), include_str!("./test2.json")] {
+        let test_data = serde_json::from_str::<Test>(test_json).unwrap();
+        // TODO: child tries
+        let storage = test_data
+            .storage
+            .root
+            .into_iter()
+            .map(|e| (e.key.0, e.value.0))
+            .collect::<BTreeMap<_, _>>();
 
-    let virtual_machine = {
-        let code = storage.get(&b":code"[..]).expect("no runtime code found");
-        let heap_pages = crate::executor::storage_heap_pages_to_value(
-            storage.get(&b":heappages"[..]).map(|v| &v[..]),
-        )
+        let virtual_machine = {
+            let code = storage.get(&b":code"[..]).expect("no runtime code found");
+            let heap_pages = crate::executor::storage_heap_pages_to_value(
+                storage.get(&b":heappages"[..]).map(|v| &v[..]),
+            )
+            .unwrap();
+
+            host::HostVmPrototype::new(host::Config {
+                module: code,
+                heap_pages,
+                exec_hint: crate::executor::vm::ExecHint::Oneshot,
+                allow_unresolved_imports: false,
+            })
+            .unwrap()
+        };
+
+        let state_version = virtual_machine
+            .runtime_version()
+            .decode()
+            .state_version
+            .unwrap_or(host::TrieEntryVersion::V0);
+
+        let digest_items = test_data
+            .block
+            .header
+            .digest
+            .logs
+            .iter()
+            .map(|item| {
+                header::DigestItem::from(
+                    header::DigestItemRef::from_scale_encoded(&item.0, 4).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let mut execution = run(Config {
+            virtual_machine,
+            function_to_call: "Core_execute_block",
+            max_log_level: 3,
+            offchain_storage_changes: Default::default(),
+            storage_main_trie_changes: Default::default(),
+            parameter: {
+                // Block header + number of extrinsics + extrinsics
+                let encoded_body_len =
+                    crate::util::encode_scale_compact_usize(test_data.block.extrinsics.len());
+                crate::header::HeaderRef {
+                    parent_hash: TryFrom::try_from(&test_data.block.header.parent_hash.0[..])
+                        .unwrap(),
+                    number: {
+                        let mut num = 0u64;
+                        for byte in &test_data.block.header.number.0 {
+                            num <<= 8;
+                            num |= u64::from(*byte);
+                        }
+                        num
+                    },
+                    state_root: TryFrom::try_from(&test_data.block.header.state_root.0[..])
+                        .unwrap(),
+                    extrinsics_root: TryFrom::try_from(
+                        &test_data.block.header.extrinsics_root.0[..],
+                    )
+                    .unwrap(),
+                    digest: header::DigestRef::from_slice(&digest_items).unwrap(),
+                }
+                .scale_encoding(4)
+                .map(|b| either::Right(either::Left(b)))
+                .chain(iter::once(either::Right(either::Right(encoded_body_len))))
+                .chain(
+                    test_data
+                        .block
+                        .extrinsics
+                        .iter()
+                        .map(|b| either::Left(&b.0)),
+                )
+            },
+        })
         .unwrap();
 
-        host::HostVmPrototype::new(host::Config {
-            module: code,
-            heap_pages,
-            exec_hint: crate::executor::vm::ExecHint::Oneshot,
-            allow_unresolved_imports: false,
-        })
-        .unwrap()
-    };
-
-    let state_version = virtual_machine
-        .runtime_version()
-        .decode()
-        .state_version
-        .unwrap_or(host::TrieEntryVersion::V0);
-
-    let digest_items = test_data
-        .block
-        .header
-        .digest
-        .logs
-        .iter()
-        .map(|item| {
-            header::DigestItem::from(header::DigestItemRef::from_scale_encoded(&item.0, 4).unwrap())
-        })
-        .collect::<Vec<_>>();
-
-    let mut execution = run(Config {
-        virtual_machine,
-        function_to_call: "Core_execute_block",
-        max_log_level: 3,
-        offchain_storage_changes: Default::default(),
-        storage_main_trie_changes: Default::default(),
-        parameter: {
-            // Block header + number of extrinsics + extrinsics
-            let encoded_body_len =
-                crate::util::encode_scale_compact_usize(test_data.block.extrinsics.len());
-            crate::header::HeaderRef {
-                parent_hash: TryFrom::try_from(&test_data.block.header.parent_hash.0[..]).unwrap(),
-                number: {
-                    let mut num = 0u64;
-                    for byte in &test_data.block.header.number.0 {
-                        num <<= 8;
-                        num |= u64::from(*byte);
-                    }
-                    num
-                },
-                state_root: TryFrom::try_from(&test_data.block.header.state_root.0[..]).unwrap(),
-                extrinsics_root: TryFrom::try_from(&test_data.block.header.extrinsics_root.0[..])
-                    .unwrap(),
-                digest: header::DigestRef::from_slice(&digest_items).unwrap(),
-            }
-            .scale_encoding(4)
-            .map(|b| either::Right(either::Left(b)))
-            .chain(iter::once(either::Right(either::Right(encoded_body_len))))
-            .chain(
-                test_data
-                    .block
-                    .extrinsics
-                    .iter()
-                    .map(|b| either::Left(&b.0)),
-            )
-        },
-    })
-    .unwrap();
-
-    loop {
-        match execution {
-            RuntimeHostVm::Finished(Ok(_)) => return, // Test successful!
-            RuntimeHostVm::Finished(Err(err)) => panic!("{:?}", err),
-            RuntimeHostVm::SignatureVerification(sig) => execution = sig.verify_and_resume(),
-            RuntimeHostVm::ClosestDescendantMerkleValue(req) => execution = req.resume_unknown(),
-            RuntimeHostVm::StorageGet(get) => {
-                let value = if get.child_trie().is_some() {
-                    None
-                } else {
-                    storage
-                        .get(get.key().as_ref())
-                        .map(|v| (iter::once(&v[..]), state_version))
-                };
-
-                execution = get.inject_value(value);
-            }
-            RuntimeHostVm::NextKey(req) => {
-                if req.child_trie().is_some() {
-                    execution = req.inject_key(None::<iter::Empty<_>>);
-                    continue;
+        loop {
+            match execution {
+                RuntimeHostVm::Finished(Ok(_)) => return, // Test successful!
+                RuntimeHostVm::Finished(Err(err)) => panic!("{:?}", err),
+                RuntimeHostVm::SignatureVerification(sig) => execution = sig.verify_and_resume(),
+                RuntimeHostVm::ClosestDescendantMerkleValue(req) => {
+                    execution = req.resume_unknown()
                 }
+                RuntimeHostVm::StorageGet(get) => {
+                    let value = if get.child_trie().is_some() {
+                        None
+                    } else {
+                        storage
+                            .get(get.key().as_ref())
+                            .map(|v| (iter::once(&v[..]), state_version))
+                    };
 
-                let mut search = trie::branch_search::BranchSearch::NextKey(
-                    trie::branch_search::start_branch_search(trie::branch_search::Config {
-                        key_before: req.key().collect::<Vec<_>>().into_iter(),
-                        or_equal: req.or_equal(),
-                        prefix: req.prefix().collect::<Vec<_>>().into_iter(),
-                        no_branch_search: !req.branch_nodes(),
-                    }),
-                );
-
-                let next_key = loop {
-                    match search {
-                        trie::branch_search::BranchSearch::Found {
-                            branch_trie_node_key,
-                        } => break branch_trie_node_key,
-                        trie::branch_search::BranchSearch::NextKey(req) => {
-                            let result = storage
-                                .range((
-                                    if req.or_equal() {
-                                        ops::Bound::Included(req.key_before().collect::<Vec<_>>())
-                                    } else {
-                                        ops::Bound::Excluded(req.key_before().collect::<Vec<_>>())
-                                    },
-                                    ops::Bound::Unbounded,
-                                ))
-                                .next()
-                                .filter(|(k, _)| k.starts_with(&req.prefix().collect::<Vec<_>>()))
-                                .map(|(k, _)| k);
-
-                            search = req.inject(result.map(|k| k.iter().copied()));
-                        }
+                    execution = get.inject_value(value);
+                }
+                RuntimeHostVm::NextKey(req) => {
+                    if req.child_trie().is_some() {
+                        execution = req.inject_key(None::<iter::Empty<_>>);
+                        continue;
                     }
-                };
 
-                execution = req.inject_key(next_key.map(|nk| nk.into_iter()));
+                    let mut search = trie::branch_search::BranchSearch::NextKey(
+                        trie::branch_search::start_branch_search(trie::branch_search::Config {
+                            key_before: req.key().collect::<Vec<_>>().into_iter(),
+                            or_equal: req.or_equal(),
+                            prefix: req.prefix().collect::<Vec<_>>().into_iter(),
+                            no_branch_search: !req.branch_nodes(),
+                        }),
+                    );
+
+                    let next_key = loop {
+                        match search {
+                            trie::branch_search::BranchSearch::Found {
+                                branch_trie_node_key,
+                            } => break branch_trie_node_key,
+                            trie::branch_search::BranchSearch::NextKey(req) => {
+                                let result = storage
+                                    .range((
+                                        if req.or_equal() {
+                                            ops::Bound::Included(
+                                                req.key_before().collect::<Vec<_>>(),
+                                            )
+                                        } else {
+                                            ops::Bound::Excluded(
+                                                req.key_before().collect::<Vec<_>>(),
+                                            )
+                                        },
+                                        ops::Bound::Unbounded,
+                                    ))
+                                    .next()
+                                    .filter(|(k, _)| {
+                                        k.starts_with(&req.prefix().collect::<Vec<_>>())
+                                    })
+                                    .map(|(k, _)| k);
+
+                                search = req.inject(result.map(|k| k.iter().copied()));
+                            }
+                        }
+                    };
+
+                    execution = req.inject_key(next_key.map(|nk| nk.into_iter()));
+                }
             }
         }
     }
