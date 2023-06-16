@@ -2478,6 +2478,7 @@ impl ExternalStorageClearPrefix {
 
         match host_fn {
             HostFunction::ext_storage_clear_prefix_version_1
+            | HostFunction::ext_default_child_storage_clear_prefix_version_1
             | HostFunction::ext_default_child_storage_storage_kill_version_1 => {
                 HostVm::ReadyToRun(ReadyToRun {
                     inner: self.inner,
@@ -2491,6 +2492,7 @@ impl ExternalStorageClearPrefix {
                 })
             }
             HostFunction::ext_storage_clear_prefix_version_2
+            | HostFunction::ext_default_child_storage_clear_prefix_version_2
             | HostFunction::ext_default_child_storage_storage_kill_version_3 => {
                 self.inner.alloc_write_and_return_pointer_size(
                     host_fn.name(),
