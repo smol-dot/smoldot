@@ -36,6 +36,7 @@ fn basic_block_generated() {
             libp2p_key: [0; 32],
             listen_addresses: Vec::new(),
             json_rpc_address: None,
+            tasks_executor: Arc::new(|task| smol::spawn(task).detach()),
             log_callback: Arc::new(move |_, _| {}),
             jaeger_agent: None,
             show_informant: false,

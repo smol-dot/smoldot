@@ -19,8 +19,8 @@
 // TODO: #![deny(unused_crate_dependencies)] doesn't work because some deps are used only by the binary, figure if this can be fixed?
 
 use futures_channel::oneshot;
-use futures_util::{stream, FutureExt as _, StreamExt as _};
-use smol::{future, lock::Mutex};
+use futures_util::{future, stream, FutureExt as _, StreamExt as _};
+use smol::lock::Mutex;
 use smoldot::{
     chain, chain_spec,
     database::full_sqlite,
@@ -53,6 +53,10 @@ pub struct Config<'a> {
     pub listen_addresses: Vec<multiaddr::Multiaddr>,
     /// Bind point of the JSON-RPC server. If `None`, no server is started.
     pub json_rpc_address: Option<SocketAddr>,
+    /// Function that can be used to spawn background tasks.
+    ///
+    /// The tasks passed as parameter must be executed until they shut down.
+    pub tasks_executor: Arc<dyn Fn(future::BoxFuture<'static, ()>) + Send + Sync>,
     /// Function called whenever a part of the node wants to notify of something.
     pub log_callback: Arc<dyn LogCallback + Send + Sync>,
     /// Address of a Jaeger agent to send traces to. If `None`, do not send Jaeger traces.
@@ -114,7 +118,6 @@ pub struct Client {
     relay_chain_consensus_service: Option<Arc<consensus_service::ConsensusService>>,
     network_service: Arc<network_service::NetworkService>,
     network_known_best: Arc<Mutex<Option<u64>>>,
-    _executor: Arc<smol::Executor<'static>>,
 }
 
 impl Client {
@@ -170,28 +173,6 @@ pub async fn start(config: Config<'_>) -> Client {
     let relay_genesis_chain_information = relay_chain_spec
         .as_ref()
         .map(|relay_chain_spec| relay_chain_spec.to_chain_information().unwrap().0);
-
-    // Create an executor where tasks are going to be spawned onto.
-    let executor = Arc::new(smol::Executor::new());
-    for n in 0..thread::available_parallelism()
-        .map(|n| n.get() - 1)
-        .unwrap_or(3)
-    {
-        let executor = executor.clone();
-
-        let spawn_result = thread::Builder::new()
-            .name(format!("tasks-pool-{}", n))
-            .spawn(move || smol::block_on(executor.run(future::pending::<()>())));
-
-        // Ignore a failure to spawn a thread, as we're going to run tasks on the current thread
-        // later down this function.
-        if let Err(err) = spawn_result {
-            config.log_callback.log(
-                LogLevel::Warn,
-                format!("tasks-pool-thread-spawn-failure; err={err}"),
-            );
-        }
-    }
 
     // Printing the SQLite version number can be useful for debugging purposes for example in case
     // a query fails.
@@ -255,7 +236,7 @@ pub async fn start(config: Config<'_>) -> Client {
         .hash(chain_spec.block_number_bytes().into());
 
     let jaeger_service = jaeger_service::JaegerService::new(jaeger_service::Config {
-        tasks_executor: &mut |task| executor.spawn(task).detach(),
+        tasks_executor: &mut |task| (config.tasks_executor)(task),
         service_name: local_peer_id.to_string(),
         jaeger_agent: config.jaeger_agent,
     })
@@ -373,8 +354,8 @@ pub async fn start(config: Config<'_>) -> Client {
             identify_agent_version: concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION")).to_owned(),
             noise_key,
             tasks_executor: {
-                let executor = executor.clone();
-                Box::new(move |task| executor.spawn(task).detach())
+                let executor = config.tasks_executor.clone();
+                Box::new(move |task| executor(task))
             },
             log_callback: config.log_callback.clone(),
             jaeger_service: jaeger_service.clone(),
@@ -396,8 +377,8 @@ pub async fn start(config: Config<'_>) -> Client {
 
     let consensus_service = consensus_service::ConsensusService::new(consensus_service::Config {
         tasks_executor: {
-            let executor = executor.clone();
-            Box::new(move |task| executor.spawn(task).detach())
+            let executor = config.tasks_executor.clone();
+            Box::new(move |task| executor(task))
         },
         log_callback: config.log_callback.clone(),
         genesis_block_hash,
@@ -415,8 +396,8 @@ pub async fn start(config: Config<'_>) -> Client {
         Some(
             consensus_service::ConsensusService::new(consensus_service::Config {
                 tasks_executor: {
-                    let executor = executor.clone();
-                    Box::new(move |task| executor.spawn(task).detach())
+                    let executor = config.tasks_executor.clone();
+                    Box::new(move |task| executor(task))
                 },
                 log_callback: config.log_callback.clone(),
                 genesis_block_hash: relay_genesis_chain_information
@@ -463,7 +444,7 @@ pub async fn start(config: Config<'_>) -> Client {
     // something else.
     let json_rpc_service = if let Some(bind_address) = config.json_rpc_address {
         let result = json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
-            tasks_executor: { &mut |task| executor.spawn(task).detach() },
+            tasks_executor: { &mut |task| (config.tasks_executor)(task) },
             log_callback: config.log_callback.clone(),
             bind_address,
         })
@@ -484,50 +465,48 @@ pub async fn start(config: Config<'_>) -> Client {
     // For this reason, it must be spawned even if no informant is started, in which case we simply
     // inhibit the printing.
     let network_known_best = Arc::new(Mutex::new(None));
-    executor
-        .spawn({
-            let mut main_network_events_receiver = network_events_receivers.next().unwrap();
-            let network_known_best = network_known_best.clone();
+    (config.tasks_executor)(Box::pin({
+        let mut main_network_events_receiver = network_events_receivers.next().unwrap();
+        let network_known_best = network_known_best.clone();
 
-            // TODO: shut down this task if the client stops?
-            async move {
-                loop {
-                    let network_event = main_network_events_receiver.next().await.unwrap();
-                    let mut network_known_best = network_known_best.lock().await;
+        // TODO: shut down this task if the client stops?
+        async move {
+            loop {
+                let network_event = main_network_events_receiver.next().await.unwrap();
+                let mut network_known_best = network_known_best.lock().await;
 
-                    match network_event {
-                        network_service::Event::BlockAnnounce {
-                            chain_index: 0,
-                            scale_encoded_header,
-                            ..
-                        } => match (
-                            *network_known_best,
-                            header::decode(
-                                &scale_encoded_header,
-                                usize::from(chain_spec.block_number_bytes()),
-                            ),
-                        ) {
-                            (Some(n), Ok(header)) if n >= header.number => {}
-                            (_, Ok(header)) => *network_known_best = Some(header.number),
-                            (_, Err(_)) => {
-                                // Do nothing if the block is invalid. This is just for the
-                                // informant and not for consensus-related purposes.
-                            }
-                        },
-                        network_service::Event::Connected {
-                            chain_index: 0,
-                            best_block_number,
-                            ..
-                        } => match *network_known_best {
-                            Some(n) if n >= best_block_number => {}
-                            _ => *network_known_best = Some(best_block_number),
-                        },
-                        _ => {}
-                    }
+                match network_event {
+                    network_service::Event::BlockAnnounce {
+                        chain_index: 0,
+                        scale_encoded_header,
+                        ..
+                    } => match (
+                        *network_known_best,
+                        header::decode(
+                            &scale_encoded_header,
+                            usize::from(chain_spec.block_number_bytes()),
+                        ),
+                    ) {
+                        (Some(n), Ok(header)) if n >= header.number => {}
+                        (_, Ok(header)) => *network_known_best = Some(header.number),
+                        (_, Err(_)) => {
+                            // Do nothing if the block is invalid. This is just for the
+                            // informant and not for consensus-related purposes.
+                        }
+                    },
+                    network_service::Event::Connected {
+                        chain_index: 0,
+                        best_block_number,
+                        ..
+                    } => match *network_known_best {
+                        Some(n) if n >= best_block_number => {}
+                        _ => *network_known_best = Some(best_block_number),
+                    },
+                    _ => {}
                 }
             }
-        })
-        .detach();
+        }
+    }));
 
     config.log_callback.log(
         LogLevel::Info,
@@ -548,7 +527,6 @@ pub async fn start(config: Config<'_>) -> Client {
         _json_rpc_service: json_rpc_service,
         network_service,
         network_known_best,
-        _executor: executor,
     }
 }
 
