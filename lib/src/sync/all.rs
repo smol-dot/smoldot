@@ -64,10 +64,16 @@ pub struct Config {
     /// If `false`, blocks containing digest items with an unknown consensus engine will fail to
     /// verify.
     ///
-    /// Passing `true` can lead to blocks being considered as valid when they shouldn't. However,
-    /// even if `true` is passed, a recognized consensus engine must always be present.
-    /// Consequently, both `true` and `false` guarantee that the number of authorable blocks over
-    /// the network is bounded.
+    /// Note that blocks must always contain digest items that are relevant to the current
+    /// consensus algorithm. This option controls what happens when blocks contain additional
+    /// digest items that aren't recognized by the implementation.
+    ///
+    /// Passing `true` can lead to blocks being considered as valid when they shouldn't, as these
+    /// additional digest items could have some logic attached to them that restricts which blocks
+    /// are valid and which are not.
+    ///
+    /// However, since a recognized consensus engine must always be present, both `true` and
+    /// `false` guarantee that the number of authorable blocks over the network is bounded.
     pub allow_unknown_consensus_engines: bool,
 
     /// Pre-allocated capacity for the number of block sources.
