@@ -42,6 +42,73 @@ async fn async_main() {
 }
 
 async fn run(cli_options: cli::CliOptionsRun) {
+    // Determine the actual CLI output by replacing `Auto` with the actual value.
+    let cli_output = if let cli::Output::Auto = cli_options.output {
+        if io::IsTerminal::is_terminal(&io::stderr()) && cli_options.log.is_empty() {
+            cli::Output::Informant
+        } else {
+            cli::Output::Logs
+        }
+    } else {
+        cli_options.output
+    };
+    debug_assert!(!matches!(cli_output, cli::Output::Auto));
+
+    // Setup the logging system of the binary.
+    // TODO: doesn't take `cli_options.log` into account
+    let log_callback: Arc<dyn smoldot_full_node::LogCallback + Send + Sync> = match cli_output {
+        cli::Output::None => Arc::new(|_level, _message| {}),
+        cli::Output::Informant | cli::Output::Logs => Arc::new(|level, message| {
+            let when = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+
+            // TODO: restore colors
+            let level_str = match level {
+                smoldot_full_node::LogLevel::Trace => "trace",
+                smoldot_full_node::LogLevel::Debug => "debug",
+                smoldot_full_node::LogLevel::Info => "info",
+                smoldot_full_node::LogLevel::Warn => "warn",
+                smoldot_full_node::LogLevel::Error => "error",
+            };
+
+            eprintln!("[{}] [{}] {}", when, level_str, message);
+        }),
+        cli::Output::LogsJson => Arc::new(|level, message| {
+            #[derive(serde::Serialize)]
+            struct Record {
+                timestamp: u128,
+                level: &'static str,
+                message: String,
+            }
+
+            let mut lock = std::io::stderr().lock();
+            if serde_json::to_writer(
+                &mut lock,
+                &Record {
+                    timestamp: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0),
+                    level: match level {
+                        smoldot_full_node::LogLevel::Trace => "trace",
+                        smoldot_full_node::LogLevel::Debug => "debug",
+                        smoldot_full_node::LogLevel::Info => "info",
+                        smoldot_full_node::LogLevel::Warn => "warn",
+                        smoldot_full_node::LogLevel::Error => "error",
+                    },
+                    message,
+                },
+            )
+            .is_ok()
+            {
+                let _ = io::Write::write_all(&mut lock, b"\n");
+            }
+        }),
+        cli::Output::Auto => unreachable!(), // Handled above.
+    };
+
     let chain_spec: Cow<[u8]> = match &cli_options.chain {
         cli::CliChain::Polkadot => {
             (&include_bytes!("../../demo-chain-specs/polkadot.json")[..]).into()
@@ -65,10 +132,12 @@ async fn run(cli_options: cli::CliOptionsRun) {
     } else if let Some(base) = directories::ProjectDirs::from("io", "smoldot", "smoldot") {
         Some(base.data_dir().to_owned())
     } else {
-        log::warn!(
+        log_callback.log(
+            smoldot_full_node::LogLevel::Warn,
             "Failed to fetch $HOME directory. Falling back to storing everything in memory, \
                 meaning that everything will be lost when the node stops. If this is intended, \
                 please make this explicit by passing the `--tmp` flag instead."
+                .to_string(),
         );
         None
     };
@@ -150,89 +219,36 @@ async fn run(cli_options: cli::CliOptionsRun) {
         rand::random()
     };
 
-    // Determine the actual CLI output by replacing `Auto` with the actual value.
-    let cli_output = if let cli::Output::Auto = cli_options.output {
-        if io::IsTerminal::is_terminal(&io::stderr()) && cli_options.log.is_empty() {
-            cli::Output::Informant
-        } else {
-            cli::Output::Logs
-        }
-    } else {
-        cli_options.output
-    };
-    debug_assert!(!matches!(cli_output, cli::Output::Auto));
-
-    // Setup the logging system of the binary.
-    if !matches!(cli_output, cli::Output::None) {
-        let mut builder = env_logger::Builder::new();
-        builder.parse_filters("cranelift=error"); // TODO: temporary work around for https://github.com/smol-dot/smoldot/issues/263
-        if matches!(cli_output, cli::Output::Informant) {
-            // TODO: display infos/warnings in a nicer way ; in particular, immediately put the informant on top of warnings
-            builder.filter_level(log::LevelFilter::Info);
-        } else {
-            builder.filter_level(log::LevelFilter::Debug);
-            for filter in &cli_options.log {
-                builder.parse_filters(filter);
-            }
-        }
-
-        if matches!(cli_output, cli::Output::LogsJson) {
-            builder.write_style(env_logger::WriteStyle::Never);
-            builder.format(|mut formatter, record| {
-                // TODO: consider using the "kv" feature of he "logs" crate and output individual fields
-                #[derive(serde::Serialize)]
-                struct Record<'a> {
-                    timestamp: u128,
-                    target: &'a str,
-                    level: &'static str,
-                    message: String,
-                }
-
-                serde_json::to_writer(
-                    &mut formatter,
-                    &Record {
-                        timestamp: SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .map(|d| d.as_millis())
-                            .unwrap_or(0),
-                        target: record.target(),
-                        level: match record.level() {
-                            log::Level::Trace => "trace",
-                            log::Level::Debug => "debug",
-                            log::Level::Info => "info",
-                            log::Level::Warn => "warn",
-                            log::Level::Error => "error",
-                        },
-                        message: format!("{}", record.args()),
-                    },
-                )
-                .map_err(|err| io::Error::new(std::io::ErrorKind::Other, err.to_string()))?;
-                io::Write::write_all(formatter, b"\n")?;
-                Ok(())
-            });
-        } else {
-            builder.write_style(match cli_options.color {
-                cli::ColorChoice::Always => env_logger::WriteStyle::Always,
-                cli::ColorChoice::Never => env_logger::WriteStyle::Never,
-            });
-        }
-
-        builder.init();
-    }
-
-    log::info!("smoldot full node");
-    log::info!("Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.");
-    log::info!("Copyright (C) 2023  Pierre Krieger.");
-    log::info!("This program comes with ABSOLUTELY NO WARRANTY.");
-    log::info!(
+    // Print some general information.
+    log_callback.log(
+        smoldot_full_node::LogLevel::Info,
+        "smoldot full node".to_string(),
+    );
+    log_callback.log(
+        smoldot_full_node::LogLevel::Info,
+        "Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.".to_string(),
+    );
+    log_callback.log(
+        smoldot_full_node::LogLevel::Info,
+        "Copyright (C) 2023  Pierre Krieger.".to_string(),
+    );
+    log_callback.log(
+        smoldot_full_node::LogLevel::Info,
+        "This program comes with ABSOLUTELY NO WARRANTY.".to_string(),
+    );
+    log_callback.log(
+        smoldot_full_node::LogLevel::Info,
         "This is free software, and you are welcome to redistribute it under certain conditions."
+            .to_string(),
     );
 
     // This warning message should be removed if/when the full node becomes mature.
-    log::warn!(
+    log_callback.log(
+        smoldot_full_node::LogLevel::Warn,
         "Please note that this full node is experimental. It is not feature complete and is \
         known to panic often. Please report any panic you might encounter to \
         <https://github.com/smol-dot/smoldot/issues>."
+            .to_string(),
     );
 
     // Starting from here, a SIGINT (or equivalent) handler is setup. If the user does Ctrl+C,
@@ -247,7 +263,10 @@ async fn run(cli_options: cli::CliOptionsRun) {
             event.notify(usize::max_value());
         }) {
             // It is not critical to fail to setup the Ctrl-C handler.
-            log::warn!("ctrlc-handler-setup-fail; err={}", err);
+            log_callback.log(
+                smoldot_full_node::LogLevel::Warn,
+                format!("ctrlc-handler-setup-fail; err={err}"),
+            );
         }
         listen
     };
@@ -270,17 +289,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
             libp2p_key,
             listen_addresses: cli_options.listen_addr,
             json_rpc_address: cli_options.json_rpc_address.0,
-            log_callback: Arc::new(|level, message| {
-                let level = match level {
-                    smoldot_full_node::LogLevel::Error => log::Level::Error,
-                    smoldot_full_node::LogLevel::Warn => log::Level::Warn,
-                    smoldot_full_node::LogLevel::Info => log::Level::Info,
-                    smoldot_full_node::LogLevel::Debug => log::Level::Debug,
-                    smoldot_full_node::LogLevel::Trace => log::Level::Trace,
-                };
-
-                log::log!(level, "{}", message)
-            }),
+            log_callback,
             jaeger_agent: cli_options.jaeger,
             show_informant: matches!(cli_output, cli::Output::Informant),
             informant_colors: match cli_options.color {
