@@ -838,6 +838,7 @@ impl Inner {
                             max_trie_recalculation_depth_hint: 16, // TODO: ?!
                         }),
                     ));
+                    continue;
                 }
             }
 
