@@ -452,7 +452,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
 
     // After `ctrlc_detected` has triggered, we destroy `main_task`, which cancels it and destroys
     // the smoldot client.
-    drop(main_task);
+    drop::<smol::Task<_>>(main_task);
 
     // TODO: consider running the executor until all tasks shut down gracefully; unfortunately this currently hangs
 }
