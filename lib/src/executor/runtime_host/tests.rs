@@ -20,16 +20,17 @@
 use core::{iter, ops};
 
 use super::{run, Config, RuntimeHostVm};
-use crate::{executor::host, header, trie};
+use crate::{executor::host, trie};
 use alloc::collections::BTreeMap;
 
 #[test]
 fn all_tests() {
+    // Tests ordered alphabetically.
     for (test_num, test_json) in [
-        include_str!("./test1.json"),
-        include_str!("./test2.json"),
-        include_str!("./test3.json"),
-        include_str!("./test4.json"),
+        include_str!("./child-trie-create-multiple.json"),
+        include_str!("./child-trie-create-one.json"),
+        include_str!("./child-trie-destroy.json"),
+        include_str!("./child-trie-read-basic.json"),
     ]
     .into_iter()
     .enumerate()
@@ -38,19 +39,14 @@ fn all_tests() {
 
         let storage = {
             let mut storage = test_data
-                .storage
-                .root
-                .into_iter()
-                .map(|e| ((None, e.key.0), e.value.0))
+                .parent_storage
+                .main_trie
+                .iter()
+                .map(|(key, value)| ((None, key.0.clone()), value.0.clone()))
                 .collect::<BTreeMap<_, _>>();
-            for (child_trie, child_trie_data) in &test_data.storage.child_tries {
-                assert!(child_trie.0.starts_with(b":child_storage:default:"));
-                let child_trie = child_trie.0[b":child_storage:default:".len()..].to_vec();
-                for entry in child_trie_data {
-                    storage.insert(
-                        (Some(child_trie.clone()), entry.key.0.clone()),
-                        entry.value.0.clone(),
-                    );
+            for (child_trie, child_trie_data) in &test_data.parent_storage.child_tries {
+                for (key, value) in child_trie_data {
+                    storage.insert((Some(child_trie.0.clone()), key.0.clone()), value.0.clone());
                 }
             }
             storage
@@ -80,19 +76,6 @@ fn all_tests() {
             .state_version
             .unwrap_or(host::TrieEntryVersion::V0);
 
-        let digest_items = test_data
-            .block
-            .header
-            .digest
-            .logs
-            .iter()
-            .map(|item| {
-                header::DigestItem::from(
-                    header::DigestItemRef::from_scale_encoded(&item.0, 4).unwrap(),
-                )
-            })
-            .collect::<Vec<_>>();
-
         let mut execution = run(Config {
             virtual_machine,
             function_to_call: "Core_execute_block",
@@ -102,36 +85,10 @@ fn all_tests() {
             parameter: {
                 // Block header + number of extrinsics + extrinsics
                 let encoded_body_len =
-                    crate::util::encode_scale_compact_usize(test_data.block.extrinsics.len());
-                crate::header::HeaderRef {
-                    parent_hash: TryFrom::try_from(&test_data.block.header.parent_hash.0[..])
-                        .unwrap(),
-                    number: {
-                        let mut num = 0u64;
-                        for byte in &test_data.block.header.number.0 {
-                            num <<= 8;
-                            num |= u64::from(*byte);
-                        }
-                        num
-                    },
-                    state_root: TryFrom::try_from(&test_data.block.header.state_root.0[..])
-                        .unwrap(),
-                    extrinsics_root: TryFrom::try_from(
-                        &test_data.block.header.extrinsics_root.0[..],
-                    )
-                    .unwrap(),
-                    digest: header::DigestRef::from_slice(&digest_items).unwrap(),
-                }
-                .scale_encoding(4)
-                .map(|b| either::Right(either::Left(b)))
-                .chain(iter::once(either::Right(either::Right(encoded_body_len))))
-                .chain(
-                    test_data
-                        .block
-                        .extrinsics
-                        .iter()
-                        .map(|b| either::Left(&b.0)),
-                )
+                    crate::util::encode_scale_compact_usize(test_data.block.body.len());
+                iter::once(either::Right(either::Left(&test_data.block.header.0)))
+                    .chain(iter::once(either::Right(either::Right(encoded_body_len))))
+                    .chain(test_data.block.body.iter().map(|b| either::Left(&b.0)))
             },
         })
         .unwrap();
@@ -210,46 +167,25 @@ fn all_tests() {
 #[derive(serde::Deserialize)]
 struct Test {
     block: Block,
-    storage: Storage,
+    parent_storage: Storage,
 }
 
 #[derive(serde::Deserialize)]
 struct Block {
-    header: Header,
-    extrinsics: Vec<HexString>,
-}
-
-#[derive(serde::Deserialize)]
-struct Header {
-    #[serde(rename = "parentHash")]
-    parent_hash: HexString,
-    number: HexString,
-    #[serde(rename = "stateRoot")]
-    state_root: HexString,
-    #[serde(rename = "extrinsicsRoot")]
-    extrinsics_root: HexString,
-    digest: Digest,
-}
-
-#[derive(serde::Deserialize)]
-struct Digest {
-    logs: Vec<HexString>,
+    header: HexString,
+    body: Vec<HexString>,
+    number_bytes: u32,
 }
 
 #[derive(serde::Deserialize)]
 struct Storage {
-    root: Vec<TrieEntry>,
-    child_tries: hashbrown::HashMap<HexString, Vec<TrieEntry>>,
+    main_trie: hashbrown::HashMap<HexString, HexString>,
+    child_tries: hashbrown::HashMap<HexString, hashbrown::HashMap<HexString, HexString>>,
 }
 
-#[derive(serde::Deserialize)]
-struct TrieEntry {
-    key: HexString,
-    value: HexString,
-}
-
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct HexString(Vec<u8>);
+
 impl<'a> serde::Deserialize<'a> for HexString {
     fn deserialize<D>(deserializer: D) -> Result<HexString, D::Error>
     where
