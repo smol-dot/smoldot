@@ -90,25 +90,43 @@ fn all_tests() {
         }
     }
 
-    for test_json in [
+    for (test_num, test_json) in [
         include_str!("./test1.json"),
         include_str!("./test2.json"),
         include_str!("./test3.json"),
         include_str!("./test4.json"),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let test_data = serde_json::from_str::<Test>(test_json).unwrap();
-        // TODO: child tries
-        let storage = test_data
-            .storage
-            .root
-            .into_iter()
-            .map(|e| (e.key.0, e.value.0))
-            .collect::<BTreeMap<_, _>>();
+
+        let storage = {
+            let mut storage = test_data
+                .storage
+                .root
+                .into_iter()
+                .map(|e| ((None, e.key.0), e.value.0))
+                .collect::<BTreeMap<_, _>>();
+            for (child_trie, child_trie_data) in &test_data.storage.child_tries {
+                assert!(child_trie.0.starts_with(b":child_storage:default:"));
+                let child_trie = child_trie.0[b":child_storage:default:".len()..].to_vec();
+                for entry in child_trie_data {
+                    storage.insert(
+                        (Some(child_trie.clone()), entry.key.0.clone()),
+                        entry.value.0.clone(),
+                    );
+                }
+            }
+            storage
+        };
 
         let virtual_machine = {
-            let code = storage.get(&b":code"[..]).expect("no runtime code found");
+            let code = storage
+                .get(&(None, b":code".to_vec()))
+                .expect("no runtime code found");
             let heap_pages = crate::executor::storage_heap_pages_to_value(
-                storage.get(&b":heappages"[..]).map(|v| &v[..]),
+                storage.get(&(None, b":heappages".to_vec())).map(|v| &v[..]),
             )
             .unwrap();
 
@@ -186,28 +204,23 @@ fn all_tests() {
         loop {
             match execution {
                 RuntimeHostVm::Finished(Ok(_)) => break, // Test successful!
-                RuntimeHostVm::Finished(Err(err)) => panic!("{:?}", err),
+                RuntimeHostVm::Finished(Err(err)) => {
+                    panic!("Error during test #{}: {:?}", test_num, err)
+                }
                 RuntimeHostVm::SignatureVerification(sig) => execution = sig.verify_and_resume(),
                 RuntimeHostVm::ClosestDescendantMerkleValue(req) => {
                     execution = req.resume_unknown()
                 }
                 RuntimeHostVm::StorageGet(get) => {
-                    let value = if get.child_trie().is_some() {
-                        None
-                    } else {
-                        storage
-                            .get(get.key().as_ref())
-                            .map(|v| (iter::once(&v[..]), state_version))
-                    };
-
+                    let value = storage
+                        .get(&(
+                            get.child_trie().map(|c| c.as_ref().to_owned()),
+                            get.key().as_ref().to_owned(),
+                        ))
+                        .map(|v| (iter::once(&v[..]), state_version));
                     execution = get.inject_value(value);
                 }
                 RuntimeHostVm::NextKey(req) => {
-                    if req.child_trie().is_some() {
-                        execution = req.inject_key(None::<iter::Empty<_>>);
-                        continue;
-                    }
-
                     let mut search = trie::branch_search::BranchSearch::NextKey(
                         trie::branch_search::start_branch_search(trie::branch_search::Config {
                             key_before: req.key().collect::<Vec<_>>().into_iter(),
@@ -222,27 +235,30 @@ fn all_tests() {
                             trie::branch_search::BranchSearch::Found {
                                 branch_trie_node_key,
                             } => break branch_trie_node_key,
-                            trie::branch_search::BranchSearch::NextKey(req) => {
+                            trie::branch_search::BranchSearch::NextKey(bs_req) => {
                                 let result = storage
                                     .range((
-                                        if req.or_equal() {
-                                            ops::Bound::Included(
-                                                req.key_before().collect::<Vec<_>>(),
-                                            )
+                                        if bs_req.or_equal() {
+                                            ops::Bound::Included((
+                                                req.child_trie().map(|c| c.as_ref().to_owned()),
+                                                bs_req.key_before().collect::<Vec<_>>(),
+                                            ))
                                         } else {
-                                            ops::Bound::Excluded(
-                                                req.key_before().collect::<Vec<_>>(),
-                                            )
+                                            ops::Bound::Excluded((
+                                                req.child_trie().map(|c| c.as_ref().to_owned()),
+                                                bs_req.key_before().collect::<Vec<_>>(),
+                                            ))
                                         },
                                         ops::Bound::Unbounded,
                                     ))
                                     .next()
-                                    .filter(|(k, _)| {
-                                        k.starts_with(&req.prefix().collect::<Vec<_>>())
+                                    .filter(|((trie, key), _)| {
+                                        *trie == req.child_trie().map(|c| c.as_ref().to_owned())
+                                            && key.starts_with(&bs_req.prefix().collect::<Vec<_>>())
                                     })
                                     .map(|(k, _)| k);
 
-                                search = req.inject(result.map(|k| k.iter().copied()));
+                                search = bs_req.inject(result.map(|(_, k)| k.iter().copied()));
                             }
                         }
                     };
