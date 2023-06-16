@@ -15,6 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use std::sync::Arc;
+
 #[test]
 fn basic_block_generated() {
     // TODO: this test is a dummy and doesn't test anything
@@ -36,6 +38,7 @@ fn basic_block_generated() {
                 libp2p_key: [0; 32],
                 listen_addresses: Vec::new(),
                 json_rpc_address: None,
+                log_callback: Arc::new(move |_, _| {}),
                 jaeger_agent: None,
                 show_informant: false,
                 informant_colors: false,

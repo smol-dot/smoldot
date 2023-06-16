@@ -15,14 +15,18 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use crate::{LogCallback, LogLevel};
 use smol::future;
 use smoldot::json_rpc::{self, methods, websocket_server};
-use std::{future::Future, io, net::SocketAddr, pin::Pin};
+use std::{future::Future, io, net::SocketAddr, pin::Pin, sync::Arc};
 
 /// Configuration for a [`JsonRpcService`].
 pub struct Config<'a> {
     /// Closure that spawns background tasks.
     pub tasks_executor: &'a mut dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>),
+
+    /// Function called in order to notify of something.
+    pub log_callback: Arc<dyn LogCallback + Send + Sync>,
 
     /// Where to bind the WebSocket server.
     pub bind_address: SocketAddr,
@@ -69,6 +73,7 @@ impl JsonRpcService {
         let background = JsonRpcBackground {
             server,
             on_service_dropped,
+            log_callback: config.log_callback,
         };
 
         (config.tasks_executor)(Box::pin(async move { background.run().await }));
@@ -95,6 +100,9 @@ struct JsonRpcBackground {
 
     /// Event notified when the frontend is dropped.
     on_service_dropped: event_listener::EventListener,
+
+    /// See [`Config::log_callback`].
+    log_callback: Arc<dyn LogCallback + Send + Sync>,
 }
 
 impl JsonRpcBackground {
@@ -107,14 +115,20 @@ impl JsonRpcBackground {
 
             let (connection_id, message) = match event {
                 websocket_server::Event::ConnectionOpen { address, .. } => {
-                    log::debug!("incoming-connection; address={}", address);
+                    self.log_callback.log(
+                        LogLevel::Debug,
+                        format!("incoming-connection; address={}", address),
+                    );
                     self.server.accept(address);
                     continue;
                 }
                 websocket_server::Event::ConnectionError {
                     user_data: address, ..
                 } => {
-                    log::debug!("connection-closed; address={}", address);
+                    self.log_callback.log(
+                        LogLevel::Debug,
+                        format!("connection-closed; address={}", address),
+                    );
                     continue;
                 }
                 websocket_server::Event::TextFrame {
@@ -127,13 +141,19 @@ impl JsonRpcBackground {
             let (request_id, _method) = match methods::parse_json_call(&message) {
                 Ok(v) => v,
                 Err(error) => {
-                    log::debug!("bad-request; error={:?}; message={:?}", error, message);
+                    self.log_callback.log(
+                        LogLevel::Debug,
+                        format!("bad-request; error={:?}; message={:?}", error, message),
+                    );
                     self.server.close(connection_id);
                     continue;
                 }
             };
 
-            log::debug!("request; request_id={:?}; method={:?}", request_id, _method);
+            self.log_callback.log(
+                LogLevel::Debug,
+                format!("request; request_id={:?}; method={:?}", request_id, _method),
+            );
 
             self.server.queue_send(
                 connection_id,

@@ -27,7 +27,7 @@
 // TODO: doc
 // TODO: re-review this once finished
 
-use crate::{database_thread, jaeger_service, util};
+use crate::{database_thread, jaeger_service, util, LogCallback, LogLevel};
 
 use core::{cmp, future::Future, mem, pin::Pin, task::Poll, time::Duration};
 use futures_channel::oneshot;
@@ -64,6 +64,9 @@ mod tasks;
 pub struct Config {
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
+
+    /// Function called in order to notify of something.
+    pub log_callback: Arc<dyn LogCallback + Send + Sync>,
 
     /// Number of event receivers returned by [`NetworkService::new`].
     pub num_events_receivers: usize,
@@ -143,6 +146,9 @@ pub struct NetworkService {
 
     /// Channel to send messages to the background task.
     to_background_tx: Mutex<channel::Sender<ToBackground>>,
+
+    /// See [`Config::log_callback`].
+    log_callback: Arc<dyn LogCallback + Send + Sync>,
 
     /// Notified when the service shuts down.
     foreground_shutdown: event_listener::Event,
@@ -229,6 +235,9 @@ struct Inner {
 
     /// See [`Config::tasks_executor`].
     tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
+
+    /// See [`Config::log_callback`].
+    log_callback: Arc<dyn LogCallback + Send + Sync>,
 
     active_connections: HashMap<
         service::ConnectionId,
@@ -334,6 +343,7 @@ impl NetworkService {
             to_background_tx: to_background_tx.clone(),
             process_network_service_events: true,
             tasks_executor: config.tasks_executor,
+            log_callback: config.log_callback.clone(),
             network,
             slots_assign_backoff: hashbrown::HashMap::with_capacity_and_hasher(
                 50, // TODO: ?
@@ -391,6 +401,7 @@ impl NetworkService {
             // Spawn a background task dedicated to this listener.
             (inner.tasks_executor)(Box::pin({
                 let to_background_tx = to_background_tx.clone();
+                let log_callback = config.log_callback.clone();
                 let mut on_foreground_shutdown = foreground_shutdown.listen();
                 async move {
                     loop {
@@ -433,7 +444,10 @@ impl NetworkService {
                         .into_iter()
                         .collect::<Multiaddr>();
 
-                        log::debug!("incoming-connection; multiaddr={}", multiaddr);
+                        log_callback.log(
+                            LogLevel::Debug,
+                            format!("incoming-connection; multiaddr={}", multiaddr),
+                        );
 
                         let _ = to_background_tx
                             .send(ToBackground::IncomingConnection {
@@ -498,6 +512,7 @@ impl NetworkService {
             local_peer_id,
             jaeger_service: config.jaeger_service,
             to_background_tx: Mutex::new(to_background_tx),
+            log_callback: config.log_callback,
             foreground_shutdown,
         });
 
@@ -604,7 +619,7 @@ impl NetworkService {
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
     ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
-        log::debug!(
+        self.log_callback.log(LogLevel::Debug, format!(
             "blocks-request-start; perr_id={}; chain_index={}; start={}; desired_count={}; direction={}",
             target, chain_index,
             match &config.start {
@@ -616,21 +631,23 @@ impl NetworkService {
                 protocol::BlocksRequestDirection::Ascending => "ascending",
                 protocol::BlocksRequestDirection::Descending => "descending",
             },
-        );
+        ));
 
         // Setup a guard that will print a log message in case it is dropped silently.
         // This lets us detect if the request is cancelled.
-        struct LogIfCancel(PeerId, usize);
+        struct LogIfCancel(PeerId, usize, Arc<dyn LogCallback + Send + Sync>);
         impl Drop for LogIfCancel {
             fn drop(&mut self) {
-                log::debug!(
-                    "blocks-request-ended; peer_id={}; chain_index={}; outcome=cancelled",
-                    self.0,
-                    self.1
+                self.2.log(
+                    LogLevel::Debug,
+                    format!(
+                        "blocks-request-ended; peer_id={}; chain_index={}; outcome=cancelled",
+                        self.0, self.1
+                    ),
                 );
             }
         }
-        let _log_if_cancel = LogIfCancel(target.clone(), chain_index);
+        let _log_if_cancel = LogIfCancel(target.clone(), chain_index, self.log_callback.clone());
 
         let _jaeger_span = self.jaeger_service.outgoing_block_request_span(
             &self.local_peer_id,
@@ -666,17 +683,20 @@ impl NetworkService {
         mem::forget(_log_if_cancel);
         match &result {
             Ok(success) => {
-                log::debug!(
+                self.log_callback.log(LogLevel::Debug, format!(
                     "blocks-request-ended; peer_id={}; chain_index={}; outcome=success; response_blocks={}",
                     target, chain_index, success.len()
-                );
+                ));
             }
             Err(err) => {
-                log::debug!(
+                self.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
                     "blocks-request-ended; peer_id={}; chain_index={}; outcome=failure; error={}",
                     target,
                     chain_index,
                     err
+                ),
                 );
             }
         }
@@ -764,13 +784,18 @@ async fn background_task(mut inner: Inner) {
 
                 match inner_event {
                     service::Event::Connected(peer_id) => {
-                        log::debug!("connected; peer_id={}", peer_id);
+                        inner
+                            .log_callback
+                            .log(LogLevel::Debug, format!("connected; peer_id={}", peer_id));
                     }
                     service::Event::Disconnected {
                         peer_id,
                         chain_indices,
                     } => {
-                        log::debug!("disconnected; peer_id={}", peer_id);
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!("disconnected; peer_id={}", peer_id),
+                        );
                         if !chain_indices.is_empty() {
                             debug_assert_eq!(chain_indices.len(), 1); // TODO: not implemented
                             break Some(Event::Disconnected {
@@ -801,10 +826,10 @@ async fn background_task(mut inner: Inner) {
                                             .hash(inner.network.block_number_bytes(chain_index)),
                                     );
 
-                                log::debug!(
+                                inner.log_callback.log(LogLevel::Debug, format!(
                                     "block-announce; peer_id={}; chain_index={}; hash={}; number={}; is_best={:?}",
                                     peer_id, chain_index, HashDisplay(&header_hash), decoded_header.number, decoded.is_best
-                                );
+                                ));
 
                                 break Some(Event::BlockAnnounce {
                                     chain_index,
@@ -814,10 +839,10 @@ async fn background_task(mut inner: Inner) {
                                 });
                             }
                             Err(error) => {
-                                log::warn!(
+                                inner.log_callback.log(LogLevel::Warn, format!(
                                     "block-announce-bad-header; peer_id={}; chain_index={}; hash={}; is_best={:?}; error={}",
                                     peer_id, chain_index, HashDisplay(&header_hash), decoded.is_best, error
-                                );
+                                ));
 
                                 inner.unassign_slot_and_ban(chain_index, peer_id);
                                 inner.process_network_service_events = true;
@@ -831,13 +856,13 @@ async fn background_task(mut inner: Inner) {
                         best_hash,
                         ..
                     } => {
-                        log::debug!(
+                        inner.log_callback.log(LogLevel::Debug, format!(
                             "chain-connected; peer_id={}; chain_index={}; best_number={}; best_hash={}",
                             peer_id,
                             chain_index,
                             best_number,
                             HashDisplay(&best_hash),
-                        );
+                        ));
                         break Some(Event::Connected {
                             peer_id,
                             chain_index,
@@ -850,10 +875,12 @@ async fn background_task(mut inner: Inner) {
                         chain_index,
                         ..
                     } => {
-                        log::debug!(
-                            "chain-disconnected; peer_id={}; chain_index={}",
-                            peer_id,
-                            chain_index
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "chain-disconnected; peer_id={}; chain_index={}",
+                                peer_id, chain_index
+                            ),
                         );
 
                         inner.unassign_slot_and_ban(chain_index, peer_id.clone());
@@ -870,11 +897,14 @@ async fn background_task(mut inner: Inner) {
                         error,
                         ..
                     } => {
-                        log::debug!(
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
                             "chain-connect-attempt-failed; peer_id={}; chain_index={}; error={}",
                             peer_id,
                             chain_index,
                             error
+                        ),
                         );
 
                         inner.unassign_slot_and_ban(chain_index, peer_id);
@@ -911,16 +941,21 @@ async fn background_task(mut inner: Inner) {
                             .unwrap();
                         match result {
                             Ok(nodes) => {
-                                log::debug!("discovered; nodes={:?}", nodes);
+                                inner
+                                    .log_callback
+                                    .log(LogLevel::Debug, format!("discovered; nodes={:?}", nodes));
                                 for (peer_id, addrs) in nodes {
                                     let mut valid_addrs = Vec::with_capacity(addrs.len());
                                     for addr in addrs {
                                         match Multiaddr::try_from(addr) {
                                             Ok(a) => valid_addrs.push(a),
                                             Err(err) => {
-                                                log::debug!(
-                                                    "discovery-invalid-address; addr={}",
-                                                    hex::encode(&err.addr)
+                                                inner.log_callback.log(
+                                                    LogLevel::Debug,
+                                                    format!(
+                                                        "discovery-invalid-address; addr={}",
+                                                        hex::encode(&err.addr)
+                                                    ),
                                                 );
                                                 continue;
                                             }
@@ -936,7 +971,10 @@ async fn background_task(mut inner: Inner) {
                                 }
                             }
                             Err(error) => {
-                                log::debug!("discovery-error; error={}", error);
+                                inner.log_callback.log(
+                                    LogLevel::Debug,
+                                    format!("discovery-error; error={}", error),
+                                );
                             }
                         }
                     }
@@ -944,7 +982,10 @@ async fn background_task(mut inner: Inner) {
                         peer_id,
                         request_id,
                     } => {
-                        log::debug!("identify-request; peer_id={}", peer_id);
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!("identify-request; peer_id={}", peer_id),
+                        );
                         inner
                             .network
                             .respond_identify(request_id, &inner.identify_agent_version);
@@ -955,10 +996,12 @@ async fn background_task(mut inner: Inner) {
                         config,
                         request_id,
                     } => {
-                        log::debug!(
-                            "incoming-blocks-request; peer_id={}; chain_index={}",
-                            peer_id,
-                            chain_index
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "incoming-blocks-request; peer_id={}; chain_index={}",
+                                peer_id, chain_index
+                            ),
                         );
                         let mut _jaeger_span = inner.jaeger_service.incoming_block_request_span(
                             &inner.local_peer_id,
@@ -985,7 +1028,10 @@ async fn background_task(mut inner: Inner) {
                             match response {
                                 Ok(b) => Some(b),
                                 Err(error) => {
-                                    log::warn!("incoming-blocks-request-error; error={}", error);
+                                    inner.log_callback.log(
+                                        LogLevel::Warn,
+                                        format!("incoming-blocks-request-error; error={}", error),
+                                    );
                                     None
                                 }
                             },
@@ -996,14 +1042,14 @@ async fn background_task(mut inner: Inner) {
                         peer_id,
                         state,
                     } => {
-                        log::debug!(
+                        inner.log_callback.log(LogLevel::Debug, format!(
                             "grandpa-neighbor-packet; peer_id={}; chain_index={}; round_number={}; set_id={}; commit_finalized_height={}",
                             peer_id,
                             chain_index,
                             state.round_number,
                             state.set_id,
                             state.commit_finalized_height,
-                        );
+                        ));
                         // TODO: report to the sync state machine
                     }
                     service::Event::GrandpaCommitMessage {
@@ -1011,15 +1057,21 @@ async fn background_task(mut inner: Inner) {
                         peer_id,
                         message,
                     } => {
-                        log::debug!(
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
                             "grandpa-commit-message; peer_id={}; chain_index={}; target_hash={}",
                             peer_id,
                             chain_index,
                             HashDisplay(message.decode().message.target_hash),
+                        ),
                         );
                     }
                     service::Event::ProtocolError { peer_id, error } => {
-                        log::warn!("protocol-error; peer_id={}; error={}", peer_id, error);
+                        inner.log_callback.log(
+                            LogLevel::Warn,
+                            format!("protocol-error; peer_id={}; error={}", peer_id, error),
+                        );
                         for chain_index in 0..inner.network.num_chains() {
                             inner.unassign_slot_and_ban(chain_index, peer_id.clone());
                         }
@@ -1080,10 +1132,12 @@ async fn background_task(mut inner: Inner) {
                         .cloned();
 
                     let Some(peer_to_assign) = peer_to_assign else { break };
-                    log::debug!(
-                        "slot-assigned; peer_id={}; chain_index={}",
-                        peer_to_assign,
-                        chain_index
+                    inner.log_callback.log(
+                        LogLevel::Debug,
+                        format!(
+                            "slot-assigned; peer_id={}; chain_index={}",
+                            peer_to_assign, chain_index
+                        ),
                     );
                     inner.network.assign_out_slot(chain_index, peer_to_assign);
                     inner.process_network_service_events = true;
@@ -1108,9 +1162,11 @@ async fn background_task(mut inner: Inner) {
 
                 // Perform the connection process in a separate task.
                 let to_background_tx = inner.to_background_tx.clone();
+                let log_callback = inner.log_callback.clone();
                 (inner.tasks_executor)(Box::pin(async move {
                     // TODO: interrupt immediately if `to_background_tx` is dropped
-                    if let Ok(socket) = tasks::opening_connection_task(start_connect.clone()).await
+                    if let Ok(socket) =
+                        tasks::opening_connection_task(start_connect.clone(), log_callback).await
                     {
                         let _ = to_background_tx
                             .send(ToBackground::ConnectionEstablishSuccess {
@@ -1191,6 +1247,7 @@ async fn background_task(mut inner: Inner) {
                 inner.active_connections.insert(connection_id, tx);
 
                 (inner.tasks_executor)(Box::pin(tasks::established_connection_task(
+                    inner.log_callback.clone(),
                     socket,
                     connection_id,
                     connection_task,
@@ -1217,6 +1274,7 @@ async fn background_task(mut inner: Inner) {
                 inner.active_connections.insert(connection_id, tx);
 
                 (inner.tasks_executor)(Box::pin(tasks::established_connection_task(
+                    inner.log_callback.clone(),
                     socket,
                     connection_id,
                     connection_task,

@@ -44,7 +44,6 @@ mod json_rpc_service;
 mod network_service;
 mod util;
 
-#[derive(Debug)]
 pub struct Config<'a> {
     /// Chain to connect to.
     pub chain: ChainConfig<'a>,
@@ -57,12 +56,40 @@ pub struct Config<'a> {
     pub listen_addresses: Vec<multiaddr::Multiaddr>,
     /// Bind point of the JSON-RPC server. If `None`, no server is started.
     pub json_rpc_address: Option<SocketAddr>,
+    /// Function called whenever a part of the node wants to notify of something.
+    pub log_callback: Arc<dyn LogCallback + Send + Sync>,
     /// Address of a Jaeger agent to send traces to. If `None`, do not send Jaeger traces.
     pub jaeger_agent: Option<SocketAddr>,
     // TODO: option is a bit weird
     pub show_informant: bool,
     // TODO: option is a bit weird
     pub informant_colors: bool,
+}
+
+/// Allow generating logs.
+///
+/// Implemented on closures.
+///
+/// > **Note**: The `log` crate isn't used because dependencies complete pollute the logs.
+pub trait LogCallback {
+    /// Add a log entry.
+    fn log(&self, log_level: LogLevel, message: String);
+}
+
+impl<T: ?Sized + Fn(LogLevel, String)> LogCallback for T {
+    fn log(&self, log_level: LogLevel, message: String) {
+        (*self)(log_level, message)
+    }
+}
+
+/// Log level of a log entry.
+#[derive(Debug)]
+pub enum LogLevel {
+    Error = 1,
+    Warn = 2,
+    Info = 3,
+    Debug = 4,
+    Trace = 5,
 }
 
 #[derive(Debug)]
@@ -121,13 +148,19 @@ pub async fn run_until(config: Config<'_>, until: Pin<Box<dyn Future<Output = ()
         // Ignore a failure to spawn a thread, as we're going to run tasks on the current thread
         // later down this function.
         if let Err(err) = spawn_result {
-            log::warn!("tasks-pool-thread-spawn-failure; err={}", err);
+            config.log_callback.log(
+                LogLevel::Warn,
+                format!("tasks-pool-thread-spawn-failure; err={err}"),
+            );
         }
     }
 
     // Printing the SQLite version number can be useful for debugging purposes for example in case
     // a query fails.
-    log::debug!("sqlite-version; version={}", full_sqlite::sqlite_version());
+    config.log_callback.log(
+        LogLevel::Debug,
+        format!("sqlite-version; version={}", full_sqlite::sqlite_version()),
+    );
 
     let (database, database_existed) = {
         let (db, existed) = open_database(
@@ -305,6 +338,7 @@ pub async fn run_until(config: Config<'_>, until: Pin<Box<dyn Future<Output = ()
                 let executor = executor.clone();
                 Box::new(move |task| executor.spawn(task).detach())
             },
+            log_callback: config.log_callback.clone(),
             jaeger_service: jaeger_service.clone(),
         })
         .await
@@ -327,6 +361,7 @@ pub async fn run_until(config: Config<'_>, until: Pin<Box<dyn Future<Output = ()
             let executor = executor.clone();
             Box::new(move |task| executor.spawn(task).detach())
         },
+        log_callback: config.log_callback.clone(),
         genesis_block_hash,
         network_events_receiver: network_events_receivers.next().unwrap(),
         network_service: (network_service.clone(), 0),
@@ -345,6 +380,7 @@ pub async fn run_until(config: Config<'_>, until: Pin<Box<dyn Future<Output = ()
                     let executor = executor.clone();
                     Box::new(move |task| executor.spawn(task).detach())
                 },
+                log_callback: config.log_callback.clone(),
                 genesis_block_hash: relay_genesis_chain_information
                     .as_ref()
                     .unwrap()
@@ -390,6 +426,7 @@ pub async fn run_until(config: Config<'_>, until: Pin<Box<dyn Future<Output = ()
     let _json_rpc_service = if let Some(bind_address) = config.json_rpc_address {
         let result = json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
             tasks_executor: { &mut |task| executor.spawn(task).detach() },
+            log_callback: config.log_callback.clone(),
             bind_address,
         })
         .await;
@@ -402,13 +439,16 @@ pub async fn run_until(config: Config<'_>, until: Pin<Box<dyn Future<Output = ()
         None
     };
 
-    log::info!(
-        "successful-initialization; local_peer_id={}; database_is_new={:?}; \
-        finalized_block_hash={}; finalized_block_number={}",
-        local_peer_id,
-        !database_existed,
-        HashDisplay(&database_finalized_block_hash),
-        database_finalized_block_number,
+    config.log_callback.log(
+        LogLevel::Info,
+        format!(
+            "successful-initialization; local_peer_id={}; database_is_new={:?}; \
+            finalized_block_hash={}; finalized_block_number={}",
+            local_peer_id,
+            !database_existed,
+            HashDisplay(&database_finalized_block_hash),
+            database_finalized_block_number
+        ),
     );
 
     // Spawn the task printing the informant.

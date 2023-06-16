@@ -21,6 +21,7 @@
 use std::{
     borrow::Cow,
     fs, io,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -269,6 +270,17 @@ async fn run(cli_options: cli::CliOptionsRun) {
             libp2p_key,
             listen_addresses: cli_options.listen_addr,
             json_rpc_address: cli_options.json_rpc_address.0,
+            log_callback: Arc::new(|level, message| {
+                let level = match level {
+                    smoldot_full_node::LogLevel::Error => log::Level::Error,
+                    smoldot_full_node::LogLevel::Warn => log::Level::Warn,
+                    smoldot_full_node::LogLevel::Info => log::Level::Info,
+                    smoldot_full_node::LogLevel::Debug => log::Level::Debug,
+                    smoldot_full_node::LogLevel::Trace => log::Level::Trace,
+                };
+
+                log::log!(level, "{}", message)
+            }),
             jaeger_agent: cli_options.jaeger,
             show_informant: matches!(cli_output, cli::Output::Informant),
             informant_colors: match cli_options.color {
