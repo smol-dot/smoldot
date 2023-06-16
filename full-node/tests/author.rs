@@ -21,7 +21,7 @@ use std::sync::Arc;
 fn basic_block_generated() {
     // TODO: this test is a dummy and doesn't test anything
     smol::block_on(async move {
-        smoldot_full_node::run_until(
+        smoldot_full_node::start(
             smoldot_full_node::Config {
                 chain: smoldot_full_node::ChainConfig {
                     chain_spec: SUBSTRATE_NODE_TEMPLATE_CHAIN_SPEC.into(),

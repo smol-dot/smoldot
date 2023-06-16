@@ -334,7 +334,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
         listen
     };
 
-    smoldot_full_node::run_until(
+    smoldot_full_node::start(
         smoldot_full_node::Config {
             chain: smoldot_full_node::ChainConfig {
                 chain_spec,
