@@ -131,7 +131,7 @@ impl ClosestDescendant {
             .chain(iter::once(either::Right(&self.key_extra_nibbles)))
     }
 
-    /// Returns the same value as [`ClosestDescendant`] but as a `Vec`.
+    /// Returns the same value as [`ClosestDescendant::key`] but as a `Vec`.
     pub fn key_as_vec(&self) -> Vec<Nibble> {
         self.key().fold(Vec::new(), |mut a, b| {
             a.extend_from_slice(b.as_ref());
@@ -200,7 +200,7 @@ impl ClosestDescendant {
                     } else {
                         // If the element doesn't have a parent, then the trie is completely empty.
                         InProgress::Finished {
-                            trie_root_hash: trie::empty_trie_merkle_value(),
+                            trie_root_hash: trie::EMPTY_TRIE_MERKLE_VALUE,
                         }
                     };
                 }
@@ -226,7 +226,7 @@ impl StorageValue {
         self.0.current_node_full_key()
     }
 
-    /// Returns the same value as [`ClosestDescendant`] but as a `Vec`.
+    /// Returns the same value as [`ClosestDescendant::key`] but as a `Vec`.
     pub fn key_as_vec(&self) -> Vec<Nibble> {
         self.key().fold(Vec::new(), |mut a, b| {
             a.extend_from_slice(b.as_ref());
@@ -339,7 +339,7 @@ impl StorageValue {
                 // This case is handled separately in order to not generate
                 // a `TrieNodeInsertUpdateEvent` for a node that doesn't actually exist.
                 InProgress::Finished {
-                    trie_root_hash: trie::empty_trie_merkle_value(),
+                    trie_root_hash: trie::EMPTY_TRIE_MERKLE_VALUE,
                 }
             }
 
@@ -493,6 +493,14 @@ impl TrieNodeInsertUpdateEvent {
             .chain(iter::once(either::Right(&self.inserted_elem_partial_key)))
     }
 
+    /// Returns the same value as [`TrieNodeInsertUpdateEvent::key`] but as a `Vec`.
+    pub fn key_as_vec(&self) -> Vec<Nibble> {
+        self.key().fold(Vec::new(), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        })
+    }
+
     /// Returns the new Merkle value of the trie node that was inserted or updated.
     pub fn merkle_value(&self) -> &[u8] {
         self.merkle_value.as_ref()
@@ -557,6 +565,14 @@ impl TrieNodeRemoveEvent {
             .chain(iter::once(either::Right(&self.calculated_elem.partial_key)))
     }
 
+    /// Returns the same value as [`TrieNodeRemoveEvent::key`] but as a `Vec`.
+    pub fn key_as_vec(&self) -> Vec<Nibble> {
+        self.key().fold(Vec::new(), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        })
+    }
+
     /// Resume the computation.
     pub fn resume(mut self) -> InProgress {
         match self.ty {
@@ -566,7 +582,7 @@ impl TrieNodeRemoveEvent {
                     self.inner.next()
                 } else {
                     InProgress::Finished {
-                        trie_root_hash: trie::empty_trie_merkle_value(),
+                        trie_root_hash: trie::EMPTY_TRIE_MERKLE_VALUE,
                     }
                 }
             }

@@ -67,9 +67,9 @@ pub struct CliOptionsRun {
     /// Output to stdout: auto, none, informant, logs, logs-json.
     #[arg(long, default_value = "auto")]
     pub output: Output,
-    /// Log filter. Example: `foo=trace`
+    /// Level of logging: off, error, warn, info, debug, trace. Defaults to info.
     #[arg(long)]
-    pub log: Vec<String>,
+    pub log_level: Option<LogLevel>,
     /// Coloring: auto, always, never
     #[arg(long, default_value = "auto")]
     pub color: ColorChoice,
@@ -163,6 +163,42 @@ impl core::str::FromStr for ColorChoice {
 #[derive(Debug, derive_more::Display, derive_more::Error)]
 #[display(fmt = "Color must be one of: always, auto, never")]
 pub struct ColorChoiceParseError;
+
+#[derive(Debug, Clone)]
+pub enum LogLevel {
+    Off,
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl core::str::FromStr for LogLevel {
+    type Err = LogLevelParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.eq_ignore_ascii_case("off") {
+            Ok(LogLevel::Off)
+        } else if s.eq_ignore_ascii_case("error") {
+            Ok(LogLevel::Error)
+        } else if s.eq_ignore_ascii_case("warn") {
+            Ok(LogLevel::Warn)
+        } else if s.eq_ignore_ascii_case("info") {
+            Ok(LogLevel::Info)
+        } else if s.eq_ignore_ascii_case("debug") {
+            Ok(LogLevel::Debug)
+        } else if s.eq_ignore_ascii_case("trace") {
+            Ok(LogLevel::Trace)
+        } else {
+            Err(LogLevelParseError)
+        }
+    }
+}
+
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display(fmt = "Log level must be one of: off, error, warn, info, debug, trace")]
+pub struct LogLevelParseError;
 
 #[derive(Debug, Clone, clap::ValueEnum)]
 pub enum Output {

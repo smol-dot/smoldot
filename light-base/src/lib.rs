@@ -423,7 +423,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         parent_hash: [0; 32],
                         number: 0,
                         state_root: *chain_spec.genesis_storage().into_trie_root_hash().unwrap(),
-                        extrinsics_root: smoldot::trie::empty_trie_merkle_value(),
+                        extrinsics_root: smoldot::trie::EMPTY_TRIE_MERKLE_VALUE,
                         digest: header::DigestRef::empty().into(),
                     };
 
@@ -460,7 +460,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         parent_hash: [0; 32],
                         number: 0,
                         state_root: *chain_spec.genesis_storage().into_trie_root_hash().unwrap(),
-                        extrinsics_root: smoldot::trie::empty_trie_merkle_value(),
+                        extrinsics_root: smoldot::trie::EMPTY_TRIE_MERKLE_VALUE,
                         digest: header::DigestRef::empty().into(),
                     };
 

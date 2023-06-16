@@ -34,7 +34,7 @@ fn empty_trie_works() {
     loop {
         match calculation {
             InProgress::Finished { trie_root_hash } => {
-                assert_eq!(trie_root_hash, trie::empty_trie_merkle_value());
+                assert_eq!(trie_root_hash, trie::EMPTY_TRIE_MERKLE_VALUE);
                 return;
             }
             InProgress::ClosestDescendant(req) => {
@@ -410,7 +410,7 @@ fn fuzzing() {
         let expected_hash = trie_after_diff
             .root_user_data()
             .map(|n| *<&[u8; 32]>::try_from(n.1.as_ref().unwrap().as_ref()).unwrap())
-            .unwrap_or(trie::empty_trie_merkle_value());
+            .unwrap_or(trie::EMPTY_TRIE_MERKLE_VALUE);
         if obtained_hash != expected_hash {
             panic!(
                 "\nexpected = {:?}\ncalculated = {:?}\ntrie_before = {:?}\ndiff = {:?}",

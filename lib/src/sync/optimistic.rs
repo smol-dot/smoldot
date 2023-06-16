@@ -999,7 +999,7 @@ pub struct BlockVerificationSuccessFull {
     pub state_trie_version: TrieEntryVersion,
 
     /// List of changes to the off-chain storage that this block performs.
-    pub offchain_storage_changes: storage_diff::TrieDiff,
+    pub offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
 
     /// Runtime of the parent, as was provided at the beginning of the verification.
     pub parent_runtime: host::HostVmPrototype,

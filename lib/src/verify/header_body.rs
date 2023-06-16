@@ -43,10 +43,16 @@ pub struct Config<'a, TBody> {
 
     /// If `false`, digest items with an unknown consensus engine lead to an error.
     ///
-    /// Passing `true` can lead to blocks being considered as valid when they shouldn't. However,
-    /// even if `true` is passed, a recognized consensus engine must always be present.
-    /// Consequently, both `true` and `false` guarantee that the number of authorable blocks over
-    /// the network is bounded.
+    /// Note that blocks must always contain digest items that are relevant to the current
+    /// consensus algorithm. This option controls what happens when blocks contain additional
+    /// digest items that aren't recognized by the implementation.
+    ///
+    /// Passing `true` can lead to blocks being considered as valid when they shouldn't, as these
+    /// additional digest items could have some logic attached to them that restricts which blocks
+    /// are valid and which are not.
+    ///
+    /// However, since a recognized consensus engine must always be present, both `true` and
+    /// `false` guarantee that the number of authorable blocks over the network is bounded.
     pub allow_unknown_consensus_engines: bool,
 
     /// Time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time) (i.e.
@@ -124,7 +130,7 @@ pub struct Success {
     pub state_trie_version: TrieEntryVersion,
 
     /// List of changes to the off-chain storage that this block performs.
-    pub offchain_storage_changes: storage_diff::TrieDiff,
+    pub offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
 
     /// Concatenation of all the log messages printed by the runtime.
     pub logs: String,
@@ -762,7 +768,7 @@ pub struct RuntimeCompilation {
     parent_runtime: host::HostVmPrototype,
     storage_main_trie_changes: storage_diff::TrieDiff,
     state_trie_version: TrieEntryVersion,
-    offchain_storage_changes: storage_diff::TrieDiff,
+    offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
     logs: String,
     heap_pages: vm::HeapPages,
     parent_code: Option<Option<Vec<u8>>>,

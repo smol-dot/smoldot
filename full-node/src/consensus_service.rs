@@ -24,7 +24,7 @@
 // TODO: doc
 // TODO: re-review this once finished
 
-use crate::{database_thread, jaeger_service, network_service};
+use crate::{database_thread, jaeger_service, network_service, LogCallback, LogLevel};
 
 use core::num::NonZeroU32;
 use futures_channel::{mpsc, oneshot};
@@ -54,6 +54,9 @@ use std::{
 pub struct Config {
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(future::BoxFuture<'static, ()>) + Send>,
+
+    /// Function called in order to notify of something.
+    pub log_callback: Arc<dyn LogCallback + Send + Sync>,
 
     /// Database to use to read and write information about the chain.
     pub database: Arc<database_thread::DatabaseThread>,
@@ -198,10 +201,12 @@ impl ConsensusService {
             ]
             && finalized_block_number <= 1500988
         {
-            log::warn!(
+            config.log_callback.log(
+                LogLevel::Warn,
                 "The Kusama chain is known to be borked at block #1491596. The official Polkadot \
                 client works around this issue by hardcoding a fork in its source code. Smoldot \
                 does not support this hardcoded fork and will thus fail to sync past this block."
+                    .to_string(),
             );
         }
 
@@ -262,6 +267,7 @@ impl ConsensusService {
             database: config.database,
             peers_source_id_map: Default::default(),
             tasks_executor: config.tasks_executor,
+            log_callback: config.log_callback,
             block_requests_finished_tx,
             block_requests_finished_rx,
             jaeger_service: config.jaeger_service,
@@ -367,6 +373,9 @@ struct SyncBackground {
 
     /// See [`Config::tasks_executor`].
     tasks_executor: Box<dyn FnMut(future::BoxFuture<'static, ()>) + Send>,
+
+    /// See [`Config::log_callback`].
+    log_callback: Arc<dyn LogCallback + Send + Sync>,
 
     /// Block requests that have been emitted on the networking service and that are still in
     /// progress. Each entry in this field also has an entry in [`SyncBackground::sync`].
@@ -688,10 +697,13 @@ impl SyncBackground {
         // TODO: it is possible that the current best block is already the same authoring slot as the slot we want to claim ; unclear how to solve this
 
         let parent_number = self.sync.best_block_number();
-        log::debug!(
-            "block-author-start; parent_hash={}; parent_number={}",
-            HashDisplay(&self.sync.best_block_hash()),
-            parent_number,
+        self.log_callback.log(
+            LogLevel::Debug,
+            format!(
+                "block-author-start; parent_hash={}; parent_number={}",
+                HashDisplay(&self.sync.best_block_hash()),
+                parent_number,
+            ),
         );
 
         // We would like to create a span for authoring the new block, but the trace id depends on
@@ -776,7 +788,10 @@ impl SyncBackground {
                                 // removed from the keystore in parallel of the block authoring
                                 // process, or the key is maybe no longer accessible because of
                                 // another issue.
-                                log::warn!("block-author-signing-error; error={}", error);
+                                self.log_callback.log(
+                                    LogLevel::Warn,
+                                    format!("block-author-signing-error; error={}", error),
+                                );
                                 self.block_authoring = None;
                                 return;
                             }
@@ -802,7 +817,10 @@ impl SyncBackground {
                         // the same state as if it had successfully generated a block.
                         self.block_authoring = Some((author::build::Builder::Idle, Vec::new()));
                         // TODO: log the runtime logs
-                        log::warn!("block-author-error; error={}", error);
+                        self.log_callback.log(
+                            LogLevel::Warn,
+                            format!("block-author-error; error={}", error),
+                        );
                         return;
                     }
 
@@ -815,7 +833,13 @@ impl SyncBackground {
                     author::build::BuilderAuthoring::ApplyExtrinsicResult { result, resume } => {
                         if let Err(error) = result {
                             // TODO: include transaction bytes or something?
-                            log::warn!("block-author-transaction-inclusion-error; error={}", error);
+                            self.log_callback.log(
+                                LogLevel::Warn,
+                                format!(
+                                    "block-author-transaction-inclusion-error; error={}",
+                                    error
+                                ),
+                            );
                         }
 
                         // TODO: actually implement including transactions in the blocks
@@ -826,7 +850,8 @@ impl SyncBackground {
                     author::build::BuilderAuthoring::StorageGet(req) => {
                         // TODO: child tries not supported
                         if req.child_trie().is_some() {
-                            log::warn!("child-tries-not-supported");
+                            self.log_callback
+                                .log(LogLevel::Warn, "child-tries-not-supported".to_owned());
                             block_authoring =
                                 req.inject_value(None::<(iter::Empty<&'static [u8]>, _)>);
                             continue;
@@ -854,7 +879,8 @@ impl SyncBackground {
                     author::build::BuilderAuthoring::NextKey(req) => {
                         // TODO: child tries not supported
                         if req.child_trie().is_some() {
-                            log::warn!("child-tries-not-supported");
+                            self.log_callback
+                                .log(LogLevel::Warn, "child-tries-not-supported".to_string());
                             block_authoring = req.inject_key(None::<iter::Empty<_>>);
                             continue;
                         }
@@ -906,11 +932,14 @@ impl SyncBackground {
 
         // Block has now finished being generated.
         let new_block_hash = header::hash_from_scale_encoded_header(&new_block_header);
-        log::info!(
-            "block-generated; hash={}; body_len={}; runtime_logs={:?}",
-            HashDisplay(&new_block_hash),
-            new_block_body.len(),
-            authoring_logs
+        self.log_callback.log(
+            LogLevel::Info,
+            format!(
+                "block-generated; hash={}; body_len={}; runtime_logs={:?}",
+                HashDisplay(&new_block_hash),
+                new_block_body.len(),
+                authoring_logs
+            ),
         );
         let _jaeger_span = self
             .jaeger_service
@@ -924,9 +953,12 @@ impl SyncBackground {
         match authoring_end.elapsed() {
             Ok(now_minus_end) if now_minus_end < Duration::from_millis(500) => {}
             _ => {
-                log::warn!(
-                    "block-generation-too-long; hash={}",
-                    HashDisplay(&new_block_hash)
+                self.log_callback.log(
+                    LogLevel::Warn,
+                    format!(
+                        "block-generation-too-long; hash={}",
+                        HashDisplay(&new_block_hash)
+                    ),
                 );
             }
         }
@@ -1019,7 +1051,10 @@ impl SyncBackground {
                 all::DesiredRequest::BlocksRequest { .. }
                     if source_id == self.block_author_sync_source =>
                 {
-                    log::debug!("queue-locally-authored-block-for-import");
+                    self.log_callback.log(
+                        LogLevel::Debug,
+                        "queue-locally-authored-block-for-import".to_string(),
+                    );
 
                     let (_, block_hash, scale_encoded_header, scale_encoded_extrinsics) =
                         self.authored_block.take().unwrap();
@@ -1166,13 +1201,16 @@ impl SyncBackground {
                             // Print a separate warning because it is important for the user
                             // to be aware of the verification failure.
                             // `error` is last because it's quite big.
-                            log::warn!(
-                                "failed-block-verification; hash={}; height={}; \
+                            self.log_callback.log(
+                                LogLevel::Warn,
+                                format!(
+                                    "failed-block-verification; hash={}; height={}; \
                                 total_duration={:?}; error={}",
-                                HashDisplay(&hash_to_verify),
-                                height_to_verify,
-                                when_verification_started.elapsed(),
-                                error
+                                    HashDisplay(&hash_to_verify),
+                                    height_to_verify,
+                                    when_verification_started.elapsed(),
+                                    error
+                                ),
                             );
                             *parent_runtime_arc.try_lock().unwrap() = Some(parent_runtime);
                             self.sync = sync_out;
@@ -1187,16 +1225,19 @@ impl SyncBackground {
                             new_runtime,
                             ..
                         } => {
-                            log::debug!(
-                                "block-verification-success; hash={}; height={}; \
+                            self.log_callback.log(
+                                LogLevel::Debug,
+                                format!(
+                                    "block-verification-success; hash={}; height={}; \
                                 total_duration={:?}; database_accesses_duration={:?}; \
                                 runtime_build_duration={:?}; is_new_best={:?}",
-                                HashDisplay(&hash_to_verify),
-                                height_to_verify,
-                                when_verification_started.elapsed(),
-                                database_accesses_duration,
-                                runtime_build_duration,
-                                is_new_best
+                                    HashDisplay(&hash_to_verify),
+                                    height_to_verify,
+                                    when_verification_started.elapsed(),
+                                    database_accesses_duration,
+                                    runtime_build_duration,
+                                    is_new_best
+                                ),
                             );
 
                             // Processing has made a step forward.
@@ -1399,7 +1440,10 @@ impl SyncBackground {
                             updates_best_block,
                         },
                     ) => {
-                        log::debug!("finality-proof-verification; outcome=success");
+                        self.log_callback.log(
+                            LogLevel::Debug,
+                            "finality-proof-verification; outcome=success".to_string(),
+                        );
                         self.sync = sync_out;
 
                         if updates_best_block {
@@ -1429,22 +1473,34 @@ impl SyncBackground {
                         (self, true)
                     }
                     (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitPending) => {
-                        log::debug!("finality-proof-verification; outcome=pending");
+                        self.log_callback.log(
+                            LogLevel::Debug,
+                            "finality-proof-verification; outcome=pending".to_string(),
+                        );
                         self.sync = sync_out;
                         (self, true)
                     }
                     (sync_out, all::FinalityProofVerifyOutcome::AlreadyFinalized) => {
-                        log::debug!("finality-proof-verification; outcome=already-finalized");
+                        self.log_callback.log(
+                            LogLevel::Debug,
+                            "finality-proof-verification; outcome=already-finalized".to_string(),
+                        );
                         self.sync = sync_out;
                         (self, true)
                     }
                     (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitError(error)) => {
-                        log::warn!("finality-proof-verification-failure; error={}", error);
+                        self.log_callback.log(
+                            LogLevel::Warn,
+                            format!("finality-proof-verification-failure; error={}", error),
+                        );
                         self.sync = sync_out;
                         (self, true)
                     }
                     (sync_out, all::FinalityProofVerifyOutcome::JustificationError(error)) => {
-                        log::warn!("finality-proof-verification-failure; error={}", error);
+                        self.log_callback.log(
+                            LogLevel::Warn,
+                            format!("finality-proof-verification-failure; error={}", error),
+                        );
                         self.sync = sync_out;
                         (self, true)
                     }
@@ -1461,10 +1517,13 @@ impl SyncBackground {
 
                 match verify.perform(unix_time, NonFinalizedBlock::NotVerified) {
                     all::HeaderVerifyOutcome::Success { sync: sync_out, .. } => {
-                        log::debug!(
-                            "header-verification; hash={}; height={}; outcome=success",
-                            HashDisplay(&hash_to_verify),
-                            height_to_verify
+                        self.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "header-verification; hash={}; height={}; outcome=success",
+                                HashDisplay(&hash_to_verify),
+                                height_to_verify
+                            ),
                         );
                         self.sync = sync_out;
                         (self, true)
@@ -1474,11 +1533,14 @@ impl SyncBackground {
                         error,
                         ..
                     } => {
-                        log::debug!(
+                        self.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
                             "header-verification; hash={}; height={}; outcome=failure; error={}",
                             HashDisplay(&hash_to_verify),
                             height_to_verify,
                             error
+                        ),
                         );
                         self.sync = sync_out;
                         (self, true)
