@@ -28,7 +28,7 @@ fn all_tests() {
     #[derive(serde::Deserialize)]
     struct Test {
         block: Block,
-        storage: Vec<StorageEntry>,
+        storage: Storage,
     }
 
     #[derive(serde::Deserialize)]
@@ -55,11 +55,18 @@ fn all_tests() {
     }
 
     #[derive(serde::Deserialize)]
-    struct StorageEntry {
+    struct Storage {
+        root: Vec<TrieEntry>,
+        child_tries: hashbrown::HashMap<HexString, Vec<TrieEntry>>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct TrieEntry {
         key: HexString,
         value: HexString,
     }
 
+    #[derive(PartialEq, Eq, Hash)]
     struct HexString(Vec<u8>);
     impl<'a> serde::Deserialize<'a> for HexString {
         fn deserialize<D>(deserializer: D) -> Result<HexString, D::Error>
@@ -84,8 +91,10 @@ fn all_tests() {
     }
 
     let test_data = serde_json::from_str::<Test>(include_str!("./test.json")).unwrap();
+    // TODO: child tries
     let storage = test_data
         .storage
+        .root
         .into_iter()
         .map(|e| (e.key.0, e.value.0))
         .collect::<BTreeMap<_, _>>();
