@@ -236,19 +236,29 @@ impl StorageChanges {
 
 impl fmt::Debug for StorageChanges {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // TODO: not debugged, could be improved
         f.debug_map()
             .entries(
                 self.trie_changes_iter_ordered()
                     .map(|(child_trie, key, change)| {
-                        let key_str = key
+                        let mut key_str = key
                             .iter()
                             .copied()
                             .map(|n| format!("{:x}", n))
                             .collect::<String>();
+                        if key_str.is_empty() {
+                            key_str = "∅".to_owned();
+                        }
 
                         let key = match child_trie {
-                            Some(ct) => format!("<{}>:{}", hex::encode(ct), key_str),
+                            Some(ct) => format!(
+                                "<{}>:{}",
+                                if ct.is_empty() {
+                                    "∅".to_string()
+                                } else {
+                                    hex::encode(ct)
+                                },
+                                key_str
+                            ),
                             None => format!("<main>:{}", key_str),
                         };
 
@@ -259,7 +269,7 @@ impl fmt::Debug for StorageChanges {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum TrieChange<'a> {
     /// Trie node is either newly-created, or already existed and has a new Merkle value.
     InsertUpdate {
@@ -274,10 +284,63 @@ pub enum TrieChange<'a> {
     Remove,
 }
 
-#[derive(Debug, Clone)]
+impl<'a> fmt::Debug for TrieChange<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TrieChange::Remove => f.debug_tuple("Remove").finish(),
+            TrieChange::InsertUpdate {
+                new_merkle_value,
+                partial_key,
+                children_merkle_values,
+                new_storage_value,
+            } => f
+                .debug_struct("InsertUpdate")
+                .field("new_merkle_value", &hex::encode(new_merkle_value))
+                .field(
+                    "partial_key",
+                    &partial_key
+                        .iter()
+                        .map(|n| format!("{:x}", n))
+                        .collect::<String>(),
+                )
+                .field(
+                    "children_merkle_values",
+                    &children_merkle_values
+                        .iter()
+                        .map(|child| match child {
+                            Some(child) => hex::encode(child),
+                            None => "∅".to_string(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )
+                .field("new_storage_value", new_storage_value)
+                .finish(),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub enum TrieChangeStorageValue<'a> {
     Unmodified,
     Modified { new_value: Option<&'a [u8]> },
+}
+
+impl<'a> fmt::Debug for TrieChangeStorageValue<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TrieChangeStorageValue::Unmodified => f.debug_tuple("Unmodified").finish(),
+            TrieChangeStorageValue::Modified { new_value: None } => {
+                f.debug_tuple("Modified").field(&"<deleted>").finish()
+            }
+            TrieChangeStorageValue::Modified {
+                new_value: Some(new_value),
+            } => f
+                .debug_tuple("Modified")
+                .field(&hex::encode(new_value))
+                .finish(),
+        }
+    }
 }
 
 /// Function execution has succeeded. Contains the return value of the call.
