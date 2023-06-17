@@ -99,7 +99,11 @@ pub fn run(
             .run_vectored(config.function_to_call, config.parameter)?
             .into(),
         pending_storage_changes: PendingStorageChanges {
-            trie_diffs: hashbrown::HashMap::with_capacity_and_hasher(4, Default::default()),
+            trie_diffs: {
+                let mut hm = hashbrown::HashMap::with_capacity_and_hasher(4, Default::default());
+                hm.insert(None, config.storage_main_trie_changes);
+                hm
+            },
             stale_child_tries_root_hashes: hashbrown::HashSet::with_capacity_and_hasher(
                 4,
                 Default::default(),
