@@ -43,7 +43,7 @@ use crate::{
 };
 
 use alloc::{borrow::ToOwned as _, collections::BTreeMap, string::String, vec::Vec};
-use core::{fmt, iter};
+use core::{fmt, iter, ops};
 
 pub use trie::{Nibble, TrieEntryVersion};
 
@@ -106,6 +106,7 @@ pub fn run(
                 0,
                 Default::default(),
             ),
+            tries_changes: BTreeMap::new(),
         },
         state_trie_version,
         transactions_stack: Vec::new(),
@@ -166,10 +167,60 @@ impl StorageChanges {
 
     /// Returns an iterator over the list of all changes performed to the tries (main trie and
     /// child tries included).
-    pub fn trie_changes_iter_unordered(
+    pub fn trie_changes_iter_ordered(
         &'_ self,
     ) -> impl Iterator<Item = (Option<&'_ [u8]>, &'_ [Nibble], TrieChange<'_>)> {
-        iter::empty() // TODO: /!\
+        self.inner
+            .tries_changes
+            .iter()
+            .map(|((child_trie, key), change)| {
+                let change = match change {
+                    PendingStorageChangesTrieNode::Removed => TrieChange::Remove,
+                    PendingStorageChangesTrieNode::InsertUpdate {
+                        new_merkle_value,
+                        partial_key,
+                        children_merkle_values,
+                    } => {
+                        debug_assert!(key.ends_with(&partial_key));
+
+                        let new_storage_value = if key.len() % 2 == 0 {
+                            let key_bytes = trie::nibbles_to_bytes_truncate(key.iter().copied())
+                                .collect::<Vec<_>>();
+
+                            let diff = match child_trie.as_ref() {
+                                None => Some(&self.inner.main_trie),
+                                Some(ct) => self.inner.default_child_tries.get(ct),
+                            };
+
+                            match diff.and_then(|diff| diff.diff_get(&key_bytes)) {
+                                None => TrieChangeStorageValue::Unmodified,
+                                Some((new_value, ())) => {
+                                    TrieChangeStorageValue::Modified { new_value }
+                                }
+                            }
+                        } else {
+                            TrieChangeStorageValue::Unmodified
+                        };
+
+                        let children_merkle_values = <Box<[_; 16]>>::try_from(
+                            children_merkle_values
+                                .iter()
+                                .map(|child| child.as_ref().map(|mv| &mv[..]))
+                                .collect::<Box<[_]>>(),
+                        )
+                        .unwrap();
+
+                        TrieChange::InsertUpdate {
+                            new_merkle_value,
+                            partial_key,
+                            children_merkle_values,
+                            new_storage_value,
+                        }
+                    }
+                };
+
+                (child_trie.as_deref(), &key[..], change)
+            })
     }
 
     /// Returns a diff of the main trie.
@@ -181,11 +232,24 @@ impl StorageChanges {
 
 impl fmt::Debug for StorageChanges {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // TODO: do properly
+        // TODO: not debugged, could be improved
         f.debug_map()
             .entries(
-                self.trie_changes_iter_unordered()
-                    .map(|(child_trie, key, change)| ((), ())),
+                self.trie_changes_iter_ordered()
+                    .map(|(child_trie, key, change)| {
+                        let key_str = key
+                            .iter()
+                            .copied()
+                            .map(|n| format!("{:x}", n))
+                            .collect::<String>();
+
+                        let key = match child_trie {
+                            Some(ct) => format!("<{}>:{}", hex::encode(ct), key_str),
+                            None => format!("<main>:{}", key_str),
+                        };
+
+                        (key, change)
+                    }),
             )
             .finish()
     }
@@ -198,7 +262,7 @@ pub enum TrieChange<'a> {
         /// New Merkle value associated to this trie node. Always inferior or equal to 32 bytes.
         new_merkle_value: &'a [u8],
         partial_key: &'a [Nibble],
-        children_merkle_values: [Option<&'a [u8]>; 16],
+        children_merkle_values: Box<[Option<&'a [u8]>; 16]>,
         /// Change to the storage value of that trie node.
         new_storage_value: TrieChangeStorageValue<'a>,
     },
@@ -799,6 +863,20 @@ struct PendingStorageChanges {
     /// be recalculated (and for child tries stored into the main trie).
     /// This is necessary in order to populate [`PendingStorageChanges::tries_nodes_changes`].
     stale_child_tries_root_hashes: hashbrown::HashSet<Option<Vec<u8>>, fnv::FnvBuildHasher>,
+
+    /// Changes to the trie nodes of all the tries.
+    tries_changes: BTreeMap<(Option<Vec<u8>>, Vec<Nibble>), PendingStorageChangesTrieNode>,
+}
+
+/// See [`PendingStorageChanges::tries_changes`].
+#[derive(Clone)]
+enum PendingStorageChangesTrieNode {
+    Removed,
+    InsertUpdate {
+        new_merkle_value: Vec<u8>,
+        partial_key: Vec<Nibble>,
+        children_merkle_values: Box<[Option<Vec<u8>>; 16]>,
+    },
 }
 
 /// Writing and reading keys the main trie under this prefix obeys special rules.
@@ -855,10 +933,30 @@ impl Inner {
                     );
                 }
                 Some((trie, trie_root_calculator::InProgress::TrieNodeInsertUpdateEvent(ev))) => {
+                    self.pending_storage_changes.tries_changes.insert(
+                        (trie.clone(), ev.key_as_vec()),
+                        PendingStorageChangesTrieNode::InsertUpdate {
+                            new_merkle_value: ev.merkle_value().to_owned(),
+                            partial_key: ev.partial_key().to_owned(),
+                            children_merkle_values: TryFrom::try_from(
+                                ev.children_merkle_values()
+                                    .map(|mv| mv.map(|mv| mv.to_owned()))
+                                    .collect::<Vec<_>>()
+                                    .into_boxed_slice(),
+                            )
+                            .unwrap(),
+                        },
+                    );
+
                     self.root_calculation = Some((trie, ev.resume()));
                     continue;
                 }
                 Some((trie, trie_root_calculator::InProgress::TrieNodeRemoveEvent(ev))) => {
+                    self.pending_storage_changes.tries_changes.insert(
+                        (trie.clone(), ev.key_as_vec()),
+                        PendingStorageChangesTrieNode::Removed,
+                    );
+
                     self.root_calculation = Some((trie, ev.resume()));
                     continue;
                 }
@@ -945,6 +1043,34 @@ impl Inner {
                 };
 
                 if let Some(trie_to_flush) = trie_to_flush {
+                    // Remove from `tries_changes` all the changes concerning this trie.
+                    // TODO: O(n) and generally not optimized
+                    {
+                        let to_remove = self
+                            .pending_storage_changes
+                            .tries_changes
+                            .range((
+                                ops::Bound::Included((
+                                    trie_to_flush
+                                        .as_ref()
+                                        .map(|t| AsRef::<[u8]>::as_ref(t).to_owned()),
+                                    Vec::new(),
+                                )),
+                                ops::Bound::Unbounded,
+                            ))
+                            .take_while(|((ct, _), _)| {
+                                ct.as_ref().map(|ct| &ct[..])
+                                    == trie_to_flush.as_ref().map(AsRef::<[u8]>::as_ref)
+                            })
+                            .map(|(k, _)| k.clone())
+                            .collect::<Vec<_>>();
+                        for to_remove in to_remove {
+                            self.pending_storage_changes
+                                .tries_changes
+                                .remove(&to_remove);
+                        }
+                    }
+
                     // TODO: don't clone?
                     let diff = match trie_to_flush.as_ref() {
                         None => self.pending_storage_changes.main_trie.clone(),
