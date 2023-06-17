@@ -854,7 +854,7 @@ struct PendingStorageChanges {
 
     /// List of tries (`None` for the main trie and `Some` for child tries) whose root hash must
     /// be recalculated (and for child tries stored into the main trie).
-    /// This is necessary in order to populate [`PendingStorageChanges::tries_nodes_changes`].
+    /// This is necessary in order to populate [`PendingStorageChanges::tries_changes`].
     stale_child_tries_root_hashes: hashbrown::HashSet<Option<Vec<u8>>, fnv::FnvBuildHasher>,
 
     /// Changes to the trie nodes of all the tries.
