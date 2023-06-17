@@ -22,7 +22,7 @@
 
 use crate::{
     chain::{chain_information, fork_tree},
-    executor::{host, storage_diff},
+    executor::host,
     header, verify,
 };
 
@@ -34,7 +34,7 @@ use super::{
 use alloc::boxed::Box;
 use core::cmp::Ordering;
 
-pub use verify::header_body::{Nibble, TrieEntryVersion};
+pub use verify::header_body::{Nibble, StorageChanges, TrieEntryVersion};
 
 impl<T> NonFinalizedTree<T> {
     /// Verifies the given block.
@@ -619,7 +619,7 @@ impl<T> VerifyContext<T> {
                 BodyVerifyStep2::Finished {
                     parent_runtime: success.parent_runtime,
                     new_runtime: success.new_runtime,
-                    storage_main_trie_changes: success.storage_main_trie_changes,
+                    storage_changes: success.storage_changes,
                     state_trie_version: success.state_trie_version,
                     offchain_storage_changes: success.offchain_storage_changes,
                     insert: BodyInsert(Box::new(BodyInsertInner {
@@ -861,14 +861,14 @@ pub enum BodyVerifyStep2<T> {
     Finished {
         /// Value that was passed to [`BodyVerifyRuntimeRequired::resume`].
         parent_runtime: host::HostVmPrototype,
-        /// Contains `Some` if and only if [`BodyVerifyStep2::Finished::storage_main_trie_changes`]
+        /// Contains `Some` if and only if [`BodyVerifyStep2::Finished::storage_changes`]
         /// contains a change in the `:code` or `:heappages` keys, indicating that the runtime has
         /// been modified. Contains the new runtime.
         new_runtime: Option<host::HostVmPrototype>,
         /// List of changes to the storage main trie that the block performs.
-        storage_main_trie_changes: storage_diff::TrieDiff,
+        storage_changes: StorageChanges,
         /// State trie version indicated by the runtime. All the storage changes indicated by
-        /// [`BodyVerifyStep2::Finished::storage_main_trie_changes`] should store this version
+        /// [`BodyVerifyStep2::Finished::storage_changes`] should store this version
         /// alongside with them.
         state_trie_version: TrieEntryVersion,
         /// List of changes to the off-chain storage that this block performs.

@@ -458,7 +458,7 @@ impl Query {
                             iter::once(info.scale_encoded_transaction),
                             info.transaction_source,
                         ),
-                        storage_main_trie_changes: success.storage_main_trie_changes,
+                        storage_main_trie_changes: success.storage_changes.into_main_trie_diff(),
                         offchain_storage_changes: success.offchain_storage_changes,
                         max_log_level: info.max_log_level,
                     });

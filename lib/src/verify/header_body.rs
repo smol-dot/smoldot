@@ -17,7 +17,7 @@
 
 use crate::{
     chain::chain_information,
-    executor::{self, host, runtime_host, storage_diff, vm},
+    executor::{self, host, runtime_host, vm},
     header, util,
     verify::{aura, babe, inherents},
 };
@@ -25,7 +25,7 @@ use crate::{
 use alloc::{string::String, vec::Vec};
 use core::{iter, num::NonZeroU64, time::Duration};
 
-pub use runtime_host::{Nibble, TrieEntryVersion};
+pub use runtime_host::{Nibble, StorageChanges, TrieEntryVersion};
 
 /// Configuration for a block verification.
 pub struct Config<'a, TBody> {
@@ -114,7 +114,7 @@ pub struct Success {
     /// Runtime that was passed by [`Config`].
     pub parent_runtime: host::HostVmPrototype,
 
-    /// Contains `Some` if and only if [`Success::storage_main_trie_changes`] contains a change in
+    /// Contains `Some` if and only if [`Success::storage_changes`] contains a change in
     /// the `:code` or `:heappages` keys, indicating that the runtime has been modified. Contains
     /// the new runtime.
     pub new_runtime: Option<host::HostVmPrototype>,
@@ -123,10 +123,10 @@ pub struct Success {
     pub consensus: SuccessConsensus,
 
     /// List of changes to the storage main trie that the block performs.
-    pub storage_main_trie_changes: storage_diff::TrieDiff,
+    pub storage_changes: StorageChanges,
 
     /// State trie version indicated by the runtime. All the storage changes indicated by
-    /// [`Success::storage_main_trie_changes`] should store this version alongside with them.
+    /// [`Success::storage_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
 
     /// List of changes to the off-chain storage that this block performs.
@@ -462,7 +462,9 @@ impl VerifyInner {
                             virtual_machine: success.virtual_machine.into_prototype(),
                             function_to_call: "Core_execute_block",
                             parameter: iter::once(&execute_block_parameters),
-                            storage_main_trie_changes: success.storage_main_trie_changes,
+                            storage_main_trie_changes: success
+                                .storage_changes
+                                .into_main_trie_diff(),
                             offchain_storage_changes: success.offchain_storage_changes,
                             max_log_level: 0,
                         });
@@ -494,14 +496,14 @@ impl VerifyInner {
                     }
 
                     match (
-                        success.storage_main_trie_changes.diff_get(&b":code"[..]),
+                        success.storage_changes.main_trie_diff_get(&b":code"[..]),
                         parent_code,
                         success
-                            .storage_main_trie_changes
-                            .diff_get(&b":heappages"[..]),
+                            .storage_changes
+                            .main_trie_diff_get(&b":heappages"[..]),
                     ) {
                         (None, _, None) => {}
-                        (Some((None, ())), _, _) => {
+                        (Some(None), _, _) => {
                             return Verify::Finished(Err((
                                 Error::CodeKeyErased,
                                 success.virtual_machine.into_prototype(),
@@ -519,12 +521,12 @@ impl VerifyInner {
                                 success.virtual_machine.into_prototype(),
                             )))
                         }
-                        (Some((Some(_), ())), parent_code, heap_pages)
+                        (Some(Some(_)), parent_code, heap_pages)
                         | (_, parent_code @ Some(Some(_)), heap_pages) => {
                             let parent_runtime = success.virtual_machine.into_prototype();
 
                             let heap_pages = match heap_pages {
-                                Some((heap_pages, ())) => {
+                                Some(heap_pages) => {
                                     match executor::storage_heap_pages_to_value(heap_pages) {
                                         Ok(hp) => hp,
                                         Err(err) => {
@@ -545,7 +547,7 @@ impl VerifyInner {
                                 parent_code,
                                 logs: success.logs,
                                 offchain_storage_changes: success.offchain_storage_changes,
-                                storage_main_trie_changes: success.storage_main_trie_changes,
+                                storage_changes: success.storage_changes,
                                 state_trie_version: success.state_trie_version,
                             });
                         }
@@ -555,7 +557,7 @@ impl VerifyInner {
                         parent_runtime: success.virtual_machine.into_prototype(),
                         new_runtime: None,
                         consensus: self.consensus_success,
-                        storage_main_trie_changes: success.storage_main_trie_changes,
+                        storage_changes: success.storage_changes,
                         state_trie_version: success.state_trie_version,
                         offchain_storage_changes: success.offchain_storage_changes,
                         logs: success.logs,
@@ -766,7 +768,7 @@ impl StorageNextKey {
 #[must_use]
 pub struct RuntimeCompilation {
     parent_runtime: host::HostVmPrototype,
-    storage_main_trie_changes: storage_diff::TrieDiff,
+    storage_changes: StorageChanges,
     state_trie_version: TrieEntryVersion,
     offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
     logs: String,
@@ -780,9 +782,8 @@ impl RuntimeCompilation {
     pub fn build(self) -> Verify {
         // A `RuntimeCompilation` object is built only if `:code` is available.
         let code = self
-            .storage_main_trie_changes
-            .diff_get(&b":code"[..])
-            .map(|(value, _)| value)
+            .storage_changes
+            .main_trie_diff_get(&b":code"[..])
             .or(self.parent_code.as_ref().map(|v| v.as_deref()))
             .unwrap()
             .unwrap();
@@ -806,7 +807,7 @@ impl RuntimeCompilation {
             parent_runtime: self.parent_runtime,
             new_runtime: Some(new_runtime),
             consensus: self.consensus_success,
-            storage_main_trie_changes: self.storage_main_trie_changes,
+            storage_changes: self.storage_changes,
             state_trie_version: self.state_trie_version,
             offchain_storage_changes: self.offchain_storage_changes,
             logs: self.logs,

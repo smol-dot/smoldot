@@ -48,7 +48,7 @@
 mod tests;
 
 use crate::{
-    executor::{host, runtime_host, storage_diff},
+    executor::{host, runtime_host},
     header, util,
     verify::inherents,
 };
@@ -56,7 +56,7 @@ use crate::{
 use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
 use core::{iter, mem};
 
-pub use runtime_host::{Nibble, TrieEntryVersion};
+pub use runtime_host::{Nibble, StorageChanges, TrieEntryVersion};
 
 /// Configuration for a block generation.
 pub struct Config<'a> {
@@ -113,9 +113,9 @@ pub struct Success {
     /// Runtime that was passed by [`Config`].
     pub parent_runtime: host::HostVmPrototype,
     /// List of changes to the storage main trie that the block performs.
-    pub storage_main_trie_changes: storage_diff::TrieDiff,
+    pub storage_changes: StorageChanges,
     /// State trie version indicated by the runtime. All the storage changes indicated by
-    /// [`Success::storage_main_trie_changes`] should store this version alongside with them.
+    /// [`Success::storage_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
     /// List of changes to the off-chain storage that this block performs.
     pub offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
@@ -301,7 +301,7 @@ impl BlockBuild {
                     return BlockBuild::InherentExtrinsics(InherentExtrinsics {
                         shared,
                         parent_runtime: success.virtual_machine.into_prototype(),
-                        storage_main_trie_changes: success.storage_main_trie_changes,
+                        storage_changes: success.storage_changes,
                         offchain_storage_changes: success.offchain_storage_changes,
                     });
                 }
@@ -337,7 +337,7 @@ impl BlockBuild {
                         virtual_machine: success.virtual_machine.into_prototype(),
                         function_to_call: "BlockBuilder_apply_extrinsic",
                         parameter: iter::once(extrinsic),
-                        storage_main_trie_changes: success.storage_main_trie_changes,
+                        storage_main_trie_changes: success.storage_changes.into_main_trie_diff(),
                         offchain_storage_changes: success.offchain_storage_changes,
                         max_log_level: shared.max_log_level,
                     });
@@ -354,7 +354,7 @@ impl BlockBuild {
                     return BlockBuild::ApplyExtrinsic(ApplyExtrinsic {
                         shared,
                         parent_runtime: success.virtual_machine.into_prototype(),
-                        storage_main_trie_changes: success.storage_main_trie_changes,
+                        storage_changes: success.storage_changes,
                         offchain_storage_changes: success.offchain_storage_changes,
                     });
                 }
@@ -437,7 +437,7 @@ impl BlockBuild {
                         resume: ApplyExtrinsic {
                             shared,
                             parent_runtime: success.virtual_machine.into_prototype(),
-                            storage_main_trie_changes: success.storage_main_trie_changes,
+                            storage_changes: success.storage_changes,
                             offchain_storage_changes: success.offchain_storage_changes,
                         },
                     };
@@ -453,7 +453,7 @@ impl BlockBuild {
                         scale_encoded_header,
                         body: shared.block_body,
                         parent_runtime: success.virtual_machine.into_prototype(),
-                        storage_main_trie_changes: success.storage_main_trie_changes,
+                        storage_changes: success.storage_changes,
                         state_trie_version: success.state_trie_version,
                         offchain_storage_changes: success.offchain_storage_changes,
                         logs: shared.logs,
@@ -498,7 +498,7 @@ enum Stage {
 pub struct InherentExtrinsics {
     shared: Shared,
     parent_runtime: host::HostVmPrototype,
-    storage_main_trie_changes: storage_diff::TrieDiff,
+    storage_changes: StorageChanges,
     offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
 }
 
@@ -541,7 +541,7 @@ impl InherentExtrinsics {
                     .map(either::Left)
                     .chain(encoded_list.map(either::Right))
             },
-            storage_main_trie_changes: self.storage_main_trie_changes,
+            storage_main_trie_changes: self.storage_changes.into_main_trie_diff(),
             offchain_storage_changes: self.offchain_storage_changes,
             max_log_level: self.shared.max_log_level,
         });
@@ -560,7 +560,7 @@ impl InherentExtrinsics {
 pub struct ApplyExtrinsic {
     shared: Shared,
     parent_runtime: host::HostVmPrototype,
-    storage_main_trie_changes: storage_diff::TrieDiff,
+    storage_changes: StorageChanges,
     offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
 }
 
@@ -573,7 +573,7 @@ impl ApplyExtrinsic {
             virtual_machine: self.parent_runtime,
             function_to_call: "BlockBuilder_apply_extrinsic",
             parameter: iter::once(&extrinsic),
-            storage_main_trie_changes: self.storage_main_trie_changes,
+            storage_main_trie_changes: self.storage_changes.into_main_trie_diff(),
             offchain_storage_changes: self.offchain_storage_changes,
             max_log_level: self.shared.max_log_level,
         });
@@ -596,7 +596,7 @@ impl ApplyExtrinsic {
             virtual_machine: self.parent_runtime,
             function_to_call: "BlockBuilder_finalize_block",
             parameter: iter::empty::<&[u8]>(),
-            storage_main_trie_changes: self.storage_main_trie_changes,
+            storage_main_trie_changes: self.storage_changes.into_main_trie_diff(),
             offchain_storage_changes: self.offchain_storage_changes,
             max_log_level: self.shared.max_log_level,
         });
