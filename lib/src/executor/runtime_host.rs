@@ -42,7 +42,7 @@ use crate::{
     trie, util,
 };
 
-use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
+use alloc::{borrow::ToOwned as _, collections::BTreeMap, string::String, vec::Vec};
 use core::{fmt, iter};
 
 pub use trie::{Nibble, TrieEntryVersion};
@@ -168,7 +168,7 @@ impl StorageChanges {
     /// child tries included).
     pub fn trie_changes_iter_unordered(
         &'_ self,
-    ) -> impl Iterator<Item = (&'_ [Nibble], TrieChange<'_>)> {
+    ) -> impl Iterator<Item = (Option<&'_ [u8]>, &'_ [Nibble], TrieChange<'_>)> {
         iter::empty() // TODO: /!\
     }
 
@@ -181,8 +181,13 @@ impl StorageChanges {
 
 impl fmt::Debug for StorageChanges {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
-        // TODO: f.debug_map()
+        // TODO: do properly
+        f.debug_map()
+            .entries(
+                self.trie_changes_iter_unordered()
+                    .map(|(child_trie, key, change)| ((), ())),
+            )
+            .finish()
     }
 }
 
@@ -787,11 +792,13 @@ struct PendingStorageChanges {
     main_trie: storage_diff::TrieDiff,
 
     /// For each default child trie, the values that have been written to it.
+    // TODO: fuse with main_trie?
     default_child_tries: hashbrown::HashMap<Vec<u8>, storage_diff::TrieDiff, fnv::FnvBuildHasher>,
 
-    /// List of default child tries whose root hash must be recalculated and stored into the main
-    /// trie before we can determine the actual main trie root.
-    stale_child_tries_root_hashes: hashbrown::HashSet<Vec<u8>, fnv::FnvBuildHasher>,
+    /// List of tries (`None` for the main trie and `Some` for child tries) whose root hash must
+    /// be recalculated (and for child tries stored into the main trie).
+    /// This is necessary in order to populate [`PendingStorageChanges::tries_nodes_changes`].
+    stale_child_tries_root_hashes: hashbrown::HashSet<Option<Vec<u8>>, fnv::FnvBuildHasher>,
 }
 
 /// Writing and reading keys the main trie under this prefix obeys special rules.
@@ -856,13 +863,13 @@ impl Inner {
                     continue;
                 }
                 Some((trie, trie_root_calculator::InProgress::Finished { trie_root_hash })) => {
+                    self.pending_storage_changes
+                        .stale_child_tries_root_hashes
+                        .remove(&trie);
+
                     // If we've finished calculating a child trie, update its entry in the
                     // main trie.
                     if let Some(child_trie) = &trie {
-                        self.pending_storage_changes
-                            .stale_child_tries_root_hashes
-                            .remove(child_trie);
-
                         let mut main_trie_key = Vec::with_capacity(
                             DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len() + child_trie.len(),
                         );
@@ -880,6 +887,10 @@ impl Inner {
                                 .main_trie
                                 .diff_insert_erase(main_trie_key, ());
                         }
+
+                        self.pending_storage_changes
+                            .stale_child_tries_root_hashes
+                            .insert(None);
                     }
 
                     // Resume the VM execution only if the calculated trie is the one that was
@@ -908,7 +919,7 @@ impl Inner {
             // This is also done if execution is finished, in order for the diff provided as
             // output to be accurate.
             {
-                let child_trie_to_flush = match &self.vm {
+                let trie_to_flush = match &self.vm {
                     host::HostVm::Finished(_) => self
                         .pending_storage_changes
                         .stale_child_tries_root_hashes
@@ -922,20 +933,23 @@ impl Inner {
                     _ => None,
                 };
 
-                if let Some(child_trie_to_flush) = child_trie_to_flush {
+                if let Some(trie_to_flush) = trie_to_flush {
                     // TODO: don't clone?
-                    let diff = match self
-                        .pending_storage_changes
-                        .default_child_tries
-                        .get(child_trie_to_flush)
-                    {
-                        None => storage_diff::TrieDiff::empty(),
-                        Some(diff) => diff.clone(),
+                    let diff = match trie_to_flush {
+                        None => self.pending_storage_changes.main_trie.clone(),
+                        Some(child_trie) => match self
+                            .pending_storage_changes
+                            .default_child_tries
+                            .get(child_trie)
+                        {
+                            None => storage_diff::TrieDiff::empty(),
+                            Some(diff) => diff.clone(),
+                        },
                     };
 
                     debug_assert!(self.root_calculation.is_none()); // `Some` handled above.
                     self.root_calculation = Some((
-                        Some(child_trie_to_flush.clone()),
+                        trie_to_flush.clone(),
                         trie_root_calculator::trie_root_calculator(trie_root_calculator::Config {
                             diff,
                             diff_trie_entries_version: self.state_trie_version,
@@ -1010,11 +1024,10 @@ impl Inner {
                         continue;
                     }
 
-                    if let Some(child_trie) = req.child_trie() {
-                        self.pending_storage_changes
-                            .stale_child_tries_root_hashes
-                            .get_or_insert_owned(child_trie.as_ref());
-                    }
+                    // TOOD: to_owned overhead
+                    self.pending_storage_changes
+                        .stale_child_tries_root_hashes
+                        .insert(req.child_trie().map(|ct| ct.as_ref().to_owned()));
 
                     let trie = match req.child_trie() {
                         None => &mut self.pending_storage_changes.main_trie,
@@ -1044,11 +1057,10 @@ impl Inner {
                         continue;
                     }
 
-                    if let Some(child_trie) = req.child_trie() {
-                        self.pending_storage_changes
-                            .stale_child_tries_root_hashes
-                            .get_or_insert_owned(child_trie.as_ref());
-                    }
+                    // TOOD: to_owned overhead
+                    self.pending_storage_changes
+                        .stale_child_tries_root_hashes
+                        .insert(req.child_trie().map(|ct| ct.as_ref().to_owned()));
 
                     let current_value = match req.child_trie() {
                         None => self
@@ -1091,11 +1103,10 @@ impl Inner {
                     }
 
                     // TODO: consider doing this only if at least one key was actually removed
-                    if let Some(child_trie) = req.child_trie() {
-                        self.pending_storage_changes
-                            .stale_child_tries_root_hashes
-                            .get_or_insert_owned(child_trie.as_ref());
-                    }
+                    // TOOD: to_owned overhead
+                    self.pending_storage_changes
+                        .stale_child_tries_root_hashes
+                        .insert(req.child_trie().map(|ct| ct.as_ref().to_owned()));
 
                     let prefix = req.prefix().as_ref().to_owned();
                     self.vm = req.into();
