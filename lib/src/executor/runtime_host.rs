@@ -63,6 +63,8 @@ pub struct Config<'a, TParams> {
 
     /// Initial state of [`Success::storage_main_trie_changes`]. The changes made during this
     /// execution will be pushed over the value in this field.
+    // TODO: consider accepting a different type
+    // TODO: accept also child trie modifications
     pub storage_main_trie_changes: storage_diff::TrieDiff,
 
     /// Initial state of [`Success::offchain_storage_changes`]. The changes made during this
@@ -121,9 +123,8 @@ pub struct Success {
     /// Contains the output value of the runtime, and the virtual machine that was passed at
     /// initialization.
     pub virtual_machine: SuccessVirtualMachine,
-    /// List of changes to the storage main trie that the block performs.
-    pub storage_main_trie_changes: storage_diff::TrieDiff,
-    // TODO: return child trie diffs
+    /// List of changes to the storage that the block performs.
+    pub storage_changes: StorageChanges,
     /// State trie version indicated by the runtime. All the storage changes indicated by
     /// [`Success::storage_main_trie_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
@@ -131,6 +132,79 @@ pub struct Success {
     pub offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
     /// Concatenation of all the log messages printed by the runtime.
     pub logs: String,
+}
+
+/// See [`Success::storage_changes`].
+pub struct StorageChanges {
+    /// The [`PendingStorageChanges`] that was built by the state machine. The changes are no
+    /// longer pending.
+    inner: PendingStorageChanges,
+}
+
+impl StorageChanges {
+    /// Returns the change, if any, at the given key of the main trie.
+    ///
+    /// Returns `None` if the runtime hasn't modified this entry in the main trie, and `Some(None)`
+    /// if the runtime has removed the storage item of this entry.
+    pub fn main_trie_diff_get(&self, key: &[u8]) -> Option<Option<&[u8]>> {
+        self.inner.main_trie.diff_get(key).map(|(v, _)| v)
+    }
+
+    /// Returns an iterator to all the entries of the main trie that are modified by this runtime
+    /// call.
+    ///
+    /// Each value is either `Some` if the runtime overwrites this value, or `None` if it erases
+    /// the underlying value.
+    pub fn main_trie_storage_changes_iter_unordered(
+        &'_ self,
+    ) -> impl ExactSizeIterator<Item = (&'_ [u8], Option<&'_ [u8]>)> + Clone + '_ {
+        self.inner
+            .main_trie
+            .diff_iter_unordered()
+            .map(|(k, v, ())| (k, v))
+    }
+
+    /// Returns an iterator over the list of all changes performed to the tries (main trie and
+    /// child tries included).
+    pub fn trie_changes_iter_unordered(
+        &'_ self,
+    ) -> impl Iterator<Item = (&'_ [Nibble], TrieChange<'_>)> {
+        iter::empty() // TODO: /!\
+    }
+
+    /// Returns a diff of the main trie.
+    // TODO: weird API, necessary to turn this object back to a value for Config::storage_main_trie_changes
+    pub fn into_main_trie_diff(self) -> storage_diff::TrieDiff {
+        self.inner.main_trie
+    }
+}
+
+impl fmt::Debug for StorageChanges {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        todo!()
+        // TODO: f.debug_map()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum TrieChange<'a> {
+    /// Trie node is either newly-created, or already existed and has a new Merkle value.
+    InsertUpdate {
+        /// New Merkle value associated to this trie node. Always inferior or equal to 32 bytes.
+        new_merkle_value: &'a [u8],
+        partial_key: &'a [Nibble],
+        children_merkle_values: [Option<&'a [u8]>; 16],
+        /// Change to the storage value of that trie node.
+        new_storage_value: TrieChangeStorageValue<'a>,
+    },
+    /// Trie node is removed.
+    Remove,
+}
+
+#[derive(Debug, Clone)]
+pub enum TrieChangeStorageValue<'a> {
+    Unmodified,
+    Modified { new_value: Option<&'a [u8]> },
 }
 
 /// Function execution has succeeded. Contains the return value of the call.
@@ -893,7 +967,9 @@ impl Inner {
 
                     return RuntimeHostVm::Finished(Ok(Success {
                         virtual_machine: SuccessVirtualMachine(finished),
-                        storage_main_trie_changes: self.pending_storage_changes.main_trie,
+                        storage_changes: StorageChanges {
+                            inner: self.pending_storage_changes,
+                        },
                         state_trie_version: self.state_trie_version,
                         offchain_storage_changes: self.offchain_storage_changes,
                         logs: self.logs,

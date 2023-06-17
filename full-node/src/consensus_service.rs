@@ -1219,7 +1219,7 @@ impl SyncBackground {
                         all::BlockVerification::Success {
                             is_new_best,
                             sync: mut sync_out,
-                            storage_main_trie_changes,
+                            storage_changes,
                             state_trie_version,
                             parent_runtime,
                             new_runtime,
@@ -1332,9 +1332,7 @@ impl SyncBackground {
                                         &scale_encoded_header_to_verify,
                                         is_new_best,
                                         iter::empty::<Vec<u8>>(), // TODO:,no /!\
-                                        storage_main_trie_changes
-                                            .diff_iter_unordered()
-                                            .map(|(k, v, ())| (k, v)),
+                                        storage_changes.main_trie_storage_changes_iter_unordered(),
                                         u8::from(state_trie_version),
                                     );
 

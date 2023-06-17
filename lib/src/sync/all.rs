@@ -32,7 +32,7 @@
 
 use crate::{
     chain::{blocks_tree, chain_information},
-    executor::{host, storage_diff},
+    executor::host,
     header,
     sync::{all_forks, optimistic, warp_sync},
     verify,
@@ -47,7 +47,7 @@ use core::{
 };
 
 pub use crate::executor::vm::ExecHint;
-pub use optimistic::{Nibble, TrieEntryVersion};
+pub use optimistic::{Nibble, StorageChanges, TrieEntryVersion};
 pub use warp_sync::{FragmentError as WarpSyncFragmentError, WarpSyncFragment};
 
 /// Configuration for the [`AllSync`].
@@ -2791,7 +2791,7 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
         /// True if the newly-verified block is considered the new best block.
         is_new_best: bool,
         /// Changes to the storage made by this block compared to its parent.
-        storage_main_trie_changes: storage_diff::TrieDiff,
+        storage_changes: StorageChanges,
         /// State trie version indicated by the runtime. All the storage changes indicated by
         /// [`BlockVerification::Success::storage_main_trie_changes`] should store this version
         /// alongside with them.
@@ -2863,7 +2863,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                 sync,
                 full:
                     Some(optimistic::BlockVerificationSuccessFull {
-                        storage_main_trie_changes,
+                        storage_changes,
                         state_trie_version,
                         offchain_storage_changes,
                         parent_runtime,
@@ -2874,7 +2874,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                 // TODO: transition to all_forks
                 BlockVerification::Success {
                     is_new_best: true,
-                    storage_main_trie_changes,
+                    storage_changes,
                     state_trie_version,
                     offchain_storage_changes,
                     parent_runtime,
