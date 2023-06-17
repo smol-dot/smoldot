@@ -181,7 +181,7 @@ impl StorageChanges {
                         partial_key,
                         children_merkle_values,
                     } => {
-                        debug_assert!(key.ends_with(&partial_key));
+                        debug_assert!(key.ends_with(partial_key));
 
                         let new_storage_value = if key.len() % 2 == 0 {
                             let key_bytes = trie::nibbles_to_bytes_truncate(key.iter().copied())
@@ -1254,7 +1254,7 @@ impl Inner {
                     });
                 }
 
-                host::HostVm::ExternalStorageRoot(req) => {
+                host::HostVm::ExternalStorageRoot(_) => {
                     // Handled above.
                     unreachable!()
                 }
