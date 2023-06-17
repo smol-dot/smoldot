@@ -919,28 +919,39 @@ impl Inner {
             // This is also done if execution is finished, in order for the diff provided as
             // output to be accurate.
             {
-                let trie_to_flush = match &self.vm {
+                let trie_to_flush: Option<Option<either::Either<_, &[u8]>>> = match &self.vm {
                     host::HostVm::Finished(_) => self
                         .pending_storage_changes
                         .stale_child_tries_root_hashes
                         .iter()
-                        .next(),
-                    host::HostVm::ExternalStorageRoot(req) if req.child_trie().is_none() => self
-                        .pending_storage_changes
-                        .stale_child_tries_root_hashes
-                        .iter()
-                        .next(),
+                        .next()
+                        .as_ref()
+                        .map(|t| t.as_ref().map(|t| either::Right(&t[..]))),
+                    host::HostVm::ExternalStorageRoot(req) => Some({
+                        if let Some(child_trie) = req.child_trie() {
+                            Some(either::Left(child_trie))
+                        } else {
+                            // Find any child trie in `pending_storage_changes`. If `None` is
+                            // found, calculate the main trie.
+                            // It is important to calculate the child tries before the main tries.
+                            self.pending_storage_changes
+                                .stale_child_tries_root_hashes
+                                .iter()
+                                .find_map(|ct| ct.as_ref())
+                                .map(|t| either::Right(&t[..]))
+                        }
+                    }),
                     _ => None,
                 };
 
                 if let Some(trie_to_flush) = trie_to_flush {
                     // TODO: don't clone?
-                    let diff = match trie_to_flush {
+                    let diff = match trie_to_flush.as_ref() {
                         None => self.pending_storage_changes.main_trie.clone(),
                         Some(child_trie) => match self
                             .pending_storage_changes
                             .default_child_tries
-                            .get(child_trie)
+                            .get(AsRef::<[u8]>::as_ref(child_trie))
                         {
                             None => storage_diff::TrieDiff::empty(),
                             Some(diff) => diff.clone(),
@@ -949,7 +960,7 @@ impl Inner {
 
                     debug_assert!(self.root_calculation.is_none()); // `Some` handled above.
                     self.root_calculation = Some((
-                        trie_to_flush.clone(),
+                        trie_to_flush.map(|t| AsRef::<[u8]>::as_ref(&t).to_owned()),
                         trie_root_calculator::trie_root_calculator(trie_root_calculator::Config {
                             diff,
                             diff_trie_entries_version: self.state_trie_version,
@@ -1119,40 +1130,7 @@ impl Inner {
 
                 host::HostVm::ExternalStorageRoot(req) => {
                     // Handled above.
-                    debug_assert!(
-                        req.child_trie().is_some()
-                            || self
-                                .pending_storage_changes
-                                .stale_child_tries_root_hashes
-                                .is_empty()
-                    );
-
-                    // TODO: don't clone?
-                    let diff = match req.child_trie() {
-                        None => self.pending_storage_changes.main_trie.clone(),
-                        Some(child_trie) => {
-                            match self
-                                .pending_storage_changes
-                                .default_child_tries
-                                .get(child_trie.as_ref())
-                            {
-                                None => storage_diff::TrieDiff::empty(),
-                                Some(diff) => diff.clone(),
-                            }
-                        }
-                    };
-
-                    debug_assert!(self.root_calculation.is_none()); // `Some` handled above.
-                    self.root_calculation = Some((
-                        req.child_trie().map(|t| t.as_ref().to_owned()),
-                        trie_root_calculator::trie_root_calculator(trie_root_calculator::Config {
-                            diff,
-                            diff_trie_entries_version: self.state_trie_version,
-                            max_trie_recalculation_depth_hint: 16, // TODO: ?!
-                        }),
-                    ));
-
-                    self.vm = req.into();
+                    unreachable!()
                 }
 
                 host::HostVm::ExternalStorageNextKey(req) => {
