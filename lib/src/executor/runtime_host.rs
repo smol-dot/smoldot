@@ -42,7 +42,9 @@ use crate::{
     trie, util,
 };
 
-use alloc::{borrow::ToOwned as _, collections::BTreeMap, string::String, vec::Vec};
+use alloc::{
+    borrow::ToOwned as _, boxed::Box, collections::BTreeMap, format, string::String, vec::Vec,
+};
 use core::{fmt, iter, ops};
 
 pub use trie::{Nibble, TrieEntryVersion};
@@ -1101,6 +1103,7 @@ impl Inner {
                 }
 
                 host::HostVm::Finished(finished) => {
+                    debug_assert!(self.transactions_stack.is_empty()); // Guaranteed by `host`.
                     debug_assert!(self
                         .pending_storage_changes
                         .stale_child_tries_root_hashes
