@@ -115,7 +115,7 @@ pub struct Success {
     /// List of changes to the storage main trie that the block performs.
     pub storage_changes: StorageChanges,
     /// State trie version indicated by the runtime. All the storage changes indicated by
-    /// [`Success::storage_main_trie_changes`] should store this version alongside with them.
+    /// [`Success::storage_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
     /// List of changes to the off-chain storage that this block performs.
     pub offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,

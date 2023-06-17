@@ -994,7 +994,7 @@ pub struct BlockVerificationSuccessFull {
     pub storage_changes: StorageChanges,
 
     /// State trie version indicated by the runtime. All the storage changes indicated by
-    /// [`BlockVerificationSuccessFull::storage_main_trie_changes`] should store this version
+    /// [`BlockVerificationSuccessFull::storage_changes`] should store this version
     /// alongside with them.
     pub state_trie_version: TrieEntryVersion,
 
@@ -1057,7 +1057,9 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     debug_assert_eq!(
                         new_runtime.is_some(),
                         storage_changes.main_trie_diff_get(&b":code"[..]).is_some()
-                            || storage_changes.main_trie_diff_get(&b":heappages"[..]).is_some()
+                            || storage_changes
+                                .main_trie_diff_get(&b":heappages"[..])
+                                .is_some()
                     );
 
                     let chain = {

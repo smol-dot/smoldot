@@ -2793,7 +2793,7 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
         /// Changes to the storage made by this block compared to its parent.
         storage_changes: StorageChanges,
         /// State trie version indicated by the runtime. All the storage changes indicated by
-        /// [`BlockVerification::Success::storage_main_trie_changes`] should store this version
+        /// [`BlockVerification::Success::storage_changes`] should store this version
         /// alongside with them.
         state_trie_version: TrieEntryVersion,
         /// List of changes to the off-chain storage that this block performs.

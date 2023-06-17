@@ -61,7 +61,7 @@ pub struct Config<'a, TParams> {
     /// actual input.
     pub parameter: TParams,
 
-    /// Initial state of [`Success::storage_main_trie_changes`]. The changes made during this
+    /// Initial state of [`Success::storage_changes`]. The changes made during this
     /// execution will be pushed over the value in this field.
     // TODO: consider accepting a different type
     // TODO: accept also child trie modifications
@@ -123,7 +123,7 @@ pub struct Success {
     /// List of changes to the storage that the block performs.
     pub storage_changes: StorageChanges,
     /// State trie version indicated by the runtime. All the storage changes indicated by
-    /// [`Success::storage_main_trie_changes`] should store this version alongside with them.
+    /// [`Success::storage_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
     /// List of changes to the off-chain storage that this block performs.
     pub offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
@@ -223,7 +223,7 @@ impl StorageChanges {
     }
 
     /// Returns a diff of the main trie.
-    // TODO: weird API, necessary to turn this object back to a value for Config::storage_main_trie_changes
+    // TODO: weird API, necessary to turn this object back to a value for Config::storage_changes
     pub fn into_main_trie_diff(mut self) -> storage_diff::TrieDiff {
         self.inner
             .trie_diffs

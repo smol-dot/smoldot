@@ -114,7 +114,7 @@ pub struct Success {
     /// Runtime that was passed by [`Config`].
     pub parent_runtime: host::HostVmPrototype,
 
-    /// Contains `Some` if and only if [`Success::storage_main_trie_changes`] contains a change in
+    /// Contains `Some` if and only if [`Success::storage_changes`] contains a change in
     /// the `:code` or `:heappages` keys, indicating that the runtime has been modified. Contains
     /// the new runtime.
     pub new_runtime: Option<host::HostVmPrototype>,
@@ -126,7 +126,7 @@ pub struct Success {
     pub storage_changes: StorageChanges,
 
     /// State trie version indicated by the runtime. All the storage changes indicated by
-    /// [`Success::storage_main_trie_changes`] should store this version alongside with them.
+    /// [`Success::storage_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
 
     /// List of changes to the off-chain storage that this block performs.

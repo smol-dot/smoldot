@@ -861,14 +861,14 @@ pub enum BodyVerifyStep2<T> {
     Finished {
         /// Value that was passed to [`BodyVerifyRuntimeRequired::resume`].
         parent_runtime: host::HostVmPrototype,
-        /// Contains `Some` if and only if [`BodyVerifyStep2::Finished::storage_main_trie_changes`]
+        /// Contains `Some` if and only if [`BodyVerifyStep2::Finished::storage_changes`]
         /// contains a change in the `:code` or `:heappages` keys, indicating that the runtime has
         /// been modified. Contains the new runtime.
         new_runtime: Option<host::HostVmPrototype>,
         /// List of changes to the storage main trie that the block performs.
         storage_changes: StorageChanges,
         /// State trie version indicated by the runtime. All the storage changes indicated by
-        /// [`BodyVerifyStep2::Finished::storage_main_trie_changes`] should store this version
+        /// [`BodyVerifyStep2::Finished::storage_changes`] should store this version
         /// alongside with them.
         state_trie_version: TrieEntryVersion,
         /// List of changes to the off-chain storage that this block performs.
