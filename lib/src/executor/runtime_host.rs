@@ -43,7 +43,12 @@ use crate::{
 };
 
 use alloc::{
-    borrow::ToOwned as _, boxed::Box, collections::BTreeMap, format, string::String, vec::Vec,
+    borrow::ToOwned as _,
+    boxed::Box,
+    collections::BTreeMap,
+    format,
+    string::{String, ToString as _},
+    vec::Vec,
 };
 use core::{fmt, iter, ops};
 
