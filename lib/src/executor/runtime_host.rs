@@ -100,12 +100,12 @@ pub fn run(
                 0,
                 Default::default(),
             ),
+            stale_child_tries_root_hashes: hashbrown::HashSet::with_capacity_and_hasher(
+                0,
+                Default::default(),
+            ),
         },
         state_trie_version,
-        stale_child_tries_root_hashes: hashbrown::HashSet::with_capacity_and_hasher(
-            0,
-            Default::default(),
-        ),
         transactions_stack: Vec::new(),
         offchain_storage_changes: config.offchain_storage_changes,
         root_calculation: None,
@@ -681,11 +681,6 @@ struct Inner {
     /// Pending changes to the storage that this execution performs.
     storage_changes: StorageChanges,
 
-    /// List of child tries whose root hash must be recalculated and stored into the main trie
-    /// before we can determine the actual main trie root.
-    // TODO: this must also be processed if the runtime doesn't ask for the main trie root hash
-    stale_child_tries_root_hashes: hashbrown::HashSet<Vec<u8>, fnv::FnvBuildHasher>,
-
     /// Contains a copy of [`Inner::storage_changes`] at the time when the transaction started.
     /// When the storage transaction ends, either the entry is silently discarded (to commit),
     /// or is written over [`Inner::storage_changes`] (to rollback).
@@ -719,6 +714,10 @@ struct StorageChanges {
 
     /// For each default child trie, the values that have been written to it.
     default_child_tries: hashbrown::HashMap<Vec<u8>, storage_diff::TrieDiff, fnv::FnvBuildHasher>,
+
+    /// List of default child tries whose root hash must be recalculated and stored into the main
+    /// trie before we can determine the actual main trie root.
+    stale_child_tries_root_hashes: hashbrown::HashSet<Vec<u8>, fnv::FnvBuildHasher>,
 }
 
 /// Writing and reading keys the main trie under this prefix obeys special rules.
@@ -786,7 +785,9 @@ impl Inner {
                     // If we've finished calculating a child trie, update its entry in the
                     // main trie.
                     if let Some(child_trie) = &trie {
-                        self.stale_child_tries_root_hashes.remove(child_trie);
+                        self.storage_changes
+                            .stale_child_tries_root_hashes
+                            .remove(child_trie);
 
                         let mut main_trie_key = Vec::with_capacity(
                             DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len() + child_trie.len(),
@@ -834,10 +835,16 @@ impl Inner {
             // output to be accurate.
             {
                 let child_trie_to_flush = match &self.vm {
-                    host::HostVm::Finished(_) => self.stale_child_tries_root_hashes.iter().next(),
-                    host::HostVm::ExternalStorageRoot(req) if req.child_trie().is_none() => {
-                        self.stale_child_tries_root_hashes.iter().next()
-                    }
+                    host::HostVm::Finished(_) => self
+                        .storage_changes
+                        .stale_child_tries_root_hashes
+                        .iter()
+                        .next(),
+                    host::HostVm::ExternalStorageRoot(req) if req.child_trie().is_none() => self
+                        .storage_changes
+                        .stale_child_tries_root_hashes
+                        .iter()
+                        .next(),
                     _ => None,
                 };
 
@@ -879,7 +886,10 @@ impl Inner {
                 }
 
                 host::HostVm::Finished(finished) => {
-                    debug_assert!(self.stale_child_tries_root_hashes.is_empty());
+                    debug_assert!(self
+                        .storage_changes
+                        .stale_child_tries_root_hashes
+                        .is_empty());
 
                     return RuntimeHostVm::Finished(Ok(Success {
                         virtual_machine: SuccessVirtualMachine(finished),
@@ -922,7 +932,8 @@ impl Inner {
                     }
 
                     if let Some(child_trie) = req.child_trie() {
-                        self.stale_child_tries_root_hashes
+                        self.storage_changes
+                            .stale_child_tries_root_hashes
                             .get_or_insert_owned(child_trie.as_ref());
                     }
 
@@ -955,7 +966,8 @@ impl Inner {
                     }
 
                     if let Some(child_trie) = req.child_trie() {
-                        self.stale_child_tries_root_hashes
+                        self.storage_changes
+                            .stale_child_tries_root_hashes
                             .get_or_insert_owned(child_trie.as_ref());
                     }
 
@@ -1001,7 +1013,8 @@ impl Inner {
 
                     // TODO: consider doing this only if at least one key was actually removed
                     if let Some(child_trie) = req.child_trie() {
-                        self.stale_child_tries_root_hashes
+                        self.storage_changes
+                            .stale_child_tries_root_hashes
                             .get_or_insert_owned(child_trie.as_ref());
                     }
 
@@ -1017,7 +1030,11 @@ impl Inner {
                 host::HostVm::ExternalStorageRoot(req) => {
                     // Handled above.
                     debug_assert!(
-                        req.child_trie().is_some() || self.stale_child_tries_root_hashes.is_empty()
+                        req.child_trie().is_some()
+                            || self
+                                .storage_changes
+                                .stale_child_tries_root_hashes
+                                .is_empty()
                     );
 
                     // TODO: don't clone?
