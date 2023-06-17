@@ -683,7 +683,6 @@ struct Inner {
 
     /// List of child tries whose root hash must be recalculated and stored into the main trie
     /// before we can determine the actual main trie root.
-    // TODO: this must also be processed if the runtime doesn't ask for the main trie root hash
     stale_child_tries_root_hashes: hashbrown::HashSet<Vec<u8>, fnv::FnvBuildHasher>,
 
     /// Contains a copy of [`Inner::storage_changes`] at the time when the transaction started.
