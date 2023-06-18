@@ -749,7 +749,11 @@ impl SqliteFullDatabase {
     ///
     /// `key_nibbles` must be an iterator to the **nibbles** of the key.
     ///
-    /// Returns `None` if there is no next key.
+    /// `parent_tries_paths_nibbles` is a list of keys to follow in order to find the root of the
+    /// trie into which `key_nibbles` should be searched.
+    ///
+    /// Returns `None` if `parent_tries_paths_nibbles` didn't lead to any trie, or if there is no
+    /// next key.
     ///
     /// The key is returned in the same format as `key_nibbles`.
     ///
@@ -763,15 +767,21 @@ impl SqliteFullDatabase {
     ///
     /// # Panics
     ///
-    /// Panics if `key_nibbles` contains any value superior or equal to 16.
+    /// Panics if any of the values yielded by `parent_tries_paths_nibbles` or `key_nibbles` is
+    /// superior or equal to 16.
     ///
-    pub fn block_storage_main_trie_next_key(
+    pub fn block_storage_next_key(
         &self,
         block_hash: &[u8; 32],
+        mut parent_tries_paths_nibbles: impl Iterator<Item = impl Iterator<Item = u8>>,
         key_nibbles: impl Iterator<Item = u8>,
         branch_nodes: bool,
     ) -> Result<Option<Vec<u8>>, StorageAccessError> {
         let connection = self.database.lock();
+
+        if parent_tries_paths_nibbles.next().is_some() {
+            todo!() // TODO: /!\
+        }
 
         // TODO: this algorithm relies the fact that leaf nodes always have a storage value, which isn't exactly clear in the schema ; however not relying on this makes it way harder to write
         // TODO: pretty slow when `branch_nodes` is `false` due to inability to do a group by + min to take only the first child
@@ -862,19 +872,29 @@ impl SqliteFullDatabase {
     ///
     /// `key_nibbles` must be an iterator to the **nibbles** of the key.
     ///
-    /// Returns `None` if there is no such descendant.
+    /// `parent_tries_paths_nibbles` is a list of keys to follow in order to find the root of the
+    /// trie into which `key_nibbles` should be searched.
+    ///
+    /// Returns `None` if `parent_tries_paths_nibbles` didn't lead to any trie, or if there is no
+    /// such descendant.
     ///
     /// # Panics
     ///
-    /// Panics if `key_nibbles` contains any value superior or equal to 16.
+    /// Panics if any of the values yielded by `parent_tries_paths_nibbles` or `key_nibbles` is
+    /// superior or equal to 16.
     ///
-    pub fn block_storage_main_trie_closest_descendant_merkle_value(
+    pub fn block_storage_closest_descendant_merkle_value(
         &self,
         block_hash: &[u8; 32],
+        mut parent_tries_paths_nibbles: impl Iterator<Item = impl Iterator<Item = u8>>,
         key_nibbles: impl Iterator<Item = u8>,
     ) -> Result<Option<Vec<u8>>, StorageAccessError> {
         let key_nibbles = key_nibbles.collect::<Vec<_>>();
         assert!(!key_nibbles.iter().any(|n| *n >= 16));
+
+        if parent_tries_paths_nibbles.next().is_some() {
+            todo!() // TODO: /!\
+        }
 
         let connection = self.database.lock();
 

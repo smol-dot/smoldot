@@ -95,7 +95,7 @@ PRAGMA temp_store = MEMORY;
     } = config.ty
     {
         database
-            .execute(&format!("PRAGMA mmap_size = {}", memory_map_size), ())
+            .execute_batch(&format!("PRAGMA mmap_size = {}", memory_map_size))
             .map_err(InternalError)?;
     }
 

@@ -208,8 +208,9 @@ fn empty_database_fill_then_query() {
                 .collect::<Vec<_>>();
             let branch_nodes = rand::random::<bool>();
             let actual = open_db
-                .block_storage_main_trie_next_key(
+                .block_storage_next_key(
                     &block0_hash,
+                    iter::empty::<iter::Empty<_>>(),
                     key.iter().copied().map(u8::from),
                     branch_nodes,
                 )
@@ -235,8 +236,9 @@ fn empty_database_fill_then_query() {
                 .map(|_| trie::Nibble::try_from(uniform_sample(0u8, 15)).unwrap())
                 .collect::<Vec<_>>();
             let actual = open_db
-                .block_storage_main_trie_closest_descendant_merkle_value(
+                .block_storage_closest_descendant_merkle_value(
                     &block0_hash,
+                    iter::empty::<iter::Empty<_>>(),
                     key.iter().copied().map(u8::from),
                 )
                 .unwrap();

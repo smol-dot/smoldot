@@ -887,13 +887,20 @@ impl SyncBackground {
                         }));
                     }
                     author::build::BuilderAuthoring::ClosestDescendantMerkleValue(req) => {
+                        let parent_paths = req.child_trie().map(|child_trie| {
+                            trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                                .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
+                                .map(u8::from)
+                                .collect::<Vec<_>>()
+                        });
                         let key_nibbles = req.key().map(u8::from).collect::<Vec<_>>();
 
                         let merkle_value = self
                             .database
                             .with_database(move |db| {
-                                db.block_storage_main_trie_closest_descendant_merkle_value(
+                                db.block_storage_closest_descendant_merkle_value(
                                     &parent_hash,
+                                    parent_paths.into_iter().map(|p| p.into_iter()),
                                     key_nibbles.iter().copied(),
                                 )
                             })
@@ -904,14 +911,12 @@ impl SyncBackground {
                             req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
                     }
                     author::build::BuilderAuthoring::NextKey(req) => {
-                        // TODO: child tries not supported
-                        if req.child_trie().is_some() {
-                            self.log_callback
-                                .log(LogLevel::Warn, "child-tries-not-supported".to_owned());
-                            block_authoring = req.inject_key(None::<iter::Empty<_>>);
-                            continue;
-                        }
-
+                        let parent_paths = req.child_trie().map(|child_trie| {
+                            trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                                .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
+                                .map(u8::from)
+                                .collect::<Vec<_>>()
+                        });
                         let key_nibbles = req
                             .key()
                             .map(u8::from)
@@ -922,8 +927,9 @@ impl SyncBackground {
                         let mut next_key = self
                             .database
                             .with_database(move |db| {
-                                db.block_storage_main_trie_next_key(
+                                db.block_storage_next_key(
                                     &parent_hash,
+                                    parent_paths.into_iter().map(|p| p.into_iter()),
                                     key_nibbles.iter().copied(),
                                     branch_nodes,
                                 )
@@ -1452,13 +1458,22 @@ impl SyncBackground {
                         all::BlockVerification::ParentStorageMerkleValue(req) => {
                             let when_database_access_started = Instant::now();
 
+                            let parent_paths = req.child_trie().map(|child_trie| {
+                                trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                                    .chain(trie::bytes_to_nibbles(
+                                        child_trie.as_ref().iter().copied(),
+                                    ))
+                                    .map(u8::from)
+                                    .collect::<Vec<_>>()
+                            });
                             let key_nibbles = req.key().map(u8::from).collect::<Vec<_>>();
 
                             let merkle_value = self
                                 .database
                                 .with_database(move |db| {
-                                    db.block_storage_main_trie_closest_descendant_merkle_value(
+                                    db.block_storage_closest_descendant_merkle_value(
                                         &parent_hash,
+                                        parent_paths.into_iter().map(|p| p.into_iter()),
                                         key_nibbles.iter().copied(),
                                     )
                                 })
@@ -1471,6 +1486,14 @@ impl SyncBackground {
                         all::BlockVerification::ParentStorageNextKey(req) => {
                             let when_database_access_started = Instant::now();
 
+                            let parent_paths = req.child_trie().map(|child_trie| {
+                                trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                                    .chain(trie::bytes_to_nibbles(
+                                        child_trie.as_ref().iter().copied(),
+                                    ))
+                                    .map(u8::from)
+                                    .collect::<Vec<_>>()
+                            });
                             let key_nibbles = req
                                 .key()
                                 .map(u8::from)
@@ -1481,8 +1504,9 @@ impl SyncBackground {
                             let mut next_key = self
                                 .database
                                 .with_database(move |db| {
-                                    db.block_storage_main_trie_next_key(
+                                    db.block_storage_next_key(
                                         &parent_hash,
+                                        parent_paths.into_iter().map(|p| p.into_iter()),
                                         key_nibbles.iter().copied(),
                                         branch_nodes,
                                     )
