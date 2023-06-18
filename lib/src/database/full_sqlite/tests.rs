@@ -27,7 +27,7 @@ use rand::distributions::{Distribution as _, Uniform};
 #[test]
 fn empty_database_fill_then_query() {
     // Repeat the test many times due to randomness.
-    for _ in 0..128 {
+    for _ in 0..16384 {
         let DatabaseOpen::Empty(empty_db) = open(Config {
             block_number_bytes: 4,
             cache_size: 2 * 1024 * 1024,
