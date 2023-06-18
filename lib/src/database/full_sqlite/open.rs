@@ -44,12 +44,13 @@ pub fn open(config: Config) -> Result<DatabaseOpen, InternalError> {
         rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
 
     let database = match config.ty {
-        ConfigTy::Disk(directory_path) => {
+        ConfigTy::Disk { path, .. } => {
             // Ignoring errors in `create_dir_all`, in order to avoid making the API of this
             // function more complex. If `create_dir_all` fails, opening the database will most
             // likely fail too.
-            let _ = fs::create_dir_all(directory_path);
-            rusqlite::Connection::open_with_flags(directory_path.join("database.sqlite"), flags)
+            let _ = fs::create_dir_all(path);
+            // TODO: don't join, directly take the file as input
+            rusqlite::Connection::open_with_flags(path.join("database.sqlite"), flags)
         }
         ConfigTy::Memory => rusqlite::Connection::open_in_memory_with_flags(flags),
     }
@@ -68,7 +69,8 @@ PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA locking_mode = EXCLUSIVE;
 PRAGMA encoding = 'UTF-8';
-PRAGMA trusted_schema = false; 
+PRAGMA trusted_schema = false;
+PRAGMA temp_store = MEMORY;
             "#,
         )
         .map_err(InternalError)?;
@@ -86,6 +88,16 @@ PRAGMA trusted_schema = false;
             (),
         )
         .map_err(InternalError)?;
+
+    // `PRAGMA` queries can't be parametrized, and thus we have to use `format!`.
+    if let ConfigTy::Disk {
+        memory_map_size, ..
+    } = config.ty
+    {
+        database
+            .execute(&format!("PRAGMA mmap_size = {}", memory_map_size), ())
+            .map_err(InternalError)?;
+    }
 
     // Each SQLite database contains a "user version" whose value can be used by the API user
     // (that's us!) however they want. Its value defaults to 0 for new database. We use it to
@@ -295,8 +307,14 @@ pub struct Config<'a> {
 /// Type of database.
 #[derive(Debug)]
 pub enum ConfigTy<'a> {
-    /// Store the database on disk. Path to the directory containing the database.
-    Disk(&'a Path),
+    /// Store the database on disk.
+    Disk {
+        /// Path to the directory containing the database.
+        path: &'a Path,
+        /// Maximum allowed amount of memory, in bytes, that SQLite will reserve to memory-map
+        /// files.
+        memory_map_size: usize,
+    },
     /// Store the database in memory. The database is discarded on destruction.
     Memory,
 }

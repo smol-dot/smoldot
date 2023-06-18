@@ -765,7 +765,10 @@ async fn background_open_database(
                 block_number_bytes,
                 cache_size: sqlite_cache_size,
                 ty: if let Some(path) = &path {
-                    full_sqlite::ConfigTy::Disk(path)
+                    full_sqlite::ConfigTy::Disk {
+                        path,
+                        memory_map_size: 1000000000, // TODO: make configurable
+                    }
                 } else {
                     full_sqlite::ConfigTy::Memory
                 },
@@ -780,7 +783,10 @@ async fn background_open_database(
             block_number_bytes,
             cache_size: sqlite_cache_size,
             ty: if let Some(path) = &path {
-                full_sqlite::ConfigTy::Disk(path)
+                full_sqlite::ConfigTy::Disk {
+                    path,
+                    memory_map_size: 1000000000, // TODO: make configurable
+                }
             } else {
                 full_sqlite::ConfigTy::Memory
             },
