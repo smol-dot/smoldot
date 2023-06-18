@@ -672,6 +672,7 @@ impl SqliteFullDatabase {
         let connection = self.database.lock();
 
         // TODO: could be optimized by having a different request when `parent_tries_paths_nibbles` is empty and when it isn't
+        // TODO: trie_root_ref system untested
         let mut statement = connection
             .prepare_cached(
                 r#"
@@ -891,6 +892,7 @@ impl SqliteFullDatabase {
     ) -> Result<Option<Vec<u8>>, StorageAccessError> {
         let connection = self.database.lock();
 
+        // TODO: trie_root_ref system untested
         let mut statement = connection
             .prepare_cached(
                 r#"
