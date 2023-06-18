@@ -266,12 +266,6 @@ PRAGMA user_version = 1;
         .map_err(InternalError)?
         == 0;
 
-    // The database is *always* within a transaction.
-    // TODO: remove this weird system
-    database
-        .execute("BEGIN TRANSACTION", ())
-        .map_err(InternalError)?;
-
     Ok(if !is_empty {
         DatabaseOpen::Open(SqliteFullDatabase {
             database: parking_lot::Mutex::new(database),
@@ -336,19 +330,25 @@ impl DatabaseEmpty {
     /// Must also pass the body, justification, and state of the storage of the finalized block.
     // TODO: Passing SameAsParent is invalid, document and error
     pub fn initialize<'a>(
-        self,
+        mut self,
         chain_information: impl Into<chain_information::ChainInformationRef<'a>>,
         finalized_block_body: impl ExactSizeIterator<Item = &'a [u8]>,
         finalized_block_justification: Option<Vec<u8>>,
         finalized_block_storage_entries: impl Iterator<Item = InsertTrieNode<'a>>,
         finalized_block_state_version: u8,
     ) -> Result<SqliteFullDatabase, AccessError> {
+        // Start a transaction to insert everything in one go.
+        let transaction = self
+            .database
+            .transaction()
+            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+
         // Temporarily disable foreign key checks in order to make the initial insertion easier,
         // as we don't have to make sure that trie nodes are sorted.
         // Note that this is immediately disabled again when we `COMMIT`.
-        self.database
+        transaction
             .execute("PRAGMA defer_foreign_keys = ON", ())
-            .unwrap(); // TODO: don't unwrap
+            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
 
         let chain_information = chain_information.into();
 
@@ -365,14 +365,13 @@ impl DatabaseEmpty {
             });
 
         insert_storage(
-            &self.database,
+            &transaction,
             None,
             finalized_block_storage_entries,
             finalized_block_state_version,
         )?;
 
-        self
-            .database
+        transaction
             .prepare_cached(
                 "INSERT INTO blocks(hash, parent_hash, state_trie_root_hash, number, header, justification) VALUES(?, ?, ?, ?, ?, ?)",
             )
@@ -390,8 +389,7 @@ impl DatabaseEmpty {
             .unwrap();
 
         {
-            let mut statement = self
-                .database
+            let mut statement = transaction
                 .prepare_cached("INSERT INTO blocks_body(hash, idx, extrinsic) VALUES(?, ?, ?)")
                 .unwrap();
             for (index, item) in finalized_block_body.enumerate() {
@@ -405,9 +403,9 @@ impl DatabaseEmpty {
             }
         }
 
-        super::meta_set_blob(&self.database, "best", &finalized_block_hash[..]).unwrap();
+        super::meta_set_blob(&transaction, "best", &finalized_block_hash[..]).unwrap();
         super::meta_set_number(
-            &self.database,
+            &transaction,
             "finalized",
             chain_information.finalized_block_header.number,
         )?;
@@ -420,13 +418,12 @@ impl DatabaseEmpty {
                 finalized_scheduled_change,
             } => {
                 super::meta_set_number(
-                    &self.database,
+                    &transaction,
                     "grandpa_authorities_set_id",
                     *after_finalized_block_authorities_set_id,
                 )?;
 
-                let mut statement = self
-                    .database
+                let mut statement = transaction
                     .prepare_cached("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
                     .unwrap();
                 for (index, item) in finalized_triggered_authorities.iter().enumerate() {
@@ -440,10 +437,9 @@ impl DatabaseEmpty {
                 }
 
                 if let Some((height, list)) = finalized_scheduled_change {
-                    super::meta_set_number(&self.database, "grandpa_scheduled_target", *height)?;
+                    super::meta_set_number(&transaction, "grandpa_scheduled_target", *height)?;
 
-                    let mut statement = self
-                        .database
+                    let mut statement = transaction
                         .prepare_cached("INSERT INTO grandpa_scheduled_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
                         .unwrap();
                     for (index, item) in list.iter().enumerate() {
@@ -465,11 +461,10 @@ impl DatabaseEmpty {
                 finalized_authorities_list,
                 slot_duration,
             } => {
-                super::meta_set_number(&self.database, "aura_slot_duration", slot_duration.get())
+                super::meta_set_number(&transaction, "aura_slot_duration", slot_duration.get())
                     .unwrap();
 
-                let mut statement = self
-                    .database
+                let mut statement = transaction
                     .prepare_cached(
                         "INSERT INTO aura_finalized_authorities(idx, public_key) VALUES(?, ?)",
                     )
@@ -485,28 +480,26 @@ impl DatabaseEmpty {
                 finalized_next_epoch_transition,
                 finalized_block_epoch_information,
             } => {
-                super::meta_set_number(
-                    &self.database,
-                    "babe_slots_per_epoch",
-                    slots_per_epoch.get(),
-                )
-                .unwrap();
+                super::meta_set_number(&transaction, "babe_slots_per_epoch", slots_per_epoch.get())
+                    .unwrap();
                 super::meta_set_blob(
-                    &self.database,
+                    &transaction,
                     "babe_finalized_next_epoch",
                     &encode_babe_epoch_information(finalized_next_epoch_transition.clone())[..],
                 )
                 .unwrap();
 
                 if let Some(finalized_block_epoch_information) = finalized_block_epoch_information {
-                    super::meta_set_blob(&self.database, "babe_finalized_epoch", &encode_babe_epoch_information(
+                    super::meta_set_blob(&transaction, "babe_finalized_epoch", &encode_babe_epoch_information(
             finalized_block_epoch_information.clone(),
         )[..]).unwrap();
                 }
             }
         }
 
-        super::flush(&self.database)?;
+        transaction
+            .commit()
+            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
 
         Ok(SqliteFullDatabase {
             database: parking_lot::Mutex::new(self.database),

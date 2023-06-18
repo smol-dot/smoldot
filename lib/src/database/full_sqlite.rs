@@ -306,29 +306,36 @@ impl SqliteFullDatabase {
             .map_err(InsertError::BadHeader)?;
 
         // Locking is performed as late as possible.
-        let connection = self.database.lock();
+        let mut database = self.database.lock();
+
+        // Start a transaction to insert everything at once.
+        let transaction = database.transaction().map_err(|err| {
+            InsertError::Access(AccessError::Corrupted(CorruptedError::Internal(
+                InternalError(err),
+            )))
+        })?;
 
         // Make sure that the block to insert isn't already in the database.
-        if has_block(&connection, &block_hash)? {
+        if has_block(&transaction, &block_hash)? {
             return Err(InsertError::Duplicate);
         }
 
         // Make sure that the parent of the block to insert is in the database.
-        if !has_block(&connection, header.parent_hash)? {
+        if !has_block(&transaction, header.parent_hash)? {
             return Err(InsertError::MissingParent);
         }
 
         // If the height of the block to insert is <= the latest finalized, it doesn't
         // belong to the finalized chain and would be pruned.
         // TODO: what if we don't immediately insert the entire finalized chain, but populate it later? should that not be a use case?
-        if header.number <= finalized_num(&connection)? {
+        if header.number <= finalized_num(&transaction)? {
             return Err(InsertError::FinalizedNephew);
         }
 
         // Temporarily disable foreign key checks in order to make the insertion easier, as we
         // don't have to make sure that trie nodes are sorted.
         // Note that this is immediately disabled again when we `COMMIT` later down below.
-        connection
+        transaction
             .execute("PRAGMA defer_foreign_keys = ON", ())
             .map_err(|err| {
                 InsertError::Access(AccessError::Corrupted(CorruptedError::Internal(
@@ -336,7 +343,7 @@ impl SqliteFullDatabase {
                 )))
             })?;
 
-        connection
+        transaction
             .prepare_cached(
                 "INSERT INTO blocks(number, hash, parent_hash, state_trie_root_hash, header, justification) VALUES (?, ?, ?, ?, ?, NULL)",
             )
@@ -351,7 +358,7 @@ impl SqliteFullDatabase {
             .unwrap();
 
         {
-            let mut statement = connection
+            let mut statement = transaction
                 .prepare_cached("INSERT INTO blocks_body(hash, idx, extrinsic) VALUES (?, ?, ?)")
                 .unwrap();
             for (index, item) in body.enumerate() {
@@ -367,7 +374,7 @@ impl SqliteFullDatabase {
 
         // Insert the changes in trie nodes.
         insert_storage(
-            &connection,
+            &transaction,
             Some(&header.parent_hash[..]),
             new_trie_nodes,
             trie_entries_version,
@@ -376,8 +383,15 @@ impl SqliteFullDatabase {
 
         // Various other updates.
         if is_new_best {
-            meta_set_blob(&connection, "best", &block_hash)?;
+            meta_set_blob(&transaction, "best", &block_hash)?;
         }
+
+        // If everything is successful, we commit.
+        transaction.commit().map_err(|err| {
+            InsertError::Access(AccessError::Corrupted(CorruptedError::Internal(
+                InternalError(err),
+            )))
+        })?;
 
         Ok(())
     }
@@ -397,10 +411,17 @@ impl SqliteFullDatabase {
         &self,
         new_finalized_block_hash: &[u8; 32],
     ) -> Result<(), SetFinalizedError> {
-        let connection = self.database.lock();
+        let mut database = self.database.lock();
+
+        // Start a transaction to insert everything at once.
+        let transaction = database.transaction().map_err(|err| {
+            SetFinalizedError::Access(AccessError::Corrupted(CorruptedError::Internal(
+                InternalError(err),
+            )))
+        })?;
 
         // Fetch the header of the block to finalize.
-        let new_finalized_header = block_header(&connection, new_finalized_block_hash)?
+        let new_finalized_header = block_header(&transaction, new_finalized_block_hash)?
             .ok_or(SetFinalizedError::UnknownBlock)?;
         let new_finalized_header = header::decode(&new_finalized_header, self.block_number_bytes)
             .map_err(CorruptedError::BlockHeaderCorrupted)
@@ -408,7 +429,7 @@ impl SqliteFullDatabase {
             .map_err(SetFinalizedError::Access)?;
 
         // Fetch the current finalized block.
-        let current_finalized = finalized_num(&connection)?;
+        let current_finalized = finalized_num(&transaction)?;
 
         // If the block to finalize is at the same height as the already-finalized
         // block, considering that the database only contains one block per height on
@@ -428,7 +449,7 @@ impl SqliteFullDatabase {
         // At this point, we are sure that the operation will succeed unless the database is
         // corrupted.
         // Update the finalized block in meta.
-        meta_set_number(&connection, "finalized", new_finalized_header.number)?;
+        meta_set_number(&transaction, "finalized", new_finalized_header.number)?;
 
         // Take each block height between `header.number` and `current_finalized + 1`
         // and remove blocks that aren't an ancestor of the new finalized block.
@@ -439,7 +460,7 @@ impl SqliteFullDatabase {
             let mut expected_hash = *new_finalized_block_hash;
 
             for height in (current_finalized + 1..=new_finalized_header.number).rev() {
-                let blocks_list = block_hashes_by_number(&connection, height)?;
+                let blocks_list = block_hashes_by_number(&transaction, height)?;
 
                 let mut expected_block_found = false;
                 for hash_at_height in blocks_list {
@@ -449,7 +470,7 @@ impl SqliteFullDatabase {
                     }
 
                     // Remove the block from the database.
-                    purge_block(&connection, &hash_at_height)?;
+                    purge_block(&transaction, &hash_at_height)?;
                 }
 
                 // `expected_hash` not found in the list of blocks with this number.
@@ -462,7 +483,7 @@ impl SqliteFullDatabase {
                 // Update `expected_hash` to point to the parent of the current
                 // `expected_hash`.
                 expected_hash = {
-                    let header = block_header(&connection, &expected_hash)?.ok_or(
+                    let header = block_header(&transaction, &expected_hash)?.ok_or(
                         SetFinalizedError::Access(AccessError::Corrupted(
                             CorruptedError::BrokenChain,
                         )),
@@ -482,13 +503,13 @@ impl SqliteFullDatabase {
         for height in new_finalized_header.number + 1.. {
             let mut next_iter_allowed_parents = Vec::with_capacity(allowed_parents.len());
 
-            let blocks_list = block_hashes_by_number(&connection, height)?;
+            let blocks_list = block_hashes_by_number(&transaction, height)?;
             if blocks_list.is_empty() {
                 break;
             }
 
             for block_hash in blocks_list {
-                let header = block_header(&connection, &block_hash)?
+                let header = block_header(&transaction, &block_hash)?
                     .ok_or(AccessError::Corrupted(CorruptedError::MissingBlockHeader))?;
                 let header = header::decode(&header, self.block_number_bytes)
                     .map_err(CorruptedError::BlockHeaderCorrupted)
@@ -499,7 +520,7 @@ impl SqliteFullDatabase {
                     continue;
                 }
 
-                purge_block(&connection, &block_hash)?;
+                purge_block(&transaction, &block_hash)?;
             }
 
             allowed_parents = next_iter_allowed_parents;
@@ -510,7 +531,7 @@ impl SqliteFullDatabase {
         for height in current_finalized + 1..=new_finalized_header.number {
             let block_hash =
                 {
-                    let list = block_hashes_by_number(&connection, height)?;
+                    let list = block_hashes_by_number(&transaction, height)?;
                     debug_assert_eq!(list.len(), 1);
                     list.into_iter().next().ok_or(SetFinalizedError::Access(
                         AccessError::Corrupted(CorruptedError::MissingBlockHeader),
@@ -518,7 +539,7 @@ impl SqliteFullDatabase {
                 };
 
             let block_header =
-                block_header(&connection, &block_hash)?.ok_or(SetFinalizedError::Access(
+                block_header(&transaction, &block_hash)?.ok_or(SetFinalizedError::Access(
                     AccessError::Corrupted(CorruptedError::MissingBlockHeader),
                 ))?;
             let block_header = header::decode(&block_header, self.block_number_bytes)
@@ -529,9 +550,9 @@ impl SqliteFullDatabase {
             // TODO: the code below is very verbose and redundant with other similar code in smoldot ; could be improved
 
             if let Some((new_epoch, next_config)) = block_header.digest.babe_epoch_information() {
-                let epoch = meta_get_blob(&connection, "babe_finalized_next_epoch")?.unwrap(); // TODO: don't unwrap
+                let epoch = meta_get_blob(&transaction, "babe_finalized_next_epoch")?.unwrap(); // TODO: don't unwrap
                 let decoded_epoch = decode_babe_epoch_information(&epoch)?;
-                connection.execute(r#"INSERT OR REPLACE INTO meta(key, value_blob) SELECT "babe_finalized_epoch", value_blob FROM meta WHERE key = "babe_finalized_next_epoch""#, ()).unwrap();
+                transaction.execute(r#"INSERT OR REPLACE INTO meta(key, value_blob) SELECT "babe_finalized_epoch", value_blob FROM meta WHERE key = "babe_finalized_next_epoch""#, ()).unwrap();
 
                 let slot_number = block_header
                     .digest
@@ -539,7 +560,7 @@ impl SqliteFullDatabase {
                     .unwrap()
                     .slot_number();
                 let slots_per_epoch =
-                    expect_nz_u64(meta_get_number(&connection, "babe_slots_per_epoch")?.unwrap())?; // TODO: don't unwrap
+                    expect_nz_u64(meta_get_number(&transaction, "babe_slots_per_epoch")?.unwrap())?; // TODO: don't unwrap
 
                 let new_epoch = if let Some(next_config) = next_config {
                     chain_information::BabeEpochInformation {
@@ -574,7 +595,7 @@ impl SqliteFullDatabase {
                 };
 
                 meta_set_blob(
-                    &connection,
+                    &transaction,
                     "babe_finalized_next_epoch",
                     &encode_babe_epoch_information(From::from(&new_epoch)),
                 )?;
@@ -582,7 +603,7 @@ impl SqliteFullDatabase {
 
             // TODO: implement Aura
 
-            if grandpa_authorities_set_id(&connection)?.is_some() {
+            if grandpa_authorities_set_id(&transaction)?.is_some() {
                 for grandpa_digest_item in block_header.digest.logs().filter_map(|d| match d {
                     header::DigestItemRef::GrandpaConsensus(gp) => Some(gp),
                     _ => None,
@@ -593,11 +614,11 @@ impl SqliteFullDatabase {
                     {
                         assert_eq!(change.delay, 0); // TODO: not implemented if != 0
 
-                        connection
+                        transaction
                             .execute("DELETE FROM grandpa_triggered_authorities", ())
                             .unwrap();
 
-                        let mut statement = connection.prepare_cached("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)").unwrap();
+                        let mut statement = transaction.prepare_cached("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)").unwrap();
                         for (index, item) in change.next_authorities.enumerate() {
                             statement
                                 .execute((
@@ -608,7 +629,7 @@ impl SqliteFullDatabase {
                                 .unwrap();
                         }
 
-                        connection.execute(r#"UPDATE meta SET value_number = value_number + 1 WHERE key = "grandpa_authorities_set_id""#, ()).unwrap();
+                        transaction.execute(r#"UPDATE meta SET value_number = value_number + 1 WHERE key = "grandpa_authorities_set_id""#, ()).unwrap();
                     }
                 }
             }
@@ -617,8 +638,12 @@ impl SqliteFullDatabase {
         // It is possible that the best block has been pruned.
         // TODO: ^ yeah, how do we handle that exactly ^ ?
 
-        // Make sure that everything is saved to disk after this point.
-        flush(&connection)?;
+        // If everything went well up to this point, commit the transaction.
+        transaction.commit().map_err(|err| {
+            SetFinalizedError::Access(AccessError::Corrupted(CorruptedError::Internal(
+                InternalError(err),
+            )))
+        })?;
 
         Ok(())
     }
@@ -909,18 +934,11 @@ impl fmt::Debug for SqliteFullDatabase {
 impl Drop for SqliteFullDatabase {
     fn drop(&mut self) {
         if !std::thread::panicking() {
-            let _ = self.database.get_mut().execute("COMMIT", ());
-        } else {
-            // Rolling back if we're unwinding is not the worst idea, in case we were in the
-            // middle of an update.
-            // We might roll back too much, but it is not considered a problem.
-            let _ = self.database.get_mut().execute("ROLLBACK", ());
+            // The SQLite documentation recommends running `PRAGMA optimize` when the database
+            // closes.
+            // TODO: it is also recommended to do this every 2 hours
+            let _ = self.database.get_mut().execute("PRAGMA optimize", ());
         }
-
-        // The SQLite documentation recommends running `PRAGMA optimize` when the database
-        // closes.
-        // TODO: it is also recommended to do this every 2 hours
-        let _ = self.database.get_mut().execute("PRAGMA optimize", ());
     }
 }
 
@@ -1181,13 +1199,6 @@ fn block_height(
     let number =
         u64::try_from(number).map_err(|_| AccessError::Corrupted(CorruptedError::InvalidNumber))?;
     Ok(Some(number))
-}
-
-fn flush(database: &rusqlite::Connection) -> Result<(), AccessError> {
-    database
-        .execute_batch("COMMIT; BEGIN TRANSACTION;")
-        .unwrap();
-    Ok(())
 }
 
 // TODO: foreign keys checks should temporarily be disabled because we insert entries in the wrong order; either clearly document this or solve this programmatically
