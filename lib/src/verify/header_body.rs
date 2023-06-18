@@ -25,7 +25,9 @@ use crate::{
 use alloc::{string::String, vec::Vec};
 use core::{iter, num::NonZeroU64, time::Duration};
 
-pub use runtime_host::{Nibble, StorageChanges, TrieEntryVersion};
+pub use runtime_host::{
+    Nibble, StorageChanges, TrieChange, TrieChangeStorageValue, TrieEntryVersion,
+};
 
 /// Configuration for a block verification.
 pub struct Config<'a, TBody> {

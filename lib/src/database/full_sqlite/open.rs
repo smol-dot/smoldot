@@ -22,7 +22,8 @@
 // TODO:remove all the unwraps in this module that shouldn't be there
 
 use super::{
-    encode_babe_epoch_information, AccessError, CorruptedError, InternalError, SqliteFullDatabase,
+    encode_babe_epoch_information, insert_storage, AccessError, CorruptedError, InsertTrieNode,
+    InternalError, SqliteFullDatabase,
 };
 use crate::chain::chain_information;
 
@@ -148,18 +149,61 @@ CREATE TABLE meta(
 );
 
 /*
+List of all trie nodes of all blocks whose trie is stored in the database.
+*/
+CREATE TABLE trie_node(
+    hash BLOB NOT NULL PRIMARY KEY,
+    partial_key BLOB NOT NULL    -- Each byte is a nibble, in other words all bytes are <16
+);
+
+/*
+Storage associated to a trie node.
+For each entry in `trie_node` there exists either 0 or 1 entry in `trie_node_storage` indicating
+the storage value associated to this node.
+*/
+CREATE TABLE trie_node_storage(
+    node_hash BLOB NOT NULL PRIMARY KEY,
+    value BLOB,
+    trie_root_ref BLOB,
+    trie_entry_version INTEGER NOT NULL,
+    FOREIGN KEY (node_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE CASCADE,
+    FOREIGN KEY (trie_root_ref) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE RESTRICT,
+    CHECK((value IS NULL) != (trie_root_ref IS NULL))
+);
+CREATE INDEX trie_node_storage_by_trie_root_ref ON trie_node_storage(trie_root_ref);
+
+/*
+Parent-child relationship between trie nodes.
+*/
+CREATE TABLE trie_node_child(
+    hash BLOB NOT NULL,
+    child_num BLOB NOT NULL,   -- Always contains one single byte. We use `BLOB` instead of `INTEGER` because SQLite stupidly doesn't provide any way of converting between integers and blobs
+    child_hash BLOB NOT NULL,
+    PRIMARY KEY (hash, child_num),
+    FOREIGN KEY (hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE CASCADE,
+    FOREIGN KEY (child_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE RESTRICT,
+    CHECK(LENGTH(child_num) == 1 AND HEX(child_num) < '10')
+);
+CREATE INDEX trie_node_child_by_hash ON trie_node_child(hash);
+CREATE INDEX trie_node_child_by_child_hash ON trie_node_child(child_hash);
+
+/*
 List of all known blocks, indexed by their hash or number.
 */
 CREATE TABLE blocks(
     hash BLOB NOT NULL PRIMARY KEY,
     parent_hash BLOB,  -- NULL only for the genesis block
+    state_trie_root_hash BLOB,  -- NULL if and only if the trie is empty or if the trie storage has been pruned from the database
     number INTEGER NOT NULL,
     header BLOB NOT NULL,
     justification BLOB,
     UNIQUE(number, hash),
-    CHECK(length(hash) == 32)
+    FOREIGN KEY (parent_hash) REFERENCES blocks(hash) ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (state_trie_root_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE SET NULL
 );
 CREATE INDEX blocks_by_number ON blocks(number);
+CREATE INDEX blocks_by_parent ON blocks(parent_hash);
+CREATE INDEX blocks_by_state_trie_root_hash ON blocks(state_trie_root_hash);
 
 /*
 Each block has a body made from 0+ extrinsics (in practice, there's always at least one extrinsic,
@@ -175,34 +219,7 @@ CREATE TABLE blocks_body(
     CHECK(length(hash) == 32),
     FOREIGN KEY (hash) REFERENCES blocks(hash) ON UPDATE CASCADE ON DELETE CASCADE
 );
-
-/*
-Storage at the highest block that is considered finalized.
-*/
-CREATE TABLE finalized_storage_main_trie(
-    key BLOB NOT NULL PRIMARY KEY,
-    value BLOB NOT NULL,
-    trie_entry_version INTEGER NOT NULL
-);
-
-/*
-For non-finalized blocks (i.e. blocks that descend from the finalized block), contains changes
-that this block performs on the storage.
-When a block gets finalized, these changes get merged into `finalized_storage_main_trie`.
-*/
-CREATE TABLE non_finalized_changes(
-    hash BLOB NOT NULL,
-    key BLOB NOT NULL,
-    -- `value` is NULL if the block removes the key from the storage, and NON-NULL if it inserts
-    -- or replaces the value at the key.
-    value BLOB,
-    -- Same NULL-ness remark as for `value`
-    trie_entry_version INTEGER,
-    UNIQUE(hash, key),
-    CHECK(length(hash) == 32),
-    CHECK((trie_entry_version IS NULL AND value IS NULL) OR (trie_entry_version IS NOT NULL AND value IS NOT NULL)),
-    FOREIGN KEY (hash) REFERENCES blocks(hash) ON UPDATE CASCADE ON DELETE CASCADE
-);
+CREATE INDEX blocks_body_by_block ON blocks_body(hash);
 
 /*
 List of public keys and weights of the GrandPa authorities that must finalize the children of the
@@ -250,6 +267,7 @@ PRAGMA user_version = 1;
         == 0;
 
     // The database is *always* within a transaction.
+    // TODO: remove this weird system
     database
         .execute("BEGIN TRANSACTION", ())
         .map_err(InternalError)?;
@@ -316,14 +334,22 @@ impl DatabaseEmpty {
     /// order to turn it into an actual database.
     ///
     /// Must also pass the body, justification, and state of the storage of the finalized block.
+    // TODO: Passing SameAsParent is invalid, document and error
     pub fn initialize<'a>(
         self,
         chain_information: impl Into<chain_information::ChainInformationRef<'a>>,
         finalized_block_body: impl ExactSizeIterator<Item = &'a [u8]>,
         finalized_block_justification: Option<Vec<u8>>,
-        finalized_block_storage_main_trie_entries: impl Iterator<Item = (&'a [u8], &'a [u8])> + Clone,
+        finalized_block_storage_entries: impl Iterator<Item = InsertTrieNode<'a>>,
         finalized_block_state_version: u8,
     ) -> Result<SqliteFullDatabase, AccessError> {
+        // Temporarily disable foreign key checks in order to make the initial insertion easier,
+        // as we don't have to make sure that trie nodes are sorted.
+        // Note that this is immediately disabled again when we `COMMIT`.
+        self.database
+            .execute("PRAGMA defer_foreign_keys = ON", ())
+            .unwrap(); // TODO: don't unwrap
+
         let chain_information = chain_information.into();
 
         let finalized_block_hash = chain_information
@@ -338,24 +364,17 @@ impl DatabaseEmpty {
                 a
             });
 
-        {
-            let mut statement = self
-                .database
-                .prepare_cached("INSERT INTO finalized_storage_main_trie(key, value, trie_entry_version) VALUES(?, ?, ?)")
-                .unwrap();
-            for (key, value) in finalized_block_storage_main_trie_entries {
-                statement
-                    .execute((key, value, i64::from(finalized_block_state_version)))
-                    .map_err(|err| {
-                        AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))
-                    })?;
-            }
-        }
+        insert_storage(
+            &self.database,
+            None,
+            finalized_block_storage_entries,
+            finalized_block_state_version,
+        )?;
 
         self
             .database
             .prepare_cached(
-                "INSERT INTO blocks(hash, parent_hash, number, header, justification) VALUES(?, ?, ?, ?, ?)",
+                "INSERT INTO blocks(hash, parent_hash, state_trie_root_hash, number, header, justification) VALUES(?, ?, ?, ?, ?, ?)",
             )
             .unwrap()
             .execute((
@@ -363,6 +382,7 @@ impl DatabaseEmpty {
                 if chain_information.finalized_block_header.number != 0 {
                     Some(&chain_information.finalized_block_header.parent_hash[..])
                 } else { None },
+                &chain_information.finalized_block_header.state_root[..],
                 i64::try_from(chain_information.finalized_block_header.number).unwrap(),
                 &scale_encoded_finalized_block_header[..],
                 finalized_block_justification.as_deref(),

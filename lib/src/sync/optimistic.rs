@@ -64,7 +64,9 @@ use core::{
 };
 use hashbrown::HashMap;
 
-pub use blocks_tree::{Nibble, StorageChanges, TrieEntryVersion};
+pub use blocks_tree::{
+    Nibble, StorageChanges, TrieChange, TrieChangeStorageValue, TrieEntryVersion,
+};
 
 mod verification_queue;
 
