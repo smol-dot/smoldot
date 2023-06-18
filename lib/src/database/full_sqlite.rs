@@ -80,7 +80,7 @@ use rusqlite::OptionalExtension as _;
 pub use open::{open, Config, ConfigTy, DatabaseEmpty, DatabaseOpen};
 
 mod open;
-// TODO: mod tests;
+mod tests;
 
 /// Returns an opaque string representing the version number of the SQLite library this binary
 /// is using.
@@ -1153,24 +1153,6 @@ fn block_hashes_by_number(
         .collect::<Result<Vec<_>, _>>()
 }
 
-fn block_parent_hash(
-    database: &rusqlite::Connection,
-    hash: &[u8; 32],
-) -> Result<Option<[u8; 32]>, AccessError> {
-    let raw_hash = database
-        .prepare_cached(r#"SELECT parent_hash FROM blocks WHERE hash = ?"#)
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
-        .query_row((&hash[..],), |row| row.get::<_, Vec<u8>>(0))
-        .optional()
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
-
-    let Some(raw_hash) = raw_hash
-        else { return Ok(None) };
-    let parent_hash = <[u8; 32]>::try_from(&raw_hash[..])
-        .map_err(|_| AccessError::Corrupted(CorruptedError::InvalidBlockHashLen))?;
-    Ok(Some(parent_hash))
-}
-
 fn block_header(
     database: &rusqlite::Connection,
     hash: &[u8; 32],
@@ -1181,24 +1163,6 @@ fn block_header(
         .query_row((&hash[..],), |row| row.get::<_, Vec<u8>>(0))
         .optional()
         .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))
-}
-
-fn block_height(
-    database: &rusqlite::Connection,
-    hash: &[u8; 32],
-) -> Result<Option<u64>, AccessError> {
-    let number = database
-        .prepare_cached(r#"SELECT number FROM blocks WHERE hash = ?"#)
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
-        .query_row((&hash[..],), |row| row.get::<_, i64>(0))
-        .optional()
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
-
-    let Some(number) = number
-        else { return Ok(None) };
-    let number =
-        u64::try_from(number).map_err(|_| AccessError::Corrupted(CorruptedError::InvalidNumber))?;
-    Ok(Some(number))
 }
 
 // TODO: foreign keys checks should temporarily be disabled because we insert entries in the wrong order; either clearly document this or solve this programmatically
