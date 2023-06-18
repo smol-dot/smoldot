@@ -750,6 +750,9 @@ impl SqliteFullDatabase {
     ///
     /// `key_nibbles` must be an iterator to the **nibbles** of the key.
     ///
+    /// `prefix_nibbles` must be an iterator to nibbles. If the result of the function wouldn't
+    /// start with this specific list of bytes, `None` is returned.
+    ///
     /// `parent_tries_paths_nibbles` is a list of keys to follow in order to find the root of the
     /// trie into which `key_nibbles` should be searched.
     ///
@@ -768,14 +771,15 @@ impl SqliteFullDatabase {
     ///
     /// # Panics
     ///
-    /// Panics if any of the values yielded by `parent_tries_paths_nibbles` or `key_nibbles` is
-    /// superior or equal to 16.
+    /// Panics if any of the values yielded by `parent_tries_paths_nibbles`, `key_nibbles`, or
+    /// `prefix_nibbles` is superior or equal to 16.
     ///
     pub fn block_storage_next_key(
         &self,
         block_hash: &[u8; 32],
         mut parent_tries_paths_nibbles: impl Iterator<Item = impl Iterator<Item = u8>>,
         key_nibbles: impl Iterator<Item = u8>,
+        prefix_nibbles: impl Iterator<Item = u8>,
         branch_nodes: bool,
     ) -> Result<Option<Vec<u8>>, StorageAccessError> {
         let connection = self.database.lock();
@@ -791,12 +795,15 @@ impl SqliteFullDatabase {
                 r#"
             WITH RECURSIVE
                 next_key(node_hash, node_is_branch, node_full_key, search_remain) AS (
-                        SELECT trie_node.hash, trie_node_storage.value IS NULL AND trie_node_storage.trie_root_ref IS NULL, trie_node.partial_key, COALESCE(SUBSTR(:key, 1 + LENGTH(trie_node.partial_key)), X'')
+                        SELECT
+                            trie_node.hash,
+                            trie_node_storage.value IS NULL AND trie_node_storage.trie_root_ref IS NULL,
+                            trie_node.partial_key,
+                            COALESCE(SUBSTR(:key, 1 + LENGTH(trie_node.partial_key)), X'')
                         FROM blocks
                         JOIN trie_node ON blocks.state_trie_root_hash = trie_node.hash
                             AND COALESCE(SUBSTR(:key, 1, LENGTH(trie_node.partial_key)), X'') <= trie_node.partial_key
                         LEFT JOIN trie_node_storage ON trie_node_storage.node_hash = trie_node.hash
-                        WHERE blocks.hash = :block_hash
                     UNION ALL
                         SELECT
                             trie_node_child.child_hash,
@@ -820,7 +827,11 @@ impl SqliteFullDatabase {
                                 ELSE TRUE END
                 )
 
-            SELECT COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1, MIN(next_key.node_full_key)
+            SELECT
+                COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1,
+                CASE COALESCE(SUBSTR(MIN(next_key.node_full_key), 1, LENGTH(:prefix)), X'') = :prefix
+                    WHEN TRUE THEN MIN(next_key.node_full_key)
+                    ELSE NULL END
             FROM blocks
             LEFT JOIN trie_node ON trie_node.hash = blocks.state_trie_root_hash
             LEFT JOIN next_key ON LENGTH(next_key.search_remain) = 0
@@ -836,12 +847,15 @@ impl SqliteFullDatabase {
 
         let key_nibbles = key_nibbles.collect::<Vec<_>>();
         assert!(!key_nibbles.iter().any(|n| *n >= 16));
+        let prefix_nibbles = prefix_nibbles.collect::<Vec<_>>();
+        assert!(!prefix_nibbles.iter().any(|n| *n >= 16));
 
         let (has_block, block_has_storage, next_key) = statement
             .query_row(
                 rusqlite::named_params! {
                     ":block_hash": &block_hash[..],
                     ":key": key_nibbles,
+                    ":prefix": prefix_nibbles,
                     ":skip_branches": !branch_nodes
                 },
                 |row| {

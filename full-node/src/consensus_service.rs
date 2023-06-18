@@ -922,29 +922,22 @@ impl SyncBackground {
                             .map(u8::from)
                             .chain(if req.or_equal() { None } else { Some(0u8) })
                             .collect::<Vec<_>>();
+                        let prefix_nibbles = req.prefix().map(u8::from).collect::<Vec<_>>();
 
                         let branch_nodes = req.branch_nodes();
-                        let mut next_key = self
+                        let next_key = self
                             .database
                             .with_database(move |db| {
                                 db.block_storage_next_key(
                                     &parent_hash,
                                     parent_paths.into_iter().map(|p| p.into_iter()),
                                     key_nibbles.iter().copied(),
+                                    prefix_nibbles.iter().copied(),
                                     branch_nodes,
                                 )
                             })
                             .await
                             .expect("database access error");
-                        // TODO: pass the prefix to SQLite
-                        if next_key.as_ref().map_or(false, |k| {
-                            k.iter()
-                                .copied()
-                                .zip(req.prefix())
-                                .any(|(a, b)| trie::Nibble::try_from(a).unwrap() != b)
-                        }) {
-                            next_key = None;
-                        }
 
                         block_authoring = req
                             .inject_key(next_key.map(|k| {
@@ -1499,29 +1492,22 @@ impl SyncBackground {
                                 .map(u8::from)
                                 .chain(if req.or_equal() { None } else { Some(0u8) })
                                 .collect::<Vec<_>>();
+                            let prefix_nibbles = req.prefix().map(u8::from).collect::<Vec<_>>();
 
                             let branch_nodes = req.branch_nodes();
-                            let mut next_key = self
+                            let next_key = self
                                 .database
                                 .with_database(move |db| {
                                     db.block_storage_next_key(
                                         &parent_hash,
                                         parent_paths.into_iter().map(|p| p.into_iter()),
                                         key_nibbles.iter().copied(),
+                                        prefix_nibbles.iter().copied(),
                                         branch_nodes,
                                     )
                                 })
                                 .await
                                 .expect("database access error");
-                            // TODO: pass the prefix to SQLite
-                            if next_key.as_ref().map_or(false, |k| {
-                                k.iter()
-                                    .copied()
-                                    .zip(req.prefix())
-                                    .any(|(a, b)| trie::Nibble::try_from(a).unwrap() != b)
-                            }) {
-                                next_key = None;
-                            }
 
                             database_accesses_duration += when_database_access_started.elapsed();
                             verify = req.inject_key(next_key.map(|k| {

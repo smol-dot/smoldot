@@ -206,12 +206,16 @@ fn empty_database_fill_then_query() {
             let key = (0..uniform_sample(0, 8))
                 .map(|_| trie::Nibble::try_from(uniform_sample(0u8, 15)).unwrap())
                 .collect::<Vec<_>>();
+            let prefix = (0..uniform_sample(0, 8))
+                .map(|_| trie::Nibble::try_from(uniform_sample(0u8, 15)).unwrap())
+                .collect::<Vec<_>>();
             let branch_nodes = rand::random::<bool>();
             let actual = open_db
                 .block_storage_next_key(
                     &block0_hash,
                     iter::empty::<iter::Empty<_>>(),
                     key.iter().copied().map(u8::from),
+                    prefix.iter().copied().map(u8::from),
                     branch_nodes,
                 )
                 .unwrap();
@@ -219,12 +223,17 @@ fn empty_database_fill_then_query() {
                 .iter_ordered()
                 .map(|n| trie.node_full_key_by_index(n).unwrap().collect::<Vec<_>>())
                 .find(|n| *n >= key)
+                .filter(|n| n.starts_with(&prefix))
                 .map(|k| k.iter().copied().map(u8::from).collect::<Vec<_>>());
             assert_eq!(
                 actual,
                 expected,
-                "\nkey = {:?}\nbranch_nodes = {:?}\ntrie = {:?}",
+                "\nkey = {:?}\nprefix = {:?}\nbranch_nodes = {:?}\ntrie = {:?}",
                 key.iter().map(|n| format!("{:x}", n)).collect::<String>(),
+                prefix
+                    .iter()
+                    .map(|n| format!("{:x}", n))
+                    .collect::<String>(),
                 branch_nodes,
                 trie
             );
