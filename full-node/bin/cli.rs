@@ -67,7 +67,7 @@ pub struct CliOptionsRun {
     /// Output to stdout: auto, none, informant, logs, logs-json.
     #[arg(long, default_value = "auto")]
     pub output: Output,
-    /// Level of logging: off, error, warn, info, debug, trace. Defaults to info.
+    /// Level of logging: off, error, warn, info, debug, trace.
     #[arg(long)]
     pub log_level: Option<LogLevel>,
     /// Coloring: auto, always, never

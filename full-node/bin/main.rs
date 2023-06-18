@@ -63,7 +63,14 @@ async fn run(cli_options: cli::CliOptionsRun) {
         cli::Output::None => Arc::new(|_level, _message| {}),
         cli::Output::Informant | cli::Output::Logs => {
             let color_choice = cli_options.color.clone();
-            let log_level = cli_options.log_level.clone().unwrap_or(cli::LogLevel::Info);
+            let log_level = cli_options.log_level.clone().unwrap_or(
+                if matches!(cli_output, cli::Output::Informant) {
+                    cli::LogLevel::Info
+                } else {
+                    cli::LogLevel::Debug
+                },
+            );
+
             Arc::new(move |level, message| {
                 match (&level, &log_level) {
                     (_, cli::LogLevel::Off) => return,
@@ -117,7 +124,10 @@ async fn run(cli_options: cli::CliOptionsRun) {
             }) as Arc<dyn smoldot_full_node::LogCallback + Send + Sync>
         }
         cli::Output::LogsJson => {
-            let log_level = cli_options.log_level.clone().unwrap_or(cli::LogLevel::Info);
+            let log_level = cli_options
+                .log_level
+                .clone()
+                .unwrap_or(cli::LogLevel::Debug);
             Arc::new(move |level, message| {
                 match (&level, &log_level) {
                     (_, cli::LogLevel::Off) => return,
