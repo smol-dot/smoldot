@@ -788,8 +788,12 @@ impl SqliteFullDatabase {
             todo!() // TODO: /!\
         }
 
+        let key_nibbles = key_nibbles.collect::<Vec<_>>();
+        assert!(!key_nibbles.iter().any(|n| *n >= 16));
+        let prefix_nibbles = prefix_nibbles.collect::<Vec<_>>();
+        assert!(!prefix_nibbles.iter().any(|n| *n >= 16));
+
         // TODO: this algorithm relies the fact that leaf nodes always have a storage value, which isn't exactly clear in the schema ; however not relying on this makes it way harder to write
-        // TODO: pretty slow when `branch_nodes` is `false` due to inability to do a group by + min to take only the first child
         let mut statement = connection
             .prepare_cached(
                 r#"
@@ -804,10 +808,11 @@ impl SqliteFullDatabase {
                         JOIN trie_node ON blocks.state_trie_root_hash = trie_node.hash
                             AND COALESCE(SUBSTR(:key, 1, LENGTH(trie_node.partial_key)), X'') <= trie_node.partial_key
                         LEFT JOIN trie_node_storage ON trie_node_storage.node_hash = trie_node.hash
-                        WHERE COALESCE(SUBSTR(trie_node.partial_key, 1, LENGTH(:prefix)), X'') = COALESCE(SUBSTR(:prefix, 1, LENGTH(trie_node.partial_key)), X'')
+                        WHERE blocks.hash = :block_hash
+                            AND COALESCE(SUBSTR(trie_node.partial_key, 1, LENGTH(:prefix)), X'') = COALESCE(SUBSTR(:prefix, 1, LENGTH(trie_node.partial_key)), X'')
                     UNION ALL
                         SELECT
-                            trie_node_child.child_hash,
+                            trie_node.hash,
                             trie_node_storage.value IS NULL AND trie_node_storage.trie_root_ref IS NULL,
                             CAST(next_key.node_full_key || trie_node_child.child_num || trie_node.partial_key AS BLOB)
                                 AS node_full_key,
@@ -815,17 +820,28 @@ impl SqliteFullDatabase {
                                 WHEN TRUE THEN SUBSTR(next_key.search_remain, 2 + LENGTH(trie_node.partial_key))
                                 ELSE X'' END
                         FROM next_key
-                        JOIN trie_node_child
+
+                        LEFT JOIN trie_node_child
                             ON next_key.node_hash = trie_node_child.hash
                             AND CASE LENGTH(next_key.search_remain)
                                 WHEN 0 THEN next_key.node_is_branch AND :skip_branches
                                 ELSE SUBSTR(next_key.search_remain, 1, 1) <= trie_node_child.child_num END
-                        LEFT JOIN trie_node_storage ON trie_node_storage.node_hash = trie_node_child.child_hash
-                        JOIN trie_node ON trie_node.hash = trie_node_child.child_hash
-                            AND
-                                CASE SUBSTR(next_key.search_remain, 1, 1) = trie_node_child.child_num
+                        LEFT JOIN trie_node ON trie_node.hash = trie_node_child.child_hash
+                            AND CASE SUBSTR(next_key.search_remain, 1, 1) = trie_node_child.child_num
                                 WHEN TRUE THEN SUBSTR(next_key.search_remain, 2, LENGTH(trie_node.partial_key)) <= trie_node.partial_key
                                 ELSE TRUE END
+
+                        LEFT JOIN trie_node_child AS trie_node_child_before
+                            ON next_key.node_hash = trie_node_child_before.hash
+                            AND trie_node_child_before.child_num < trie_node_child.child_num
+                            AND trie_node_child_before.child_num > SUBSTR(next_key.search_remain, 1, 1)
+
+                        LEFT JOIN trie_node_storage
+                            ON trie_node_storage.node_hash = trie_node.hash
+
+                        WHERE trie_node_child_before.hash IS NULL
+                            AND trie_node.hash IS NOT NULL
+                            AND COALESCE(SUBSTR(node_full_key, 1, LENGTH(:prefix)), X'') <= COALESCE(SUBSTR(:prefix, 1, LENGTH(node_full_key)), X'')
                 )
 
             SELECT
@@ -845,11 +861,6 @@ impl SqliteFullDatabase {
                     InternalError(err),
                 )))
             })?;
-
-        let key_nibbles = key_nibbles.collect::<Vec<_>>();
-        assert!(!key_nibbles.iter().any(|n| *n >= 16));
-        let prefix_nibbles = prefix_nibbles.collect::<Vec<_>>();
-        assert!(!prefix_nibbles.iter().any(|n| *n >= 16));
 
         let (has_block, block_has_storage, next_key) = statement
             .query_row(
