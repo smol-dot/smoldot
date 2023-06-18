@@ -183,7 +183,11 @@ fn empty_database_fill_then_query() {
                 .map(|_| uniform_sample(0, 255))
                 .collect::<Vec<_>>();
             let actual = open_db
-                .block_storage_main_trie_get(&block0_hash, &key)
+                .block_storage_get(
+                    &block0_hash,
+                    iter::empty::<iter::Empty<_>>(),
+                    trie::bytes_to_nibbles(key.iter().copied()).map(u8::from),
+                )
                 .unwrap();
             let expected = trie
                 .node_by_full_key(trie::bytes_to_nibbles(key.iter().copied()))

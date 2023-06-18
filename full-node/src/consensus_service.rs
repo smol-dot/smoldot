@@ -171,12 +171,20 @@ impl ConsensusService {
                         .to_chain_information(&finalized_block_hash)
                         .unwrap();
                     let finalized_code = database
-                        .block_storage_main_trie_get(&finalized_block_hash, b":code")
+                        .block_storage_get(
+                            &finalized_block_hash,
+                            iter::empty::<iter::Empty<_>>(),
+                            trie::bytes_to_nibbles(b":code".iter().copied()).map(u8::from),
+                        )
                         .unwrap()
                         .unwrap() // TODO: better error?
                         .0;
                     let finalized_heap_pages = database
-                        .block_storage_main_trie_get(&finalized_block_hash, b":heappages")
+                        .block_storage_get(
+                            &finalized_block_hash,
+                            iter::empty::<iter::Empty<_>>(),
+                            trie::bytes_to_nibbles(b":heappages".iter().copied()).map(u8::from),
+                        )
                         .unwrap() // TODO: better error?
                         .map(|(hp, _)| hp);
                     (
@@ -850,20 +858,23 @@ impl SyncBackground {
 
                     // Access to the best block storage.
                     author::build::BuilderAuthoring::StorageGet(req) => {
-                        // TODO: child tries not supported
-                        if req.child_trie().is_some() {
-                            self.log_callback
-                                .log(LogLevel::Warn, "child-tries-not-supported".to_owned());
-                            block_authoring =
-                                req.inject_value(None::<(iter::Empty<&'static [u8]>, _)>);
-                            continue;
-                        }
-
-                        let key = req.key().as_ref().to_vec();
+                        let parent_paths = req.child_trie().map(|child_trie| {
+                            trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                                .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
+                                .map(u8::from)
+                                .collect::<Vec<_>>()
+                        });
+                        let key = trie::bytes_to_nibbles(req.key().as_ref().iter().copied())
+                            .map(u8::from)
+                            .collect::<Vec<_>>();
                         let value = self
                             .database
                             .with_database(move |db| {
-                                db.block_storage_main_trie_get(&parent_hash, &key)
+                                db.block_storage_get(
+                                    &parent_hash,
+                                    parent_paths.into_iter().map(|p| p.into_iter()),
+                                    key.iter().copied(),
+                                )
                             })
                             .await
                             .expect("database access error");
@@ -1406,11 +1417,25 @@ impl SyncBackground {
 
                         all::BlockVerification::ParentStorageGet(req) => {
                             let when_database_access_started = Instant::now();
-                            let key = req.key().as_ref().to_vec();
+                            let parent_paths = req.child_trie().map(|child_trie| {
+                                trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                                    .chain(trie::bytes_to_nibbles(
+                                        child_trie.as_ref().iter().copied(),
+                                    ))
+                                    .map(u8::from)
+                                    .collect::<Vec<_>>()
+                            });
+                            let key = trie::bytes_to_nibbles(req.key().as_ref().iter().copied())
+                                .map(u8::from)
+                                .collect::<Vec<_>>();
                             let value = self
                                 .database
                                 .with_database(move |db| {
-                                    db.block_storage_main_trie_get(&parent_hash, &key)
+                                    db.block_storage_get(
+                                        &parent_hash,
+                                        parent_paths.into_iter().map(|p| p.into_iter()),
+                                        key.iter().copied(),
+                                    )
                                 })
                                 .await
                                 .expect("database access error");

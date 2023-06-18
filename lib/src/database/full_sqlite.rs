@@ -70,10 +70,10 @@
 #![cfg(feature = "database-sqlite")]
 #![cfg_attr(docsrs, doc(cfg(feature = "database-sqlite")))]
 
-use crate::{chain::chain_information, header, trie, util};
+use crate::{chain::chain_information, header, util};
 
 use alloc::borrow::Cow;
-use core::{fmt, num::NonZeroU64};
+use core::{fmt, iter, num::NonZeroU64};
 use parking_lot::Mutex;
 use rusqlite::OptionalExtension as _;
 
@@ -648,15 +648,30 @@ impl SqliteFullDatabase {
         Ok(())
     }
 
-    /// Returns the value associated to a key in the storage of either the latest finalized block or a
-    /// non-finalized block, and the trie entry version.
-    pub fn block_storage_main_trie_get(
+    /// Returns the value associated with a node of the trie of the given block.
+    ///
+    /// `parent_tries_paths_nibbles` is a list of keys to follow in order to find the root of the
+    /// trie into which `key_nibbles` should be searched.
+    ///
+    /// Beware that both `parent_tries_paths_nibbles` and `key_nibbles` must yield *nibbles*, in
+    /// other words values strictly inferior to 16.
+    ///
+    /// Returns an error if the block or its storage can't be found in the database.
+    ///
+    /// # Panic
+    ///
+    /// Panics if any of the values yielded by `parent_tries_paths_nibbles` or `key_nibbles` is
+    /// superior or equal to 16.
+    ///
+    pub fn block_storage_get(
         &self,
         block_hash: &[u8; 32],
-        key: &[u8],
+        parent_tries_paths_nibbles: impl Iterator<Item = impl Iterator<Item = u8>>,
+        key_nibbles: impl Iterator<Item = u8>,
     ) -> Result<Option<(Vec<u8>, u8)>, StorageAccessError> {
         let connection = self.database.lock();
 
+        // TODO: could be optimized by having a different request when `parent_tries_paths_nibbles` is empty and when it isn't
         let mut statement = connection
             .prepare_cached(
                 r#"
@@ -666,11 +681,12 @@ impl SqliteFullDatabase {
                         FROM blocks, trie_node
                         WHERE blocks.hash = :block_hash AND blocks.state_trie_root_hash = trie_node.hash AND COALESCE(SUBSTR(:key, 1, LENGTH(trie_node.partial_key)), X'') = trie_node.partial_key
                     UNION ALL
-                    SELECT trie_node.hash, SUBSTR(node_with_key.search_remain, 2 + LENGTH(trie_node.partial_key))
+                    SELECT COALESCE(trie_node.hash, trie_node_storage.trie_root_ref), COALESCE(SUBSTR(node_with_key.search_remain, 2 + LENGTH(trie_node.partial_key)), SUBSTR(node_with_key.search_remain, 1))
                         FROM node_with_key
-                        JOIN trie_node_child ON node_with_key.node_hash = trie_node_child.hash AND SUBSTR(node_with_key.search_remain, 1, 1) = trie_node_child.child_num
-                        JOIN trie_node ON trie_node.hash = trie_node_child.child_hash AND SUBSTR(node_with_key.search_remain, 2, LENGTH(trie_node.partial_key)) = trie_node.partial_key
-                        WHERE LENGTH(node_with_key.search_remain) >= 1
+                        LEFT JOIN trie_node_child ON node_with_key.node_hash = trie_node_child.hash AND SUBSTR(node_with_key.search_remain, 1, 1) = trie_node_child.child_num
+                        LEFT JOIN trie_node ON trie_node.hash = trie_node_child.child_hash AND SUBSTR(node_with_key.search_remain, 2, LENGTH(trie_node.partial_key)) = trie_node.partial_key
+                        LEFT JOIN trie_node_storage ON node_with_key.node_hash = trie_node_storage.node_hash AND trie_node_storage.trie_root_ref IS NOT NULL AND HEX(SUBSTR(node_with_key.search_remain, 1, 1)) = '10'
+                        WHERE LENGTH(node_with_key.search_remain) >= 1 AND (trie_node.hash IS NOT NULL OR trie_node_storage.trie_root_ref IS NOT NULL)
                 )
             SELECT COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1, COALESCE(trie_node_storage.value, trie_node_storage.trie_root_ref), trie_node_storage.trie_entry_version
             FROM blocks
@@ -685,11 +701,16 @@ impl SqliteFullDatabase {
                 )))
             })?;
 
+        let key_vectored = parent_tries_paths_nibbles
+            .flat_map(|t| t.inspect(|n| assert!(*n < 16)).chain(iter::once(0x10)))
+            .chain(key_nibbles.inspect(|n| assert!(*n < 16)))
+            .collect::<Vec<_>>();
+
         let (has_block, block_has_storage, value, trie_entry_version) = statement
             .query_row(
                 rusqlite::named_params! {
                     ":block_hash": &block_hash[..],
-                    ":key": trie::bytes_to_nibbles(key.iter().copied()).map(u8::from).collect::<Vec<_>>(), // TODO: key parameter should be an iterator?
+                    ":key": key_vectored,
                 },
                 |row| {
                     let has_block = row.get::<_, i64>(0)? != 0;
