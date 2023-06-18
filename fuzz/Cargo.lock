@@ -103,9 +103,9 @@ dependencies = [
 
 [[package]]
 name = "arrayvec"
-version = "0.7.3"
+version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8868f09ff8cea88b079da74ae569d9b8c62a23c68c746240b704ee6f7525c89c"
+checksum = "96d30a06541fbafbc7f82ed10c06164cfbd2c401138f6addd8404629c4b16711"
 
 [[package]]
 name = "async-channel"
@@ -1708,7 +1708,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "844b7645371e6ecdf61ff246ba1958c29e802881a749ae3fb1993675d210d28d"
 dependencies = [
  "arrayref",
- "arrayvec 0.7.3",
+ "arrayvec 0.7.4",
  "curve25519-dalek-ng",
  "merlin",
  "rand_core 0.6.4",
@@ -1864,7 +1864,7 @@ dependencies = [
 name = "smoldot"
 version = "0.8.0"
 dependencies = [
- "arrayvec 0.7.3",
+ "arrayvec 0.7.4",
  "async-lock",
  "atomic",
  "base64 0.21.2",
