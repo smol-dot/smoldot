@@ -191,7 +191,7 @@ fn empty_database_fill_then_query() {
                 .unwrap();
             let expected = trie
                 .node_by_full_key(trie::bytes_to_nibbles(key.iter().copied()))
-                .map(|n| (trie[n].0.as_ref().unwrap().clone(), 0u8));
+                .and_then(|n| Some((trie[n].0.as_ref()?.clone(), 0u8)));
             assert_eq!(
                 actual,
                 expected,
