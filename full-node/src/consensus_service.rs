@@ -1233,6 +1233,69 @@ impl SyncBackground {
                             new_runtime,
                             ..
                         } => {
+                            // Insert the block in the database.
+                            let when_database_access_started = Instant::now();
+                            self.database
+                                .with_database_detached({
+                                    let scale_encoded_header_to_verify = scale_encoded_header_to_verify.clone();
+                                    move |database| {
+                                        // TODO: overhead for building the SCALE encoding of the header
+                                        let result = database.insert(
+                                            &scale_encoded_header_to_verify,
+                                            is_new_best,
+                                            iter::empty::<Vec<u8>>(), // TODO:,no /!\
+                                            storage_changes.trie_changes_iter_ordered().filter_map(
+                                                |(_child_trie, _key, change)| {
+                                                    let all::TrieChange::InsertUpdate {
+                                                        new_merkle_value,
+                                                        partial_key,
+                                                        children_merkle_values,
+                                                        new_storage_value
+                                                    } = &change
+                                                        else { return None };
+
+                                                    Some(full_sqlite::InsertTrieNode {
+                                                        merkle_value: (&new_merkle_value[..]).into(),
+                                                        children_merkle_values: array::from_fn(|n| {
+                                                            children_merkle_values[n]
+                                                                .as_ref()
+                                                                .map(|v| From::from(&v[..]))
+                                                        }),
+                                                        storage_value: match new_storage_value {
+                                                            all::TrieChangeStorageValue::Modified {
+                                                                new_value: Some(value),
+                                                            } => full_sqlite::InsertTrieNodeStorageValue::Value {
+                                                                value: Cow::Borrowed(value),
+                                                                references_merkle_value: false // TODO: pass true if key starts with :child_storage:default: /!\
+                                                            },
+                                                            all::TrieChangeStorageValue::Modified {
+                                                                new_value: None,
+                                                            } => full_sqlite::InsertTrieNodeStorageValue::NoValue,
+                                                            all::TrieChangeStorageValue::Unmodified => {
+                                                                full_sqlite::InsertTrieNodeStorageValue::SameAsParent
+                                                            }
+                                                        },
+                                                        partial_key_nibbles: partial_key
+                                                            .iter()
+                                                            .map(|n| u8::from(*n))
+                                                            .collect::<Vec<_>>()
+                                                            .into(),
+                                                    })
+                                                },
+                                            ),
+                                            u8::from(state_trie_version),
+                                        );
+
+                                        match result {
+                                            Ok(()) => {}
+                                            Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
+                                            Err(err) => panic!("{}", err),
+                                        }
+                                    }
+                                })
+                                .await;
+                            database_accesses_duration += when_database_access_started.elapsed();
+
                             self.log_callback.log(
                                 LogLevel::Debug,
                                 format!(
@@ -1332,63 +1395,6 @@ impl SyncBackground {
                                     );
                                 }
                             }
-
-                            self.database
-                                .with_database_detached(move |database| {
-                                    // TODO: overhead for building the SCALE encoding of the header
-                                    let result = database.insert(
-                                        &scale_encoded_header_to_verify,
-                                        is_new_best,
-                                        iter::empty::<Vec<u8>>(), // TODO:,no /!\
-                                        storage_changes.trie_changes_iter_ordered().filter_map(
-                                            |(_child_trie, _key, change)| {
-                                                let all::TrieChange::InsertUpdate {
-                                                    new_merkle_value,
-                                                    partial_key,
-                                                    children_merkle_values,
-                                                    new_storage_value
-                                                } = &change
-                                                    else { return None };
-
-                                                Some(full_sqlite::InsertTrieNode {
-                                                    merkle_value: (&new_merkle_value[..]).into(),
-                                                    children_merkle_values: array::from_fn(|n| {
-                                                        children_merkle_values[n]
-                                                            .as_ref()
-                                                            .map(|v| From::from(&v[..]))
-                                                    }),
-                                                    storage_value: match new_storage_value {
-                                                        all::TrieChangeStorageValue::Modified {
-                                                            new_value: Some(value),
-                                                        } => full_sqlite::InsertTrieNodeStorageValue::Value {
-                                                            value: Cow::Borrowed(value),
-                                                            references_merkle_value: false // TODO: pass true if key starts with :child_storage:default: /!\
-                                                        },
-                                                        all::TrieChangeStorageValue::Modified {
-                                                            new_value: None,
-                                                        } => full_sqlite::InsertTrieNodeStorageValue::NoValue,
-                                                        all::TrieChangeStorageValue::Unmodified => {
-                                                            full_sqlite::InsertTrieNodeStorageValue::SameAsParent
-                                                        }
-                                                    },
-                                                    partial_key_nibbles: partial_key
-                                                        .iter()
-                                                        .map(|n| u8::from(*n))
-                                                        .collect::<Vec<_>>()
-                                                        .into(),
-                                                })
-                                            },
-                                        ),
-                                        u8::from(state_trie_version),
-                                    );
-
-                                    match result {
-                                        Ok(()) => {}
-                                        Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
-                                        Err(err) => panic!("{}", err),
-                                    }
-                                })
-                                .await;
 
                             return (self, true);
                         }
