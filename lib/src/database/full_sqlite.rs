@@ -886,16 +886,9 @@ impl SqliteFullDatabase {
     pub fn block_storage_closest_descendant_merkle_value(
         &self,
         block_hash: &[u8; 32],
-        mut parent_tries_paths_nibbles: impl Iterator<Item = impl Iterator<Item = u8>>,
+        parent_tries_paths_nibbles: impl Iterator<Item = impl Iterator<Item = u8>>,
         key_nibbles: impl Iterator<Item = u8>,
     ) -> Result<Option<Vec<u8>>, StorageAccessError> {
-        let key_nibbles = key_nibbles.collect::<Vec<_>>();
-        assert!(!key_nibbles.iter().any(|n| *n >= 16));
-
-        if parent_tries_paths_nibbles.next().is_some() {
-            todo!() // TODO: /!\
-        }
-
         let connection = self.database.lock();
 
         let mut statement = connection
@@ -911,16 +904,19 @@ impl SqliteFullDatabase {
                                 OR COALESCE(SUBSTR(:key, 1, LENGTH(trie_node.partial_key)), X'') = trie_node.partial_key
                             )
                     UNION ALL
-                    SELECT trie_node.hash, SUBSTR(closest_descendant.search_remain, 2 + LENGTH(trie_node.partial_key))
+                    SELECT
+                            COALESCE(trie_node.hash, trie_node_storage.trie_root_ref),
+                            COALESCE(SUBSTR(closest_descendant.search_remain, 2 + LENGTH(trie_node.partial_key)), SUBSTR(closest_descendant.search_remain, 1), X'')
                         FROM closest_descendant
-                        JOIN trie_node_child ON closest_descendant.node_hash = trie_node_child.hash
+                        LEFT JOIN trie_node_child ON closest_descendant.node_hash = trie_node_child.hash
                             AND SUBSTR(closest_descendant.search_remain, 1, 1) = trie_node_child.child_num
-                        JOIN trie_node ON trie_node.hash = trie_node_child.child_hash
+                        LEFT JOIN trie_node ON trie_node.hash = trie_node_child.child_hash
                             AND (
                                 COALESCE(SUBSTR(trie_node.partial_key, 1, LENGTH(closest_descendant.search_remain) - 1), X'') = COALESCE(SUBSTR(closest_descendant.search_remain, 2), X'')
                                 OR COALESCE(SUBSTR(closest_descendant.search_remain, 2, LENGTH(trie_node.partial_key)), X'') = trie_node.partial_key
                             )
-                        WHERE LENGTH(closest_descendant.search_remain) >= 1
+                        LEFT JOIN trie_node_storage ON closest_descendant.node_hash = trie_node_storage.node_hash AND trie_node_storage.trie_root_ref IS NOT NULL AND HEX(SUBSTR(closest_descendant.search_remain, 1, 1)) = '10'
+                        WHERE LENGTH(closest_descendant.search_remain) >= 1 AND (trie_node.hash IS NOT NULL OR trie_node_storage.trie_root_ref IS NOT NULL)
                 )
             SELECT COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1, closest_descendant.node_hash
             FROM blocks
@@ -935,11 +931,16 @@ impl SqliteFullDatabase {
                 )))
             })?;
 
+        let key_vectored = parent_tries_paths_nibbles
+            .flat_map(|t| t.inspect(|n| assert!(*n < 16)).chain(iter::once(0x10)))
+            .chain(key_nibbles.inspect(|n| assert!(*n < 16)))
+            .collect::<Vec<_>>();
+
         let (has_block, block_has_storage, merkle_value) = statement
             .query_row(
                 rusqlite::named_params! {
                     ":block_hash": &block_hash[..],
-                    ":key": key_nibbles,
+                    ":key": key_vectored,
                 },
                 |row| {
                     let has_block = row.get::<_, i64>(0)? != 0;
