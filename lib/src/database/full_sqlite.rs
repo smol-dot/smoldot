@@ -1286,7 +1286,7 @@ fn insert_storage<'a>(
         .prepare_cached("INSERT OR IGNORE INTO trie_node_storage(node_hash, value, trie_root_ref, trie_entry_version) VALUES(?, ?, ?, ?)")
         .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
     let mut insert_node_storage_copy_statement = database
-        .prepare_cached(r#"INSERT INTO temp_pending_parent_copies(node_hash) VALUES (?)"#)
+        .prepare_cached(r#"INSERT OR IGNORE INTO temp_pending_parent_copies(node_hash) VALUES (?)"#)
         .map_err(|err: rusqlite::Error| {
             AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))
         })?;
