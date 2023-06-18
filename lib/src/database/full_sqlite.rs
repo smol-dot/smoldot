@@ -777,23 +777,32 @@ impl SqliteFullDatabase {
     pub fn block_storage_next_key(
         &self,
         block_hash: &[u8; 32],
-        mut parent_tries_paths_nibbles: impl Iterator<Item = impl Iterator<Item = u8>>,
+        parent_tries_paths_nibbles: impl Iterator<Item = impl Iterator<Item = u8>>,
         key_nibbles: impl Iterator<Item = u8>,
         prefix_nibbles: impl Iterator<Item = u8>,
         branch_nodes: bool,
     ) -> Result<Option<Vec<u8>>, StorageAccessError> {
         let connection = self.database.lock();
 
-        if parent_tries_paths_nibbles.next().is_some() {
-            todo!() // TODO: /!\
-        }
+        let parent_tries_paths_nibbles = parent_tries_paths_nibbles
+            .flat_map(|t| t.inspect(|n| assert!(*n < 16)).chain(iter::once(0x10)))
+            .collect::<Vec<_>>();
+        let parent_tries_paths_nibbles_length = parent_tries_paths_nibbles.len();
 
-        let key_nibbles = key_nibbles.collect::<Vec<_>>();
-        assert!(!key_nibbles.iter().any(|n| *n >= 16));
-        let prefix_nibbles = prefix_nibbles.collect::<Vec<_>>();
-        assert!(!prefix_nibbles.iter().any(|n| *n >= 16));
+        let key_nibbles = {
+            let mut v = parent_tries_paths_nibbles.clone();
+            v.extend(key_nibbles.inspect(|n| assert!(*n < 16)));
+            v
+        };
+
+        let prefix_nibbles = {
+            let mut v = parent_tries_paths_nibbles;
+            v.extend(prefix_nibbles.inspect(|n| assert!(*n < 16)));
+            v
+        };
 
         // TODO: this algorithm relies the fact that leaf nodes always have a storage value, which isn't exactly clear in the schema ; however not relying on this makes it way harder to write
+        // TODO: trie_root_ref system untested and most likely not working
         let mut statement = connection
             .prepare_cached(
                 r#"
@@ -812,13 +821,16 @@ impl SqliteFullDatabase {
                             AND COALESCE(SUBSTR(trie_node.partial_key, 1, LENGTH(:prefix)), X'') = COALESCE(SUBSTR(:prefix, 1, LENGTH(trie_node.partial_key)), X'')
                     UNION ALL
                         SELECT
-                            trie_node.hash,
+                            COALESCE(trie_node.hash, trie_node_trieref.hash),
                             trie_node_storage.value IS NULL AND trie_node_storage.trie_root_ref IS NULL,
-                            CAST(next_key.node_full_key || trie_node_child.child_num || trie_node.partial_key AS BLOB)
+                            CAST(next_key.node_full_key || trie_node_child.child_num || COALESCE(trie_node.partial_key, trie_node_trieref.partial_key) AS BLOB)
                                 AS node_full_key,
                             CASE SUBSTR(next_key.search_remain, 1, 1) = trie_node_child.child_num AND SUBSTR(next_key.search_remain, 2, LENGTH(trie_node.partial_key)) = trie_node.partial_key
                                 WHEN TRUE THEN SUBSTR(next_key.search_remain, 2 + LENGTH(trie_node.partial_key))
-                                ELSE X'' END
+                                ELSE CASE HEX(SUBSTR(next_key.search_remain, 1, 1)) = '10' AND COALESCE(SUBSTR(next_key.search_remain, 2, LENGTH(trie_node_trieref.partial_key)), X'') = trie_node_trieref.partial_key
+                                    WHEN TRUE THEN COALESCE(SUBSTR(next_key.search_remain, 2 + LENGTH(trie_node_trieref.partial_key)), X'')
+                                    ELSE X'' END
+                                END
                         FROM next_key
 
                         LEFT JOIN trie_node_child
@@ -836,11 +848,17 @@ impl SqliteFullDatabase {
                             AND trie_node_child_before.child_num < trie_node_child.child_num
                             AND trie_node_child_before.child_num > SUBSTR(next_key.search_remain, 1, 1)
 
+                        LEFT JOIN trie_node_storage AS trie_node_storage_trieref
+                            ON next_key.node_hash = trie_node_storage_trieref.node_hash AND trie_node_storage_trieref.trie_root_ref IS NOT NULL AND HEX(SUBSTR(next_key.search_remain, 1, 1)) = '10'
+                        LEFT JOIN trie_node AS trie_node_trieref
+                            ON trie_node_trieref.hash = trie_node_storage_trieref.node_hash
+                            AND COALESCE(SUBSTR(next_key.search_remain, 2, LENGTH(trie_node_trieref.partial_key)), X'') <= trie_node_trieref.partial_key
+
                         LEFT JOIN trie_node_storage
-                            ON trie_node_storage.node_hash = trie_node.hash
+                            ON trie_node_storage.node_hash = COALESCE(trie_node.hash, trie_node_trieref.hash)
 
                         WHERE trie_node_child_before.hash IS NULL
-                            AND trie_node.hash IS NOT NULL
+                            AND (trie_node.hash IS NOT NULL OR trie_node_trieref.hash IS NOT NULL)
                             AND COALESCE(SUBSTR(node_full_key, 1, LENGTH(:prefix)), X'') <= COALESCE(SUBSTR(:prefix, 1, LENGTH(node_full_key)), X'')
                 )
 
@@ -862,7 +880,7 @@ impl SqliteFullDatabase {
                 )))
             })?;
 
-        let (has_block, block_has_storage, next_key) = statement
+        let (has_block, block_has_storage, mut next_key) = statement
             .query_row(
                 rusqlite::named_params! {
                     ":block_hash": &block_hash[..],
@@ -889,6 +907,10 @@ impl SqliteFullDatabase {
 
         if !block_has_storage {
             return Err(StorageAccessError::Pruned);
+        }
+
+        if parent_tries_paths_nibbles_length != 0 {
+            next_key = next_key.map(|nk| nk[parent_tries_paths_nibbles_length..].to_vec());
         }
 
         Ok(next_key)
