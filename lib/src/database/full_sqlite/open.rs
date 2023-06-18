@@ -71,6 +71,7 @@ PRAGMA locking_mode = EXCLUSIVE;
 PRAGMA encoding = 'UTF-8';
 PRAGMA trusted_schema = false;
 PRAGMA temp_store = MEMORY;
+PRAGMA foreign_keys = ON;
             "#,
         )
         .map_err(InternalError)?;
