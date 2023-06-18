@@ -784,23 +784,6 @@ impl SqliteFullDatabase {
     ) -> Result<Option<Vec<u8>>, StorageAccessError> {
         let connection = self.database.lock();
 
-        let parent_tries_paths_nibbles = parent_tries_paths_nibbles
-            .flat_map(|t| t.inspect(|n| assert!(*n < 16)).chain(iter::once(0x10)))
-            .collect::<Vec<_>>();
-        let parent_tries_paths_nibbles_length = parent_tries_paths_nibbles.len();
-
-        let key_nibbles = {
-            let mut v = parent_tries_paths_nibbles.clone();
-            v.extend(key_nibbles.inspect(|n| assert!(*n < 16)));
-            v
-        };
-
-        let prefix_nibbles = {
-            let mut v = parent_tries_paths_nibbles;
-            v.extend(prefix_nibbles.inspect(|n| assert!(*n < 16)));
-            v
-        };
-
         // TODO: this algorithm relies the fact that leaf nodes always have a storage value, which isn't exactly clear in the schema ; however not relying on this makes it way harder to write
         // TODO: trie_root_ref system untested and most likely not working
         let mut statement = connection
@@ -879,6 +862,23 @@ impl SqliteFullDatabase {
                     InternalError(err),
                 )))
             })?;
+
+        let parent_tries_paths_nibbles = parent_tries_paths_nibbles
+            .flat_map(|t| t.inspect(|n| assert!(*n < 16)).chain(iter::once(0x10)))
+            .collect::<Vec<_>>();
+        let parent_tries_paths_nibbles_length = parent_tries_paths_nibbles.len();
+
+        let key_nibbles = {
+            let mut v = parent_tries_paths_nibbles.clone();
+            v.extend(key_nibbles.inspect(|n| assert!(*n < 16)));
+            v
+        };
+
+        let prefix_nibbles = {
+            let mut v = parent_tries_paths_nibbles;
+            v.extend(prefix_nibbles.inspect(|n| assert!(*n < 16)));
+            v
+        };
 
         let (has_block, block_has_storage, mut next_key) = statement
             .query_row(
