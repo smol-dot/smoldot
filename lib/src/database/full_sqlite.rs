@@ -1199,11 +1199,10 @@ fn insert_storage<'a>(
 ) -> Result<(), AccessError> {
     // Create a temporary table where we store the newly-created trie nodes that must inherit the
     // storage value of the parent block. These trie nodes are processed later.
-    // TODO: use CREATE TEMPORARY TABLE? see if it works as expected
     database
         .execute(
             r#"
-        CREATE TABLE temp_pending_parent_copies(
+        CREATE TEMPORARY TABLE temp_pending_parent_copies(
             node_hash BLOB NOT NULL PRIMARY KEY
         );
     "#,
