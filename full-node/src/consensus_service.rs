@@ -44,6 +44,8 @@ use smoldot::{
     trie,
 };
 use std::{
+    array,
+    borrow::Cow,
     iter, mem,
     num::NonZeroU64,
     sync::Arc,
@@ -169,12 +171,20 @@ impl ConsensusService {
                         .to_chain_information(&finalized_block_hash)
                         .unwrap();
                     let finalized_code = database
-                        .block_storage_main_trie_get(&finalized_block_hash, b":code")
+                        .block_storage_get(
+                            &finalized_block_hash,
+                            iter::empty::<iter::Empty<_>>(),
+                            trie::bytes_to_nibbles(b":code".iter().copied()).map(u8::from),
+                        )
                         .unwrap()
                         .unwrap() // TODO: better error?
                         .0;
                     let finalized_heap_pages = database
-                        .block_storage_main_trie_get(&finalized_block_hash, b":heappages")
+                        .block_storage_get(
+                            &finalized_block_hash,
+                            iter::empty::<iter::Empty<_>>(),
+                            trie::bytes_to_nibbles(b":heappages".iter().copied()).map(u8::from),
+                        )
                         .unwrap() // TODO: better error?
                         .map(|(hp, _)| hp);
                     (
@@ -848,20 +858,23 @@ impl SyncBackground {
 
                     // Access to the best block storage.
                     author::build::BuilderAuthoring::StorageGet(req) => {
-                        // TODO: child tries not supported
-                        if req.child_trie().is_some() {
-                            self.log_callback
-                                .log(LogLevel::Warn, "child-tries-not-supported".to_owned());
-                            block_authoring =
-                                req.inject_value(None::<(iter::Empty<&'static [u8]>, _)>);
-                            continue;
-                        }
-
-                        let key = req.key().as_ref().to_vec();
+                        let parent_paths = req.child_trie().map(|child_trie| {
+                            trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                                .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
+                                .map(u8::from)
+                                .collect::<Vec<_>>()
+                        });
+                        let key = trie::bytes_to_nibbles(req.key().as_ref().iter().copied())
+                            .map(u8::from)
+                            .collect::<Vec<_>>();
                         let value = self
                             .database
                             .with_database(move |db| {
-                                db.block_storage_main_trie_get(&parent_hash, &key)
+                                db.block_storage_get(
+                                    &parent_hash,
+                                    parent_paths.into_iter().map(|p| p.into_iter()),
+                                    key.iter().copied(),
+                                )
                             })
                             .await
                             .expect("database access error");
@@ -874,57 +887,62 @@ impl SyncBackground {
                         }));
                     }
                     author::build::BuilderAuthoring::ClosestDescendantMerkleValue(req) => {
-                        block_authoring = req.resume_unknown();
+                        let parent_paths = req.child_trie().map(|child_trie| {
+                            trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                                .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
+                                .map(u8::from)
+                                .collect::<Vec<_>>()
+                        });
+                        let key_nibbles = req.key().map(u8::from).collect::<Vec<_>>();
+
+                        let merkle_value = self
+                            .database
+                            .with_database(move |db| {
+                                db.block_storage_closest_descendant_merkle_value(
+                                    &parent_hash,
+                                    parent_paths.into_iter().map(|p| p.into_iter()),
+                                    key_nibbles.iter().copied(),
+                                )
+                            })
+                            .await
+                            .expect("database access error");
+
+                        block_authoring =
+                            req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
                     }
                     author::build::BuilderAuthoring::NextKey(req) => {
-                        // TODO: child tries not supported
-                        if req.child_trie().is_some() {
-                            self.log_callback
-                                .log(LogLevel::Warn, "child-tries-not-supported".to_string());
-                            block_authoring = req.inject_key(None::<iter::Empty<_>>);
-                            continue;
-                        }
+                        let parent_paths = req.child_trie().map(|child_trie| {
+                            trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                                .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
+                                .map(u8::from)
+                                .collect::<Vec<_>>()
+                        });
+                        let key_nibbles = req
+                            .key()
+                            .map(u8::from)
+                            .chain(if req.or_equal() { None } else { Some(0u8) })
+                            .collect::<Vec<_>>();
+                        let prefix_nibbles = req.prefix().map(u8::from).collect::<Vec<_>>();
 
-                        let search_params = trie::branch_search::Config {
-                            key_before: req.key().collect::<Vec<_>>().into_iter(),
-                            or_equal: req.or_equal(),
-                            prefix: req.prefix().collect::<Vec<_>>().into_iter(),
-                            no_branch_search: !req.branch_nodes(),
-                        };
-
+                        let branch_nodes = req.branch_nodes();
                         let next_key = self
                             .database
                             .with_database(move |db| {
-                                let mut search = trie::branch_search::BranchSearch::NextKey(
-                                    trie::branch_search::start_branch_search(search_params),
-                                );
-
-                                loop {
-                                    match search {
-                                        trie::branch_search::BranchSearch::Found {
-                                            branch_trie_node_key,
-                                        } => break branch_trie_node_key,
-                                        trie::branch_search::BranchSearch::NextKey(req) => {
-                                            let mut next_key = db
-                                                .block_storage_main_trie_next_key(
-                                                    &parent_hash,
-                                                    &req.key_before().collect::<Vec<_>>(),
-                                                    req.or_equal(),
-                                                )
-                                                .expect("database access error");
-                                            if next_key.as_ref().map_or(false, |nk| {
-                                                !nk.starts_with(&req.prefix().collect::<Vec<_>>())
-                                            }) {
-                                                next_key = None;
-                                            }
-                                            search = req.inject(next_key.map(|k| k.into_iter()));
-                                        }
-                                    }
-                                }
+                                db.block_storage_next_key(
+                                    &parent_hash,
+                                    parent_paths.into_iter().map(|p| p.into_iter()),
+                                    key_nibbles.iter().copied(),
+                                    prefix_nibbles.iter().copied(),
+                                    branch_nodes,
+                                )
                             })
-                            .await;
+                            .await
+                            .expect("database access error");
 
-                        block_authoring = req.inject_key(next_key.map(|nk| nk.into_iter()));
+                        block_authoring = req
+                            .inject_key(next_key.map(|k| {
+                                k.into_iter().map(|b| trie::Nibble::try_from(b).unwrap())
+                            }));
                     }
                 }
             }
@@ -1225,6 +1243,74 @@ impl SyncBackground {
                             new_runtime,
                             ..
                         } => {
+                            // Insert the block in the database.
+                            let when_database_access_started = Instant::now();
+                            self.database
+                                .with_database_detached({
+                                    let scale_encoded_header_to_verify = scale_encoded_header_to_verify.clone();
+                                    move |database| {
+                                        // TODO: overhead for building the SCALE encoding of the header
+                                        let result = database.insert(
+                                            &scale_encoded_header_to_verify,
+                                            is_new_best,
+                                            iter::empty::<Vec<u8>>(), // TODO:,no /!\
+                                            storage_changes.trie_changes_iter_ordered().filter_map(
+                                                |(_child_trie, key, change)| {
+                                                    let all::TrieChange::InsertUpdate {
+                                                        new_merkle_value,
+                                                        partial_key,
+                                                        children_merkle_values,
+                                                        new_storage_value
+                                                    } = &change
+                                                        else { return None };
+
+                                                    // TODO: this punches through abstraction layers; maybe add some code to runtime_host to indicate this?
+                                                    let references_merkle_value = key.iter().copied()
+                                                        .zip(trie::bytes_to_nibbles(b":child_storage:".iter().copied()))
+                                                        .all(|(a, b)| a == b);
+
+                                                    Some(full_sqlite::InsertTrieNode {
+                                                        merkle_value: (&new_merkle_value[..]).into(),
+                                                        children_merkle_values: array::from_fn(|n| {
+                                                            children_merkle_values[n]
+                                                                .as_ref()
+                                                                .map(|v| From::from(&v[..]))
+                                                        }),
+                                                        storage_value: match new_storage_value {
+                                                            all::TrieChangeStorageValue::Modified {
+                                                                new_value: Some(value),
+                                                            } => full_sqlite::InsertTrieNodeStorageValue::Value {
+                                                                value: Cow::Borrowed(value),
+                                                                references_merkle_value,
+                                                            },
+                                                            all::TrieChangeStorageValue::Modified {
+                                                                new_value: None,
+                                                            } => full_sqlite::InsertTrieNodeStorageValue::NoValue,
+                                                            all::TrieChangeStorageValue::Unmodified => {
+                                                                full_sqlite::InsertTrieNodeStorageValue::SameAsParent
+                                                            }
+                                                        },
+                                                        partial_key_nibbles: partial_key
+                                                            .iter()
+                                                            .map(|n| u8::from(*n))
+                                                            .collect::<Vec<_>>()
+                                                            .into(),
+                                                    })
+                                                },
+                                            ),
+                                            u8::from(state_trie_version),
+                                        );
+
+                                        match result {
+                                            Ok(()) => {}
+                                            Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
+                                            Err(err) => panic!("{}", err),
+                                        }
+                                    }
+                                })
+                                .await;
+                            database_accesses_duration += when_database_access_started.elapsed();
+
                             self.log_callback.log(
                                 LogLevel::Debug,
                                 format!(
@@ -1325,35 +1411,30 @@ impl SyncBackground {
                                 }
                             }
 
-                            self.database
-                                .with_database_detached(move |database| {
-                                    // TODO: overhead for building the SCALE encoding of the header
-                                    let result = database.insert(
-                                        &scale_encoded_header_to_verify,
-                                        is_new_best,
-                                        iter::empty::<Vec<u8>>(), // TODO:,no /!\
-                                        storage_changes.main_trie_storage_changes_iter_unordered(),
-                                        u8::from(state_trie_version),
-                                    );
-
-                                    match result {
-                                        Ok(()) => {}
-                                        Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
-                                        Err(err) => panic!("{}", err),
-                                    }
-                                })
-                                .await;
-
                             return (self, true);
                         }
 
                         all::BlockVerification::ParentStorageGet(req) => {
                             let when_database_access_started = Instant::now();
-                            let key = req.key().as_ref().to_vec();
+                            let parent_paths = req.child_trie().map(|child_trie| {
+                                trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                                    .chain(trie::bytes_to_nibbles(
+                                        child_trie.as_ref().iter().copied(),
+                                    ))
+                                    .map(u8::from)
+                                    .collect::<Vec<_>>()
+                            });
+                            let key = trie::bytes_to_nibbles(req.key().as_ref().iter().copied())
+                                .map(u8::from)
+                                .collect::<Vec<_>>();
                             let value = self
                                 .database
                                 .with_database(move |db| {
-                                    db.block_storage_main_trie_get(&parent_hash, &key)
+                                    db.block_storage_get(
+                                        &parent_hash,
+                                        parent_paths.into_iter().map(|p| p.into_iter()),
+                                        key.iter().copied(),
+                                    )
                                 })
                                 .await
                                 .expect("database access error");
@@ -1368,56 +1449,70 @@ impl SyncBackground {
                             verify = req.inject_value(value);
                         }
                         all::BlockVerification::ParentStorageMerkleValue(req) => {
-                            // TODO: the syncing is currently extremely slow due to this
-                            verify = req.resume_unknown();
+                            let when_database_access_started = Instant::now();
+
+                            let parent_paths = req.child_trie().map(|child_trie| {
+                                trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                                    .chain(trie::bytes_to_nibbles(
+                                        child_trie.as_ref().iter().copied(),
+                                    ))
+                                    .map(u8::from)
+                                    .collect::<Vec<_>>()
+                            });
+                            let key_nibbles = req.key().map(u8::from).collect::<Vec<_>>();
+
+                            let merkle_value = self
+                                .database
+                                .with_database(move |db| {
+                                    db.block_storage_closest_descendant_merkle_value(
+                                        &parent_hash,
+                                        parent_paths.into_iter().map(|p| p.into_iter()),
+                                        key_nibbles.iter().copied(),
+                                    )
+                                })
+                                .await
+                                .expect("database access error");
+
+                            database_accesses_duration += when_database_access_started.elapsed();
+                            verify = req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
                         }
                         all::BlockVerification::ParentStorageNextKey(req) => {
                             let when_database_access_started = Instant::now();
 
-                            let search_params = trie::branch_search::Config {
-                                key_before: req.key().collect::<Vec<_>>().into_iter(),
-                                or_equal: req.or_equal(),
-                                prefix: req.prefix().collect::<Vec<_>>().into_iter(),
-                                no_branch_search: !req.branch_nodes(),
-                            };
+                            let parent_paths = req.child_trie().map(|child_trie| {
+                                trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                                    .chain(trie::bytes_to_nibbles(
+                                        child_trie.as_ref().iter().copied(),
+                                    ))
+                                    .map(u8::from)
+                                    .collect::<Vec<_>>()
+                            });
+                            let key_nibbles = req
+                                .key()
+                                .map(u8::from)
+                                .chain(if req.or_equal() { None } else { Some(0u8) })
+                                .collect::<Vec<_>>();
+                            let prefix_nibbles = req.prefix().map(u8::from).collect::<Vec<_>>();
 
+                            let branch_nodes = req.branch_nodes();
                             let next_key = self
                                 .database
                                 .with_database(move |db| {
-                                    let mut search = trie::branch_search::BranchSearch::NextKey(
-                                        trie::branch_search::start_branch_search(search_params),
-                                    );
-
-                                    loop {
-                                        match search {
-                                            trie::branch_search::BranchSearch::Found {
-                                                branch_trie_node_key,
-                                            } => break branch_trie_node_key,
-                                            trie::branch_search::BranchSearch::NextKey(req) => {
-                                                let mut next_key = db
-                                                    .block_storage_main_trie_next_key(
-                                                        &parent_hash,
-                                                        &req.key_before().collect::<Vec<_>>(),
-                                                        req.or_equal(),
-                                                    )
-                                                    .expect("database access error");
-                                                if next_key.as_ref().map_or(false, |nk| {
-                                                    !nk.starts_with(
-                                                        &req.prefix().collect::<Vec<_>>(),
-                                                    )
-                                                }) {
-                                                    next_key = None;
-                                                }
-                                                search =
-                                                    req.inject(next_key.map(|k| k.into_iter()));
-                                            }
-                                        }
-                                    }
+                                    db.block_storage_next_key(
+                                        &parent_hash,
+                                        parent_paths.into_iter().map(|p| p.into_iter()),
+                                        key_nibbles.iter().copied(),
+                                        prefix_nibbles.iter().copied(),
+                                        branch_nodes,
+                                    )
                                 })
-                                .await;
+                                .await
+                                .expect("database access error");
 
                             database_accesses_duration += when_database_access_started.elapsed();
-                            verify = req.inject_key(next_key.map(|nk| nk.into_iter()));
+                            verify = req.inject_key(next_key.map(|k| {
+                                k.into_iter().map(|b| trie::Nibble::try_from(b).unwrap())
+                            }));
                         }
                         all::BlockVerification::RuntimeCompilation(rt) => {
                             let before_runtime_build = Instant::now();

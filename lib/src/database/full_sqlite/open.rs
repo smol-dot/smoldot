@@ -22,7 +22,8 @@
 // TODO:remove all the unwraps in this module that shouldn't be there
 
 use super::{
-    encode_babe_epoch_information, AccessError, CorruptedError, InternalError, SqliteFullDatabase,
+    encode_babe_epoch_information, insert_storage, AccessError, CorruptedError, InsertTrieNode,
+    InternalError, SqliteFullDatabase,
 };
 use crate::chain::chain_information;
 
@@ -43,12 +44,13 @@ pub fn open(config: Config) -> Result<DatabaseOpen, InternalError> {
         rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
 
     let database = match config.ty {
-        ConfigTy::Disk(directory_path) => {
+        ConfigTy::Disk { path, .. } => {
             // Ignoring errors in `create_dir_all`, in order to avoid making the API of this
             // function more complex. If `create_dir_all` fails, opening the database will most
             // likely fail too.
-            let _ = fs::create_dir_all(directory_path);
-            rusqlite::Connection::open_with_flags(directory_path.join("database.sqlite"), flags)
+            let _ = fs::create_dir_all(path);
+            // TODO: don't join, directly take the file as input
+            rusqlite::Connection::open_with_flags(path.join("database.sqlite"), flags)
         }
         ConfigTy::Memory => rusqlite::Connection::open_in_memory_with_flags(flags),
     }
@@ -86,6 +88,16 @@ PRAGMA foreign_keys = ON;
             (),
         )
         .map_err(InternalError)?;
+
+    // `PRAGMA` queries can't be parametrized, and thus we have to use `format!`.
+    if let ConfigTy::Disk {
+        memory_map_size, ..
+    } = config.ty
+    {
+        database
+            .execute_batch(&format!("PRAGMA mmap_size = {}", memory_map_size))
+            .map_err(InternalError)?;
+    }
 
     // Each SQLite database contains a "user version" whose value can be used by the API user
     // (that's us!) however they want. Its value defaults to 0 for new database. We use it to
@@ -149,18 +161,61 @@ CREATE TABLE meta(
 );
 
 /*
+List of all trie nodes of all blocks whose trie is stored in the database.
+*/
+CREATE TABLE trie_node(
+    hash BLOB NOT NULL PRIMARY KEY,
+    partial_key BLOB NOT NULL    -- Each byte is a nibble, in other words all bytes are <16
+);
+
+/*
+Storage associated to a trie node.
+For each entry in `trie_node` there exists either 0 or 1 entry in `trie_node_storage` indicating
+the storage value associated to this node.
+*/
+CREATE TABLE trie_node_storage(
+    node_hash BLOB NOT NULL PRIMARY KEY,
+    value BLOB,
+    trie_root_ref BLOB,
+    trie_entry_version INTEGER NOT NULL,
+    FOREIGN KEY (node_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE CASCADE,
+    FOREIGN KEY (trie_root_ref) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE RESTRICT,
+    CHECK((value IS NULL) != (trie_root_ref IS NULL))
+);
+CREATE INDEX trie_node_storage_by_trie_root_ref ON trie_node_storage(trie_root_ref);
+
+/*
+Parent-child relationship between trie nodes.
+*/
+CREATE TABLE trie_node_child(
+    hash BLOB NOT NULL,
+    child_num BLOB NOT NULL,   -- Always contains one single byte. We use `BLOB` instead of `INTEGER` because SQLite stupidly doesn't provide any way of converting between integers and blobs
+    child_hash BLOB NOT NULL,
+    PRIMARY KEY (hash, child_num),
+    FOREIGN KEY (hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE CASCADE,
+    FOREIGN KEY (child_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE RESTRICT,
+    CHECK(LENGTH(child_num) == 1 AND HEX(child_num) < '10')
+);
+CREATE INDEX trie_node_child_by_hash ON trie_node_child(hash);
+CREATE INDEX trie_node_child_by_child_hash ON trie_node_child(child_hash);
+
+/*
 List of all known blocks, indexed by their hash or number.
 */
 CREATE TABLE blocks(
     hash BLOB NOT NULL PRIMARY KEY,
     parent_hash BLOB,  -- NULL only for the genesis block
+    state_trie_root_hash BLOB,  -- NULL if and only if the trie is empty or if the trie storage has been pruned from the database
     number INTEGER NOT NULL,
     header BLOB NOT NULL,
     justification BLOB,
     UNIQUE(number, hash),
-    CHECK(length(hash) == 32)
+    FOREIGN KEY (parent_hash) REFERENCES blocks(hash) ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (state_trie_root_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE SET NULL
 );
 CREATE INDEX blocks_by_number ON blocks(number);
+CREATE INDEX blocks_by_parent ON blocks(parent_hash);
+CREATE INDEX blocks_by_state_trie_root_hash ON blocks(state_trie_root_hash);
 
 /*
 Each block has a body made from 0+ extrinsics (in practice, there's always at least one extrinsic,
@@ -176,34 +231,7 @@ CREATE TABLE blocks_body(
     CHECK(length(hash) == 32),
     FOREIGN KEY (hash) REFERENCES blocks(hash) ON UPDATE CASCADE ON DELETE CASCADE
 );
-
-/*
-Storage at the highest block that is considered finalized.
-*/
-CREATE TABLE finalized_storage_main_trie(
-    key BLOB NOT NULL PRIMARY KEY,
-    value BLOB NOT NULL,
-    trie_entry_version INTEGER NOT NULL
-);
-
-/*
-For non-finalized blocks (i.e. blocks that descend from the finalized block), contains changes
-that this block performs on the storage.
-When a block gets finalized, these changes get merged into `finalized_storage_main_trie`.
-*/
-CREATE TABLE non_finalized_changes(
-    hash BLOB NOT NULL,
-    key BLOB NOT NULL,
-    -- `value` is NULL if the block removes the key from the storage, and NON-NULL if it inserts
-    -- or replaces the value at the key.
-    value BLOB,
-    -- Same NULL-ness remark as for `value`
-    trie_entry_version INTEGER,
-    UNIQUE(hash, key),
-    CHECK(length(hash) == 32),
-    CHECK((trie_entry_version IS NULL AND value IS NULL) OR (trie_entry_version IS NOT NULL AND value IS NOT NULL)),
-    FOREIGN KEY (hash) REFERENCES blocks(hash) ON UPDATE CASCADE ON DELETE CASCADE
-);
+CREATE INDEX blocks_body_by_block ON blocks_body(hash);
 
 /*
 List of public keys and weights of the GrandPa authorities that must finalize the children of the
@@ -250,11 +278,6 @@ PRAGMA user_version = 1;
         .map_err(InternalError)?
         == 0;
 
-    // The database is *always* within a transaction.
-    database
-        .execute("BEGIN TRANSACTION", ())
-        .map_err(InternalError)?;
-
     Ok(if !is_empty {
         DatabaseOpen::Open(SqliteFullDatabase {
             database: parking_lot::Mutex::new(database),
@@ -284,8 +307,14 @@ pub struct Config<'a> {
 /// Type of database.
 #[derive(Debug)]
 pub enum ConfigTy<'a> {
-    /// Store the database on disk. Path to the directory containing the database.
-    Disk(&'a Path),
+    /// Store the database on disk.
+    Disk {
+        /// Path to the directory containing the database.
+        path: &'a Path,
+        /// Maximum allowed amount of memory, in bytes, that SQLite will reserve to memory-map
+        /// files.
+        memory_map_size: usize,
+    },
     /// Store the database in memory. The database is discarded on destruction.
     Memory,
 }
@@ -317,14 +346,28 @@ impl DatabaseEmpty {
     /// order to turn it into an actual database.
     ///
     /// Must also pass the body, justification, and state of the storage of the finalized block.
+    // TODO: Passing SameAsParent is invalid, document and error
     pub fn initialize<'a>(
-        self,
+        mut self,
         chain_information: impl Into<chain_information::ChainInformationRef<'a>>,
         finalized_block_body: impl ExactSizeIterator<Item = &'a [u8]>,
         finalized_block_justification: Option<Vec<u8>>,
-        finalized_block_storage_main_trie_entries: impl Iterator<Item = (&'a [u8], &'a [u8])> + Clone,
+        finalized_block_storage_entries: impl Iterator<Item = InsertTrieNode<'a>>,
         finalized_block_state_version: u8,
     ) -> Result<SqliteFullDatabase, AccessError> {
+        // Start a transaction to insert everything in one go.
+        let transaction = self
+            .database
+            .transaction()
+            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+
+        // Temporarily disable foreign key checks in order to make the initial insertion easier,
+        // as we don't have to make sure that trie nodes are sorted.
+        // Note that this is immediately disabled again when we `COMMIT`.
+        transaction
+            .execute("PRAGMA defer_foreign_keys = ON", ())
+            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+
         let chain_information = chain_information.into();
 
         let finalized_block_hash = chain_information
@@ -339,24 +382,16 @@ impl DatabaseEmpty {
                 a
             });
 
-        {
-            let mut statement = self
-                .database
-                .prepare_cached("INSERT INTO finalized_storage_main_trie(key, value, trie_entry_version) VALUES(?, ?, ?)")
-                .unwrap();
-            for (key, value) in finalized_block_storage_main_trie_entries {
-                statement
-                    .execute((key, value, i64::from(finalized_block_state_version)))
-                    .map_err(|err| {
-                        AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))
-                    })?;
-            }
-        }
+        insert_storage(
+            &transaction,
+            None,
+            finalized_block_storage_entries,
+            finalized_block_state_version,
+        )?;
 
-        self
-            .database
+        transaction
             .prepare_cached(
-                "INSERT INTO blocks(hash, parent_hash, number, header, justification) VALUES(?, ?, ?, ?, ?)",
+                "INSERT INTO blocks(hash, parent_hash, state_trie_root_hash, number, header, justification) VALUES(?, ?, ?, ?, ?, ?)",
             )
             .unwrap()
             .execute((
@@ -364,6 +399,7 @@ impl DatabaseEmpty {
                 if chain_information.finalized_block_header.number != 0 {
                     Some(&chain_information.finalized_block_header.parent_hash[..])
                 } else { None },
+                &chain_information.finalized_block_header.state_root[..],
                 i64::try_from(chain_information.finalized_block_header.number).unwrap(),
                 &scale_encoded_finalized_block_header[..],
                 finalized_block_justification.as_deref(),
@@ -371,8 +407,7 @@ impl DatabaseEmpty {
             .unwrap();
 
         {
-            let mut statement = self
-                .database
+            let mut statement = transaction
                 .prepare_cached("INSERT INTO blocks_body(hash, idx, extrinsic) VALUES(?, ?, ?)")
                 .unwrap();
             for (index, item) in finalized_block_body.enumerate() {
@@ -386,9 +421,9 @@ impl DatabaseEmpty {
             }
         }
 
-        super::meta_set_blob(&self.database, "best", &finalized_block_hash[..]).unwrap();
+        super::meta_set_blob(&transaction, "best", &finalized_block_hash[..]).unwrap();
         super::meta_set_number(
-            &self.database,
+            &transaction,
             "finalized",
             chain_information.finalized_block_header.number,
         )?;
@@ -401,13 +436,12 @@ impl DatabaseEmpty {
                 finalized_scheduled_change,
             } => {
                 super::meta_set_number(
-                    &self.database,
+                    &transaction,
                     "grandpa_authorities_set_id",
                     *after_finalized_block_authorities_set_id,
                 )?;
 
-                let mut statement = self
-                    .database
+                let mut statement = transaction
                     .prepare_cached("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
                     .unwrap();
                 for (index, item) in finalized_triggered_authorities.iter().enumerate() {
@@ -421,10 +455,9 @@ impl DatabaseEmpty {
                 }
 
                 if let Some((height, list)) = finalized_scheduled_change {
-                    super::meta_set_number(&self.database, "grandpa_scheduled_target", *height)?;
+                    super::meta_set_number(&transaction, "grandpa_scheduled_target", *height)?;
 
-                    let mut statement = self
-                        .database
+                    let mut statement = transaction
                         .prepare_cached("INSERT INTO grandpa_scheduled_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
                         .unwrap();
                     for (index, item) in list.iter().enumerate() {
@@ -446,11 +479,10 @@ impl DatabaseEmpty {
                 finalized_authorities_list,
                 slot_duration,
             } => {
-                super::meta_set_number(&self.database, "aura_slot_duration", slot_duration.get())
+                super::meta_set_number(&transaction, "aura_slot_duration", slot_duration.get())
                     .unwrap();
 
-                let mut statement = self
-                    .database
+                let mut statement = transaction
                     .prepare_cached(
                         "INSERT INTO aura_finalized_authorities(idx, public_key) VALUES(?, ?)",
                     )
@@ -466,28 +498,26 @@ impl DatabaseEmpty {
                 finalized_next_epoch_transition,
                 finalized_block_epoch_information,
             } => {
-                super::meta_set_number(
-                    &self.database,
-                    "babe_slots_per_epoch",
-                    slots_per_epoch.get(),
-                )
-                .unwrap();
+                super::meta_set_number(&transaction, "babe_slots_per_epoch", slots_per_epoch.get())
+                    .unwrap();
                 super::meta_set_blob(
-                    &self.database,
+                    &transaction,
                     "babe_finalized_next_epoch",
                     &encode_babe_epoch_information(finalized_next_epoch_transition.clone())[..],
                 )
                 .unwrap();
 
                 if let Some(finalized_block_epoch_information) = finalized_block_epoch_information {
-                    super::meta_set_blob(&self.database, "babe_finalized_epoch", &encode_babe_epoch_information(
+                    super::meta_set_blob(&transaction, "babe_finalized_epoch", &encode_babe_epoch_information(
             finalized_block_epoch_information.clone(),
         )[..]).unwrap();
                 }
             }
         }
 
-        super::flush(&self.database)?;
+        transaction
+            .commit()
+            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
 
         Ok(SqliteFullDatabase {
             database: parking_lot::Mutex::new(self.database),

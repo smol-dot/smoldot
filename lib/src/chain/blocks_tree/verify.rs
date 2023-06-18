@@ -34,7 +34,9 @@ use super::{
 use alloc::boxed::Box;
 use core::cmp::Ordering;
 
-pub use verify::header_body::{Nibble, StorageChanges, TrieEntryVersion};
+pub use verify::header_body::{
+    Nibble, StorageChanges, TrieChange, TrieChangeStorageValue, TrieEntryVersion,
+};
 
 impl<T> NonFinalizedTree<T> {
     /// Verifies the given block.

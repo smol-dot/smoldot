@@ -31,8 +31,11 @@ use smoldot::{
         connection, multiaddr,
         peer_id::{self, PeerId},
     },
+    trie,
 };
-use std::{borrow::Cow, iter, net::SocketAddr, path::PathBuf, sync::Arc, thread, time::Duration};
+use std::{
+    array, borrow::Cow, iter, net::SocketAddr, path::PathBuf, sync::Arc, thread, time::Duration,
+};
 
 mod consensus_service;
 mod database_thread;
@@ -579,6 +582,7 @@ async fn open_database(
             // In order to determine the state_version of the genesis block, we need to compile
             // the runtime.
             // TODO: return errors instead of panicking
+            // TODO: consider not throwing away the runtime
             let state_version = executor::host::HostVmPrototype::new(executor::host::Config {
                 module: genesis_storage.value(b":code").unwrap(),
                 heap_pages: executor::storage_heap_pages_to_value(
@@ -595,6 +599,136 @@ async fn open_database(
             .map(u8::from)
             .unwrap_or(0);
 
+            // The chain specification only contains trie nodes that have a storage value attached
+            // to them, while the database needs to know all trie nodes (including branch nodes).
+            // The good news is that we can determine the latter from the former, which we do
+            // here.
+            // TODO: consider moving this block to the chain spec module
+            // TODO: poorly optimized
+            let mut trie_structure = {
+                let mut trie_structure = trie::trie_structure::TrieStructure::new();
+                for (key, value) in genesis_storage.iter() {
+                    match trie_structure.node(trie::bytes_to_nibbles(key.iter().copied())) {
+                        trie::trie_structure::Entry::Vacant(e) => {
+                            e.insert_storage_value().insert(
+                                (Some(value), None::<trie::trie_node::MerkleValueOutput>),
+                                (None, None),
+                            );
+                        }
+                        trie::trie_structure::Entry::Occupied(
+                            trie::trie_structure::NodeAccess::Branch(mut e),
+                        ) => {
+                            *e.user_data() = (Some(value), None);
+                            e.insert_storage_value();
+                        }
+                        trie::trie_structure::Entry::Occupied(
+                            trie::trie_structure::NodeAccess::Storage(_),
+                        ) => {
+                            // Duplicate entry.
+                            panic!() // TODO: don't panic?
+                        }
+                    }
+                }
+
+                // Calculate the Merkle values of the nodes.
+                for node_index in trie_structure
+                    .iter_ordered()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                {
+                    let mut node_access = trie_structure.node_by_index(node_index).unwrap();
+
+                    let children = core::array::from_fn::<_, 16, _>(|n| {
+                        node_access
+                            .child(trie::Nibble::try_from(u8::try_from(n).unwrap()).unwrap())
+                            .map(|mut child| child.user_data().1.as_ref().unwrap().clone())
+                    });
+
+                    let is_root_node = node_access.is_root_node();
+                    let partial_key = node_access.partial_key().collect::<Vec<_>>().into_iter();
+
+                    // We have to hash the storage value ahead of time if necessary due to borrow
+                    // checking difficulties.
+                    let storage_value_hashed =
+                        match (node_access.user_data().0.as_ref(), state_version) {
+                            (Some(v), 1) => {
+                                if v.len() >= 33 {
+                                    Some(blake2_rfc::blake2b::blake2b(32, &[], v))
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        };
+                    let storage_value = match (
+                        node_access.user_data().0.as_ref(),
+                        storage_value_hashed.as_ref(),
+                    ) {
+                        (_, Some(storage_value_hashed)) => trie::trie_node::StorageValue::Hashed(
+                            <&[u8; 32]>::try_from(storage_value_hashed.as_bytes()).unwrap(),
+                        ),
+                        (Some(v), None) => trie::trie_node::StorageValue::Unhashed(&v[..]),
+                        (None, _) => trie::trie_node::StorageValue::None,
+                    };
+
+                    let merkle_value = trie::trie_node::calculate_merkle_value(
+                        trie::trie_node::Decoded {
+                            children,
+                            partial_key,
+                            storage_value,
+                        },
+                        is_root_node,
+                    )
+                    .unwrap();
+
+                    node_access.into_user_data().1 = Some(merkle_value);
+                }
+
+                trie_structure
+            };
+
+            // Build the iterator of trie nodes.
+            let genesis_storage_full_trie = trie_structure
+                .iter_unordered()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|node_index| {
+                    let (storage_value, Some(merkle_value)) = &trie_structure[node_index]
+                        else { unreachable!() };
+                    // Cloning to solve borrow checker restriction. // TODO: optimize?
+                    let storage_value = if let Some(storage_value) = storage_value {
+                        // TODO: child tries support?
+                        full_sqlite::InsertTrieNodeStorageValue::Value {
+                            value: Cow::Owned(storage_value.to_vec()),
+                            references_merkle_value: false,
+                        }
+                    } else {
+                        full_sqlite::InsertTrieNodeStorageValue::NoValue
+                    };
+                    let merkle_value = merkle_value.as_ref().to_owned();
+                    let mut node_access = trie_structure.node_by_index(node_index).unwrap();
+
+                    full_sqlite::InsertTrieNode {
+                        storage_value,
+                        merkle_value: Cow::Owned(merkle_value),
+                        children_merkle_values: array::from_fn::<_, 16, _>(|n| {
+                            let child_index =
+                                trie::Nibble::try_from(u8::try_from(n).unwrap()).unwrap();
+                            if let Some(mut child) = node_access.child(child_index) {
+                                Some(Cow::Owned(
+                                    child.user_data().1.as_ref().unwrap().as_ref().to_vec(),
+                                ))
+                            } else {
+                                None
+                            }
+                        }),
+                        partial_key_nibbles: Cow::Owned(
+                            node_access.partial_key().map(u8::from).collect::<Vec<_>>(),
+                        ),
+                    }
+                });
+
             // The finalized block is the genesis block. As such, it has an empty body and
             // no justification.
             let database = empty
@@ -602,7 +736,7 @@ async fn open_database(
                     genesis_chain_information,
                     iter::empty(),
                     None,
-                    genesis_storage.iter(),
+                    genesis_storage_full_trie,
                     state_version,
                 )
                 .unwrap();
@@ -631,7 +765,10 @@ async fn background_open_database(
                 block_number_bytes,
                 cache_size: sqlite_cache_size,
                 ty: if let Some(path) = &path {
-                    full_sqlite::ConfigTy::Disk(path)
+                    full_sqlite::ConfigTy::Disk {
+                        path,
+                        memory_map_size: 1000000000, // TODO: make configurable
+                    }
                 } else {
                     full_sqlite::ConfigTy::Memory
                 },
@@ -646,7 +783,10 @@ async fn background_open_database(
             block_number_bytes,
             cache_size: sqlite_cache_size,
             ty: if let Some(path) = &path {
-                full_sqlite::ConfigTy::Disk(path)
+                full_sqlite::ConfigTy::Disk {
+                    path,
+                    memory_map_size: 1000000000, // TODO: make configurable
+                }
             } else {
                 full_sqlite::ConfigTy::Memory
             },
