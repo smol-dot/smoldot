@@ -1245,7 +1245,7 @@ impl SyncBackground {
                                             is_new_best,
                                             iter::empty::<Vec<u8>>(), // TODO:,no /!\
                                             storage_changes.trie_changes_iter_ordered().filter_map(
-                                                |(_child_trie, _key, change)| {
+                                                |(_child_trie, key, change)| {
                                                     let all::TrieChange::InsertUpdate {
                                                         new_merkle_value,
                                                         partial_key,
@@ -1253,6 +1253,11 @@ impl SyncBackground {
                                                         new_storage_value
                                                     } = &change
                                                         else { return None };
+
+                                                    // TODO: this punches through abstraction layers; maybe add some code to runtime_host to indicate this?
+                                                    let references_merkle_value = key.iter().copied()
+                                                        .zip(trie::bytes_to_nibbles(b":child_storage:".iter().copied()))
+                                                        .all(|(a, b)| a == b);
 
                                                     Some(full_sqlite::InsertTrieNode {
                                                         merkle_value: (&new_merkle_value[..]).into(),
@@ -1266,7 +1271,7 @@ impl SyncBackground {
                                                                 new_value: Some(value),
                                                             } => full_sqlite::InsertTrieNodeStorageValue::Value {
                                                                 value: Cow::Borrowed(value),
-                                                                references_merkle_value: false // TODO: pass true if key starts with :child_storage:default: /!\
+                                                                references_merkle_value,
                                                             },
                                                             all::TrieChangeStorageValue::Modified {
                                                                 new_value: None,
