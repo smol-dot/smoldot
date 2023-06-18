@@ -67,7 +67,8 @@ PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA locking_mode = EXCLUSIVE;
 PRAGMA encoding = 'UTF-8';
-PRAGMA trusted_schema = false; 
+PRAGMA trusted_schema = false;
+PRAGMA foreign_keys = ON;
             "#,
         )
         .map_err(InternalError)?;
