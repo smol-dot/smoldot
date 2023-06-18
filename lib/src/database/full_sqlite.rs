@@ -804,6 +804,7 @@ impl SqliteFullDatabase {
                         JOIN trie_node ON blocks.state_trie_root_hash = trie_node.hash
                             AND COALESCE(SUBSTR(:key, 1, LENGTH(trie_node.partial_key)), X'') <= trie_node.partial_key
                         LEFT JOIN trie_node_storage ON trie_node_storage.node_hash = trie_node.hash
+                        WHERE COALESCE(SUBSTR(trie_node.partial_key, 1, LENGTH(:prefix)), X'') = COALESCE(SUBSTR(:prefix, 1, LENGTH(trie_node.partial_key)), X'')
                     UNION ALL
                         SELECT
                             trie_node_child.child_hash,
