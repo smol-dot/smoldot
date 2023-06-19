@@ -216,9 +216,17 @@ struct Cache {
     /// When `state_getKeysPaged` is called and the response is truncated, the response is
     /// inserted in this cache. The API user is likely to call `state_getKeysPaged` again with
     /// the same parameters, in which case we hit the cache and avoid the networking requests.
-    /// The keys are `(block_hash, prefix)` and values are list of keys.
-    state_get_keys_paged:
-        lru::LruCache<([u8; 32], Option<methods::HexString>), Vec<Vec<u8>>, util::SipHasherBuild>,
+    /// The values are list of keys.
+    state_get_keys_paged: lru::LruCache<GetKeysPagedCacheKey, Vec<Vec<u8>>, util::SipHasherBuild>,
+}
+
+/// See [`Cache::state_get_keys_paged`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct GetKeysPagedCacheKey {
+    /// Value of the `hash` parameter of the call to `state_getKeysPaged`.
+    hash: [u8; 32],
+    /// Value of the `prefix` parameter of the call to `state_getKeysPaged`.
+    prefix: Option<methods::HexString>,
 }
 
 pub(super) fn start<TPlat: PlatformRef>(
