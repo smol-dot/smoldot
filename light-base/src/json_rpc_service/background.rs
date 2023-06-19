@@ -17,6 +17,7 @@
 
 use crate::{
     network_service, platform::PlatformRef, runtime_service, sync_service, transactions_service,
+    util,
 };
 
 use super::StartConfig;
@@ -217,7 +218,7 @@ struct Cache {
     /// the same parameters, in which case we hit the cache and avoid the networking requests.
     /// The keys are `(block_hash, prefix)` and values are list of keys.
     state_get_keys_paged:
-        lru::LruCache<([u8; 32], Option<methods::HexString>), Vec<Vec<u8>>, fnv::FnvBuildHasher>,
+        lru::LruCache<([u8; 32], Option<methods::HexString>), Vec<Vec<u8>>, util::SipHasherBuild>,
 }
 
 pub(super) fn start<TPlat: PlatformRef>(
@@ -255,7 +256,7 @@ pub(super) fn start<TPlat: PlatformRef>(
             ),
             state_get_keys_paged: lru::LruCache::with_hasher(
                 NonZeroUsize::new(2).unwrap(),
-                Default::default(),
+                util::SipHasherBuild::new(rand::random()),
             ),
         }),
         genesis_block_hash: config.genesis_block_hash,
