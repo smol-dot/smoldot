@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.10 - 2023-06-19
+
 ### Changed
 
 - Multiaddresses that can't be parsed during the discovery process are now silently ignored instead of causing the entire list of discovered nodes to be discarded. ([#705](https://github.com/smol-dot/smoldot/pull/705))
