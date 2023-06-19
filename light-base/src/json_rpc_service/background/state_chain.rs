@@ -82,7 +82,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             Err(error) => {
                 log::warn!(
                     target: &self.log_target,
-                    "Returning error from `state_getMetadata`. \
+                    "Returning error from `system_accountNextIndex`. \
                     API user might not function properly. Error: {}",
                     error
                 );
@@ -957,7 +957,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             Err(error) => {
                 log::warn!(
                     target: &self.log_target,
-                    "Returning error from `state_getMetadata`. \
+                    "Returning error from `payment_queryInfo`. \
                     API user might not function properly. Error: {}",
                     error
                 );
