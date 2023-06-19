@@ -4,7 +4,7 @@
 
 ### Changed
 
-- A limit of one simultaneous request per peer is now enforced in order to limit the load that a light client induces on each full node it is connected to. This limit is theoretically part of the Polkadot networking protocol but in practice isn't properly enforced. Consequently, requests that were previously being executed in parallel might now execute more one after the other.
+- A limit of one simultaneous request per peer is now enforced in order to limit the load that a light client induces on each full node it is connected to. This limit is theoretically part of the Polkadot networking protocol but in practice isn't properly enforced. Consequently, requests that were previously being executed in parallel might now execute more one after the other. ([#779](https://github.com/smol-dot/smoldot/pull/779))
 
 ## 1.0.10 - 2023-06-19
 
