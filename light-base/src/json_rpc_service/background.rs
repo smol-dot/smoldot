@@ -226,7 +226,7 @@ struct GetKeysPagedCacheKey {
     /// Value of the `hash` parameter of the call to `state_getKeysPaged`.
     hash: [u8; 32],
     /// Value of the `prefix` parameter of the call to `state_getKeysPaged`.
-    prefix: Option<methods::HexString>,
+    prefix: Vec<u8>,
 }
 
 pub(super) fn start<TPlat: PlatformRef>(

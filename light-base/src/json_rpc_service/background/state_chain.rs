@@ -1101,6 +1101,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             ),
         };
 
+        // A prefix of `None` means "empty".
+        let prefix = prefix.unwrap_or(methods::HexString(Vec::new())).0;
+
         // Because the user is likely to call this function multiple times in a row with the exact
         // same parameters, we store the untruncated responses in a cache. Check if we hit the
         // cache.
@@ -1159,7 +1162,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             .storage_prefix_keys_query(
                 block_number,
                 &hash,
-                &prefix.as_ref().unwrap().0, // TODO: don't unwrap! what is this Option?
+                &prefix,
                 &state_root,
                 3,
                 Duration::from_secs(12),
