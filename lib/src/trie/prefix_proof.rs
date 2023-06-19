@@ -193,7 +193,7 @@ impl PrefixScan {
                     proof_decode::StorageValue::Known { .. }
                         | proof_decode::StorageValue::HashKnownValueMissing(_)
                 ) {
-                    //
+                    // Fetch the storage value of this node.
                     let value = match info.storage_value {
                         proof_decode::StorageValue::HashKnownValueMissing(_)
                             if self.full_storage_values_required && is_first_iteration =>
