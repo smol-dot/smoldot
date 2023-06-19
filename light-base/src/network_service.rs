@@ -143,6 +143,13 @@ struct Shared<TPlat: PlatformRef> {
     /// if the event is notified while the background task is already awake, the background task
     /// will do an additional loop.
     wake_up_main_background_task: event_listener::Event,
+
+    /// Whenever a request to a peer finished or is aborted, an element is pushed to this queue.
+    /// The queue is later processed in order to update [`SharedGuarded::peer_requests_locks`].
+    peer_requests_unlocks: crossbeam_queue::SegQueue<PeerId>,
+
+    /// Event to notify when an element is pushed onto [`Shared::peer_requests_unlocks`].
+    peer_requests_unlocks_pushed: event_listener::Event,
 }
 
 struct SharedGuarded<TPlat: PlatformRef> {
@@ -152,6 +159,9 @@ struct SharedGuarded<TPlat: PlatformRef> {
     /// List of nodes that are considered as important for logging purposes.
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
     important_nodes: HashSet<PeerId, fnv::FnvBuildHasher>,
+
+    /// List of peers for which a request lock has been grabbed.
+    peer_requests_locks: HashSet<PeerId, fnv::FnvBuildHasher>,
 
     /// List of peer and chain index tuples for which no outbound slot should be assigned.
     ///
@@ -262,6 +272,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     util::SipHasherBuild::new(rand::random()),
                 ),
                 important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
+                peer_requests_locks: HashSet::with_capacity_and_hasher(16, Default::default()),
                 active_connections: HashMap::with_capacity_and_hasher(32, Default::default()),
                 messages_from_connections_tx,
                 messages_from_connections_rx,
@@ -281,6 +292,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             identify_agent_version: config.identify_agent_version,
             log_chain_names,
             wake_up_main_background_task: event_listener::Event::new(),
+            peer_requests_unlocks: crossbeam_queue::SegQueue::new(),
+            peer_requests_unlocks_pushed: event_listener::Event::new(),
         });
 
         // Spawn main task that processes the network service.
@@ -355,11 +368,90 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         (final_network_service, event_receivers)
     }
 
+    /// Try to grab a so-called "request lock" associated with the given `PeerId`. While the lock
+    /// is active, no other "request lock" towards the same `PeerId` can be acquired. The lock
+    /// can then be used to actually start a request.
+    ///
+    /// This function does **not** check whether there exists a connection with the given peer.
+    /// In other words, it is possible to successfully grab a lock only for the request to fail
+    /// because we aren't connected to the given peer. The reason for this design is that it is
+    /// possible for the peer disconnect between the lock being grabbed and the request starting,
+    /// and as such there's no benefit in performing the verification twice.
+    pub async fn try_lock_peer_for_request(
+        self: Arc<Self>,
+        target: PeerId,
+    ) -> Option<PeerRequestLock<TPlat>> {
+        let mut guarded = self.shared.guarded.lock().await;
+
+        while let Some(unlocked_peer) = self.shared.peer_requests_unlocks.pop() {
+            let _was_in = guarded.peer_requests_locks.remove(&unlocked_peer);
+            debug_assert!(_was_in);
+        }
+
+        if guarded.peer_requests_locks.contains(&target) {
+            return None;
+        }
+
+        guarded.peer_requests_locks.insert(target.clone());
+        drop(guarded);
+
+        Some(PeerRequestLock {
+            service: self,
+            peer_id: target,
+        })
+    }
+
+    /// Grabs a so-called "request lock" associated with any of the `PeerId` provided. While the
+    /// lock is active, no other "request lock" towards the same `PeerId` can be acquired. The
+    /// lock can then be used to actually start a request.
+    ///
+    /// This function waits until one of the peers can be locked and locks it. If multiple peers
+    /// are ready, one is chosen at random.
+    ///
+    /// See also [`NetworkService::try_lock_peer_for_request`].
+    // TODO: better API for the list?
+    pub async fn lock_any_for_request(
+        self: Arc<Self>,
+        list: hashbrown::HashSet<PeerId, fnv::FnvBuildHasher>,
+    ) -> PeerRequestLock<TPlat> {
+        let mut on_pushed = None::<event_listener::EventListener>;
+
+        loop {
+            if let Some(on_pushed) = on_pushed.take() {
+                on_pushed.await;
+            }
+
+            let mut guarded = self.shared.guarded.lock().await;
+
+            on_pushed = Some(self.shared.peer_requests_unlocks_pushed.listen());
+
+            while let Some(unlocked_peer) = self.shared.peer_requests_unlocks.pop() {
+                let _was_in = guarded.peer_requests_locks.remove(&unlocked_peer);
+                debug_assert!(_was_in);
+            }
+
+            if let Some(peer_id) = rand::seq::IteratorRandom::choose(
+                list.difference(&guarded.peer_requests_locks),
+                &mut rand::thread_rng(),
+            )
+            .cloned()
+            {
+                guarded.peer_requests_locks.insert(peer_id.clone());
+                drop(guarded);
+
+                break PeerRequestLock {
+                    service: self,
+                    peer_id,
+                };
+            }
+        }
+    }
+
     /// Sends a blocks request to the given peer.
     // TODO: more docs
     pub async fn blocks_request(
         self: Arc<Self>,
-        target: PeerId, // TODO: takes by value because of future longevity issue
+        request_lock: PeerRequestLock<TPlat>,
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
         timeout: Duration,
@@ -368,7 +460,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             let mut guarded = self.shared.guarded.lock().await;
 
             // The call to `start_blocks_request` below panics if we have no active connection.
-            if !guarded.network.can_start_requests(&target) {
+            if !guarded.network.can_start_requests(&request_lock.peer_id) {
                 return Err(BlocksRequestError::NoConnection);
             }
 
@@ -377,7 +469,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     log::debug!(
                         target: "network",
                         "Connection({}) <= BlocksRequest(chain={}, start={}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
-                        target, self.shared.log_chain_names[chain_index], HashDisplay(hash),
+                        request_lock.peer_id, self.shared.log_chain_names[chain_index], HashDisplay(hash),
                         config.desired_count.get(),
                         matches!(config.direction, protocol::BlocksRequestDirection::Descending),
                         config.fields.header, config.fields.body, config.fields.justifications
@@ -387,7 +479,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     log::debug!(
                         target: "network",
                         "Connection({}) <= BlocksRequest(chain={}, start=#{}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
-                        target, self.shared.log_chain_names[chain_index], number,
+                        request_lock.peer_id, self.shared.log_chain_names[chain_index], number,
                         config.desired_count.get(),
                         matches!(config.direction, protocol::BlocksRequestDirection::Descending),
                         config.fields.header, config.fields.body, config.fields.justifications
@@ -397,7 +489,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 
             let request_id = guarded.network.start_blocks_request(
                 self.shared.platform.now(),
-                &target,
+                &request_lock.peer_id,
                 chain_index,
                 config,
                 timeout,
@@ -417,7 +509,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 log::debug!(
                     target: "network",
                     "Connection({}) => BlocksRequest(chain={}, num_blocks={}, block_data_total_size={})",
-                    target,
+                    request_lock.peer_id,
                     self.shared.log_chain_names[chain_index],
                     blocks.len(),
                     BytesDisplay(blocks.iter().fold(0, |sum, block| {
@@ -432,7 +524,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 log::debug!(
                     target: "network",
                     "Connection({}) => BlocksRequest(chain={}, error={:?})",
-                    target,
+                    request_lock.peer_id,
                     self.shared.log_chain_names[chain_index],
                     err
                 );
@@ -449,12 +541,14 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     log::warn!(
                         target: "network",
                         "Error in block request with {}. This might indicate an incompatibility. Error: {}",
-                        target,
+                        request_lock.peer_id,
                         err
                     );
                 }
             }
         }
+
+        drop(request_lock);
 
         result.map_err(BlocksRequestError::Request)
     }
@@ -463,7 +557,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     // TODO: more docs
     pub async fn grandpa_warp_sync_request(
         self: Arc<Self>,
-        target: PeerId, // TODO: takes by value because of future longevity issue
+        request_lock: PeerRequestLock<TPlat>,
         chain_index: usize,
         begin_hash: [u8; 32],
         timeout: Duration,
@@ -473,18 +567,18 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 
             // The call to `start_grandpa_warp_sync_request` below panics if we have no
             // active connection.
-            if !guarded.network.can_start_requests(&target) {
+            if !guarded.network.can_start_requests(&request_lock.peer_id) {
                 return Err(GrandpaWarpSyncRequestError::NoConnection);
             }
 
             log::debug!(
                 target: "network", "Connection({}) <= GrandpaWarpSyncRequest(chain={}, start={})",
-                target, self.shared.log_chain_names[chain_index], HashDisplay(&begin_hash)
+                request_lock.peer_id, self.shared.log_chain_names[chain_index], HashDisplay(&begin_hash)
             );
 
             let request_id = guarded.network.start_grandpa_warp_sync_request(
                 self.shared.platform.now(),
-                &target,
+                &request_lock.peer_id,
                 chain_index,
                 begin_hash,
                 timeout,
@@ -506,7 +600,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 log::debug!(
                     target: "network",
                     "Connection({}) => GrandpaWarpSyncRequest(chain={}, num_fragments={}, finished={:?})",
-                    target,
+                    request_lock.peer_id,
                     self.shared.log_chain_names[chain_index],
                     decoded.fragments.len(),
                     decoded.is_finished,
@@ -516,12 +610,14 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 log::debug!(
                     target: "network",
                     "Connection({}) => GrandpaWarpSyncRequest(chain={}, error={:?})",
-                    target,
+                    request_lock.peer_id,
                     self.shared.log_chain_names[chain_index],
                     err,
                 );
             }
         }
+
+        drop(request_lock);
 
         result.map_err(GrandpaWarpSyncRequestError::Request)
     }
@@ -568,7 +664,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     pub async fn storage_proof_request(
         self: Arc<Self>,
         chain_index: usize,
-        target: PeerId, // TODO: takes by value because of futures longevity issue
+        request_lock: PeerRequestLock<TPlat>,
         config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + Clone>>,
         timeout: Duration,
     ) -> Result<service::EncodedMerkleProof, StorageProofRequestError> {
@@ -577,21 +673,21 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 
             // The call to `start_storage_proof_request` below panics if we have no active
             // connection.
-            if !guarded.network.can_start_requests(&target) {
+            if !guarded.network.can_start_requests(&request_lock.peer_id) {
                 return Err(StorageProofRequestError::NoConnection);
             }
 
             log::debug!(
                 target: "network",
                 "Connection({}) <= StorageProofRequest(chain={}, block={})",
-                target,
+                request_lock.peer_id,
                 self.shared.log_chain_names[chain_index],
                 HashDisplay(&config.block_hash)
             );
 
             let request_id = match guarded.network.start_storage_proof_request(
                 self.shared.platform.now(),
-                &target,
+                &request_lock.peer_id,
                 chain_index,
                 config,
                 timeout,
@@ -618,7 +714,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 log::debug!(
                     target: "network",
                     "Connection({}) => StorageProofRequest(chain={}, total_size={})",
-                    target,
+                    request_lock.peer_id,
                     self.shared.log_chain_names[chain_index],
                     BytesDisplay(u64::try_from(decoded.len()).unwrap()),
                 );
@@ -627,12 +723,14 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 log::debug!(
                     target: "network",
                     "Connection({}) => StorageProofRequest(chain={}, error={:?})",
-                    target,
+                    request_lock.peer_id,
                     self.shared.log_chain_names[chain_index],
                     err
                 );
             }
         }
+
+        drop(request_lock);
 
         result.map_err(StorageProofRequestError::Request)
     }
@@ -644,7 +742,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     pub async fn call_proof_request(
         self: Arc<Self>,
         chain_index: usize,
-        target: PeerId, // TODO: takes by value because of futures longevity issue
+        request_lock: PeerRequestLock<TPlat>,
         config: protocol::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>>>,
         timeout: Duration,
     ) -> Result<EncodedMerkleProof, CallProofRequestError> {
@@ -652,14 +750,14 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             let mut guarded = self.shared.guarded.lock().await;
 
             // The call to `start_call_proof_request` below panics if we have no active connection.
-            if !guarded.network.can_start_requests(&target) {
+            if !guarded.network.can_start_requests(&request_lock.peer_id) {
                 return Err(CallProofRequestError::NoConnection);
             }
 
             log::debug!(
                 target: "network",
                 "Connection({}) <= CallProofRequest({}, {}, {})",
-                target,
+                request_lock.peer_id,
                 self.shared.log_chain_names[chain_index],
                 HashDisplay(&config.block_hash),
                 config.method
@@ -667,7 +765,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 
             let request_id = match guarded.network.start_call_proof_request(
                 self.shared.platform.now(),
-                &target,
+                &request_lock.peer_id,
                 chain_index,
                 config,
                 timeout,
@@ -693,7 +791,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 log::debug!(
                     target: "network",
                     "Connection({}) => CallProofRequest({}, total_size: {})",
-                    target,
+                    request_lock.peer_id,
                     self.shared.log_chain_names[chain_index],
                     BytesDisplay(u64::try_from(decoded.len()).unwrap())
                 );
@@ -702,12 +800,14 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 log::debug!(
                     target: "network",
                     "Connection({}) => CallProofRequest({}, {})",
-                    target,
+                    request_lock.peer_id,
                     self.shared.log_chain_names[chain_index],
                     err
                 );
             }
         }
+
+        drop(request_lock);
 
         result.map_err(CallProofRequestError::Request)
     }
@@ -882,6 +982,27 @@ pub enum Event {
         chain_index: usize,
         message: service::EncodedGrandpaCommitMessage,
     },
+}
+
+/// Active lock preventing other requests towards the same peer from being started.
+///
+/// See [`NetworkService::try_lock_peer_for_request`].
+pub struct PeerRequestLock<TPlat: PlatformRef> {
+    service: Arc<NetworkService<TPlat>>,
+    peer_id: PeerId,
+}
+
+impl<TPlat: PlatformRef> Drop for PeerRequestLock<TPlat> {
+    fn drop(&mut self) {
+        self.service
+            .shared
+            .peer_requests_unlocks
+            .push(self.peer_id.clone());
+        self.service
+            .shared
+            .peer_requests_unlocks_pushed
+            .notify(usize::max_value());
+    }
 }
 
 /// Error returned by [`NetworkService::blocks_request`].

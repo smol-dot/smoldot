@@ -672,6 +672,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     ///
     /// Panics if the [`SourceId`] is invalid.
     ///
+    // TODO: this function is questionable, because in practice we send requests to sources that are outside the scope of syncing
     pub fn source_num_ongoing_requests(&self, source_id: SourceId) -> usize {
         debug_assert!(self.shared.sources.contains(source_id.0));
 

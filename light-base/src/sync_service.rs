@@ -268,7 +268,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         &self,
         block_number: u64,
         block_hash: &[u8; 32],
-    ) -> impl Iterator<Item = PeerId> {
+    ) -> Vec<PeerId> {
         let (send_back, rx) = oneshot::channel();
 
         self.to_background
@@ -282,7 +282,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             .await
             .unwrap();
 
-        rx.await.unwrap().into_iter()
+        rx.await.unwrap()
     }
 
     // TODO: doc; explain the guarantees
@@ -291,7 +291,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         block_number: u64,
         hash: [u8; 32],
         fields: protocol::BlocksRequestFields,
-        total_attempts: u32,
+        mut total_attempts: u32,
         timeout_per_request: Duration,
         _max_parallel: NonZeroU32,
     ) -> Result<protocol::BlockData, ()> {
@@ -304,17 +304,29 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         };
 
         // TODO: handle max_parallel
-        // TODO: better peers selection ; don't just take the first 3
-        for target in self
-            .peers_assumed_know_blocks(block_number, &hash)
-            .await
-            .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
-        {
+        // TODO: shuffle peers ; don't just take the first
+        // TODO: slowly increase number of peers dynamically if no peer is immediately available
+        loop {
+            if total_attempts == 0 {
+                break;
+            }
+
+            let peers_assumed_know_blocks =
+                self.peers_assumed_know_blocks(block_number, &hash).await;
+
+            let request_lock = self
+                .network_service
+                .clone()
+                .lock_any_for_request(peers_assumed_know_blocks.into_iter().collect())
+                .await;
+
+            total_attempts -= 1;
+
             let mut result = match self
                 .network_service
                 .clone()
                 .blocks_request(
-                    target,
+                    request_lock,
                     self.network_chain_index,
                     request_config.clone(),
                     timeout_per_request,
@@ -336,7 +348,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         self: Arc<Self>,
         hash: [u8; 32],
         fields: protocol::BlocksRequestFields,
-        total_attempts: u32,
+        mut total_attempts: u32,
         timeout_per_request: Duration,
         _max_parallel: NonZeroU32,
     ) -> Result<protocol::BlockData, ()> {
@@ -349,18 +361,28 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         };
 
         // TODO: handle max_parallel
-        // TODO: better peers selection ; don't just take the first
-        for target in self
-            .network_service
-            .peers_list()
-            .await
-            .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
-        {
+        // TODO: shuffle peers ; don't just take the first
+        // TODO: slowly increase number of peers dynamically if no peer is immediately available
+        loop {
+            if total_attempts == 0 {
+                break;
+            }
+
+            let peers_list = self.network_service.peers_list().await;
+
+            let request_lock = self
+                .network_service
+                .clone()
+                .lock_any_for_request(peers_list.collect())
+                .await;
+
+            total_attempts -= 1;
+
             let mut result = match self
                 .network_service
                 .clone()
                 .blocks_request(
-                    target,
+                    request_lock,
                     self.network_chain_index,
                     request_config.clone(),
                     timeout_per_request,
@@ -399,26 +421,39 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         block_hash: &[u8; 32],
         storage_trie_root: &[u8; 32],
         requested_keys: impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone,
-        total_attempts: u32,
+        mut total_attempts: u32,
         timeout_per_request: Duration,
         _max_parallel: NonZeroU32,
     ) -> Result<Vec<Option<Vec<u8>>>, StorageQueryError> {
         let mut outcome_errors =
             Vec::with_capacity(usize::try_from(total_attempts).unwrap_or(usize::max_value()));
 
-        // TODO: better peers selection ; don't just take the first
         // TODO: handle max_parallel
-        for target in self
-            .peers_assumed_know_blocks(block_number, block_hash)
-            .await
-            .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
-        {
+        // TODO: shuffle peers ; don't just take the first
+        // TODO: slowly increase number of peers dynamically if no peer is immediately available
+        loop {
+            if total_attempts == 0 {
+                break;
+            }
+
+            let peers_assumed_know_blocks = self
+                .peers_assumed_know_blocks(block_number, block_hash)
+                .await;
+
+            let request_lock = self
+                .network_service
+                .clone()
+                .lock_any_for_request(peers_assumed_know_blocks.into_iter().collect())
+                .await;
+
+            total_attempts -= 1;
+
             let result = self
                 .network_service
                 .clone()
                 .storage_proof_request(
                     self.network_chain_index,
-                    target,
+                    request_lock,
                     protocol::StorageProofRequestConfig {
                         block_hash: *block_hash,
                         keys: requested_keys.clone(),
@@ -466,7 +501,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         block_hash: &[u8; 32],
         prefix: &[u8],
         storage_trie_root: &[u8; 32],
-        total_attempts: u32,
+        mut total_attempts: u32,
         timeout_per_request: Duration,
         _max_parallel: NonZeroU32,
     ) -> Result<Vec<Vec<u8>>, StorageQueryError> {
@@ -479,20 +514,33 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             let mut outcome_errors =
                 Vec::with_capacity(usize::try_from(total_attempts).unwrap_or(usize::max_value()));
 
-            // TODO: better peers selection ; don't just take the first
             // TODO: handle max_parallel
-            // TODO: is the number of keys is large, split into multiple requests
-            for target in self
-                .peers_assumed_know_blocks(block_number, block_hash)
-                .await
-                .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
-            {
+            // TODO: shuffle peers ; don't just take the first
+            // TODO: slowly increase number of peers dynamically if no peer is immediately available
+            // TODO: if the number of keys is large, split into multiple requests
+            loop {
+                if total_attempts == 0 {
+                    break;
+                }
+
+                let peers_assumed_know_blocks = self
+                    .peers_assumed_know_blocks(block_number, block_hash)
+                    .await;
+
+                let request_lock = self
+                    .network_service
+                    .clone()
+                    .lock_any_for_request(peers_assumed_know_blocks.into_iter().collect())
+                    .await;
+
+                total_attempts -= 1;
+
                 let result = self
                     .network_service
                     .clone()
                     .storage_proof_request(
                         self.network_chain_index,
-                        target,
+                        request_lock,
                         protocol::StorageProofRequestConfig {
                             block_hash: *block_hash,
                             keys: prefix_scan.requested_keys().map(|nibbles| {
@@ -549,26 +597,39 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             '_,
             impl Iterator<Item = impl AsRef<[u8]>> + Clone,
         >,
-        total_attempts: u32,
+        mut total_attempts: u32,
         timeout_per_request: Duration,
         _max_parallel: NonZeroU32,
     ) -> Result<network_service::EncodedMerkleProof, CallProofQueryError> {
         let mut outcome_errors =
             Vec::with_capacity(usize::try_from(total_attempts).unwrap_or(usize::max_value()));
 
-        // TODO: better peers selection ; don't just take the first
         // TODO: handle max_parallel
-        for target in self
-            .peers_assumed_know_blocks(block_number, &config.block_hash)
-            .await
-            .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
-        {
+        // TODO: shuffle peers ; don't just take the first
+        // TODO: slowly increase number of peers dynamically if no peer is immediately available
+        loop {
+            if total_attempts == 0 {
+                break;
+            }
+
+            let peers_assumed_know_blocks = self
+                .peers_assumed_know_blocks(block_number, &config.block_hash)
+                .await;
+
+            let request_lock = self
+                .network_service
+                .clone()
+                .lock_any_for_request(peers_assumed_know_blocks.into_iter().collect())
+                .await;
+
+            total_attempts -= 1;
+
             let result = self
                 .network_service
                 .clone()
                 .call_proof_request(
                     self.network_chain_index,
-                    target,
+                    request_lock,
                     config.clone(),
                     timeout_per_request,
                 )

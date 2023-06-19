@@ -2418,6 +2418,7 @@ version = "0.6.0"
 dependencies = [
  "async-lock",
  "blake2-rfc",
+ "crossbeam-queue",
  "derive_more",
  "either",
  "env_logger",

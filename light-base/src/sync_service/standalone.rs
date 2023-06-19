@@ -121,7 +121,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
 
             // Start a networking request (block requests, warp sync requests, etc.) that the
             // syncing state machine would like to start.
-            if task.start_next_request() {
+            if task.start_next_request().await {
                 queue_empty = false;
             }
 
@@ -393,18 +393,36 @@ impl<TPlat: PlatformRef> Task<TPlat> {
     /// Starts one network request if any is necessary.
     ///
     /// Returns `true` if a request has been started.
-    fn start_next_request(&mut self) -> bool {
+    async fn start_next_request(&mut self) -> bool {
         // `desired_requests()` returns, in decreasing order of priority, the requests
         // that should be started in order for the syncing to proceed. The fact that multiple
         // requests are returned could be used to filter out undesired one. We use this
         // filtering to enforce a maximum of one ongoing request per source.
-        let (source_id, _, mut request_detail) = match self
-            .sync
-            .desired_requests()
-            .find(|(source_id, _, _)| self.sync.source_num_ongoing_requests(*source_id) == 0)
-        {
-            Some(v) => v,
-            None => return false,
+        let (source_id, request_lock, mut request_detail) = {
+            // We need to collect the desired requests, as we can't keep the iterator alive
+            // during an await point.
+            let mut desired_requests_iter = self
+                .sync
+                .desired_requests()
+                .map(|(src_id, _, details)| (src_id, details))
+                .collect::<Vec<_>>()
+                .into_iter();
+
+            loop {
+                let Some((source_id, request_details)) = desired_requests_iter.next()
+                    // TODO: if no peer can be locked because they're all busy with something else, the syncing will not wake up once they are
+                    else { return false };
+
+                let peer_id = self.sync[source_id].0.clone();
+                if let Some(request_lock) = self
+                    .network_service
+                    .clone()
+                    .try_lock_peer_for_request(peer_id)
+                    .await
+                {
+                    break (source_id, request_lock, request_details);
+                }
+            }
         };
 
         // Before inserting the request back to the syncing state machine, clamp the number
@@ -424,10 +442,8 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 request_bodies,
                 request_justification,
             } => {
-                let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
-
                 let block_request = self.network_service.clone().blocks_request(
-                    peer_id,
+                    request_lock,
                     self.network_chain_index,
                     network::protocol::BlocksRequestConfig {
                         start: if let Some(first_block_hash) = first_block_hash {
@@ -467,10 +483,8 @@ impl<TPlat: PlatformRef> Task<TPlat> {
             all::DesiredRequest::GrandpaWarpSync {
                 sync_start_block_hash,
             } => {
-                let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
-
                 let grandpa_request = self.network_service.clone().grandpa_warp_sync_request(
-                    peer_id,
+                    request_lock,
                     self.network_chain_index,
                     sync_start_block_hash,
                     // The timeout needs to be long enough to potentially download the maximum
@@ -501,11 +515,9 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 ref keys,
                 ..
             } => {
-                let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
-
                 let storage_request = self.network_service.clone().storage_proof_request(
                     self.network_chain_index,
-                    peer_id,
+                    request_lock,
                     network::protocol::StorageProofRequestConfig {
                         block_hash,
                         keys: keys.clone().into_iter(),
@@ -543,7 +555,6 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 ref function_name,
                 ref parameter_vectored,
             } => {
-                let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
                 let network_service = self.network_service.clone();
                 let network_chain_index = self.network_chain_index;
                 // TODO: all this copying is done because of lifetime requirements in NetworkService::call_proof_request; maybe check if it can be avoided
@@ -553,7 +564,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 let call_proof_request = async move {
                     let rq = network_service.call_proof_request(
                         network_chain_index,
-                        peer_id,
+                        request_lock,
                         network::protocol::CallProofRequestConfig {
                             block_hash,
                             method: &function_name,
