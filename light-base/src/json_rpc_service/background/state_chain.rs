@@ -17,7 +17,7 @@
 
 //! All legacy JSON-RPC method handlers that relate to the chain or the storage.
 
-use super::{Background, PlatformRef, SubscriptionMessage};
+use super::{Background, GetKeysPagedCacheKey, PlatformRef, SubscriptionMessage};
 
 use crate::runtime_service;
 
@@ -1101,15 +1101,21 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             ),
         };
 
+        // A prefix of `None` means "empty".
+        let prefix = prefix.unwrap_or(methods::HexString(Vec::new())).0;
+
         // Because the user is likely to call this function multiple times in a row with the exact
         // same parameters, we store the untruncated responses in a cache. Check if we hit the
         // cache.
-        if let Some(keys) = self
-            .cache
-            .lock()
-            .await
-            .state_get_keys_paged
-            .get(&(hash, prefix.clone()))
+        if let Some(keys) =
+            self.cache
+                .lock()
+                .await
+                .state_get_keys_paged
+                .get(&GetKeysPagedCacheKey {
+                    hash,
+                    prefix: prefix.clone(),
+                })
         {
             let out = keys
                 .iter()
@@ -1156,7 +1162,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             .storage_prefix_keys_query(
                 block_number,
                 &hash,
-                &prefix.as_ref().unwrap().0, // TODO: don't unwrap! what is this Option?
+                &prefix,
                 &state_root,
                 3,
                 Duration::from_secs(12),
@@ -1183,7 +1189,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         .lock()
                         .await
                         .state_get_keys_paged
-                        .push((hash, prefix), keys);
+                        .push(GetKeysPagedCacheKey { hash, prefix }, keys);
                 }
 
                 methods::Response::state_getKeysPaged(out).to_json_response(request_id.0)
