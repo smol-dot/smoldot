@@ -45,7 +45,8 @@ pub struct Config<'a> {
     pub trie_root_hash: [u8; 32],
 
     /// If `true`, then the final result will only contain [`StorageValue::Value`] entries and no
-    /// [`StorageValue::Hash`] entry. If the remote doesn't .
+    /// [`StorageValue::Hash`] entry. Proofs that only contain a storage value hash when they are
+    /// expected to contain the full value are considered as invalid.
     pub full_storage_values_required: bool,
 }
 
