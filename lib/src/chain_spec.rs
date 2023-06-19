@@ -44,7 +44,6 @@ use crate::{
 
 use alloc::{
     boxed::Box,
-    collections::BTreeSet,
     string::{String, ToString as _},
     vec::Vec,
 };
@@ -403,19 +402,18 @@ impl<'a> GenesisStorageItems<'a> {
         or_equal: bool,
         prefix: impl Iterator<Item = u8>,
     ) -> Option<impl Iterator<Item = u8> + 'a> {
-        // TODO: due to this `HexString` thing, we have to create a separate BTreeSet
-        let top = self.raw.top.keys().map(|k| &k.0).collect::<BTreeSet<_>>();
-
         let lower_bound = if or_equal {
-            Bound::Included(key_before.collect::<Vec<_>>())
+            Bound::Included(structs::HexString(key_before.collect::<Vec<_>>()))
         } else {
-            Bound::Excluded(key_before.collect::<Vec<_>>())
+            Bound::Excluded(structs::HexString(key_before.collect::<Vec<_>>()))
         };
 
-        top.range((lower_bound, Bound::Unbounded))
+        self.raw
+            .top
+            .range((lower_bound, Bound::Unbounded))
             .next()
-            .filter(|k| k.iter().copied().zip(prefix).all(|(a, b)| a == b))
-            .map(|k| k.iter().copied())
+            .filter(|(k, _)| k.0.iter().copied().zip(prefix).all(|(a, b)| a == b))
+            .map(|(k, _)| k.0.iter().copied())
     }
 
     /// Returns the genesis storage value for a specific key.
