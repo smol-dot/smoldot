@@ -553,9 +553,21 @@ pub enum HostVm {
     /// Need to provide the first child trie or the child trie that follows a specific one.
     #[from]
     ExternalStorageNextChildTrie(ExternalStorageNextChildTrie),
+    /// Must load an offchain storage value.
+    #[from]
+    ExternalOffchainStorageGet(ExternalOffchainStorageGet),
     /// Must the set value of an off-chain storage entry.
     #[from]
     ExternalOffchainStorageSet(ExternalOffchainStorageSet),
+    /// Need to provide the current timestamp.
+    #[from]
+    OffchainTimestamp(OffchainTimestamp),
+    /// Must return random seed.
+    #[from]
+    OffchainRandomSeed(OffchainRandomSeed),
+    /// Submit a transaction from offchain worker.
+    #[from]
+    OffchainSubmitTransaction(OffchainSubmitTransaction),
     /// Need to verify whether a signature is valid.
     #[from]
     SignatureVerification(SignatureVerification),
@@ -601,7 +613,11 @@ impl HostVm {
             HostVm::ExternalStorageRoot(inner) => inner.inner.into_prototype(),
             HostVm::ExternalStorageNextKey(inner) => inner.inner.into_prototype(),
             HostVm::ExternalStorageNextChildTrie(inner) => inner.inner.into_prototype(),
+            HostVm::ExternalOffchainStorageGet(inner) => inner.inner.into_prototype(),
             HostVm::ExternalOffchainStorageSet(inner) => inner.inner.into_prototype(),
+            HostVm::OffchainTimestamp(inner) => inner.inner.into_prototype(),
+            HostVm::OffchainRandomSeed(inner) => inner.inner.into_prototype(),
+            HostVm::OffchainSubmitTransaction(inner) => inner.inner.into_prototype(),
             HostVm::SignatureVerification(inner) => inner.inner.into_prototype(),
             HostVm::CallRuntimeVersion(inner) => inner.inner.into_prototype(),
             HostVm::StartStorageTransaction(inner) => inner.inner.into_prototype(),
@@ -1851,6 +1867,7 @@ impl ReadyToRun {
                     key_ptr,
                     key_size,
                     value: Some((value_ptr, value_size)),
+                    old_value: None,
                     inner: self.inner,
                 })
             }
@@ -1860,21 +1877,85 @@ impl ReadyToRun {
                     key_ptr,
                     key_size,
                     value: None,
+                    old_value: None,
                     inner: self.inner,
                 })
             }
-            HostFunction::ext_offchain_is_validator_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_offchain_submit_transaction_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_offchain_network_state_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_offchain_timestamp_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_offchain_sleep_until_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_offchain_random_seed_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_offchain_local_storage_set_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_offchain_local_storage_compare_and_set_version_1 => {
+            HostFunction::ext_offchain_is_validator_version_1 => HostVm::ReadyToRun(ReadyToRun {
+                inner: self.inner,
+                resume_value: Some(vm::WasmValue::I32(1)),
+            }),
+            HostFunction::ext_offchain_submit_transaction_version_1 => {
+                let (tx_ptr, tx_size) = expect_pointer_size_raw!(0);
+                HostVm::OffchainSubmitTransaction(OffchainSubmitTransaction {
+                    inner: self.inner,
+                    calling: id,
+                    tx_ptr,
+                    tx_size,
+                })
+            }
+            HostFunction::ext_offchain_network_state_version_1 => {
                 host_fn_not_implemented!()
             }
-            HostFunction::ext_offchain_local_storage_get_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_offchain_local_storage_clear_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_offchain_timestamp_version_1 => {
+                HostVm::OffchainTimestamp(OffchainTimestamp { inner: self.inner })
+            }
+            HostFunction::ext_offchain_sleep_until_version_1 => {
+                host_fn_not_implemented!()
+            }
+            HostFunction::ext_offchain_random_seed_version_1 => {
+                HostVm::OffchainRandomSeed(OffchainRandomSeed {
+                    inner: self.inner,
+                    calling: id,
+                })
+            }
+            HostFunction::ext_offchain_local_storage_set_version_1 => {
+                let _kind = expect_u32!(0);
+                let (key_ptr, key_size) = expect_pointer_size_raw!(1);
+                let (value_ptr, value_size) = expect_pointer_size_raw!(2);
+                HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
+                    key_ptr,
+                    key_size,
+                    value: Some((value_ptr, value_size)),
+                    old_value: None,
+                    inner: self.inner,
+                })
+            }
+            HostFunction::ext_offchain_local_storage_compare_and_set_version_1 => {
+                let _kind = expect_u32!(0);
+                let (key_ptr, key_size) = expect_pointer_size_raw!(1);
+                let (old_value_ptr, old_value_size) = expect_pointer_size_raw!(2);
+                let (value_ptr, value_size) = expect_pointer_size_raw!(3);
+                HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
+                    key_ptr,
+                    key_size,
+                    value: Some((value_ptr, value_size)),
+                    old_value: Some((old_value_ptr, old_value_size)),
+                    inner: self.inner,
+                })
+            }
+            HostFunction::ext_offchain_local_storage_get_version_1 => {
+                let _kind = expect_u32!(0);
+                let (key_ptr, key_size) = expect_pointer_size_raw!(1);
+
+                HostVm::ExternalOffchainStorageGet(ExternalOffchainStorageGet {
+                    key_ptr,
+                    key_size,
+                    calling: id,
+                    inner: self.inner,
+                })
+            }
+            HostFunction::ext_offchain_local_storage_clear_version_1 => {
+                let _kind = expect_u32!(0);
+                let (key_ptr, key_size) = expect_pointer_size_raw!(1);
+                HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
+                    key_ptr,
+                    key_size,
+                    value: None,
+                    old_value: None,
+                    inner: self.inner,
+                })
+            }
             HostFunction::ext_offchain_http_request_start_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_offchain_http_request_add_header_version_1 => {
                 host_fn_not_implemented!()
@@ -3246,6 +3327,9 @@ pub struct ExternalOffchainStorageSet {
 
     /// Pointer and size of the value to set. `None` for clearing. Guaranteed to be in range.
     value: Option<(u32, u32)>,
+
+    /// Pointer and size of the old value to compare. Guaranteed to be in range.
+    old_value: Option<(u32, u32)>,
 }
 
 impl ExternalOffchainStorageSet {
@@ -3268,18 +3352,194 @@ impl ExternalOffchainStorageSet {
         }
     }
 
+    /// Returns the old value.
+    pub fn old_value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        if let Some((ptr, size)) = self.old_value {
+            Some(self.inner.vm.read_memory(ptr, size).unwrap())
+        } else {
+            None
+        }
+    }
+
     /// Resumes execution after having set the value.
-    pub fn resume(self) -> HostVm {
-        HostVm::ReadyToRun(ReadyToRun {
-            inner: self.inner,
-            resume_value: None,
-        })
+    pub fn resume(self, replaced: bool) -> HostVm {
+        if self.old_value.is_some() {
+            HostVm::ReadyToRun(ReadyToRun {
+                inner: self.inner,
+                resume_value: Some(vm::WasmValue::I32(if replaced { 1 } else { 0 })),
+            })
+        } else {
+            HostVm::ReadyToRun(ReadyToRun {
+                inner: self.inner,
+                resume_value: None,
+            })
+        }
     }
 }
 
 impl fmt::Debug for ExternalOffchainStorageSet {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("ExternalOffchainStorageSet").finish()
+    }
+}
+
+/// Must get the value of the off-chain storage.
+pub struct ExternalOffchainStorageGet {
+    inner: Inner,
+
+    /// Function currently being called by the Wasm code. Refers to an index within
+    /// [`Inner::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
+    calling: usize,
+
+    /// Pointer to the key whose value must be set. Guaranteed to be in range.
+    key_ptr: u32,
+    /// Size of the key whose value must be set. Guaranteed to be in range.
+    key_size: u32,
+}
+
+impl ExternalOffchainStorageGet {
+    /// Returns the key whose value must be set.
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+        self.inner
+            .vm
+            .read_memory(self.key_ptr, self.key_size)
+            .unwrap()
+    }
+
+    /// Resumes execution after having set the value.
+    pub fn resume(self, value: Option<&[u8]>) -> HostVm {
+        let host_fn = match self.inner.registered_functions[self.calling] {
+            FunctionImport::Resolved(f) => f,
+            FunctionImport::Unresolved { .. } => unreachable!(),
+        };
+
+        if let Some(value) = value {
+            let value = iter::once(&value[..]);
+            // Writing `Some(value)`.
+            debug_assert_eq!(
+                value.clone().fold(0, |a, b| a + b.as_ref().len()),
+                value.len()
+            );
+            let value_len_enc = util::encode_scale_compact_usize(value.len());
+            self.inner.alloc_write_and_return_pointer_size(
+                host_fn.name(),
+                iter::once(&[1][..])
+                    .chain(iter::once(value_len_enc.as_ref()))
+                    .map(either::Left)
+                    .chain(value.map(either::Right)),
+            )
+        } else {
+            // Write a SCALE-encoded `None`.
+            self.inner
+                .alloc_write_and_return_pointer_size(host_fn.name(), iter::once(&[0]))
+        }
+    }
+}
+
+impl fmt::Debug for ExternalOffchainStorageGet {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("ExternalOffchainStorageGet").finish()
+    }
+}
+
+/// Must return the current timestamp.
+pub struct OffchainTimestamp {
+    inner: Inner,
+}
+
+impl OffchainTimestamp {
+    /// Resumes execution after having set the value.
+    pub fn resume(self, value: u64) -> HostVm {
+        HostVm::ReadyToRun(ReadyToRun {
+            inner: self.inner,
+            resume_value: Some(vm::WasmValue::I64(i64::from_ne_bytes(value.to_ne_bytes()))),
+        })
+    }
+}
+
+impl fmt::Debug for OffchainTimestamp {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("OffchainTimestamp").finish()
+    }
+}
+
+/// Must return the current timestamp.
+pub struct OffchainRandomSeed {
+    inner: Inner,
+
+    /// Function currently being called by the Wasm code. Refers to an index within
+    /// [`Inner::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
+    calling: usize,
+}
+
+impl OffchainRandomSeed {
+    /// Resumes execution after having set the value.
+    pub fn resume(self, value: [u8; 32]) -> HostVm {
+        let host_fn = match self.inner.registered_functions[self.calling] {
+            FunctionImport::Resolved(f) => f,
+            FunctionImport::Unresolved { .. } => unreachable!(),
+        };
+        self.inner
+            .alloc_write_and_return_pointer(host_fn.name(), iter::once(value))
+    }
+}
+
+impl fmt::Debug for OffchainRandomSeed {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("OffchainRandomSeed").finish()
+    }
+}
+
+/// Must return the current timestamp.
+pub struct OffchainSubmitTransaction {
+    inner: Inner,
+
+    /// Function currently being called by the Wasm code. Refers to an index within
+    /// [`Inner::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
+    calling: usize,
+
+    /// Pointer to the transaction whose value must be set. Guaranteed to be in range.
+    tx_ptr: u32,
+
+    /// Size of the transaction whose value must be set. Guaranteed to be in range.
+    tx_size: u32,
+}
+
+impl OffchainSubmitTransaction {
+    pub fn transaction(&'_ self) -> impl AsRef<[u8]> + '_ {
+        self.inner
+            .vm
+            .read_memory(self.tx_ptr, self.tx_size)
+            .unwrap()
+    }
+
+    /// Resumes execution after having set the value.
+    pub fn resume(self, value: (&[u8], usize)) -> HostVm {
+        let host_fn = match self.inner.registered_functions[self.calling] {
+            FunctionImport::Resolved(f) => f,
+            FunctionImport::Unresolved { .. } => unreachable!(),
+        };
+
+        let (value, value_total_len) = value;
+        let value = iter::once(&value[..]);
+        debug_assert_eq!(
+            value.clone().fold(0, |a, b| a + b.as_ref().len()),
+            value_total_len
+        );
+        let value_len_enc = util::encode_scale_compact_usize(value_total_len);
+        self.inner.alloc_write_and_return_pointer_size(
+            host_fn.name(),
+            iter::once(&[1][..])
+                .chain(iter::once(value_len_enc.as_ref()))
+                .map(either::Left)
+                .chain(value.map(either::Right)),
+        )
+    }
+}
+
+impl fmt::Debug for OffchainSubmitTransaction {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("OffchainSubmitTransaction").finish()
     }
 }
 

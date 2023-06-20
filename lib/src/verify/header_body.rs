@@ -563,6 +563,18 @@ impl VerifyInner {
                 runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
                     self.inner = sig.verify_and_resume();
                 }
+                runtime_host::RuntimeHostVm::OffchainStorageGet(_inner) => {
+                    unimplemented!()
+                }
+                runtime_host::RuntimeHostVm::OffchainTimestamp(_inner) => {
+                    unimplemented!()
+                }
+                runtime_host::RuntimeHostVm::OffchainRandomSeed(_inner) => {
+                    unimplemented!()
+                }
+                runtime_host::RuntimeHostVm::OffchainSubmitTransaction(_inner) => {
+                    unimplemented!()
+                }
             }
         }
     }
