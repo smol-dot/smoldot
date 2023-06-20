@@ -247,10 +247,6 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
         // For each chain object returned by `addChain`, the associated internal chain id.
         // Immediately cleared when `remove()` is called on a chain.
         chainIds: WeakMap<Chain, number>,
-        // Task currently being executed by the Wasm. Used for diagnostic about when a panic
-        // happens.
-        // TODO: consider moving this to raw-instance and report the name as part of the wasm-panic event
-        currentTaskName: string | null,
         // List of all active connections. Keys are IDs assigned by the instance.
         connections: Map<number, Connection>,
         // FIFO queue. When `addChain` is called, an entry is added to this queue. When the
@@ -267,7 +263,6 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
     } = {
         instance: { status: "not-created" },
         chainIds: new WeakMap(),
-        currentTaskName: null,
         connections: new Map(),
         addChainResults: [],
         onExecutorShutdownOrWasmPanic: () => {},
@@ -280,7 +275,7 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
             case "wasm-panic": {
                 console.error(
                     "Smoldot has panicked" +
-                    (state.currentTaskName ? (" while executing task `" + state.currentTaskName + "`") : "") +
+                    (event.currentTask ? (" while executing task `" + event.currentTask + "`") : "") +
                     ". This is a bug in smoldot. Please open an issue at " +
                     "https://github.com/smol-dot/smoldot/issues with the following message:\n" +
                     event.message
@@ -307,8 +302,6 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 }
                 state.chains.clear();
 
-                state.currentTaskName = null;
-
                 const cb = state.onExecutorShutdownOrWasmPanic;
                 state.onExecutorShutdownOrWasmPanic = () => {};
                 cb();
@@ -334,10 +327,6 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 while (callbacks.length !== 0) {
                     (callbacks.shift()!)();
                 }
-                break;
-            }
-            case "current-task": {
-                state.currentTaskName = event.taskName;
                 break;
             }
             case "new-connection": {
@@ -619,7 +608,6 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 chain.jsonRpcResponsesPromises = [];
             }
             state.chains.clear();
-            state.currentTaskName = null;
 
             // Wait for the `executor-shutdown` event to be generated.
             await new Promise<void>((resolve) => state.onExecutorShutdownOrWasmPanic = resolve);
