@@ -704,7 +704,7 @@ impl OffchainSubmitTransaction {
             _ => unreachable!(),
         }
     }
-    /// Injects random seed.
+    /// Injects outcome.
     pub fn inject_outcome(mut self, value: &[u8]) -> RuntimeHostVm {
         match self.inner.vm {
             host::HostVm::OffchainSubmitTransaction(req) => {
