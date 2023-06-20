@@ -241,7 +241,6 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
                 const mem = new Uint8Array(instance.exports.memory.buffer);
                 state.bufferIndices[0] = new TextEncoder().encode(result.error)
                 buffer.writeUInt32LE(mem, errorBufferIndexPtr, 0);
-                buffer.writeUInt8(mem, errorBufferIndexPtr + 4, 1);  // TODO: remove isBadAddress param since it's always true
                 return 1;
             }
         },

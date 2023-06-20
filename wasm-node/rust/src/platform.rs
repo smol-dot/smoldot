@@ -153,14 +153,14 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         let connection_id = lock.next_connection_id;
         lock.next_connection_id += 1;
 
-        let mut error_buffer_index = [0u8; 5];
+        let mut error_buffer_index = [0u8; 4];
 
         let ret_code = unsafe {
             bindings::connection_new(
                 connection_id,
                 u32::try_from(url.as_bytes().as_ptr() as usize).unwrap(),
                 u32::try_from(url.as_bytes().len()).unwrap(),
-                u32::try_from(&mut error_buffer_index as *mut [u8; 5] as usize).unwrap(),
+                u32::try_from(&mut error_buffer_index as *mut [u8; 4] as usize).unwrap(),
             )
         };
 
@@ -170,7 +170,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
             ));
             Err(ConnectError {
                 message: str::from_utf8(&error_message).unwrap().to_owned(),
-                is_bad_addr: error_buffer_index[4] != 0,
+                is_bad_addr: true,
             })
         } else {
             let _prev_value = lock.connections.insert(

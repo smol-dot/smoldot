@@ -151,20 +151,20 @@ extern "C" {
     /// The `id` parameter is an identifier for this connection, as chosen by the Rust code. It
     /// must be passed on every interaction with this connection.
     ///
-    /// Returns 0 to indicate success, or 1 to indicate that an error happened. If an error is
-    /// returned, the `id` doesn't correspond to anything.
+    /// Returns 0 to indicate success, or 1 to indicate an error: the multiaddress couldn't be
+    /// parsed or that the protocol isn't supported. If an error is returned, the `id` doesn't
+    /// correspond to anything.
     ///
     /// > **Note**: If you implement this function using for example `new WebSocket()`, please
     /// >           keep in mind that exceptions should be caught and turned into an error code.
     ///
-    /// If an error happened, assign a so-called "buffer index" (a `u32`) representing the buffer
+    /// If 1 is returned, assign a so-called "buffer index" (a `u32`) representing the buffer
     /// containing the UTF-8 error message, then write this buffer index as little-endian to the
     /// memory of the WebAssembly indicated by `error_buffer_index_ptr`. The Rust code will call
     /// [`buffer_size`] and [`buffer_copy`] in order to obtain the content of this buffer. The
     /// buffer index should remain assigned and buffer alive until the next time the JavaScript
-    /// code retains control. Then, write at location `error_buffer_index_ptr + 4` a `1` if the
-    /// error is caused by the address being forbidden or unsupported, and `0` otherwise. If no
-    /// error happens, nothing should be written to `error_buffer_index_ptr`.
+    /// code retains control. If no error happens, nothing should be written to
+    /// `error_buffer_index_ptr`.
     ///
     /// At any time, a connection can be in one of the three following states:
     ///
