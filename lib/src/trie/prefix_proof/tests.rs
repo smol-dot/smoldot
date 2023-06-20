@@ -14491,6 +14491,7 @@ fn regression_test_174() {
     let mut prefix_scan = prefix_scan(Config {
         prefix: REQUESTED,
         trie_root_hash: STATE_TRIE_ROOT,
+        full_storage_values_required: true,
     });
 
     for proof in PROOFS {
@@ -14499,11 +14500,14 @@ fn regression_test_174() {
                 prefix_scan = scan;
                 continue;
             }
-            Ok(ResumeOutcome::Success { mut keys }) => {
+            Ok(ResumeOutcome::Success { mut entries }) => {
                 let mut expected = EXPECTED.to_owned();
                 expected.sort();
-                keys.sort();
-                assert_eq!(keys, expected);
+                entries.sort_by(|(key1, _), (key2, _)| key1.cmp(&key2));
+                assert_eq!(
+                    entries.into_iter().map(|(key, _)| key).collect::<Vec<_>>(),
+                    expected
+                );
                 return;
             }
             Err((_, err)) => panic!("{err:?}"),

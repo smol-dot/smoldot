@@ -473,6 +473,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         let mut prefix_scan = prefix_proof::prefix_scan(prefix_proof::Config {
             prefix,
             trie_root_hash: *storage_trie_root,
+            full_storage_values_required: false,
         });
 
         'main_scan: loop {
@@ -512,8 +513,9 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                                 prefix_scan = scan;
                                 continue 'main_scan;
                             }
-                            Ok(prefix_proof::ResumeOutcome::Success { keys }) => {
-                                return Ok(keys);
+                            Ok(prefix_proof::ResumeOutcome::Success { entries }) => {
+                                // TODO :overhead
+                                return Ok(entries.into_iter().map(|(key, _)| key).collect());
                             }
                             Err((scan, err)) => {
                                 prefix_scan = scan;
