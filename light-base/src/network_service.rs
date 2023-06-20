@@ -36,7 +36,7 @@
 //! [`NetworkService::new`]. These channels inform the foreground about updates to the network
 //! connectivity.
 
-use crate::platform::PlatformRef;
+use crate::{platform::PlatformRef, util};
 
 use alloc::{
     boxed::Box,
@@ -45,12 +45,10 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use async_lock::Mutex;
 use core::{cmp, num::NonZeroUsize, task::Poll, time::Duration};
-use futures::{
-    channel::{mpsc, oneshot},
-    lock::Mutex,
-    prelude::*,
-};
+use futures_channel::{mpsc, oneshot};
+use futures_util::{future, stream, FutureExt as _, SinkExt as _, StreamExt as _};
 use hashbrown::{hash_map, HashMap, HashSet};
 use itertools::Itertools as _;
 use smoldot::{
@@ -158,8 +156,7 @@ struct SharedGuarded<TPlat: PlatformRef> {
     /// List of peer and chain index tuples for which no outbound slot should be assigned.
     ///
     /// The values are the moment when the ban expires.
-    // TODO: use SipHasher
-    slots_assign_backoff: HashMap<(PeerId, usize), TPlat::Instant, fnv::FnvBuildHasher>,
+    slots_assign_backoff: HashMap<(PeerId, usize), TPlat::Instant, util::SipHasherBuild>,
 
     messages_from_connections_tx:
         mpsc::Sender<(service::ConnectionId, service::ConnectionToCoordinator)>,
@@ -260,7 +257,10 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     handshake_timeout: Duration::from_secs(8),
                     randomness_seed: rand::random(),
                 }),
-                slots_assign_backoff: HashMap::with_capacity_and_hasher(32, Default::default()),
+                slots_assign_backoff: HashMap::with_capacity_and_hasher(
+                    32,
+                    util::SipHasherBuild::new(rand::random()),
+                ),
                 important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
                 active_connections: HashMap::with_capacity_and_hasher(32, Default::default()),
                 messages_from_connections_tx,
@@ -423,7 +423,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     BytesDisplay(blocks.iter().fold(0, |sum, block| {
                         let block_size = block.header.as_ref().map_or(0, |h| h.len()) +
                             block.body.as_ref().map_or(0, |b| b.iter().fold(0, |s, e| s + e.len())) +
-                            block.justifications.as_ref().into_iter().flat_map(|l| l.iter()).fold(0, |s, j| s + j.1.len());
+                            block.justifications.as_ref().into_iter().flat_map(|l| l.iter()).fold(0, |s, j| s + j.justification.len());
                         sum + u64::try_from(block_size).unwrap()
                     }))
                 );
@@ -1177,11 +1177,26 @@ async fn update_round<TPlat: PlatformRef>(
                             );
 
                             for (peer_id, addrs) in nodes {
+                                let mut valid_addrs = Vec::with_capacity(addrs.len());
+                                for addr in addrs {
+                                    match Multiaddr::try_from(addr) {
+                                        Ok(a) => valid_addrs.push(a),
+                                        Err(err) => {
+                                            log::debug!(
+                                                target: "connections",
+                                                "Discovery => InvalidAddress({})",
+                                                hex::encode(&err.addr)
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                }
+
                                 guarded.network.discover(
                                     &shared.platform.now(),
                                     chain_index,
                                     peer_id,
-                                    addrs,
+                                    valid_addrs,
                                 );
                             }
                         }

@@ -144,7 +144,9 @@ pub fn decode_database(encoded: &str, block_number_bytes: usize) -> Result<Datab
         return Err(());
     };
 
-    let (chain_information, _) = finalized_serialize::decode_chain(
+    let finalized_serialize::Decoded {
+        chain_information, ..
+    } = finalized_serialize::decode_chain(
         &serde_json::to_string(&decoded.chain).unwrap(),
         block_number_bytes,
     )

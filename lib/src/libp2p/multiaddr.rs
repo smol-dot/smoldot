@@ -54,6 +54,11 @@ impl Multiaddr {
         self.bytes.clone()
     }
 
+    /// Returns the serialized version of this `Multiaddr`.
+    pub fn into_vec(self) -> Vec<u8> {
+        self.bytes
+    }
+
     /// Returns the list of components of the multiaddress.
     pub fn iter(&'_ self) -> impl Iterator<Item = ProtocolRef<'_>> + '_ {
         let mut iter =
@@ -148,7 +153,7 @@ impl TryFrom<Vec<u8>> for Multiaddr {
         ))(&bytes)
         .is_err()
         {
-            return Err(FromVecError {});
+            return Err(FromVecError { addr: bytes });
         }
 
         Ok(Multiaddr { bytes })
@@ -173,7 +178,10 @@ impl fmt::Display for Multiaddr {
 
 // TODO: more doc and properly derive Display
 #[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
-pub struct FromVecError {}
+#[display(fmt = "Unable to parse multiaddress")]
+pub struct FromVecError {
+    pub addr: Vec<u8>,
+}
 
 // TODO: more doc and properly derive Display
 #[derive(Debug, derive_more::Display, Clone)]

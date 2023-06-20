@@ -60,7 +60,7 @@
 //! fragment represents a change in the list of Grandpa authorities, and a list of signatures of
 //! the previous authorities that certify that this change is correct.
 //! - Verifying the fragments. Each fragment that is successfully verified progresses towards
-//! towards the head of the chain. Even if one fragment is invalid, all the previously-verified
+//! the head of the chain. Even if one fragment is invalid, all the previously-verified
 //! fragments can still be kept, and the warp syncing can resume from there.
 //! - Downloading from a source the runtime code of the final block of the proof.
 //! - Performing some runtime calls in order to obtain the current consensus-related parameters
@@ -209,6 +209,17 @@ pub enum WarpSyncInitError {
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct SourceId(usize);
 
+impl SourceId {
+    /// Returns the smallest possible [`SourceId`]. It is always inferior or equal to any other.
+    pub fn min_value() -> Self {
+        SourceId(usize::min_value())
+    }
+
+    pub fn checked_add(&self, n: u8) -> Option<Self> {
+        Some(SourceId(self.0.checked_add(usize::from(n))?))
+    }
+}
+
 /// The result of a successful warp sync.
 pub struct Success<TSrc, TRq> {
     /// The synced chain information.
@@ -225,7 +236,8 @@ pub struct Success<TSrc, TRq> {
     pub finalized_storage_heap_pages: Option<Vec<u8>>,
 
     /// The list of sources that were added to the state machine.
-    pub sources: Vec<TSrc>,
+    /// The list is ordered by [`SourceId`].
+    pub sources_ordered: Vec<(SourceId, TSrc)>,
 
     /// The list of requests that were added to the state machine.
     pub in_progress_requests: Vec<(SourceId, RequestId, TRq, RequestDetail)>,
@@ -575,18 +587,11 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             };
 
             // TODO: O(n)
-            if !self
-                .in_progress_requests
-                .iter()
-                .any(|(_, (_, _, rq))| match rq {
+            if !self.in_progress_requests.iter().any(|(_, (_, _, rq))| {
+                matches!(rq,
                     RequestDetail::WarpSyncRequest { block_hash }
-                        if *block_hash == start_block_hash =>
-                    {
-                        true
-                    }
-                    _ => false,
-                })
-            {
+                        if *block_hash == start_block_hash)
+            }) {
                 // Combine the request with every single available source.
                 either::Left(self.sources.iter().filter_map(move |(src_id, src)| {
                     // TODO: also filter by source finalized block? so that we don't request from sources below us
@@ -1199,7 +1204,6 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             let decoded_downloaded_runtime =
                 match proof_decode::decode_and_verify_proof(proof_decode::Config {
                     proof: &downloaded_runtime[..],
-                    trie_root_hash: &header.state_root,
                 }) {
                     Ok(p) => p,
                     Err(err) => {
@@ -1216,35 +1220,36 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     }
                 };
 
-            let finalized_storage_code = match decoded_downloaded_runtime.storage_value(b":code") {
-                Some(Some((code, _))) => code,
-                Some(None) => {
-                    self.inner.phase = Phase::DownloadFragments {
-                        previous_verifier_values: Some((
-                            header.clone(),
-                            chain_information_finality.clone(),
-                        )),
-                    };
-                    return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
-                }
-                None => {
-                    self.inner.phase = Phase::DownloadFragments {
-                        previous_verifier_values: Some((
-                            header.clone(),
-                            chain_information_finality.clone(),
-                        )),
-                    };
-                    return (
-                        WarpSync::InProgress(self.inner),
-                        Some(Error::MerkleProofEntriesMissing),
-                    );
-                }
-            };
+            let finalized_storage_code =
+                match decoded_downloaded_runtime.storage_value(&header.state_root, b":code") {
+                    Ok(Some((code, _))) => code,
+                    Ok(None) => {
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: Some((
+                                header.clone(),
+                                chain_information_finality.clone(),
+                            )),
+                        };
+                        return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
+                    }
+                    Err(proof_decode::IncompleteProofError { .. }) => {
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: Some((
+                                header.clone(),
+                                chain_information_finality.clone(),
+                            )),
+                        };
+                        return (
+                            WarpSync::InProgress(self.inner),
+                            Some(Error::MerkleProofEntriesMissing),
+                        );
+                    }
+                };
 
             let finalized_storage_heappages =
-                match decoded_downloaded_runtime.storage_value(b":heappages") {
-                    Some(val) => val.map(|(v, _)| v),
-                    None => {
+                match decoded_downloaded_runtime.storage_value(&header.state_root, b":heappages") {
+                    Ok(val) => val.map(|(v, _)| v),
+                    Err(proof_decode::IncompleteProofError { .. }) => {
                         self.inner.phase = Phase::DownloadFragments {
                             previous_verifier_values: Some((
                                 header.clone(),
@@ -1304,10 +1309,12 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                         }
                     } else {
                         chain_information::build::ConfigFinalizedBlockHeader::NonGenesis {
-                            header: header.clone(),
+                            scale_encoded_header: header
+                                .scale_encoding_vec(self.inner.block_number_bytes),
                             known_finality: Some(chain_information_finality.clone()),
                         }
                     },
+                    block_number_bytes: self.inner.block_number_bytes,
                     runtime,
                 },
             );
@@ -1324,11 +1331,9 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                             finalized_storage_code: Some(finalized_storage_code.to_owned()),
                             finalized_storage_heap_pages: finalized_storage_heappages
                                 .map(|v| v.to_vec()),
-                            sources: self
-                                .inner
-                                .sources
-                                .drain()
-                                .map(|source| source.user_data)
+                            sources_ordered: mem::take(&mut self.inner.sources)
+                                .into_iter()
+                                .map(|(id, source)| (SourceId(id), source.user_data))
                                 .collect(),
                             in_progress_requests: mem::take(&mut self.inner.in_progress_requests)
                                 .into_iter()
@@ -1416,7 +1421,6 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     let proof = proof.take().unwrap();
                     let decoded_proof =
                         match proof_decode::decode_and_verify_proof(proof_decode::Config {
-                            trie_root_hash: &header.state_root,
                             proof: proof.into_iter(),
                         }) {
                             Ok(d) => d,
@@ -1444,22 +1448,24 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
             loop {
                 match chain_info_builder {
                     chain_information::build::InProgress::StorageGet(get) => {
+                        // TODO: child tries not supported
                         let proof = calls.get(&get.call_in_progress()).unwrap();
-                        let value = match proof.storage_value(get.key().as_ref()) {
-                            Some(v) => v.map(|(v, _)| v),
-                            None => {
-                                self.inner.phase = Phase::DownloadFragments {
-                                    previous_verifier_values: Some((
-                                        header.clone(),
-                                        chain_information_finality.clone(),
-                                    )),
-                                };
-                                return (
-                                    WarpSync::InProgress(self.inner),
-                                    Some(Error::MerkleProofEntriesMissing),
-                                );
-                            }
-                        };
+                        let value =
+                            match proof.storage_value(&header.state_root, get.key().as_ref()) {
+                                Ok(v) => v.map(|(v, _)| v),
+                                Err(proof_decode::IncompleteProofError { .. }) => {
+                                    self.inner.phase = Phase::DownloadFragments {
+                                        previous_verifier_values: Some((
+                                            header.clone(),
+                                            chain_information_finality.clone(),
+                                        )),
+                                    };
+                                    return (
+                                        WarpSync::InProgress(self.inner),
+                                        Some(Error::MerkleProofEntriesMissing),
+                                    );
+                                }
+                            };
 
                         match get.inject_value(value.map(iter::once)) {
                             chain_information::build::ChainInformationBuild::Finished {
@@ -1475,11 +1481,9 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                         finalized_storage_code: downloaded_runtime.storage_code,
                                         finalized_storage_heap_pages: downloaded_runtime
                                             .storage_heap_pages,
-                                        sources: self
-                                            .inner
-                                            .sources
-                                            .drain()
-                                            .map(|source| source.user_data)
+                                        sources_ordered: mem::take(&mut self.inner.sources)
+                                            .into_iter()
+                                            .map(|(id, source)| (SourceId(id), source.user_data))
                                             .collect(),
                                         in_progress_requests: mem::take(
                                             &mut self.inner.in_progress_requests,

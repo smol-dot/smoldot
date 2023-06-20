@@ -17,7 +17,7 @@
 
 //! All legacy JSON-RPC method handlers that relate to the chain or the storage.
 
-use super::{Background, PlatformRef, SubscriptionMessage};
+use super::{Background, GetKeysPagedCacheKey, PlatformRef, SubscriptionMessage};
 
 use crate::runtime_service;
 
@@ -29,12 +29,14 @@ use alloc::{
     vec,
     vec::Vec,
 };
+use async_lock::MutexGuard;
 use core::{
     iter,
     num::{NonZeroU32, NonZeroUsize},
+    pin,
     time::Duration,
 };
-use futures::{lock::MutexGuard, prelude::*};
+use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use smoldot::{
     header,
     informant::HashDisplay,
@@ -80,7 +82,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             Err(error) => {
                 log::warn!(
                     target: &self.log_target,
-                    "Returning error from `state_getMetadata`. \
+                    "Returning error from `system_accountNextIndex`. \
                     API user might not function properly. Error: {}",
                     error
                 );
@@ -186,7 +188,11 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     self.sync_service.block_number_bytes(),
                 )
                 .unwrap(),
-                justifications: block.justifications,
+                justifications: block.justifications.map(|list| {
+                    list.into_iter()
+                        .map(|j| (j.engine_id, j.justification))
+                        .collect()
+                }),
             })
             .to_json_response(request_id.0)
         } else {
@@ -443,9 +449,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
                     loop {
                         let message = {
-                            let next_new_block = new_blocks.next();
-                            let next_message = messages_rx.next();
-                            futures::pin_mut!(next_message, next_new_block);
+                            let next_new_block = pin::pin!(new_blocks.next());
+                            let next_message = pin::pin!(messages_rx.next());
                             match future::select(next_new_block, next_message).await {
                                 future::Either::Left((v, _)) => either::Left(v),
                                 future::Either::Right((v, _)) => either::Right(v),
@@ -595,8 +600,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
                 loop {
                     let event = {
-                        let next_message = messages_rx.next();
-                        futures::pin_mut!(next_message);
+                        let next_message = pin::pin!(messages_rx.next());
                         match future::select(blocks_list.next(), next_message).await {
                             future::Either::Left((ev, _)) => either::Left(ev),
                             future::Either::Right((ev, _)) => either::Right(ev),
@@ -729,8 +733,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
                 loop {
                     let event = {
-                        let next_message = messages_rx.next();
-                        futures::pin_mut!(next_message);
+                        let next_message = pin::pin!(messages_rx.next());
                         match future::select(blocks_list.next(), next_message).await {
                             future::Either::Left((ev, _)) => either::Left(ev),
                             future::Either::Right((ev, _)) => either::Right(ev),
@@ -954,7 +957,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             Err(error) => {
                 log::warn!(
                     target: &self.log_target,
-                    "Returning error from `state_getMetadata`. \
+                    "Returning error from `payment_queryInfo`. \
                     API user might not function properly. Error: {}",
                     error
                 );
@@ -1098,15 +1101,21 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             ),
         };
 
+        // A prefix of `None` means "empty".
+        let prefix = prefix.unwrap_or(methods::HexString(Vec::new())).0;
+
         // Because the user is likely to call this function multiple times in a row with the exact
         // same parameters, we store the untruncated responses in a cache. Check if we hit the
         // cache.
-        if let Some(keys) = self
-            .cache
-            .lock()
-            .await
-            .state_get_keys_paged
-            .get(&(hash, prefix.clone()))
+        if let Some(keys) =
+            self.cache
+                .lock()
+                .await
+                .state_get_keys_paged
+                .get(&GetKeysPagedCacheKey {
+                    hash,
+                    prefix: prefix.clone(),
+                })
         {
             let out = keys
                 .iter()
@@ -1153,7 +1162,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             .storage_prefix_keys_query(
                 block_number,
                 &hash,
-                &prefix.as_ref().unwrap().0, // TODO: don't unwrap! what is this Option?
+                &prefix,
                 &state_root,
                 3,
                 Duration::from_secs(12),
@@ -1180,7 +1189,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         .lock()
                         .await
                         .state_get_keys_paged
-                        .push((hash, prefix), keys);
+                        .push(GetKeysPagedCacheKey { hash, prefix }, keys);
                 }
 
                 methods::Response::state_getKeysPaged(out).to_json_response(request_id.0)
@@ -1215,7 +1224,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             .runtime_call(
                 &block_hash,
                 "Metadata",
-                1..=1,
+                1..=2,
                 "Metadata_metadata",
                 iter::empty::<Vec<u8>>(),
                 3,
@@ -1273,7 +1282,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         };
 
         let response = match self
-            .runtime_lock(&block_hash)
+            .runtime_access(&block_hash)
             .await
             .map(|l| l.specification())
         {
@@ -1437,8 +1446,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
                 let (current_spec, spec_changes) =
                     sub_utils::subscribe_runtime_version(&runtime_service).await;
-                let spec_changes = stream::iter(iter::once(current_spec)).chain(spec_changes);
-                futures::pin_mut!(spec_changes);
+                let mut spec_changes =
+                    pin::pin!(stream::iter(iter::once(current_spec)).chain(spec_changes));
 
                 let requests_subscriptions = {
                     let weak = Arc::downgrade(&requests_subscriptions);
@@ -1448,8 +1457,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
                 loop {
                     let event = {
-                        let next_message = messages_rx.next();
-                        futures::pin_mut!(next_message);
+                        let next_message = pin::pin!(messages_rx.next());
                         match future::select(spec_changes.next(), next_message).await {
                             future::Either::Left((ev, _)) => either::Left(ev),
                             future::Either::Right((ev, _)) => either::Right(ev),
@@ -1701,7 +1709,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     )
                     .await;
 
-                futures::pin_mut!(storage_updates);
+                let mut storage_updates = pin::pin!(storage_updates);
 
                 let requests_subscriptions = {
                     let weak = Arc::downgrade(&requests_subscriptions);
@@ -1711,8 +1719,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
                 loop {
                     let event = {
-                        let next_message = messages_rx.next();
-                        futures::pin_mut!(next_message);
+                        let next_message = pin::pin!(messages_rx.next());
                         match future::select(storage_updates.next(), next_message).await {
                             future::Either::Left((ev, _)) => either::Left(ev),
                             future::Either::Right((ev, _)) => either::Right(ev),

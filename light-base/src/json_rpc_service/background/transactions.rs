@@ -22,7 +22,8 @@ use super::{Background, PlatformRef, SubscriptionMessage};
 use crate::transactions_service;
 
 use alloc::{borrow::ToOwned as _, str, string::ToString as _, sync::Arc, vec::Vec};
-use futures::prelude::*;
+use core::pin;
+use futures_util::{future, StreamExt as _};
 use smoldot::json_rpc::{self, methods, requests_subscriptions};
 
 impl<TPlat: PlatformRef> Background<TPlat> {
@@ -174,8 +175,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 let mut included_block = None;
                 let mut num_broadcasted_peers = 0;
 
-                // TODO: doesn't reported `validated` events
-
                 let requests_subscriptions = {
                     let weak = Arc::downgrade(&requests_subscriptions);
                     drop(requests_subscriptions);
@@ -184,8 +183,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
                 loop {
                     let event = {
-                        let next_message = messages_rx.next();
-                        futures::pin_mut!(next_message);
+                        let next_message = pin::pin!(messages_rx.next());
                         match future::select(transaction_updates.next(), next_message).await {
                             future::Either::Left((v, _)) => either::Left(v),
                             future::Either::Right((v, _)) => either::Right(v),
@@ -211,8 +209,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                             // client understands that no new notification is expected and
                             // unsubscribes.
                             break loop {
-                                let next_message = messages_rx.next();
-                                futures::pin_mut!(next_message);
+                                let next_message = pin::pin!(messages_rx.next());
                                 if let (
                                     SubscriptionMessage::StopIfTransactionLegacy {
                                         stop_request_id,
@@ -270,7 +267,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     };
 
                     let update = match (status_update, is_legacy) {
-                        (transactions_service::TransactionStatus::Broadcast(peers), false) => {
+                        (transactions_service::TransactionStatus::Broadcast(peers), true) => {
                             methods::ServerToClient::author_extrinsicUpdate {
                                 subscription: (&subscription_id).into(),
                                 result: methods::TransactionStatus::Broadcast(
@@ -279,7 +276,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                             }
                             .to_json_call_object_parameters(None)
                         }
-                        (transactions_service::TransactionStatus::Broadcast(peers), true) => {
+                        (transactions_service::TransactionStatus::Broadcast(peers), false) => {
                             num_broadcasted_peers += peers.len();
                             methods::ServerToClient::transaction_unstable_watchEvent {
                                 subscription: (&subscription_id).into(),
@@ -287,6 +284,17 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                     num_peers: u32::try_from(num_broadcasted_peers)
                                         .unwrap_or(u32::max_value()),
                                 },
+                            }
+                            .to_json_call_object_parameters(None)
+                        }
+
+                        (transactions_service::TransactionStatus::Validated, true) => {
+                            continue;
+                        }
+                        (transactions_service::TransactionStatus::Validated, false) => {
+                            methods::ServerToClient::transaction_unstable_watchEvent {
+                                subscription: (&subscription_id).into(),
+                                result: methods::TransactionWatchEvent::Validated {},
                             }
                             .to_json_call_object_parameters(None)
                         }

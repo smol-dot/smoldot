@@ -235,6 +235,29 @@ fn memory_misnamed() {
 }
 
 #[test]
+fn memory_isnt_memory() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (func (export "memory") (result i32) i32.const 0)
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        assert!(matches!(
+            super::VirtualMachinePrototype::new(super::Config {
+                module_bytes: &module_bytes,
+                exec_hint,
+                symbols: &mut |_, _, _| Ok(0)
+            }),
+            Err(super::NewErr::MemoryIsntMemory)
+        ));
+    }
+}
+
+#[test]
 fn two_memories() {
     let module_bytes = wat::parse_str(
         r#"
@@ -425,7 +448,7 @@ fn get_global() {
         r#"
     (module
         (import "env" "memory" (memory $mem 0 4096))
-        (global $g (export "test") i32 (i32.const 12))
+        (global (export "test") i32 (i32.const 12))
     )
     "#,
     )
@@ -439,6 +462,106 @@ fn get_global() {
         })
         .unwrap();
         assert_eq!(prototype.global_value("test").unwrap(), 12);
+    }
+}
+
+#[test]
+fn global_doesntexist() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 0 4096))
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let mut prototype = super::VirtualMachinePrototype::new(super::Config {
+            module_bytes: &module_bytes,
+            exec_hint,
+            symbols: &mut |_, _, _| Ok(0),
+        })
+        .unwrap();
+        assert!(matches!(
+            prototype.global_value("test"),
+            Err(super::GlobalValueErr::NotFound)
+        ));
+    }
+}
+
+#[test]
+fn global_wrong_type() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 0 4096))
+        (global (export "test") i64 (i64.const 2))
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let mut prototype = super::VirtualMachinePrototype::new(super::Config {
+            module_bytes: &module_bytes,
+            exec_hint,
+            symbols: &mut |_, _, _| Ok(0),
+        })
+        .unwrap();
+        assert!(matches!(
+            prototype.global_value("test"),
+            Err(super::GlobalValueErr::Invalid)
+        ));
+    }
+}
+
+#[test]
+fn global_isnt_global() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 0 4096))
+        (func (export "test") (result i32) i32.const 0)
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let mut prototype = super::VirtualMachinePrototype::new(super::Config {
+            module_bytes: &module_bytes,
+            exec_hint,
+            symbols: &mut |_, _, _| Ok(0),
+        })
+        .unwrap();
+        assert!(matches!(
+            prototype.global_value("test"),
+            Err(super::GlobalValueErr::NotFound)
+        ));
+    }
+}
+
+#[test]
+fn global_negative_value_works() {
+    let module_bytes = wat::parse_str(
+        r#"
+    (module
+        (import "env" "memory" (memory $mem 0 4096))
+        (global (export "test") i32 (i32.const -1))
+    )
+    "#,
+    )
+    .unwrap();
+
+    for exec_hint in super::ExecHint::available_engines() {
+        let mut prototype = super::VirtualMachinePrototype::new(super::Config {
+            module_bytes: &module_bytes,
+            exec_hint,
+            symbols: &mut |_, _, _| Ok(0),
+        })
+        .unwrap();
+        assert_eq!(prototype.global_value("test").unwrap(), u32::max_value());
     }
 }
 
@@ -541,11 +664,7 @@ fn try_to_call_global() {
         .unwrap();
         assert!(matches!(
             prototype.prepare().start("hello", &[]),
-            // TODO: wasmi doesn't properly detect NotAFunction at the moment
-            Err((
-                super::StartErr::NotAFunction | super::StartErr::FunctionNotFound,
-                _
-            ))
+            Err((super::StartErr::NotAFunction, _))
         ));
     }
 }

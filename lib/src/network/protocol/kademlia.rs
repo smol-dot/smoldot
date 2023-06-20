@@ -43,7 +43,7 @@ pub fn build_find_node_request(peer_id: &[u8]) -> Vec<u8> {
 // TODO: return a borrow of the response bytes ; we're limited by protobuf library
 pub fn decode_find_node_response(
     response_bytes: &[u8],
-) -> Result<Vec<(peer_id::PeerId, Vec<multiaddr::Multiaddr>)>, DecodeFindNodeResponseError> {
+) -> Result<Vec<(peer_id::PeerId, Vec<Vec<u8>>)>, DecodeFindNodeResponseError> {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode! {
             #[optional] response_ty = 1 => protobuf::enum_tag_decode,
@@ -71,9 +71,7 @@ pub fn decode_find_node_response(
 
         let mut multiaddrs = Vec::with_capacity(peer.addrs.len());
         for addr in peer.addrs {
-            let addr = multiaddr::Multiaddr::try_from(addr.to_vec())
-                .map_err(DecodeFindNodeResponseError::BadMultiaddr)?;
-            multiaddrs.push(addr);
+            multiaddrs.push(addr.to_vec());
         }
 
         result.push((peer_id, multiaddrs));

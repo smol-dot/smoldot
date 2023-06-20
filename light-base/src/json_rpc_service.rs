@@ -45,7 +45,7 @@ use crate::{
 
 use alloc::{format, string::String, sync::Arc, vec::Vec};
 use core::num::NonZeroU32;
-use futures::prelude::*;
+use futures_util::future;
 use smoldot::{
     chain_spec,
     json_rpc::{self, requests_subscriptions},

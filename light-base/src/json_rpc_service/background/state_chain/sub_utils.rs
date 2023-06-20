@@ -25,7 +25,7 @@ use crate::{
 
 use alloc::{sync::Arc, vec::Vec};
 use core::num::NonZeroUsize;
-use futures::prelude::*;
+use futures_util::{future, stream, StreamExt as _};
 use smoldot::{executor, header};
 
 /// Returns the current runtime version, plus an unlimited stream that produces one item every

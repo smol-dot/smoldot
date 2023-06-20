@@ -17,6 +17,7 @@
 
 use crate::{
     network_service, platform::PlatformRef, runtime_service, sync_service, transactions_service,
+    util,
 };
 
 use super::StartConfig;
@@ -28,6 +29,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use async_lock::Mutex;
 use core::{
     iter,
     num::{NonZeroU32, NonZeroUsize},
@@ -35,7 +37,7 @@ use core::{
     sync::atomic,
     time::Duration,
 };
-use futures::{lock::Mutex, prelude::*};
+use futures_util::{future, FutureExt as _};
 use smoldot::{
     executor::{host, runtime_host},
     header,
@@ -156,7 +158,11 @@ pub(super) enum SubscriptionMessage {
         get_request_id: (String, requests_subscriptions::RequestId),
         network_config: methods::NetworkConfig,
         key: methods::HexString,
-        child_key: Option<methods::HexString>,
+        child_trie: Option<methods::HexString>,
+        ty: methods::ChainHeadStorageType,
+    },
+    ChainHeadStorageContinue {
+        continue_request_id: (String, requests_subscriptions::RequestId),
     },
     ChainHeadBody {
         hash: methods::HashHexString,
@@ -210,9 +216,17 @@ struct Cache {
     /// When `state_getKeysPaged` is called and the response is truncated, the response is
     /// inserted in this cache. The API user is likely to call `state_getKeysPaged` again with
     /// the same parameters, in which case we hit the cache and avoid the networking requests.
-    /// The keys are `(block_hash, prefix)` and values are list of keys.
-    state_get_keys_paged:
-        lru::LruCache<([u8; 32], Option<methods::HexString>), Vec<Vec<u8>>, fnv::FnvBuildHasher>,
+    /// The values are list of keys.
+    state_get_keys_paged: lru::LruCache<GetKeysPagedCacheKey, Vec<Vec<u8>>, util::SipHasherBuild>,
+}
+
+/// See [`Cache::state_get_keys_paged`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct GetKeysPagedCacheKey {
+    /// Value of the `hash` parameter of the call to `state_getKeysPaged`.
+    hash: [u8; 32],
+    /// Value of the `prefix` parameter of the call to `state_getKeysPaged`.
+    prefix: Vec<u8>,
 }
 
 pub(super) fn start<TPlat: PlatformRef>(
@@ -250,7 +264,7 @@ pub(super) fn start<TPlat: PlatformRef>(
             ),
             state_get_keys_paged: lru::LruCache::with_hasher(
                 NonZeroUsize::new(2).unwrap(),
-                Default::default(),
+                util::SipHasherBuild::new(rand::random()),
             ),
         }),
         genesis_block_hash: config.genesis_block_hash,
@@ -523,6 +537,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::chainHead_unstable_stopCall { .. }
             | methods::MethodCall::chainHead_unstable_stopStorage { .. }
             | methods::MethodCall::chainHead_unstable_storage { .. }
+            | methods::MethodCall::chainHead_unstable_storageContinue { .. }
             | methods::MethodCall::chainHead_unstable_unfollow { .. }
             | methods::MethodCall::chainHead_unstable_unpin { .. }
             | methods::MethodCall::chainSpec_unstable_chainName { .. }
@@ -797,7 +812,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 follow_subscription,
                 hash,
                 key,
-                child_key,
+                child_trie,
+                ty,
                 network_config,
             } => {
                 self.chain_head_storage(
@@ -805,13 +821,21 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     &follow_subscription,
                     hash,
                     key,
-                    child_key,
+                    child_trie,
+                    ty,
                     network_config,
                 )
                 .await;
             }
-            methods::MethodCall::chainHead_unstable_follow { runtime_updates } => {
-                self.chain_head_follow((request_id, &state_machine_request_id), runtime_updates)
+            methods::MethodCall::chainHead_unstable_storageContinue { subscription } => {
+                self.chain_head_storage_continue(
+                    (request_id, &state_machine_request_id),
+                    &subscription,
+                )
+                .await;
+            }
+            methods::MethodCall::chainHead_unstable_follow { with_runtime } => {
+                self.chain_head_follow((request_id, &state_machine_request_id), with_runtime)
                     .await;
             }
             methods::MethodCall::chainHead_unstable_genesisHash {} => {
@@ -1115,10 +1139,10 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
     /// Obtain a lock to the runtime of the given block against the runtime service.
     // TODO: return better error?
-    async fn runtime_lock(
+    async fn runtime_access(
         self: &Arc<Self>,
         block_hash: &[u8; 32],
-    ) -> Result<runtime_service::RuntimeLock<TPlat>, RuntimeCallError> {
+    ) -> Result<runtime_service::RuntimeAccess<TPlat>, RuntimeCallError> {
         let cache_lock = self.cache.lock().await;
 
         // Try to find the block in the cache of recent blocks. Most of the time, the call target
@@ -1127,7 +1151,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             // The runtime service has the block pinned, meaning that we can ask the runtime
             // service to perform the call.
             self.runtime_service
-                .pinned_block_runtime_lock(cache_lock.subscription_id.unwrap(), block_hash)
+                .pinned_block_runtime_access(cache_lock.subscription_id.unwrap(), block_hash)
                 .await
                 .ok()
         } else {
@@ -1138,7 +1162,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             lock
         } else {
             // Second situation: the block is not in the cache of recent blocks. This isn't great.
-            drop::<futures::lock::MutexGuard<_>>(cache_lock);
+            drop::<async_lock::MutexGuard<_>>(cache_lock);
 
             // The only solution is to download the runtime of the block in question from the network.
 
@@ -1183,7 +1207,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
             let precall = self
                 .runtime_service
-                .pinned_runtime_lock(
+                .pinned_runtime_access(
                     pinned_runtime_id.clone(),
                     *block_hash,
                     block_number,
@@ -1267,7 +1291,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
     ) -> Result<(Vec<u8>, Option<u32>), RuntimeCallError> {
         // This function contains two steps: obtaining the runtime of the block in question,
         // then performing the actual call. The first step is the longest and most difficult.
-        let precall = self.runtime_lock(block_hash).await?;
+        let precall = self.runtime_access(block_hash).await?;
 
         let (runtime_call_lock, virtual_machine) = precall
             .start(
@@ -1288,9 +1312,15 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 .apis
                 .find_version(api_name);
             match version {
-                None => return Err(RuntimeCallError::ApiNotFound),
+                None => {
+                    runtime_call_lock.unlock(virtual_machine);
+                    return Err(RuntimeCallError::ApiNotFound);
+                }
                 Some(v) if version_range.contains(&v) => Some(v),
-                Some(v) => return Err(RuntimeCallError::ApiVersionUnknown { actual_version: v }),
+                Some(v) => {
+                    runtime_call_lock.unlock(virtual_machine);
+                    return Err(RuntimeCallError::ApiVersionUnknown { actual_version: v });
+                }
             }
         } else {
             None
@@ -1305,7 +1335,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             virtual_machine,
             function_to_call,
             parameter: call_parameters,
-            main_trie_root_calculation_cache: None,
             storage_main_trie_changes: Default::default(),
             offchain_storage_changes: Default::default(),
             max_log_level: 0,
@@ -1329,7 +1358,13 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     break Err(RuntimeCallError::RuntimeError(error.detail));
                 }
                 runtime_host::RuntimeHostVm::StorageGet(get) => {
-                    let storage_value = runtime_call_lock.storage_entry(get.key().as_ref());
+                    let storage_value = {
+                        let child_trie = get.child_trie();
+                        runtime_call_lock.storage_entry(
+                            child_trie.as_ref().map(|c| c.as_ref()),
+                            get.key().as_ref(),
+                        )
+                    };
                     let storage_value = match storage_value {
                         Ok(v) => v,
                         Err(err) => {
@@ -1342,20 +1377,49 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     runtime_call =
                         get.inject_value(storage_value.map(|(val, vers)| (iter::once(val), vers)));
                 }
+                runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv) => {
+                    let merkle_value = {
+                        let child_trie = mv.child_trie();
+                        runtime_call_lock.closest_descendant_merkle_value(
+                            child_trie.as_ref().map(|c| c.as_ref()),
+                            &mv.key().collect::<Vec<_>>(),
+                        )
+                    };
+                    let merkle_value = match merkle_value {
+                        Ok(v) => v,
+                        Err(err) => {
+                            runtime_call_lock.unlock(
+                                runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv)
+                                    .into_prototype(),
+                            );
+                            break Err(RuntimeCallError::Call(err));
+                        }
+                    };
+                    runtime_call = mv.inject_merkle_value(merkle_value);
+                }
                 runtime_host::RuntimeHostVm::NextKey(nk) => {
-                    // TODO:
-                    runtime_call_lock
-                        .unlock(runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
-                    break Err(RuntimeCallError::NextKeyForbidden);
+                    let next_key = {
+                        let child_trie = nk.child_trie();
+                        runtime_call_lock.next_key(
+                            child_trie.as_ref().map(|c| c.as_ref()),
+                            &nk.key().collect::<Vec<_>>(),
+                            nk.or_equal(),
+                            &nk.prefix().collect::<Vec<_>>(),
+                            nk.branch_nodes(),
+                        )
+                    };
+                    let next_key = match next_key {
+                        Ok(v) => v,
+                        Err(err) => {
+                            runtime_call_lock
+                                .unlock(runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
+                            break Err(RuntimeCallError::Call(err));
+                        }
+                    };
+                    runtime_call = nk.inject_key(next_key.map(|k| k.iter().copied()));
                 }
                 runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
                     runtime_call = sig.verify_and_resume();
-                }
-                runtime_host::RuntimeHostVm::PrefixKeys(pk) => {
-                    // TODO:
-                    runtime_call_lock
-                        .unlock(runtime_host::RuntimeHostVm::PrefixKeys(pk).into_prototype());
-                    break Err(RuntimeCallError::PrefixKeysForbidden);
                 }
             }
         }
@@ -1378,14 +1442,17 @@ enum RuntimeCallError {
     /// Error while finding the storage root hash of the requested block.
     #[display(fmt = "Failed to obtain block state trie root: {_0}")]
     FindStorageRootHashError(StateTrieRootHashError),
+    #[display(fmt = "{_0}")]
     Call(runtime_service::RuntimeCallError),
+    #[display(fmt = "{_0}")]
     StartError(host::StartErr),
+    #[display(fmt = "{_0}")]
     RuntimeError(runtime_host::ErrorDetail),
-    NextKeyForbidden,
-    PrefixKeysForbidden,
     /// Required runtime API isn't supported by the runtime.
+    #[display(fmt = "Required runtime API isn't supported by the runtime")]
     ApiNotFound,
     /// Version requirement of runtime API isn't supported.
+    #[display(fmt = "Version {actual_version} of the runtime API not supported")]
     ApiVersionUnknown {
         /// Version that the runtime supports.
         actual_version: u32,

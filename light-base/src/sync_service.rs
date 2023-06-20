@@ -29,12 +29,10 @@
 use crate::{network_service, platform::PlatformRef, runtime_service};
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
+use async_lock::Mutex;
 use core::{fmt, num::NonZeroU32, time::Duration};
-use futures::{
-    channel::{mpsc, oneshot},
-    lock::Mutex,
-    prelude::*,
-};
+use futures_channel::{mpsc, oneshot};
+use futures_util::{stream, SinkExt as _};
 use smoldot::{
     chain,
     executor::host,
@@ -433,7 +431,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     let decoded = outcome.decode();
                     let decoded = proof_decode::decode_and_verify_proof(proof_decode::Config {
                         proof: decoded,
-                        trie_root_hash: storage_trie_root,
                     })
                     .map_err(StorageQueryErrorDetail::ProofVerification)?;
 
@@ -441,8 +438,8 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     for key in requested_keys.clone() {
                         result.push(
                             decoded
-                                .storage_value(key.as_ref())
-                                .ok_or(StorageQueryErrorDetail::MissingProofEntry)?
+                                .storage_value(storage_trie_root, key.as_ref())
+                                .map_err(|_| StorageQueryErrorDetail::MissingProofEntry)?
                                 .map(|(v, _)| v.to_owned()),
                         );
                     }
@@ -476,6 +473,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         let mut prefix_scan = prefix_proof::prefix_scan(prefix_proof::Config {
             prefix,
             trie_root_hash: *storage_trie_root,
+            full_storage_values_required: false,
         });
 
         'main_scan: loop {
@@ -515,8 +513,9 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                                 prefix_scan = scan;
                                 continue 'main_scan;
                             }
-                            Ok(prefix_proof::ResumeOutcome::Success { keys }) => {
-                                return Ok(keys);
+                            Ok(prefix_proof::ResumeOutcome::Success { entries }) => {
+                                // TODO :overhead
+                                return Ok(entries.into_iter().map(|(key, _)| key).collect());
                             }
                             Err((scan, err)) => {
                                 prefix_scan = scan;

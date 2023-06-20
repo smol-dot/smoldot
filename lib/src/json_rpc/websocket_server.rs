@@ -110,15 +110,16 @@
 //! case of a (D)DoS attack on the WebSocket server, only up to one core of CPU processing power
 //! can be occupied by the attacker.
 
-#![cfg(all(feature = "std"))]
-#![cfg_attr(docsrs, doc(cfg(all(feature = "std"))))]
+#![cfg(feature = "std")]
+#![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
 #[cfg(test)]
 mod tests;
 
-use async_std::net::{TcpListener, TcpStream};
 use core::{fmt, ops, str};
-use futures::{channel::mpsc, prelude::*};
+use futures_channel::mpsc;
+use futures_util::{future, stream, FutureExt as _, StreamExt as _};
+use smol::net::{TcpListener, TcpStream};
 use soketto::handshake::{server::Response, Server};
 use std::{io, net::SocketAddr};
 
@@ -375,7 +376,7 @@ impl<T> WsServer<T> {
     /// Returns the next event happening on the server.
     pub async fn next_event(&'_ mut self) -> Event<'_, T> {
         loop {
-            futures::select! {
+            futures_util::select! {
                 // Only try to fetch a new incoming connection if none is pending.
                 socket = {
                     let listener = &self.listener;
@@ -384,7 +385,7 @@ impl<T> WsServer<T> {
                         if !has_pending {
                             listener.accept().await
                         } else {
-                            loop { futures::pending!() }
+                            loop { futures_util::future::pending::<()>().await }
                         }
                     }
                 }.fuse() => {

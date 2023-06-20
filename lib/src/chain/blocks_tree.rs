@@ -67,7 +67,7 @@ use crate::{
 };
 
 use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
-use core::{fmt, mem, num::NonZeroU64, time::Duration};
+use core::{fmt, mem, num::NonZeroU64, ops, time::Duration};
 use hashbrown::HashMap;
 
 mod best_block;
@@ -93,10 +93,16 @@ pub struct Config {
     /// If `false`, blocks containing digest items with an unknown consensus engine will fail to
     /// verify.
     ///
-    /// Passing `true` can lead to blocks being considered as valid when they shouldn't. However,
-    /// even if `true` is passed, a recognized consensus engine must always be present.
-    /// Consequently, both `true` and `false` guarantee that the number of authorable blocks over
-    /// the network is bounded.
+    /// Note that blocks must always contain digest items that are relevant to the current
+    /// consensus algorithm. This option controls what happens when blocks contain additional
+    /// digest items that aren't recognized by the implementation.
+    ///
+    /// Passing `true` can lead to blocks being considered as valid when they shouldn't, as these
+    /// additional digest items could have some logic attached to them that restricts which blocks
+    /// are valid and which are not.
+    ///
+    /// However, since a recognized consensus engine must always be present, both `true` and
+    /// `false` guarantee that the number of authorable blocks over the network is bounded.
     pub allow_unknown_consensus_engines: bool,
 }
 
@@ -163,8 +169,8 @@ impl<T> NonFinalizedTree<T> {
                         slots_per_epoch,
                     } => FinalizedConsensus::Babe {
                         slots_per_epoch,
-                        block_epoch_information: finalized_block_epoch_information.map(Arc::new),
-                        next_epoch_transition: Arc::new(finalized_next_epoch_transition),
+                        block_epoch_information: finalized_block_epoch_information.map(Arc::from),
+                        next_epoch_transition: Arc::from(finalized_next_epoch_transition),
                     },
                 },
                 blocks: fork_tree::ForkTree::with_capacity(config.blocks_capacity),
@@ -181,7 +187,7 @@ impl<T> NonFinalizedTree<T> {
 
     /// Removes all non-finalized blocks from the tree.
     pub fn clear(&mut self) {
-        let mut inner = self.inner.as_mut().unwrap();
+        let inner = self.inner.as_mut().unwrap();
         inner.blocks.clear();
         inner.blocks_by_hash.clear();
         inner.current_best = None;
@@ -458,6 +464,40 @@ where
             )
             .field("non_finalized_blocks", &Blocks(inner))
             .finish()
+    }
+}
+
+impl<'a, T> ops::Index<&'a [u8; 32]> for NonFinalizedTree<T> {
+    type Output = T;
+
+    #[track_caller]
+    fn index(&self, block_hash: &'a [u8; 32]) -> &T {
+        let inner = self.inner.as_ref().unwrap();
+        let node_index = inner
+            .blocks_by_hash
+            .get(block_hash)
+            .unwrap_or_else(|| panic!("invalid block hash"));
+        &inner
+            .blocks
+            .get(*node_index)
+            .unwrap_or_else(|| unreachable!())
+            .user_data
+    }
+}
+
+impl<'a, T> ops::IndexMut<&'a [u8; 32]> for NonFinalizedTree<T> {
+    #[track_caller]
+    fn index_mut(&mut self, block_hash: &'a [u8; 32]) -> &mut T {
+        let inner = self.inner.as_mut().unwrap();
+        let node_index = inner
+            .blocks_by_hash
+            .get(block_hash)
+            .unwrap_or_else(|| panic!("invalid block hash"));
+        &mut inner
+            .blocks
+            .get_mut(*node_index)
+            .unwrap_or_else(|| unreachable!())
+            .user_data
     }
 }
 

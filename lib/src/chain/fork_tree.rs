@@ -557,7 +557,7 @@ impl<'a, T> Iterator for PruneAncestorsIter<'a, T> {
                 break None;
             }
 
-            let mut iter_node = &mut self.tree.nodes[self.iter];
+            let iter_node = &mut self.tree.nodes[self.iter];
 
             // If current node is a direct child of `new_final`, then don't remove it.
             // Instead, just update its parent to be `None` and continue iterating.

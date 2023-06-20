@@ -18,7 +18,7 @@
 //! List of requests and how to answer them.
 
 use super::parse;
-use crate::header;
+use crate::{header, identity::ss58};
 
 use alloc::{
     borrow::Cow,
@@ -214,7 +214,7 @@ macro_rules! define_methods {
             /// Panics if the `id_json` isn't valid JSON.
             ///
             pub fn to_json_call_object_parameters(&self, id_json: Option<&str>) -> String {
-                parse::build_call(parse::Call {
+                parse::build_call(&parse::Call {
                     id_json,
                     method: self.name(),
                     // Note that we never skip the `params` field, even if empty. This is an
@@ -440,7 +440,7 @@ define_methods! {
         #[rename = "networkConfig"] network_config: Option<NetworkConfig>
     ) -> Cow<'a, str>,
     chainHead_unstable_follow(
-        #[rename = "runtimeUpdates"] runtime_updates: bool
+        #[rename = "withRuntime"] with_runtime: bool
     ) -> Cow<'a, str>,
     chainHead_unstable_genesisHash() -> HashHexString,
     chainHead_unstable_header(
@@ -460,9 +460,13 @@ define_methods! {
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString,
         key: HexString,
-        #[rename = "childKey"] child_key: Option<HexString>,
+        #[rename = "childTrie"] child_trie: Option<HexString>,
+        #[rename = "type"] ty: ChainHeadStorageType,
         #[rename = "networkConfig"] network_config: Option<NetworkConfig>
     ) -> Cow<'a, str>,
+    chainHead_unstable_storageContinue(
+        #[rename = "subscription"] subscription: Cow<'a, str>
+    ) -> (),
     chainHead_unstable_unfollow(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>
     ) -> (),
@@ -610,7 +614,7 @@ pub enum RemoveMetadataLengthPrefixError {
 ///
 /// The deserialization involves decoding an SS58 address into this public key.
 #[derive(Debug, Clone)]
-pub struct AccountId(pub [u8; 32]);
+pub struct AccountId(pub Vec<u8>);
 
 impl serde::Serialize for AccountId {
     fn serialize<S>(&self, _: S) -> Result<S::Ok, S::Error>
@@ -628,25 +632,14 @@ impl<'a> serde::Deserialize<'a> for AccountId {
         D: serde::Deserializer<'a>,
     {
         let string = <&str>::deserialize(deserializer)?;
-        let decoded = match bs58::decode(&string).into_vec() {
-            // TODO: don't use into_vec
+        let decoded = match ss58::decode(string) {
             Ok(d) => d,
-            Err(_) => return Err(serde::de::Error::custom("AccountId isn't in base58 format")),
+            Err(err) => return Err(serde::de::Error::custom(err.to_string())),
         };
 
-        // TODO: retrieve the actual prefix length of the current chain
-        if decoded.len() < 35 {
-            return Err(serde::de::Error::custom("unexpected length for AccountId"));
-        }
+        // TODO: check the prefix against the one of the current chain?
 
-        // TODO: finish implementing this properly ; must notably check checksum
-        // see https://github.com/paritytech/substrate/blob/74a50abd6cbaad1253daf3585d5cdaa4592e9184/primitives/core/src/crypto.rs#L228
-
-        // TODO: retrieve and use the actual prefix length of the current chain
-        let account_id =
-            <[u8; 32]>::try_from(&decoded[(decoded.len() - 34)..(decoded.len() - 2)]).unwrap();
-
-        Ok(AccountId(account_id))
+        Ok(AccountId(decoded.public_key.as_ref().to_vec()))
     }
 }
 
@@ -679,7 +672,7 @@ pub enum FollowEvent<'a> {
         #[serde(rename = "parentBlockHash")]
         parent_block_hash: HashHexString,
         #[serde(rename = "newRuntime")]
-        // TODO: must not be present if runtime_updates: false
+        // TODO: must not be present if with_runtime: false
         new_runtime: Option<MaybeRuntimeSpec<'a>>,
     },
     #[serde(rename = "bestBlockChanged")]
@@ -723,10 +716,36 @@ pub enum ChainHeadCallEvent<'a> {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum ChainHeadStorageType {
+    #[serde(rename = "value")]
+    Value,
+    #[serde(rename = "hash")]
+    Hash,
+    #[serde(rename = "closest-ancestor-merkle-value")]
+    ClosestAncestorMerkleValue,
+    #[serde(rename = "descendants-values")]
+    DescendantsValues,
+    #[serde(rename = "descendants-hashes")]
+    DescendantsHashes,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event")]
 pub enum ChainHeadStorageEvent<'a> {
+    #[serde(rename = "item")]
+    Item {
+        key: HexString,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        value: Option<HexString>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<HexString>,
+        #[serde(rename = "merkle-value", skip_serializing_if = "Option::is_none")]
+        merkle_value: Option<HexString>,
+    },
     #[serde(rename = "done")]
-    Done { value: Option<String> },
+    Done,
+    #[serde(rename = "waiting-for-continue")]
+    WaitingForContinue,
     #[serde(rename = "inaccessible")]
     Inaccessible {},
     #[serde(rename = "error")]
@@ -1062,15 +1081,25 @@ pub enum SystemPeerRole {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum TransactionStatus {
+    #[serde(rename = "future")]
     Future,
+    #[serde(rename = "ready")]
     Ready,
+    #[serde(rename = "broadcast")]
     Broadcast(Vec<String>), // Base58 PeerIds  // TODO: stronger typing
+    #[serde(rename = "inBlock")]
     InBlock(HashHexString),
+    #[serde(rename = "retracted")]
     Retracted(HashHexString),
+    #[serde(rename = "finalityTimeout")]
     FinalityTimeout(HashHexString),
+    #[serde(rename = "finalized")]
     Finalized(HashHexString),
+    #[serde(rename = "usurped")]
     Usurped(HashHexString),
+    #[serde(rename = "dropped")]
     Dropped,
+    #[serde(rename = "invalid")]
     Invalid,
 }
 

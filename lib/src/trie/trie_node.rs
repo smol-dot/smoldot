@@ -267,11 +267,17 @@ impl AsRef<[u8]> for MerkleValueOutput {
     }
 }
 
-impl From<MerkleValueOutput> for [u8; 32] {
-    fn from(output: MerkleValueOutput) -> Self {
-        let mut out = [0; 32];
-        out.copy_from_slice(output.as_ref());
-        out
+impl TryFrom<MerkleValueOutput> for [u8; 32] {
+    type Error = (); // TODO: proper error?
+
+    fn try_from(output: MerkleValueOutput) -> Result<Self, Self::Error> {
+        if output.as_ref().len() == 32 {
+            let mut out = [0; 32];
+            out.copy_from_slice(output.as_ref());
+            Ok(out)
+        } else {
+            Err(())
+        }
     }
 }
 

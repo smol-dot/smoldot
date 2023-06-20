@@ -176,16 +176,21 @@ impl InterpreterPrototype {
             .ensure_no_start(&mut store)
             .map_err(|_| NewErr::StartFunctionNotSupported)?;
 
+        let exported_memory = match instance.get_export(&store, "memory") {
+            Some(wasmi::Extern::Memory(m)) => Some(m),
+            None => None,
+            Some(_) => return Err(NewErr::MemoryIsntMemory),
+        };
+
         let memory = if let Some(wasmi::Extern::Memory(import_memory)) =
             linker.get(&store, "env", "memory")
         {
-            if instance.get_memory(&store, "memory").is_some() {
+            if exported_memory.is_some() {
                 return Err(NewErr::TwoMemories);
             }
 
             import_memory
-        } else if let Some(mem) = instance.get_memory(&store, "memory") {
-            // TODO: we don't detect NewErr::MemoryIsntMemory
+        } else if let Some(mem) = exported_memory {
             mem
         } else {
             return Err(NewErr::NoMemory);
@@ -204,14 +209,11 @@ impl InterpreterPrototype {
         let value = self
             .instance
             .get_global(&self.store, name)
-            .ok_or(GlobalValueErr::NotFound)? // TODO: we don't differentiate between "missing" and "invalid"
+            .ok_or(GlobalValueErr::NotFound)?
             .get(&self.store);
 
         match value {
-            wasmi::Value::I32(v) => match u32::try_from(v) {
-                Ok(v) => Ok(v),
-                Err(_) => Err(GlobalValueErr::Invalid), // Negative value.
-            },
+            wasmi::Value::I32(v) => Ok(u32::from_ne_bytes(v.to_ne_bytes())),
             _ => Err(GlobalValueErr::Invalid),
         }
     }
@@ -345,9 +347,9 @@ impl Prepare {
         let func_to_call = match self
             .inner
             .instance
-            .get_func(&self.inner.store, function_name)
+            .get_export(&self.inner.store, function_name)
         {
-            Some(function) => {
+            Some(wasmi::Extern::Func(function)) => {
                 // Try to convert the signature of the function to call, in order to make sure
                 // that the type of parameters and return value are supported.
                 let Ok(signature) = Signature::try_from(function.ty(&self.inner.store)) else {
@@ -368,7 +370,8 @@ impl Prepare {
 
                 function
             }
-            None => return Err((StartErr::FunctionNotFound, self.inner)), // TODO: we don't differentiate between `FunctionNotFound` and `NotAFunction` here
+            Some(_) => return Err((StartErr::NotAFunction, self.inner)),
+            None => return Err((StartErr::FunctionNotFound, self.inner)),
         };
 
         let dummy_output_value = {

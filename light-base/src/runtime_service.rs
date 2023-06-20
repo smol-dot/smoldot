@@ -59,23 +59,21 @@ use crate::{platform::PlatformRef, sync_service};
 use alloc::{
     borrow::ToOwned as _,
     boxed::Box,
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     format,
     string::{String, ToString as _},
     sync::{Arc, Weak},
     vec::Vec,
 };
+use async_lock::{Mutex, MutexGuard};
 use core::{
     iter, mem,
     num::{NonZeroU32, NonZeroUsize},
     pin::Pin,
     time::Duration,
 };
-use futures::{
-    channel::mpsc,
-    lock::{Mutex, MutexGuard},
-    prelude::*,
-};
+use futures_channel::mpsc;
+use futures_util::{future, stream, FutureExt as _, Stream, StreamExt as _};
 use itertools::Itertools as _;
 use smoldot::{
     chain::async_tree,
@@ -272,7 +270,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         let _prev_value = pinned_blocks.insert(
             (subscription_id, finalized_block.hash),
             PinnedBlock {
-                runtime: tree.finalized_async_user_data().clone(),
+                runtime: tree.output_finalized_async_user_data().clone(),
                 state_trie_root_hash: *decoded_finalized_block.state_root,
                 block_number: decoded_finalized_block.number,
                 block_ignores_limit: false,
@@ -282,18 +280,17 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
 
         let mut non_finalized_blocks_ancestry_order =
             Vec::with_capacity(tree.num_input_non_finalized_blocks());
-        for block in tree.input_iter_ancestry_order() {
+        for block in tree.input_output_iter_ancestry_order() {
             let runtime = match block.async_op_user_data {
                 Some(rt) => rt.clone(),
                 None => continue, // Runtime of that block not known yet, so it shouldn't be reported.
             };
 
             let block_hash = block.user_data.hash;
-            let parent_runtime = tree
-                .parent(block.id)
-                .map_or(tree.finalized_async_user_data().clone(), |parent_idx| {
-                    tree.block_async_user_data(parent_idx).unwrap().clone()
-                });
+            let parent_runtime = tree.parent(block.id).map_or(
+                tree.output_finalized_async_user_data().clone(),
+                |parent_idx| tree.block_async_user_data(parent_idx).unwrap().clone(),
+            );
 
             let parent_hash = *header::decode(
                 &block.user_data.scale_encoded_header,
@@ -304,7 +301,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             debug_assert!(
                 parent_hash == finalized_block.hash
                     || tree
-                        .input_iter_ancestry_order()
+                        .input_output_iter_ancestry_order()
                         .any(|b| parent_hash == b.user_data.hash && b.async_op_user_data.is_some())
             );
 
@@ -359,7 +356,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         SubscribeAll {
             finalized_block_scale_encoded_header: finalized_block.scale_encoded_header.clone(),
             finalized_block_runtime: tree
-                .finalized_async_user_data()
+                .output_finalized_async_user_data()
                 .runtime
                 .as_ref()
                 .map(|rt| rt.runtime_spec.clone())
@@ -440,11 +437,11 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     ///
     /// Panics if the given block isn't currently pinned by the given subscription.
     ///
-    pub async fn pinned_block_runtime_lock(
+    pub async fn pinned_block_runtime_access(
         &self,
         subscription_id: SubscriptionId,
         block_hash: &[u8; 32],
-    ) -> Result<RuntimeLock<TPlat>, PinnedBlockRuntimeLockError> {
+    ) -> Result<RuntimeAccess<TPlat>, PinnedBlockRuntimeAccessError> {
         // Note: copying the hash ahead of time fixes some weird intermittent borrow checker
         // issue.
         let block_hash = *block_hash;
@@ -468,16 +465,16 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
                         {
                             panic!("block already unpinned for subscription {sub_name}");
                         } else {
-                            return Err(PinnedBlockRuntimeLockError::ObsoleteSubscription);
+                            return Err(PinnedBlockRuntimeAccessError::ObsoleteSubscription);
                         }
                     }
                 }
             } else {
-                return Err(PinnedBlockRuntimeLockError::ObsoleteSubscription);
+                return Err(PinnedBlockRuntimeAccessError::ObsoleteSubscription);
             }
         };
 
-        Ok(RuntimeLock {
+        Ok(RuntimeAccess {
             sync_service: self.sync_service.clone(),
             hash: block_hash,
             runtime: pinned_block.runtime,
@@ -496,14 +493,14 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     ///
     /// Panics if the provided [`PinnedRuntimeId`] is stale or invalid.
     ///
-    pub async fn pinned_runtime_lock(
+    pub async fn pinned_runtime_access(
         &self,
         pinned_runtime_id: PinnedRuntimeId,
         block_hash: [u8; 32],
         block_number: u64,
         block_state_trie_root_hash: [u8; 32],
-    ) -> RuntimeLock<TPlat> {
-        RuntimeLock {
+    ) -> RuntimeAccess<TPlat> {
+        RuntimeAccess {
             sync_service: self.sync_service.clone(),
             hash: block_hash,
             runtime: pinned_runtime_id.0,
@@ -744,17 +741,16 @@ async fn is_near_head_of_chain_heuristic<TPlat: PlatformRef>(
     guarded.lock().await.best_near_head_of_chain
 }
 
-/// See [`RuntimeService::pinned_block_runtime_lock`].
+/// See [`RuntimeService::pinned_block_runtime_access`].
 #[derive(Debug, derive_more::Display, Clone)]
-pub enum PinnedBlockRuntimeLockError {
+pub enum PinnedBlockRuntimeAccessError {
     /// Subscription is dead.
     ObsoleteSubscription,
 }
 
-/// See [`RuntimeService::pinned_block_runtime_lock`].
-// TODO: rename, as it doesn't lock anything anymore
+/// See [`RuntimeService::pinned_block_runtime_access`].
 #[must_use]
-pub struct RuntimeLock<TPlat: PlatformRef> {
+pub struct RuntimeAccess<TPlat: PlatformRef> {
     sync_service: Arc<sync_service::SyncService<TPlat>>,
 
     block_number: u64,
@@ -763,7 +759,7 @@ pub struct RuntimeLock<TPlat: PlatformRef> {
     runtime: Arc<Runtime>,
 }
 
-impl<TPlat: PlatformRef> RuntimeLock<TPlat> {
+impl<TPlat: PlatformRef> RuntimeAccess<TPlat> {
     /// Returns the hash of the block the call is being made against.
     pub fn block_hash(&self) -> &[u8; 32] {
         &self.hash
@@ -784,7 +780,7 @@ impl<TPlat: PlatformRef> RuntimeLock<TPlat> {
         total_attempts: u32,
         timeout_per_request: Duration,
         max_parallel: NonZeroU32,
-    ) -> Result<(RuntimeCallLock<'b>, executor::host::HostVmPrototype), RuntimeCallError> {
+    ) -> Result<(RuntimeCall<'b>, executor::host::HostVmPrototype), RuntimeCallError> {
         // TODO: DRY :-/ this whole thing is messy
 
         // Perform the call proof request.
@@ -811,7 +807,6 @@ impl<TPlat: PlatformRef> RuntimeLock<TPlat> {
         let call_proof = call_proof.and_then(|call_proof| {
             proof_decode::decode_and_verify_proof(proof_decode::Config {
                 proof: call_proof.decode().to_owned(), // TODO: to_owned() inefficiency, need some help from the networking to obtain the owned data
-                trie_root_hash: &self.block_state_root_hash,
             })
             .map_err(RuntimeCallError::StorageRetrieval)
         });
@@ -827,7 +822,7 @@ impl<TPlat: PlatformRef> RuntimeLock<TPlat> {
             }
         };
 
-        let lock = RuntimeCallLock {
+        let lock = RuntimeCall {
             guarded,
             block_state_root_hash: self.block_state_root_hash,
             call_proof,
@@ -837,15 +832,15 @@ impl<TPlat: PlatformRef> RuntimeLock<TPlat> {
     }
 }
 
-/// See [`RuntimeService::pinned_block_runtime_lock`].
+/// See [`RuntimeService::pinned_block_runtime_access`].
 #[must_use]
-pub struct RuntimeCallLock<'a> {
+pub struct RuntimeCall<'a> {
     guarded: MutexGuard<'a, Option<executor::host::HostVmPrototype>>,
     block_state_root_hash: [u8; 32],
     call_proof: Result<trie::proof_decode::DecodedTrieProof<Vec<u8>>, RuntimeCallError>,
 }
 
-impl<'a> RuntimeCallLock<'a> {
+impl<'a> RuntimeCall<'a> {
     /// Returns the storage root of the block the call is being made against.
     pub fn block_storage_root(&self) -> &[u8; 32] {
         &self.block_state_root_hash
@@ -853,11 +848,15 @@ impl<'a> RuntimeCallLock<'a> {
 
     /// Finds the given key in the call proof and returns the associated storage value.
     ///
+    /// If `child_trie` is `Some`, look for the key in the given child trie. If it is `None`, look
+    /// for the key in the main trie.
+    ///
     /// Returns an error if the key couldn't be found in the proof, meaning that the proof is
     /// invalid.
     // TODO: if proof is invalid, we should give the option to fetch another call proof
     pub fn storage_entry(
         &self,
+        child_trie: Option<&[u8]>,
         requested_key: &[u8],
     ) -> Result<Option<(&[u8], TrieEntryVersion)>, RuntimeCallError> {
         let call_proof = match &self.call_proof {
@@ -865,67 +864,100 @@ impl<'a> RuntimeCallLock<'a> {
             Err(err) => return Err(err.clone()),
         };
 
-        match call_proof.storage_value(requested_key) {
-            Some(v) => Ok(v),
-            None => Err(RuntimeCallError::MissingProofEntry),
+        let trie_root = match child_trie {
+            Some(child_trie) => {
+                match Self::child_trie_root(call_proof, &self.block_state_root_hash, child_trie)? {
+                    Some(h) => h,
+                    None => return Ok(None),
+                }
+            }
+            None => self.block_state_root_hash,
+        };
+
+        match call_proof.storage_value(&trie_root, requested_key) {
+            Ok(v) => Ok(v),
+            Err(err) => Err(RuntimeCallError::MissingProofEntry(err)),
         }
     }
 
-    /// Finds in the call proof the list of keys that match a certain prefix.
+    /// Find in the proof the trie node that follows `key_before` in lexicographic order.
     ///
-    /// Returns an error if not all the keys could be found in the proof, meaning that the proof
-    /// is invalid.
+    /// If `child_trie` is `Some`, look for the key in the given child trie. If it is `None`, look
+    /// for the key in the main trie.
     ///
-    /// The keys returned are ordered lexicographically.
-    // TODO: if proof is invalid, we should give the option to fetch another call proof
-    pub fn storage_prefix_keys_ordered(
+    /// If `or_equal` is `true`, then `key_before` is returned if it is equal to a node in the
+    /// trie. If `false`, then only keys that are strictly superior are returned.
+    ///
+    /// The returned value must always start with `prefix`. Note that the value of `prefix` is
+    /// important as it can be the difference between `None` and `Some(None)`.
+    ///
+    /// If `branch_nodes` is `false`, then trie nodes that don't have a storage value are skipped.
+    ///
+    /// Returns an error if the proof doesn't contain enough information, meaning that the proof is
+    /// invalid.
+    pub fn next_key(
         &'_ self,
-        prefix: &[u8],
-    ) -> Result<impl Iterator<Item = impl AsRef<[u8]> + '_>, RuntimeCallError> {
-        // TODO: this could be a function in the proof_decode module
-        let mut to_find = VecDeque::<Vec<_>>::new();
-        to_find.push_back(trie::bytes_to_nibbles(prefix.iter().copied()).collect::<Vec<_>>());
-
-        let mut output = Vec::new();
-
+        child_trie: Option<&[u8]>,
+        key_before: &[trie::Nibble],
+        or_equal: bool,
+        prefix: &[trie::Nibble],
+        branch_nodes: bool,
+    ) -> Result<Option<&'_ [trie::Nibble]>, RuntimeCallError> {
         let call_proof = match &self.call_proof {
             Ok(p) => p,
             Err(err) => return Err(err.clone()),
         };
 
-        while let Some(key) = to_find.pop_front() {
-            let node_info = call_proof
-                .trie_node_info(&key)
-                .ok_or(RuntimeCallError::MissingProofEntry)?;
-
-            if matches!(
-                node_info.storage_value,
-                proof_decode::StorageValue::Known { .. }
-                    | proof_decode::StorageValue::HashKnownValueMissing(_)
-            ) {
-                assert_eq!(key.len() % 2, 0);
-                let key_as_bytes =
-                    trie::nibbles_to_bytes_suffix_extend(key.iter().copied()).collect::<Vec<_>>();
-                debug_assert!(output.last().map_or(true, |last| *last < key_as_bytes));
-                output.push(key_as_bytes);
-            }
-
-            for child in node_info.children.children().rev() {
-                match child {
-                    proof_decode::Child::NoChild => continue,
-                    proof_decode::Child::AbsentFromProof => {
-                        return Err(RuntimeCallError::MissingProofEntry);
-                    }
-                    proof_decode::Child::InProof { child_key } => {
-                        debug_assert!(to_find.front().map_or(true, |f| child_key < f));
-                        to_find.push_front(child_key.to_owned());
-                    }
+        let trie_root = match child_trie {
+            Some(child_trie) => {
+                match Self::child_trie_root(call_proof, &self.block_state_root_hash, child_trie)? {
+                    Some(h) => h,
+                    None => return Ok(None),
                 }
             }
-        }
+            None => self.block_state_root_hash,
+        };
 
-        // TODO: debug_assert!(output.is_sorted()); // TODO: https://github.com/rust-lang/rust/issues/53485
-        Ok(output.into_iter())
+        match call_proof.next_key(&trie_root, key_before, or_equal, prefix, branch_nodes) {
+            Ok(v) => Ok(v),
+            Err(err) => Err(RuntimeCallError::MissingProofEntry(err)),
+        }
+    }
+
+    /// Find in the proof the closest trie node that descends from `key` and returns its Merkle
+    /// value.
+    ///
+    /// If `child_trie` is `Some`, look for the key in the given child trie. If it is `None`, look
+    /// for the key in the main trie.
+    ///
+    /// Returns an error if the proof doesn't contain enough information, meaning that the proof is
+    /// invalid.
+    ///
+    /// Returns `Ok(None)` if the child trie is known to not exist or if it is known that there is
+    /// no descendant.
+    pub fn closest_descendant_merkle_value(
+        &'_ self,
+        child_trie: Option<&[u8]>,
+        key: &[trie::Nibble],
+    ) -> Result<Option<&'_ [u8]>, RuntimeCallError> {
+        let call_proof = match &self.call_proof {
+            Ok(p) => p,
+            Err(err) => return Err(err.clone()),
+        };
+
+        let trie_root = match child_trie {
+            Some(child_trie) => {
+                match Self::child_trie_root(call_proof, &self.block_state_root_hash, child_trie)? {
+                    Some(h) => h,
+                    None => return Ok(None),
+                }
+            }
+            None => self.block_state_root_hash,
+        };
+
+        call_proof
+            .closest_descendant_merkle_value(&trie_root, key)
+            .map_err(RuntimeCallError::MissingProofEntry)
     }
 
     /// End the runtime call.
@@ -935,12 +967,33 @@ impl<'a> RuntimeCallLock<'a> {
         debug_assert!(self.guarded.is_none());
         *self.guarded = Some(vm);
     }
+
+    fn child_trie_root(
+        proof: &proof_decode::DecodedTrieProof<Vec<u8>>,
+        main_trie_root: &[u8; 32],
+        child_trie: &[u8],
+    ) -> Result<Option<[u8; 32]>, RuntimeCallError> {
+        // TODO: allocation here, but probably not problematic
+        const PREFIX: &[u8] = b":child_storage:default:";
+        let mut key = Vec::with_capacity(PREFIX.len() + child_trie.as_ref().len());
+        key.extend_from_slice(PREFIX);
+        key.extend_from_slice(child_trie.as_ref());
+
+        match proof.storage_value(main_trie_root, &key) {
+            Err(err) => Err(RuntimeCallError::MissingProofEntry(err)),
+            Ok(None) => Ok(None),
+            Ok(Some((value, _))) => match <[u8; 32]>::try_from(value) {
+                Ok(hash) => Ok(Some(hash)),
+                Err(_) => Err(RuntimeCallError::InvalidChildTrieRoot),
+            },
+        }
+    }
 }
 
-impl<'a> Drop for RuntimeCallLock<'a> {
+impl<'a> Drop for RuntimeCall<'a> {
     fn drop(&mut self) {
         if self.guarded.is_none() {
-            // The [`RuntimeCallLock`] has been destroyed without being properly unlocked.
+            // The [`RuntimeCall`] has been destroyed without being properly unlocked.
             panic!()
         }
     }
@@ -958,7 +1011,10 @@ pub enum RuntimeCallError {
     #[display(fmt = "Error in call proof: {_0}")]
     StorageRetrieval(proof_decode::Error),
     /// One or more entries are missing from the call proof.
-    MissingProofEntry,
+    #[display(fmt = "One or more entries are missing from the call proof")]
+    MissingProofEntry(proof_decode::IncompleteProofError),
+    /// Call proof contains a reference to a child trie whose hash isn't 32 bytes.
+    InvalidChildTrieRoot,
     /// Error while retrieving the call proof from the network.
     #[display(fmt = "Error when retrieving the call proof: {_0}")]
     CallProof(sync_service::CallProofQueryError),
@@ -974,7 +1030,8 @@ impl RuntimeCallError {
         match self {
             RuntimeCallError::InvalidRuntime(_) => false,
             RuntimeCallError::StorageRetrieval(_) => false,
-            RuntimeCallError::MissingProofEntry => false,
+            RuntimeCallError::MissingProofEntry(_) => false,
+            RuntimeCallError::InvalidChildTrieRoot => false,
             RuntimeCallError::CallProof(err) => err.is_network_problem(),
             RuntimeCallError::StorageQuery(err) => err.is_network_problem(),
         }
@@ -1224,7 +1281,7 @@ async fn run_background<TPlat: PlatformRef>(
                                 None
                             } else {
                                 Some(
-                                    tree.input_iter_unordered()
+                                    tree.input_output_iter_unordered()
                                         .find(|b| b.user_data.hash == block.parent_hash)
                                         .unwrap()
                                         .id,
@@ -1280,7 +1337,7 @@ async fn run_background<TPlat: PlatformRef>(
 
                         for block in subscription.non_finalized_blocks_ancestry_order {
                             let parent_index = tree
-                                .input_iter_unordered()
+                                .input_output_iter_unordered()
                                 .find(|b| b.user_data.hash == block.parent_hash)
                                 .unwrap()
                                 .id;
@@ -1323,7 +1380,7 @@ async fn run_background<TPlat: PlatformRef>(
 
         // Inner loop. Process incoming events.
         loop {
-            futures::select! {
+            futures_util::select! {
                 _ = &mut background.wake_up_new_necessary_download => {
                     background.start_necessary_downloads().await;
                 },
@@ -1357,7 +1414,7 @@ async fn run_background<TPlat: PlatformRef>(
                                     let parent_index = if new_block.parent_hash == finalized_block.hash {
                                         None
                                     } else {
-                                        Some(tree.input_iter_unordered().find(|block| block.user_data.hash == new_block.parent_hash).unwrap().id)
+                                        Some(tree.input_output_iter_unordered().find(|block| block.user_data.hash == new_block.parent_hash).unwrap().id)
                                     };
 
                                     tree.input_insert_block(Block {
@@ -1366,7 +1423,7 @@ async fn run_background<TPlat: PlatformRef>(
                                     }, parent_index, same_runtime_as_parent, new_block.is_new_best);
                                 }
                                 GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                                    let parent_index = tree.input_iter_unordered().find(|block| block.user_data.hash == new_block.parent_hash).unwrap().id;
+                                    let parent_index = tree.input_output_iter_unordered().find(|block| block.user_data.hash == new_block.parent_hash).unwrap().id;
                                     tree.input_insert_block(Block {
                                         hash: header::hash_from_scale_encoded_header(&new_block.scale_encoded_header),
                                         scale_encoded_header: new_block.scale_encoded_header,
@@ -1400,14 +1457,19 @@ async fn run_background<TPlat: PlatformRef>(
 
                             match &mut guarded.tree {
                                 GuardedInner::FinalizedBlockRuntimeKnown {
+                                    finalized_block,
                                     tree, ..
                                 } => {
-                                    let idx = tree.input_iter_unordered().find(|block| block.user_data.hash == hash).unwrap().id;
+                                    let idx = if hash == finalized_block.hash {
+                                        None
+                                    } else {
+                                        Some(tree.input_output_iter_unordered().find(|block| block.user_data.hash == hash).unwrap().id)
+                                    };
                                     tree.input_set_best_block(idx);
                                 }
                                 GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                                    let idx = tree.input_iter_unordered().find(|block| block.user_data.hash == hash).unwrap().id;
-                                    tree.input_set_best_block(idx);
+                                    let idx = tree.input_output_iter_unordered().find(|block| block.user_data.hash == hash).unwrap().id;
+                                    tree.input_set_best_block(Some(idx));
                                 }
                             }
 
@@ -1702,7 +1764,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
                         let parent_runtime = tree
                             .parent(block_index)
-                            .map_or(tree.finalized_async_user_data().clone(), |idx| {
+                            .map_or(tree.output_finalized_async_user_data().clone(), |idx| {
                                 tree.block_async_user_data(idx).unwrap().clone()
                             });
 
@@ -1961,12 +2023,12 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             } => {
                 debug_assert_ne!(finalized_block.hash, hash_to_finalize);
                 let node_to_finalize = tree
-                    .input_iter_unordered()
+                    .input_output_iter_unordered()
                     .find(|block| block.user_data.hash == hash_to_finalize)
                     .unwrap()
                     .id;
                 let new_best_block = tree
-                    .input_iter_unordered()
+                    .input_output_iter_unordered()
                     .find(|block| block.user_data.hash == new_best_block_hash)
                     .unwrap()
                     .id;
@@ -1974,12 +2036,12 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             }
             GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
                 let node_to_finalize = tree
-                    .input_iter_unordered()
+                    .input_output_iter_unordered()
                     .find(|block| block.user_data.hash == hash_to_finalize)
                     .unwrap()
                     .id;
                 let new_best_block = tree
-                    .input_iter_unordered()
+                    .input_output_iter_unordered()
                     .find(|block| block.user_data.hash == new_best_block_hash)
                     .unwrap()
                     .id;

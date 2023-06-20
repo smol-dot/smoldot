@@ -639,7 +639,7 @@ where
         best_hash: [u8; 32],
         best_number: u64,
     ) {
-        let mut config = &mut self.chains[chain_index].chain_config;
+        let config = &mut self.chains[chain_index].chain_config;
         config.best_hash = best_hash;
         config.best_number = best_number;
     }

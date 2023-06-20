@@ -47,6 +47,18 @@ export function writeUInt32LE(buffer: Uint8Array, offset: number, value: number)
     buffer[offset] = value & 0xff
 }
 
+export function writeUInt64LE(buffer: Uint8Array, offset: number, value: bigint) {
+    checkRange(buffer, offset, 8);
+    buffer[offset + 7] = Number((value >> BigInt(56)) & BigInt(0xff))
+    buffer[offset + 6] = Number((value >> BigInt(48)) & BigInt(0xff))
+    buffer[offset + 5] = Number((value >> BigInt(40)) & BigInt(0xff))
+    buffer[offset + 4] = Number((value >> BigInt(32)) & BigInt(0xff))
+    buffer[offset + 3] = Number((value >> BigInt(24)) & BigInt(0xff))
+    buffer[offset + 2] = Number((value >> BigInt(16)) & BigInt(0xff))
+    buffer[offset + 1] = Number((value >> BigInt(8)) & BigInt(0xff))
+    buffer[offset] = Number(value & BigInt(0xff))
+}
+
 function checkRange(buffer: Uint8Array, offset: number, length: number) {
     if (!Number.isInteger(offset) || offset < 0)
         throw new RangeError()

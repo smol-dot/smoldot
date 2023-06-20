@@ -32,9 +32,9 @@
 // Note: believe or not, but I couldn't find a library that does this in the Rust ecosystem.
 
 use alloc::sync::{Arc, Weak};
+use async_lock::Mutex;
 use core::{fmt, future::Future, pin::Pin, sync::atomic, task};
-use futures::future::BoxFuture;
-use futures::lock::Mutex;
+use futures_util::future::BoxFuture;
 
 /// See [the module-level documentation](..).
 pub struct TasksQueue {
@@ -211,13 +211,13 @@ impl alloc::task::Wake for Waker {
 mod tests {
     use alloc::sync::Arc;
     use core::sync::atomic;
-    use futures::{SinkExt as _, StreamExt as _};
+    use futures_util::{SinkExt as _, StreamExt as _};
 
     #[test]
     fn no_race_condition() {
         // Push a lot of tasks in the queue. Each task sleeps a couple times then increments a
         // counter. We check, at the end, that the counter has the expected value.
-        async_std::task::block_on(async move {
+        smol::block_on(async move {
             let queue = super::TasksQueue::new();
             let counter = Arc::new(atomic::AtomicUsize::new(0));
 
@@ -226,11 +226,11 @@ mod tests {
             // Spawn background tasks that will run the futures.
             // A message is sent on `finished_tx` as soon as one executor detects that the
             // counter has reached the target value.
-            // Note that we use a `ThreadPool` rather that spawn futures with
-            // `async_std::task::spawn`, as at the end of the test all executors but one will be
-            // stuck sleeping, and we preferably don't want them to leak.
-            let threads_pool = futures::executor::ThreadPool::new().unwrap();
-            let (finished_tx, mut finished_rx) = futures::channel::mpsc::channel::<()>(0);
+            // Note that we use a `ThreadPool` rather that spawn futures with `smol::spawn`, as at
+            // the end of the test all executors but one will be stuck sleeping, and we preferably
+            // don't want them to leak.
+            let threads_pool = futures_executor::ThreadPool::new().unwrap();
+            let (finished_tx, mut finished_rx) = futures_channel::mpsc::channel::<()>(0);
             for _ in 0..4 {
                 let queue = queue.clone();
                 let counter = counter.clone();
@@ -253,10 +253,10 @@ mod tests {
                     // Note that the randomness doesn't have uniform distrib, but we don't care.
                     for _ in 0..(rand::random::<usize>() % 5) {
                         if (rand::random::<usize>() % 10) == 0 {
-                            async_std::task::yield_now().await;
+                            smol::future::yield_now().await;
                         }
                         let num_us = rand::random::<u64>() % 50000;
-                        async_std::task::sleep(core::time::Duration::from_micros(num_us)).await;
+                        smol::Timer::after(core::time::Duration::from_micros(num_us)).await;
                     }
 
                     counter.fetch_add(1, atomic::Ordering::SeqCst);
@@ -265,7 +265,7 @@ mod tests {
 
             // Stop the test as soon as one executor is finished, as only one executor will
             // actually detect the limit and the others will be sleeping.
-            let _ = finished_rx.next().await.unwrap();
+            finished_rx.next().await.unwrap();
             assert_eq!(counter.load(atomic::Ordering::SeqCst), NUM_TASKS);
         })
     }
@@ -274,7 +274,7 @@ mod tests {
     fn tasks_destroyed_when_queue_destroyed() {
         // Push infinite tasks in the queue. These tasks share an `Arc`. Destroy the queue. Verify
         // that the `Arc` is stale.
-        async_std::task::block_on(async move {
+        smol::block_on(async move {
             let queue = super::TasksQueue::new();
             let counter = Arc::new(());
 
@@ -283,7 +283,7 @@ mod tests {
                 let counter = counter.clone();
                 queue.push(Box::pin(async move {
                     // Sleep for twelve hours, which basically means infinitely.
-                    async_std::task::sleep(core::time::Duration::from_secs(12 * 3600)).await;
+                    smol::Timer::after(core::time::Duration::from_secs(12 * 3600)).await;
                     drop(counter);
                 }));
             }
@@ -294,8 +294,8 @@ mod tests {
             }
 
             // Then drop the queue and make sure that there's no clone of `counter` remaining.
-            let _ = Arc::try_unwrap(queue).unwrap();
-            let () = Arc::try_unwrap(counter).unwrap();
+            let _ = Arc::into_inner(queue).unwrap();
+            let () = Arc::into_inner(counter).unwrap();
         })
     }
 }

@@ -88,7 +88,7 @@ use crate::{
     header, verify,
 };
 
-use alloc::{borrow::ToOwned as _, vec::Vec};
+use alloc::{borrow::ToOwned as _, boxed::Box, vec::Vec};
 use core::{
     cmp, mem,
     num::{NonZeroU32, NonZeroU64},
@@ -116,10 +116,16 @@ pub struct Config {
     /// If `false`, blocks containing digest items with an unknown consensus engine will fail to
     /// verify.
     ///
-    /// Passing `true` can lead to blocks being considered as valid when they shouldn't. However,
-    /// even if `true` is passed, a recognized consensus engine must always be present.
-    /// Consequently, both `true` and `false` guarantee that the number of authorable blocks over
-    /// the network is bounded.
+    /// Note that blocks must always contain digest items that are relevant to the current
+    /// consensus algorithm. This option controls what happens when blocks contain additional
+    /// digest items that aren't recognized by the implementation.
+    ///
+    /// Passing `true` can lead to blocks being considered as valid when they shouldn't, as these
+    /// additional digest items could have some logic attached to them that restricts which blocks
+    /// are valid and which are not.
+    ///
+    /// However, since a recognized consensus engine must always be present, both `true` and
+    /// `false` guarantee that the number of authorable blocks over the network is bounded.
     pub allow_unknown_consensus_engines: bool,
 
     /// Pre-allocated capacity for the number of block sources.
@@ -175,7 +181,7 @@ pub struct AllForksSync<TBl, TRq, TSrc> {
     chain: blocks_tree::NonFinalizedTree<Block<TBl>>,
 
     /// Extra fields. In a separate structure in order to be moved around.
-    inner: Inner<TBl, TRq, TSrc>,
+    inner: Box<Inner<TBl, TRq, TSrc>>,
 }
 
 /// Extra fields. In a separate structure in order to be moved around.
@@ -433,7 +439,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
 
         Self {
             chain,
-            inner: Inner {
+            inner: Box::new(Inner {
                 blocks: pending_blocks::PendingBlocks::new(pending_blocks::Config {
                     blocks_capacity: config.blocks_capacity,
                     finalized_block_height,
@@ -441,7 +447,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     sources_capacity: config.sources_capacity,
                     verify_bodies: config.full,
                 }),
-            },
+            }),
         }
     }
 
@@ -1119,6 +1125,22 @@ impl<TBl, TRq, TSrc> ops::IndexMut<SourceId> for AllForksSync<TBl, TRq, TSrc> {
     #[track_caller]
     fn index_mut(&mut self, id: SourceId) -> &mut TSrc {
         &mut self.inner.blocks[id].user_data
+    }
+}
+
+impl<'a, TBl, TRq, TSrc> ops::Index<(u64, &'a [u8; 32])> for AllForksSync<TBl, TRq, TSrc> {
+    type Output = TBl;
+
+    #[track_caller]
+    fn index(&self, (block_height, block_hash): (u64, &'a [u8; 32])) -> &TBl {
+        self.block_user_data(block_height, block_hash)
+    }
+}
+
+impl<'a, TBl, TRq, TSrc> ops::IndexMut<(u64, &'a [u8; 32])> for AllForksSync<TBl, TRq, TSrc> {
+    #[track_caller]
+    fn index_mut(&mut self, (block_height, block_hash): (u64, &'a [u8; 32])) -> &mut TBl {
+        self.block_user_data_mut(block_height, block_hash)
     }
 }
 
@@ -2280,10 +2302,6 @@ pub enum BlockBodyVerify<TBl, TRq, TSrc> {
 
     /// Loading a storage value of the finalized block is required in order to continue.
     FinalizedStorageGet(StorageGet<TBl, TRq, TSrc>),
-
-    /// Fetching the list of keys of the finalized block with a given prefix is required in order
-    /// to continue.
-    FinalizedStoragePrefixKeys(StoragePrefixKeys<TBl, TRq, TSrc>),
 
     /// Fetching the key of the finalized block storage that follows a given one is required in
     /// order to continue.

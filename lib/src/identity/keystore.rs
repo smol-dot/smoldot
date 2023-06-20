@@ -40,12 +40,12 @@
 //! >           questionable decisions that it has to keep for backwards compatibility reasons.
 //! >           This keystore, being newly-written, doesn't have to follow them.
 
-#![cfg(all(feature = "std"))]
-#![cfg_attr(docsrs, doc(cfg(all(feature = "std"))))]
+#![cfg(feature = "std")]
+#![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
 use crate::{identity::seed_phrase, util::SipHasherBuild};
 
-use futures::lock::Mutex;
+use async_lock::Mutex;
 use rand::{Rng as _, SeedableRng as _};
 use std::{borrow::Cow, fs, io, path, str};
 
@@ -163,8 +163,8 @@ impl Keystore {
                             ),
                             nom::bytes::complete::tag("-"),
                             nom::combinator::map_opt(
-                                nom::bytes::complete::take_while(|c| {
-                                    ('0'..='9').contains(&c) || ('a'..='f').contains(&c)
+                                nom::bytes::complete::take_while(|c: char| {
+                                    c.is_ascii_digit() || ('a'..='f').contains(&c)
                                 }),
                                 |k: &str| {
                                     if k.len() == 64 {
@@ -650,7 +650,7 @@ mod tests {
 
     #[test]
     fn disk_storage_works_ed25519() {
-        futures::executor::block_on(async move {
+        futures_executor::block_on(async move {
             let path = tempfile::tempdir().unwrap();
 
             let keystore1 = Keystore::new(Some(path.path().to_owned()), rand::random())
@@ -684,7 +684,7 @@ mod tests {
 
     #[test]
     fn disk_storage_works_sr25519() {
-        futures::executor::block_on(async move {
+        futures_executor::block_on(async move {
             let path = tempfile::tempdir().unwrap();
 
             let keystore1 = Keystore::new(Some(path.path().to_owned()), rand::random())

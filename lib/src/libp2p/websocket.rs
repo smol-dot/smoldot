@@ -18,10 +18,10 @@
 //! Implementation of a WebSocket client that wraps around an abstract representation of a TCP
 //! socket through the `AsyncRead` and `AsyncWrite` traits.
 
-#![cfg(all(feature = "std"))]
-#![cfg_attr(docsrs, doc(cfg(all(feature = "std"))))]
+#![cfg(feature = "std")]
+#![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
-use futures::prelude::*;
+use futures_util::{future, AsyncRead, AsyncWrite, Future as _};
 
 use core::{
     cmp, mem,
@@ -86,13 +86,13 @@ pub struct Connection<T> {
 enum Read<T> {
     Idle(soketto::connection::Receiver<T>, Vec<u8>, usize),
     Error(soketto::connection::Error),
-    InProgress(
-        future::BoxFuture<
-            'static,
-            Result<(soketto::connection::Receiver<T>, Vec<u8>), soketto::connection::Error>,
-        >,
-    ),
+    InProgress(future::BoxFuture<'static, Result<ReadOutcome<T>, soketto::connection::Error>>),
     Poisoned,
+}
+
+struct ReadOutcome<T> {
+    socket: soketto::connection::Receiver<T>,
+    buffer: Vec<u8>,
 }
 
 enum Write<T> {
@@ -136,7 +136,7 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> AsyncRead for Connectio
                     buffer.clear();
                     self.receiver = Read::InProgress(Box::pin(async move {
                         socket.receive_data(&mut buffer).await?;
-                        Ok((socket, buffer))
+                        Ok(ReadOutcome { socket, buffer })
                     }));
                 }
                 Read::InProgress(mut future) => match Pin::new(&mut future).poll(cx) {
@@ -144,7 +144,7 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> AsyncRead for Connectio
                         self.receiver = Read::InProgress(future);
                         return Poll::Pending;
                     }
-                    Poll::Ready(Ok((socket, buffer))) => {
+                    Poll::Ready(Ok(ReadOutcome { socket, buffer })) => {
                         self.receiver = Read::Idle(socket, buffer, 0);
                     }
                     Poll::Ready(Err(err)) => {
@@ -374,7 +374,7 @@ fn convert_err(err: &soketto::connection::Error) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use futures::prelude::*;
+    use futures_util::{AsyncRead, AsyncWrite};
 
     #[test]
     fn is_send() {

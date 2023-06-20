@@ -1,4 +1,5 @@
 [workspace]
+resolver = "2"
 default-members = ["lib", "full-node"]
 members = [
     "lib",
@@ -7,8 +8,14 @@ members = [
     "wasm-node/rust",
 ]
 
+[workspace.package]
+authors = ["Parity Technologies <admin@parity.io>", "Pierre Krieger <pierre.krieger1708@gmail.com>"]
+license = "GPL-3.0-or-later WITH Classpath-exception-2.0"
+edition = "2021"
+repository = "https://github.com/smol-dot/smoldot"
+
 [profile.dev]
-debug = 1    # Default value is `2`, which contains the full debug info. `1` is enough for stack traces.
+debug = 1    # Default value is `2`, which contains the full debug info. `1` is enough for stack traces.  # TODO: use the named version after Cargo v1.71
 opt-level = 2
 panic = "abort"
 [profile.dev.package."*"]
@@ -28,7 +35,7 @@ lto = true
 # https://doc.rust-lang.org/rustc/codegen-options/index.html#codegen-units
 codegen-units = 1
 incremental = false
-#strip = "symbols"      # TODO: uncomment once stable
+strip = "symbols"
 
 [profile.min-size-release]
 inherits = "release"
