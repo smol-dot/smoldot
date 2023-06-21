@@ -3047,7 +3047,7 @@ impl fmt::Debug for ExternalOffchainStorageSet {
 
 /// Must get the value of the off-chain storage.
 pub struct ExternalOffchainStorageGet {
-    inner: Inner,
+    inner: Box<Inner>,
 
     /// Function currently being called by the Wasm code. Refers to an index within
     /// [`Inner::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
@@ -3070,7 +3070,7 @@ impl ExternalOffchainStorageGet {
 
     /// Resumes execution after having set the value.
     pub fn resume(self, value: Option<&[u8]>) -> HostVm {
-        let host_fn = match self.inner.registered_functions[self.calling] {
+        let host_fn = match self.inner.common.registered_functions[self.calling] {
             FunctionImport::Resolved(f) => f,
             FunctionImport::Unresolved { .. } => unreachable!(),
         };
@@ -3106,7 +3106,7 @@ impl fmt::Debug for ExternalOffchainStorageGet {
 
 /// Must return the current timestamp.
 pub struct OffchainTimestamp {
-    inner: Inner,
+    inner: Box<Inner>,
 }
 
 impl OffchainTimestamp {
@@ -3127,7 +3127,7 @@ impl fmt::Debug for OffchainTimestamp {
 
 /// Must return the current timestamp.
 pub struct OffchainRandomSeed {
-    inner: Inner,
+    inner: Box<Inner>,
 
     /// Function currently being called by the Wasm code. Refers to an index within
     /// [`Inner::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
@@ -3137,7 +3137,7 @@ pub struct OffchainRandomSeed {
 impl OffchainRandomSeed {
     /// Resumes execution after having set the value.
     pub fn resume(self, value: [u8; 32]) -> HostVm {
-        let host_fn = match self.inner.registered_functions[self.calling] {
+        let host_fn = match self.inner.common.registered_functions[self.calling] {
             FunctionImport::Resolved(f) => f,
             FunctionImport::Unresolved { .. } => unreachable!(),
         };
@@ -3154,7 +3154,7 @@ impl fmt::Debug for OffchainRandomSeed {
 
 /// Must return the current timestamp.
 pub struct OffchainSubmitTransaction {
-    inner: Inner,
+    inner: Box<Inner>,
 
     /// Function currently being called by the Wasm code. Refers to an index within
     /// [`Inner::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
@@ -3177,7 +3177,7 @@ impl OffchainSubmitTransaction {
 
     /// Resumes execution after having set the value.
     pub fn resume(self, value: (&[u8], usize)) -> HostVm {
-        let host_fn = match self.inner.registered_functions[self.calling] {
+        let host_fn = match self.inner.common.registered_functions[self.calling] {
             FunctionImport::Resolved(f) => f,
             FunctionImport::Unresolved { .. } => unreachable!(),
         };

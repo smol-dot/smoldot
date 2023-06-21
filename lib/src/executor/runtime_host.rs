@@ -1434,22 +1434,20 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalOffchainStorageGet(req) => {
-                    let search = self.offchain_storage_changes.diff_get(req.key().as_ref());
-                    if let Some((overlay, _)) = search {
-                        self.vm = req.resume(overlay);
-                    } else {
-                        self.vm = req.into();
-                        return RuntimeHostVm::OffchainStorageGet(OffchainStorageGet {
-                            inner: self,
-                        });
+                    let overlay = self.offchain_storage_changes.get(req.key().as_ref());
+                    match overlay {
+                        Some(value) => self.vm = req.resume(value.as_ref().map(|v| &v[..])),
+                        None => {
+                            self.vm = req.into();
+                            return RuntimeHostVm::OffchainStorageGet(OffchainStorageGet {
+                                inner: self,
+                            });
+                        }
                     }
                 }
 
                 host::HostVm::ExternalOffchainStorageSet(req) => {
-                    let overlay = self
-                        .offchain_storage_changes
-                        .diff_get(req.key().as_ref())
-                        .map(|(v, _)| v);
+                    let overlay = self.offchain_storage_changes.get(req.key().as_ref());
 
                     let replace = match (overlay, req.old_value()) {
                         (Some(Some(overlay)), Some(old_value)) => {
@@ -1460,14 +1458,10 @@ impl Inner {
 
                     if replace {
                         if let Some(value) = req.value() {
-                            self.offchain_storage_changes.diff_insert(
-                                req.key().as_ref().to_vec(),
-                                value.as_ref().to_vec(),
-                                (),
-                            );
-                        } else {
                             self.offchain_storage_changes
-                                .diff_insert_erase(req.key().as_ref().to_vec(), ());
+                                .insert(req.key().as_ref().to_vec(), Some(value.as_ref().to_vec()));
+                        } else {
+                            self.offchain_storage_changes.remove(req.key().as_ref());
                         }
                     }
 
