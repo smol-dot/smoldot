@@ -35,37 +35,27 @@ use hashbrown::HashMap;
 ///
 /// On success, returns a JSON-encoded identifier for that request that must be passed back when
 /// emitting the response.
-pub fn parse_json_call(message: &str) -> Result<(&str, MethodCall), ParseError> {
-    let call_def = parse::parse_call(message).map_err(ParseError::JsonRpcParse)?;
+pub fn parse_json_call(message: &str) -> Result<(&str, MethodCall), ParseCallError> {
+    let call_def = parse::parse_call(message).map_err(ParseCallError::JsonRpcParse)?;
 
     // No notification is supported by this server. If the `id` field is missing in the request,
     // assuming that this is a notification and return an appropriate error.
     let request_id = match call_def.id_json {
         Some(id) => id,
-        None => return Err(ParseError::UnknownNotification(call_def.method)),
+        None => return Err(ParseCallError::UnknownNotification(call_def.method)),
     };
 
     let call = match MethodCall::from_defs(call_def.method, call_def.params_json) {
         Ok(c) => c,
-        Err(error) => return Err(ParseError::Method { request_id, error }),
+        Err(error) => return Err(ParseCallError::Method { request_id, error }),
     };
 
     Ok((request_id, call))
 }
 
-/// Builds a JSON call, to send it to a JSON-RPC server.
-///
-/// # Panic
-///
-/// Panics if the `id_json` isn't valid JSON.
-///
-pub fn build_json_call_object_parameters(id_json: Option<&str>, method: MethodCall) -> String {
-    method.to_json_call_object_parameters(id_json)
-}
-
 /// Error produced by [`parse_json_call`].
 #[derive(Debug, derive_more::Display)]
-pub enum ParseError<'a> {
+pub enum ParseCallError<'a> {
     /// Could not parse the body of the message as a valid JSON-RPC message.
     JsonRpcParse(parse::ParseError),
     /// Call concerns a notification that isn't recognized.
@@ -80,7 +70,36 @@ pub enum ParseError<'a> {
     },
 }
 
-/// See [`ParseError::Method`].
+/// Parses a JSON notification.
+pub fn parse_notification(message: &str) -> Result<ServerToClient, ParseNotificationError> {
+    let call_def = parse::parse_call(message).map_err(ParseNotificationError::JsonRpcParse)?;
+    let call = ServerToClient::from_defs(call_def.method, call_def.params_json)
+        .map_err(ParseNotificationError::Method)?;
+    Ok(call)
+}
+
+/// Error produced by [`parse_notification`].
+#[derive(Debug, derive_more::Display)]
+pub enum ParseNotificationError<'a> {
+    /// Could not parse the body of the message as a valid JSON-RPC message.
+    #[display(fmt = "{_0}")]
+    JsonRpcParse(parse::ParseError),
+    /// JSON-RPC request is valid, but there is a problem related to the method being called.
+    #[display(fmt = "{_0}")]
+    Method(MethodError<'a>),
+}
+
+/// Builds a JSON call, to send it to a JSON-RPC server.
+///
+/// # Panic
+///
+/// Panics if the `id_json` isn't valid JSON.
+///
+pub fn build_json_call_object_parameters(id_json: Option<&str>, method: MethodCall) -> String {
+    method.to_json_call_object_parameters(id_json)
+}
+
+/// See [`ParseError::Method`] or [`ParseNotificationError::Method`].
 #[derive(Debug, derive_more::Display)]
 pub enum MethodError<'a> {
     /// Call concerns a method that isn't recognized.
@@ -1258,7 +1277,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            Err(super::ParseError::Method {
+            Err(super::ParseCallError::Method {
                 request_id: "2",
                 error: super::MethodError::MissingParameters {
                     rpc_method: "chainHead_unstable_follow"

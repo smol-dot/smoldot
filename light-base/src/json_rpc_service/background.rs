@@ -41,7 +41,7 @@ use futures_util::{future, FutureExt as _};
 use smoldot::{
     executor::{host, runtime_host},
     header,
-    json_rpc::{self, methods, requests_subscriptions},
+    json_rpc::{self, methods, service},
     libp2p::{multiaddr, PeerId},
     network::protocol,
 };
@@ -58,12 +58,6 @@ struct Background<TPlat: PlatformRef> {
 
     /// Access to the platform's capabilities.
     platform: TPlat,
-
-    /// State machine holding all the clients, requests, and subscriptions.
-    ///
-    /// Only requests that are valid JSON-RPC are insert into the state machine. However, requests
-    /// can try to call an unknown method, or have invalid parameters.
-    requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>>,
 
     /// Name of the chain, as found in the chain specification.
     chain_name: String,
@@ -102,73 +96,18 @@ struct Background<TPlat: PlatformRef> {
     /// If `true`, we have already printed a warning about usage of the legacy JSON-RPC API. This
     /// flag prevents printing this message multiple times.
     printed_legacy_json_rpc_warning: atomic::AtomicBool,
-}
 
-pub(super) enum SubscriptionMessage {
-    StopIfAllHeads {
-        stop_request_id: (String, requests_subscriptions::RequestId),
-    },
-    StopIfNewHeads {
-        stop_request_id: (String, requests_subscriptions::RequestId),
-    },
-    StopIfFinalizedHeads {
-        stop_request_id: (String, requests_subscriptions::RequestId),
-    },
-    StopIfStorage {
-        stop_request_id: (String, requests_subscriptions::RequestId),
-    },
-    StopIfTransactionLegacy {
-        stop_request_id: (String, requests_subscriptions::RequestId),
-    },
-    StopIfTransaction {
-        stop_request_id: (String, requests_subscriptions::RequestId),
-    },
-    StopIfRuntimeSpec {
-        stop_request_id: (String, requests_subscriptions::RequestId),
-    },
-    StopIfChainHeadBody {
-        stop_request_id: (String, requests_subscriptions::RequestId),
-    },
-    StopIfChainHeadCall {
-        stop_request_id: (String, requests_subscriptions::RequestId),
-    },
-    StopIfChainHeadStorage {
-        stop_request_id: (String, requests_subscriptions::RequestId),
-    },
-    StopIfChainHeadFollow {
-        stop_request_id: (String, requests_subscriptions::RequestId),
-    },
-    ChainHeadFollowUnpin {
-        hash: methods::HashHexString,
-        unpin_request_id: (String, requests_subscriptions::RequestId),
-    },
-    ChainHeadHeader {
-        hash: methods::HashHexString,
-        get_request_id: (String, requests_subscriptions::RequestId),
-    },
-    ChainHeadCall {
-        hash: methods::HashHexString,
-        get_request_id: (String, requests_subscriptions::RequestId),
-        function_to_call: String,
-        call_parameters: methods::HexString,
-        network_config: methods::NetworkConfig,
-    },
-    ChainHeadStorage {
-        hash: methods::HashHexString,
-        get_request_id: (String, requests_subscriptions::RequestId),
-        network_config: methods::NetworkConfig,
-        key: methods::HexString,
-        child_trie: Option<methods::HexString>,
-        ty: methods::ChainHeadStorageType,
-    },
-    ChainHeadStorageContinue {
-        continue_request_id: (String, requests_subscriptions::RequestId),
-    },
-    ChainHeadBody {
-        hash: methods::HashHexString,
-        get_request_id: (String, requests_subscriptions::RequestId),
-        network_config: methods::NetworkConfig,
-    },
+    /// For each `chainHead_follow` subscription ID, a channel to the task dedicated to processing
+    /// this subscription.
+    chain_head_follow_tasks: Mutex<
+        hashbrown::HashMap<
+            String,
+            service::DeliverSender<
+                either::Either<service::RequestProcess, service::SubscriptionStartProcess>,
+            >,
+            fnv::FnvBuildHasher,
+        >,
+    >,
 }
 
 struct Cache {
@@ -231,16 +170,14 @@ struct GetKeysPagedCacheKey {
 
 pub(super) fn start<TPlat: PlatformRef>(
     log_target: String,
-    requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>>,
     config: StartConfig<'_, TPlat>,
+    mut requests_processing_task: service::ClientMainTask,
     max_parallel_requests: NonZeroU32,
-    max_parallel_subscription_updates: NonZeroU32,
     background_abort_registrations: Vec<future::AbortRegistration>,
 ) {
     let me = Arc::new(Background {
         log_target,
         platform: config.platform,
-        requests_subscriptions,
         chain_name: config.chain_spec.name().to_owned(),
         chain_ty: config.chain_spec.chain_type().to_owned(),
         chain_is_live: config.chain_spec.has_live_network(),
@@ -269,55 +206,66 @@ pub(super) fn start<TPlat: PlatformRef>(
         }),
         genesis_block_hash: config.genesis_block_hash,
         printed_legacy_json_rpc_warning: atomic::AtomicBool::new(false),
+        chain_head_follow_tasks: Mutex::new(hashbrown::HashMap::with_hasher(Default::default())),
     });
 
     let mut background_abort_registrations = background_abort_registrations.into_iter();
 
-    // A certain number of tasks (`max_parallel_requests`) are dedicated to pulling requests
-    // from the inner state machine and processing them.
-    // Each task can only process one request at a time, which is why we spawn one task per
-    // desired level of parallelism.
-    for n in 0..max_parallel_requests.get() {
-        let me_task = me.clone();
-        me.platform.spawn_task(
-            format!("{}-requests-{}", me_task.log_target, n).into(),
-            future::Abortable::new(
+    let (tx, rx) = async_channel::bounded(
+        usize::try_from(max_parallel_requests.get()).unwrap_or(usize::max_value()),
+    );
+
+    // Spawn a task that is dedicated to receiving the raw JSON-RPC requests, decode them, and
+    // send them to the request processing tasks.
+    me.platform
+        .clone()
+        .spawn_task(format!("{}-main-task", me.log_target).into(), {
+            async move {
+                loop {
+                    match requests_processing_task.run_until_event().await {
+                        service::Event::HandleRequest {
+                            task,
+                            request_process,
+                        } => {
+                            requests_processing_task = task;
+                            tx.send(either::Left(request_process)).await.unwrap();
+                        }
+                        service::Event::HandleSubscriptionStart {
+                            task,
+                            subscription_start,
+                        } => {
+                            requests_processing_task = task;
+                            tx.send(either::Right(subscription_start)).await.unwrap();
+                        }
+                        service::Event::SerializedRequestsIoClosed => {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+    // Spawn tasks dedicated to effectively process the JSON-RPC requests.
+    for task_num in 0..max_parallel_requests.get() {
+        me.platform.clone().spawn_task(
+            format!("{}-requests-{}", me.log_target, task_num).into(),
+            {
+                let me = me.clone();
+                let rx = rx.clone();
                 async move {
                     loop {
-                        me_task.handle_request().await;
-
-                        // We yield once between each request in order to politely let other tasks
-                        // do some work and not monopolize the CPU.
-                        me_task.platform.yield_after_cpu_intensive().await;
+                        match rx.recv().await {
+                            Ok(either::Left(request_process)) => {
+                                me.handle_request(request_process).await;
+                            }
+                            Ok(either::Right(subscription_start)) => {
+                                me.handle_subscription_start(subscription_start).await;
+                            }
+                            Err(_) => break,
+                        }
                     }
-                },
-                background_abort_registrations.next().unwrap(),
-            )
-            .map(|_: Result<(), _>| ())
-            .boxed(),
-        );
-    }
-
-    // A certain number of tasks (`max_parallel_subscription_updates`) are dedicated to
-    // processing subscriptions-related tasks after they wake up.
-    for n in 0..max_parallel_subscription_updates.get() {
-        let me_task = me.clone();
-        me.platform.spawn_task(
-            format!("{}-subscriptions-{}", me_task.log_target, n).into(),
-            future::Abortable::new(
-                async move {
-                    loop {
-                        me_task.requests_subscriptions.run_subscription_task().await;
-
-                        // We yield once between each request in order to politely let other tasks
-                        // do some work and not monopolize the CPU.
-                        me_task.platform.yield_after_cpu_intensive().await;
-                    }
-                },
-                background_abort_registrations.next().unwrap(),
-            )
-            .map(|_: Result<(), _>| ())
-            .boxed(),
+                }
+            },
         );
     }
 
@@ -419,38 +367,17 @@ pub(super) fn start<TPlat: PlatformRef>(
 
 impl<TPlat: PlatformRef> Background<TPlat> {
     /// Pulls one request from the inner state machine, and processes it.
-    async fn handle_request(self: &Arc<Self>) {
-        let (json_rpc_request, state_machine_request_id) =
-            self.requests_subscriptions.next_request().await;
-        log::debug!(target: &self.log_target, "PendingRequestsQueue => {}",
+    async fn handle_request(self: &Arc<Self>, request: service::RequestProcess) {
+        // TODO: restore some form of logging
+        /*log::debug!(target: &self.log_target, "PendingRequestsQueue => {}",
             crate::util::truncated_str(
                 json_rpc_request.chars().filter(|c| !c.is_control()),
                 100,
             )
-        );
-
-        // Check whether the JSON-RPC request is correct, and bail out if it isn't.
-        let (request_id, call) = match methods::parse_json_call(&json_rpc_request) {
-            Ok((request_id, call)) => (request_id, call),
-            Err(methods::ParseError::Method { request_id, error }) => {
-                log::warn!(
-                    target: &self.log_target,
-                    "Error in JSON-RPC method call with id {:?}: {}", request_id, error
-                );
-                self.requests_subscriptions
-                    .respond(&state_machine_request_id, error.to_json_error(request_id))
-                    .await;
-                return;
-            }
-            Err(_) => {
-                // We make sure to not insert in the state machine requests that are not valid
-                // JSON-RPC requests.
-                unreachable!()
-            }
-        };
+        );*/
 
         // Print a warning for legacy JSON-RPC functions.
-        match call {
+        match request.request() {
             methods::MethodCall::account_nextIndex { .. }
             | methods::MethodCall::author_hasKey { .. }
             | methods::MethodCall::author_hasSessionKeys { .. }
@@ -524,7 +451,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         <https://github.com/paritytech/json-rpc-interface-spec/> instead. The \
                         legacy JSON-RPC API functions will be deprecated and removed in the \
                         distant future.",
-                        call.name()
+                        request.request().name()
                     )
                 }
             }
@@ -554,369 +481,115 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         }
 
         // Each call is handled in a separate method.
-        match call {
+        match request.request() {
             methods::MethodCall::author_pendingExtrinsics {} => {
-                self.author_pending_extrinsics((request_id, &state_machine_request_id))
-                    .await;
+                self.author_pending_extrinsics(request).await;
             }
-            methods::MethodCall::author_submitExtrinsic { transaction } => {
-                self.author_submit_extrinsic((request_id, &state_machine_request_id), transaction)
-                    .await;
+            methods::MethodCall::author_submitExtrinsic { .. } => {
+                self.author_submit_extrinsic(request).await;
             }
-            methods::MethodCall::author_submitAndWatchExtrinsic { transaction } => {
-                self.submit_and_watch_transaction(
-                    (request_id, &state_machine_request_id),
-                    transaction,
-                    true,
-                )
-                .await
+            methods::MethodCall::chain_getBlock { .. } => {
+                self.chain_get_block(request).await;
             }
-            methods::MethodCall::author_unwatchExtrinsic { subscription } => {
-                self.author_unwatch_extrinsic(
-                    (request_id, &state_machine_request_id),
-                    &subscription,
-                )
-                .await;
-            }
-            methods::MethodCall::chain_getBlock { hash } => {
-                self.chain_get_block((request_id, &state_machine_request_id), hash)
-                    .await;
-            }
-            methods::MethodCall::chain_getBlockHash { height } => {
-                self.chain_get_block_hash((request_id, &state_machine_request_id), height)
-                    .await;
+            methods::MethodCall::chain_getBlockHash { .. } => {
+                self.chain_get_block_hash(request).await;
             }
             methods::MethodCall::chain_getFinalizedHead {} => {
-                self.chain_get_finalized_head((request_id, &state_machine_request_id))
-                    .await;
+                self.chain_get_finalized_head(request).await;
             }
-            methods::MethodCall::chain_getHeader { hash } => {
-                self.chain_get_header((request_id, &state_machine_request_id), hash)
-                    .await;
+            methods::MethodCall::chain_getHeader { .. } => {
+                self.chain_get_header(request).await;
             }
-            methods::MethodCall::chain_subscribeAllHeads {} => {
-                self.chain_subscribe_all_heads((request_id, &state_machine_request_id))
-                    .await;
-            }
-            methods::MethodCall::chain_subscribeFinalizedHeads {} => {
-                self.chain_subscribe_finalized_heads((request_id, &state_machine_request_id))
-                    .await;
-            }
-            methods::MethodCall::chain_subscribeNewHeads {} => {
-                self.chain_subscribe_new_heads((request_id, &state_machine_request_id))
-                    .await;
-            }
-            methods::MethodCall::chain_unsubscribeAllHeads { subscription } => {
-                self.chain_unsubscribe_all_heads(
-                    (request_id, &state_machine_request_id),
-                    subscription,
-                )
-                .await;
-            }
-            methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription } => {
-                self.chain_unsubscribe_finalized_heads(
-                    (request_id, &state_machine_request_id),
-                    subscription,
-                )
-                .await;
-            }
-            methods::MethodCall::chain_unsubscribeNewHeads { subscription } => {
-                self.chain_unsubscribe_new_heads(
-                    (request_id, &state_machine_request_id),
-                    subscription,
-                )
-                .await;
-            }
-            methods::MethodCall::payment_queryInfo { extrinsic, hash } => {
-                self.payment_query_info(
-                    (request_id, &state_machine_request_id),
-                    &extrinsic.0,
-                    hash.as_ref().map(|h| &h.0),
-                )
-                .await;
+            methods::MethodCall::payment_queryInfo { .. } => {
+                self.payment_query_info(request).await;
             }
             methods::MethodCall::rpc_methods {} => {
-                self.rpc_methods((request_id, &state_machine_request_id))
-                    .await;
+                self.rpc_methods(request).await;
             }
-            methods::MethodCall::state_call {
-                name,
-                parameters,
-                hash,
-            } => {
-                self.state_call(
-                    (request_id, &state_machine_request_id),
-                    &name,
-                    parameters,
-                    hash,
-                )
-                .await;
+            methods::MethodCall::state_call { .. } => {
+                self.state_call(request).await;
             }
-            methods::MethodCall::state_getKeys { prefix, hash } => {
-                self.state_get_keys((request_id, &state_machine_request_id), prefix, hash)
-                    .await;
+            methods::MethodCall::state_getKeys { .. } => {
+                self.state_get_keys(request).await;
             }
-            methods::MethodCall::state_getKeysPaged {
-                prefix,
-                count,
-                start_key,
-                hash,
-            } => {
-                self.state_get_keys_paged(
-                    (request_id, &state_machine_request_id),
-                    prefix,
-                    count,
-                    start_key,
-                    hash,
-                )
-                .await;
+            methods::MethodCall::state_getKeysPaged { .. } => {
+                self.state_get_keys_paged(request).await;
             }
-            methods::MethodCall::state_queryStorageAt { keys, at } => {
-                self.state_query_storage_at((request_id, &state_machine_request_id), keys, at)
-                    .await;
+            methods::MethodCall::state_queryStorageAt { .. } => {
+                self.state_query_storage_at(request).await;
             }
-            methods::MethodCall::state_getMetadata { hash } => {
-                self.state_get_metadata((request_id, &state_machine_request_id), hash)
-                    .await;
+            methods::MethodCall::state_getMetadata { .. } => {
+                self.state_get_metadata(request).await;
             }
-            methods::MethodCall::state_getStorage { key, hash } => {
-                self.state_get_storage((request_id, &state_machine_request_id), key, hash)
-                    .await;
+            methods::MethodCall::state_getStorage { .. } => {
+                self.state_get_storage(request).await;
             }
-            methods::MethodCall::state_subscribeRuntimeVersion {} => {
-                self.state_subscribe_runtime_version((request_id, &state_machine_request_id))
-                    .await;
+            methods::MethodCall::state_getRuntimeVersion { .. } => {
+                self.state_get_runtime_version(request).await;
             }
-            methods::MethodCall::state_unsubscribeRuntimeVersion { subscription } => {
-                self.state_unsubscribe_runtime_version(
-                    (request_id, &state_machine_request_id),
-                    &subscription,
-                )
-                .await;
-            }
-            methods::MethodCall::state_subscribeStorage { list } => {
-                self.state_subscribe_storage((request_id, &state_machine_request_id), list)
-                    .await;
-            }
-            methods::MethodCall::state_unsubscribeStorage { subscription } => {
-                self.state_unsubscribe_storage(
-                    (request_id, &state_machine_request_id),
-                    &subscription,
-                )
-                .await;
-            }
-            methods::MethodCall::state_getRuntimeVersion { at } => {
-                self.state_get_runtime_version(
-                    (request_id, &state_machine_request_id),
-                    at.as_ref().map(|h| &h.0),
-                )
-                .await;
-            }
-            methods::MethodCall::system_accountNextIndex { account } => {
-                self.account_next_index((request_id, &state_machine_request_id), account)
-                    .await;
+            methods::MethodCall::system_accountNextIndex { .. } => {
+                self.account_next_index(request).await;
             }
             methods::MethodCall::system_chain {} => {
-                self.system_chain((request_id, &state_machine_request_id))
-                    .await;
+                self.system_chain(request).await;
             }
             methods::MethodCall::system_chainType {} => {
-                self.system_chain_type((request_id, &state_machine_request_id))
-                    .await;
+                self.system_chain_type(request).await;
             }
             methods::MethodCall::system_health {} => {
-                self.system_health((request_id, &state_machine_request_id))
-                    .await;
+                self.system_health(request).await;
             }
             methods::MethodCall::system_localListenAddresses {} => {
-                self.system_local_listen_addresses((request_id, &state_machine_request_id))
-                    .await;
+                self.system_local_listen_addresses(request).await;
             }
             methods::MethodCall::system_localPeerId {} => {
-                self.system_local_peer_id((request_id, &state_machine_request_id))
-                    .await;
+                self.system_local_peer_id(request).await;
             }
             methods::MethodCall::system_name {} => {
-                self.system_name((request_id, &state_machine_request_id))
-                    .await;
+                self.system_name(request).await;
             }
             methods::MethodCall::system_nodeRoles {} => {
-                self.system_node_roles((request_id, &state_machine_request_id))
-                    .await;
+                self.system_node_roles(request).await;
             }
             methods::MethodCall::system_peers {} => {
-                self.system_peers((request_id, &state_machine_request_id))
-                    .await;
+                self.system_peers(request).await;
             }
             methods::MethodCall::system_properties {} => {
-                self.system_properties((request_id, &state_machine_request_id))
-                    .await;
+                self.system_properties(request).await;
             }
             methods::MethodCall::system_version {} => {
-                self.system_version((request_id, &state_machine_request_id))
-                    .await;
+                self.system_version(request).await;
             }
 
-            methods::MethodCall::chainHead_unstable_stopBody { subscription } => {
-                self.chain_head_unstable_stop_body(
-                    (request_id, &state_machine_request_id),
-                    &subscription,
-                )
-                .await;
-            }
-            methods::MethodCall::chainHead_unstable_body {
-                follow_subscription,
-                hash,
-                network_config,
-            } => {
-                self.chain_head_unstable_body(
-                    (request_id, &state_machine_request_id),
-                    &follow_subscription,
-                    hash,
-                    network_config,
-                )
-                .await;
-            }
-            methods::MethodCall::chainHead_unstable_call {
-                follow_subscription,
-                hash,
-                function,
-                call_parameters,
-                network_config,
-            } => {
-                self.chain_head_call(
-                    (request_id, &state_machine_request_id),
-                    &follow_subscription,
-                    hash,
-                    function.into_owned(),
-                    call_parameters,
-                    network_config,
-                )
-                .await;
-            }
-            methods::MethodCall::chainHead_unstable_stopCall { subscription } => {
-                self.chain_head_unstable_stop_call(
-                    (request_id, &state_machine_request_id),
-                    &subscription,
-                )
-                .await;
-            }
-            methods::MethodCall::chainHead_unstable_stopStorage { subscription } => {
-                self.chain_head_unstable_stop_storage(
-                    (request_id, &state_machine_request_id),
-                    &subscription,
-                )
-                .await;
-            }
-            methods::MethodCall::chainHead_unstable_storage {
-                follow_subscription,
-                hash,
-                key,
-                child_trie,
-                ty,
-                network_config,
-            } => {
-                self.chain_head_storage(
-                    (request_id, &state_machine_request_id),
-                    &follow_subscription,
-                    hash,
-                    key,
-                    child_trie,
-                    ty,
-                    network_config,
-                )
-                .await;
-            }
-            methods::MethodCall::chainHead_unstable_storageContinue { subscription } => {
-                self.chain_head_storage_continue(
-                    (request_id, &state_machine_request_id),
-                    &subscription,
-                )
-                .await;
-            }
-            methods::MethodCall::chainHead_unstable_follow { with_runtime } => {
-                self.chain_head_follow((request_id, &state_machine_request_id), with_runtime)
-                    .await;
+            methods::MethodCall::chainHead_unstable_storageContinue { .. } => {
+                self.chain_head_storage_continue(request).await;
             }
             methods::MethodCall::chainHead_unstable_genesisHash {} => {
-                self.chain_head_unstable_genesis_hash((request_id, &state_machine_request_id))
-                    .await;
+                self.chain_head_unstable_genesis_hash(request).await;
             }
-            methods::MethodCall::chainHead_unstable_header {
-                follow_subscription,
-                hash,
-            } => {
-                self.chain_head_unstable_header(
-                    (request_id, &state_machine_request_id),
-                    &follow_subscription,
-                    hash,
-                )
-                .await;
+            methods::MethodCall::chainHead_unstable_header { .. } => {
+                self.chain_head_unstable_header(request).await;
             }
-            methods::MethodCall::chainHead_unstable_unpin {
-                follow_subscription,
-                hash,
-            } => {
-                self.chain_head_unstable_unpin(
-                    (request_id, &state_machine_request_id),
-                    &follow_subscription,
-                    hash,
-                )
-                .await;
+            methods::MethodCall::chainHead_unstable_unpin { .. } => {
+                self.chain_head_unstable_unpin(request).await;
             }
-            methods::MethodCall::chainHead_unstable_unfollow {
-                follow_subscription,
-            } => {
-                self.chain_head_unstable_unfollow(
-                    (request_id, &state_machine_request_id),
-                    &follow_subscription,
-                )
-                .await;
-            }
-            methods::MethodCall::chainHead_unstable_finalizedDatabase { max_size_bytes } => {
-                self.chain_head_unstable_finalized_database(
-                    (request_id, &state_machine_request_id),
-                    max_size_bytes,
-                )
-                .await;
+            methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {
+                self.chain_head_unstable_finalized_database(request).await;
             }
             methods::MethodCall::chainSpec_unstable_chainName {} => {
-                self.chain_spec_unstable_chain_name((request_id, &state_machine_request_id))
-                    .await;
+                self.chain_spec_unstable_chain_name(request).await;
             }
             methods::MethodCall::chainSpec_unstable_genesisHash {} => {
-                self.chain_spec_unstable_genesis_hash((request_id, &state_machine_request_id))
-                    .await;
+                self.chain_spec_unstable_genesis_hash(request).await;
             }
             methods::MethodCall::chainSpec_unstable_properties {} => {
-                self.chain_spec_unstable_properties((request_id, &state_machine_request_id))
-                    .await;
+                self.chain_spec_unstable_properties(request).await;
             }
-            methods::MethodCall::sudo_unstable_p2pDiscover { multiaddr } => {
-                self.sudo_unstable_p2p_discover(
-                    (request_id, &state_machine_request_id),
-                    &multiaddr,
-                )
-                .await;
+            methods::MethodCall::sudo_unstable_p2pDiscover { .. } => {
+                self.sudo_unstable_p2p_discover(request).await;
             }
             methods::MethodCall::sudo_unstable_version {} => {
-                self.sudo_unstable_version((request_id, &state_machine_request_id))
-                    .await;
-            }
-            methods::MethodCall::transaction_unstable_submitAndWatch { transaction } => {
-                self.submit_and_watch_transaction(
-                    (request_id, &state_machine_request_id),
-                    transaction,
-                    false,
-                )
-                .await
-            }
-            methods::MethodCall::transaction_unstable_unwatch { subscription } => {
-                self.transaction_unstable_unwatch(
-                    (request_id, &state_machine_request_id),
-                    &subscription,
-                )
-                .await;
+                self.sudo_unstable_version(request).await;
             }
 
             _method @ (methods::MethodCall::account_nextIndex { .. }
@@ -941,35 +614,192 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::system_addReservedPeer { .. }
             | methods::MethodCall::system_dryRun { .. }
             | methods::MethodCall::system_networkState { .. }
-            | methods::MethodCall::system_removeReservedPeer { .. }
-            | methods::MethodCall::network_unstable_subscribeEvents { .. }
-            | methods::MethodCall::network_unstable_unsubscribeEvents { .. }) => {
+            | methods::MethodCall::system_removeReservedPeer { .. }) => {
                 // TODO: implement the ones that make sense to implement ^
                 log::error!(target: &self.log_target, "JSON-RPC call not supported yet: {:?}", _method);
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        json_rpc::parse::build_error_response(
-                            request_id,
-                            json_rpc::parse::ErrorResponse::ServerError(
-                                -32000,
-                                "Not implemented in smoldot yet",
-                            ),
-                            None,
-                        ),
-                    )
-                    .await;
+                request.fail(json_rpc::parse::ErrorResponse::ServerError(
+                    -32000,
+                    "Not implemented in smoldot yet",
+                ));
             }
+
+            _ => unreachable!(),
+        }
+    }
+
+    /// Pulls one request from the inner state machine, and processes it.
+    async fn handle_subscription_start(
+        self: &Arc<Self>,
+        request: service::SubscriptionStartProcess,
+    ) {
+        // TODO: restore some form of logging
+        /*log::debug!(target: &self.log_target, "PendingRequestsQueue => {}",
+            crate::util::truncated_str(
+                json_rpc_request.chars().filter(|c| !c.is_control()),
+                100,
+            )
+        );*/
+
+        // Print a warning for legacy JSON-RPC functions.
+        match request.request() {
+            methods::MethodCall::account_nextIndex { .. }
+            | methods::MethodCall::author_hasKey { .. }
+            | methods::MethodCall::author_hasSessionKeys { .. }
+            | methods::MethodCall::author_insertKey { .. }
+            | methods::MethodCall::author_pendingExtrinsics { .. }
+            | methods::MethodCall::author_removeExtrinsic { .. }
+            | methods::MethodCall::author_rotateKeys { .. }
+            | methods::MethodCall::author_submitAndWatchExtrinsic { .. }
+            | methods::MethodCall::author_submitExtrinsic { .. }
+            | methods::MethodCall::author_unwatchExtrinsic { .. }
+            | methods::MethodCall::babe_epochAuthorship { .. }
+            | methods::MethodCall::chain_getBlock { .. }
+            | methods::MethodCall::chain_getBlockHash { .. }
+            | methods::MethodCall::chain_getFinalizedHead { .. }
+            | methods::MethodCall::chain_getHeader { .. }
+            | methods::MethodCall::chain_subscribeAllHeads { .. }
+            | methods::MethodCall::chain_subscribeFinalizedHeads { .. }
+            | methods::MethodCall::chain_subscribeNewHeads { .. }
+            | methods::MethodCall::chain_unsubscribeAllHeads { .. }
+            | methods::MethodCall::chain_unsubscribeFinalizedHeads { .. }
+            | methods::MethodCall::chain_unsubscribeNewHeads { .. }
+            | methods::MethodCall::childstate_getKeys { .. }
+            | methods::MethodCall::childstate_getStorage { .. }
+            | methods::MethodCall::childstate_getStorageHash { .. }
+            | methods::MethodCall::childstate_getStorageSize { .. }
+            | methods::MethodCall::grandpa_roundState { .. }
+            | methods::MethodCall::offchain_localStorageGet { .. }
+            | methods::MethodCall::offchain_localStorageSet { .. }
+            | methods::MethodCall::payment_queryInfo { .. }
+            | methods::MethodCall::state_call { .. }
+            | methods::MethodCall::state_getKeys { .. }
+            | methods::MethodCall::state_getKeysPaged { .. }
+            | methods::MethodCall::state_getMetadata { .. }
+            | methods::MethodCall::state_getPairs { .. }
+            | methods::MethodCall::state_getReadProof { .. }
+            | methods::MethodCall::state_getRuntimeVersion { .. }
+            | methods::MethodCall::state_getStorage { .. }
+            | methods::MethodCall::state_getStorageHash { .. }
+            | methods::MethodCall::state_getStorageSize { .. }
+            | methods::MethodCall::state_queryStorage { .. }
+            | methods::MethodCall::state_queryStorageAt { .. }
+            | methods::MethodCall::state_subscribeRuntimeVersion { .. }
+            | methods::MethodCall::state_subscribeStorage { .. }
+            | methods::MethodCall::state_unsubscribeRuntimeVersion { .. }
+            | methods::MethodCall::state_unsubscribeStorage { .. }
+            | methods::MethodCall::system_accountNextIndex { .. }
+            | methods::MethodCall::system_addReservedPeer { .. }
+            | methods::MethodCall::system_chain { .. }
+            | methods::MethodCall::system_chainType { .. }
+            | methods::MethodCall::system_dryRun { .. }
+            | methods::MethodCall::system_health { .. }
+            | methods::MethodCall::system_localListenAddresses { .. }
+            | methods::MethodCall::system_localPeerId { .. }
+            | methods::MethodCall::system_name { .. }
+            | methods::MethodCall::system_networkState { .. }
+            | methods::MethodCall::system_nodeRoles { .. }
+            | methods::MethodCall::system_peers { .. }
+            | methods::MethodCall::system_properties { .. }
+            | methods::MethodCall::system_removeReservedPeer { .. }
+            | methods::MethodCall::system_version { .. } => {
+                if !self
+                    .printed_legacy_json_rpc_warning
+                    .swap(true, atomic::Ordering::Relaxed)
+                {
+                    log::warn!(
+                        target: &self.log_target,
+                        "The JSON-RPC client has just called a JSON-RPC function from the legacy \
+                        JSON-RPC API ({}). Legacy JSON-RPC functions have loose semantics and \
+                        cannot be properly implemented on a light client. You are encouraged to \
+                        use the new JSON-RPC API \
+                        <https://github.com/paritytech/json-rpc-interface-spec/> instead. The \
+                        legacy JSON-RPC API functions will be deprecated and removed in the \
+                        distant future.",
+                        request.request().name()
+                    )
+                }
+            }
+            methods::MethodCall::chainHead_unstable_body { .. }
+            | methods::MethodCall::chainHead_unstable_call { .. }
+            | methods::MethodCall::chainHead_unstable_follow { .. }
+            | methods::MethodCall::chainHead_unstable_genesisHash { .. }
+            | methods::MethodCall::chainHead_unstable_header { .. }
+            | methods::MethodCall::chainHead_unstable_stopBody { .. }
+            | methods::MethodCall::chainHead_unstable_stopCall { .. }
+            | methods::MethodCall::chainHead_unstable_stopStorage { .. }
+            | methods::MethodCall::chainHead_unstable_storage { .. }
+            | methods::MethodCall::chainHead_unstable_storageContinue { .. }
+            | methods::MethodCall::chainHead_unstable_unfollow { .. }
+            | methods::MethodCall::chainHead_unstable_unpin { .. }
+            | methods::MethodCall::chainSpec_unstable_chainName { .. }
+            | methods::MethodCall::chainSpec_unstable_genesisHash { .. }
+            | methods::MethodCall::chainSpec_unstable_properties { .. }
+            | methods::MethodCall::rpc_methods { .. }
+            | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
+            | methods::MethodCall::sudo_unstable_version { .. }
+            | methods::MethodCall::transaction_unstable_submitAndWatch { .. }
+            | methods::MethodCall::transaction_unstable_unwatch { .. }
+            | methods::MethodCall::network_unstable_subscribeEvents { .. }
+            | methods::MethodCall::network_unstable_unsubscribeEvents { .. }
+            | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {}
+        }
+
+        // Each call is handled in a separate method.
+        match request.request() {
+            methods::MethodCall::author_submitAndWatchExtrinsic { .. } => {
+                self.submit_and_watch_transaction(request).await
+            }
+            methods::MethodCall::chain_subscribeAllHeads {} => {
+                self.chain_subscribe_all_heads(request).await;
+            }
+            methods::MethodCall::chain_subscribeFinalizedHeads {} => {
+                self.chain_subscribe_finalized_heads(request).await;
+            }
+            methods::MethodCall::chain_subscribeNewHeads {} => {
+                self.chain_subscribe_new_heads(request).await;
+            }
+            methods::MethodCall::state_subscribeRuntimeVersion {} => {
+                self.state_subscribe_runtime_version(request).await;
+            }
+            methods::MethodCall::state_subscribeStorage { .. } => {
+                self.state_subscribe_storage(request).await;
+            }
+
+            methods::MethodCall::chainHead_unstable_body { .. } => {
+                self.chain_head_unstable_body(request).await;
+            }
+            methods::MethodCall::chainHead_unstable_call { .. } => {
+                self.chain_head_call(request).await;
+            }
+            methods::MethodCall::chainHead_unstable_storage { .. } => {
+                self.chain_head_storage(request).await;
+            }
+            methods::MethodCall::chainHead_unstable_follow { .. } => {
+                self.chain_head_follow(request).await;
+            }
+            methods::MethodCall::transaction_unstable_submitAndWatch { .. } => {
+                self.submit_and_watch_transaction(request).await
+            }
+
+            _method @ methods::MethodCall::network_unstable_subscribeEvents { .. } => {
+                // TODO: implement the ones that make sense to implement ^
+                log::error!(target: &self.log_target, "JSON-RPC call not supported yet: {:?}", _method);
+                request.fail(json_rpc::parse::ErrorResponse::ServerError(
+                    -32000,
+                    "Not implemented in smoldot yet",
+                ));
+            }
+
+            _ => unreachable!(),
         }
     }
 
     /// Handles a call to [`methods::MethodCall::sudo_unstable_p2pDiscover`].
-    async fn sudo_unstable_p2p_discover(
-        self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
-        multiaddr: &str,
-    ) {
-        let response = match multiaddr.parse::<multiaddr::Multiaddr>() {
+    async fn sudo_unstable_p2p_discover(self: &Arc<Self>, request: service::RequestProcess) {
+        let methods::MethodCall::sudo_unstable_p2pDiscover { multiaddr } = request.request()
+            else { unreachable!() };
+
+        match multiaddr.parse::<multiaddr::Multiaddr>() {
             Ok(mut addr) if matches!(addr.iter().last(), Some(multiaddr::ProtocolRef::P2p(_))) => {
                 let peer_id_bytes = match addr.iter().last() {
                     Some(multiaddr::ProtocolRef::P2p(peer_id)) => peer_id.into_owned(),
@@ -988,31 +818,23 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                 false,
                             )
                             .await;
-                        methods::Response::sudo_unstable_p2pDiscover(())
-                            .to_json_response(request_id.0)
+                        request.respond(methods::Response::sudo_unstable_p2pDiscover(()));
                     }
-                    Err(_) => json_rpc::parse::build_error_response(
-                        request_id.0,
+                    Err(_) => request.fail_with_attached_json(
                         json_rpc::parse::ErrorResponse::InvalidParams,
-                        Some(&serde_json::to_string("multiaddr doesn't end with /p2p").unwrap()),
+                        &serde_json::to_string("multiaddr doesn't end with /p2p").unwrap(),
                     ),
                 }
             }
-            Ok(_) => json_rpc::parse::build_error_response(
-                request_id.0,
+            Ok(_) => request.fail_with_attached_json(
                 json_rpc::parse::ErrorResponse::InvalidParams,
-                Some(&serde_json::to_string("multiaddr doesn't end with /p2p").unwrap()),
+                &serde_json::to_string("multiaddr doesn't end with /p2p").unwrap(),
             ),
-            Err(err) => json_rpc::parse::build_error_response(
-                request_id.0,
+            Err(err) => request.fail_with_attached_json(
                 json_rpc::parse::ErrorResponse::InvalidParams,
-                Some(&serde_json::to_string(&err.to_string()).unwrap()),
+                &serde_json::to_string(&err.to_string()).unwrap(),
             ),
-        };
-
-        self.requests_subscriptions
-            .respond(request_id.1, response)
-            .await;
+        }
     }
 
     /// Obtain the state trie root hash and number of the given block, and make sure to put it
