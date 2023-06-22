@@ -997,6 +997,18 @@ impl SubscriptionStartProcess {
                     &self.subscription_id,
                 ))
             }
+            methods::MethodCall::chainHead_unstable_body { .. } => {
+                methods::Response::chainHead_unstable_body(Cow::Borrowed(&self.subscription_id))
+            }
+            methods::MethodCall::chainHead_unstable_call { .. } => {
+                methods::Response::chainHead_unstable_call(Cow::Borrowed(&self.subscription_id))
+            }
+            methods::MethodCall::chainHead_unstable_follow { .. } => {
+                methods::Response::chainHead_unstable_follow(Cow::Borrowed(&self.subscription_id))
+            }
+            methods::MethodCall::chainHead_unstable_storage { .. } => {
+                methods::Response::chainHead_unstable_storage(Cow::Borrowed(&self.subscription_id))
+            }
             _ => unreachable!(),
         }
         .to_json_response(request_id);
