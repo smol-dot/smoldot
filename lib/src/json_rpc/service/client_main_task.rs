@@ -128,7 +128,7 @@ pub struct Config {
     pub max_active_subscriptions: u32,
 
     /// Number of elements in the channels between the [`ClientMainTask`] and
-    /// [`SerializedRequestIo`]. If the value is too high, more memory will be used than necessary.
+    /// [`SerializedRequestsIo`]. If the value is too high, more memory will be used than necessary.
     /// If the value is too low, there might be more task switches than necessary.
     ///
     /// A typical reasonable value is 4.
@@ -788,7 +788,7 @@ impl fmt::Debug for SerializedRequestsIo {
     }
 }
 
-/// See [`SerializedRequestsio::wait_next_response`].
+/// See [`SerializedRequestsIo::wait_next_response`].
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum WaitNextResponseError {
     /// The attached [`ClientMainTask`] has been destroyed.

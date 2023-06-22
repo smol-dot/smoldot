@@ -99,7 +99,7 @@ pub fn build_json_call_object_parameters(id_json: Option<&str>, method: MethodCa
     method.to_json_call_object_parameters(id_json)
 }
 
-/// See [`ParseError::Method`] or [`ParseNotificationError::Method`].
+/// See [`ParseCallError::Method`] or [`ParseNotificationError::Method`].
 #[derive(Debug, derive_more::Display)]
 pub enum MethodError<'a> {
     /// Call concerns a method that isn't recognized.
