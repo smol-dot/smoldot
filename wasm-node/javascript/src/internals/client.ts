@@ -332,8 +332,9 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
             case "new-connection": {
                 const connectionId = event.connectionId;
 
+                let connection;
                 try {
-                    const connection = platformBindings.connect({
+                    connection = platformBindings.connect({
                         address: event.address,
                         onConnectionReset(message) {
                             if (state.instance.status !== "ready")
@@ -368,16 +369,16 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                         },
                     });
 
-                    state.connections.set(connectionId, connection);
-
                 } catch(error) {
                     const errorMsg = error instanceof Error ? error.toString() : "Uncaught exception while connecting";
                     setTimeout(() => {
                         if (state.instance.status === 'ready')
                             state.instance.instance.connectionReset(connectionId, errorMsg);
                     }, 0);
+                    break;
                 }
 
+                state.connections.set(connectionId, connection);
                 break;
             }
             case "connection-reset": {
