@@ -285,10 +285,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "atomic"
-version = "0.5.3"
+name = "atomic-take"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c59bdb34bc650a32731b31bd8f0829cc15d24a708ee31559e0bb34f2bc320cba"
+checksum = "a8ab6b55fe97976e46f91ddbed8d147d966475dc29b2032757ba47e02376fbc3"
 
 [[package]]
 name = "atomic-waker"
@@ -2333,8 +2333,9 @@ name = "smoldot"
 version = "0.8.0"
 dependencies = [
  "arrayvec 0.7.4",
+ "async-channel",
  "async-lock",
- "atomic",
+ "atomic-take",
  "base64 0.21.2",
  "bip39",
  "blake2-rfc",
@@ -2416,6 +2417,7 @@ dependencies = [
 name = "smoldot-light"
 version = "0.6.0"
 dependencies = [
+ "async-channel",
  "async-lock",
  "blake2-rfc",
  "derive_more",

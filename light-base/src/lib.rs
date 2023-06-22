@@ -865,7 +865,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 // supposed to know what happens within the client, they can't rationally decide
                 // what value is appropriate.
                 max_parallel_requests: NonZeroU32::new(24).unwrap(),
-                max_parallel_subscription_updates: NonZeroU32::new(8).unwrap(),
             });
 
             let system_name = self.platform.client_name().into_owned();
