@@ -77,7 +77,7 @@ struct Inner {
     // TODO: shrink to fit from time to time?
     active_subscriptions:
         hashbrown::HashMap<String, Arc<SubscriptionKillChannel>, fnv::FnvBuildHasher>,
-    /// Maximum value that [`Inner::num_active_subscriptions`] is allowed to reach. Beyond this,
+    /// Maximum size that [`Inner::active_subscriptions`] is allowed to reach. Beyond this,
     /// subscription start requests are automatically denied.
     max_active_subscriptions: u32,
 
