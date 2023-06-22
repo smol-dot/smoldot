@@ -142,9 +142,11 @@ pub fn client_main_task(config: Config) -> (ClientMainTask, SerializedRequestsIo
     let (serialized_rp_sender, serialized_rp_receiver) =
         mpsc::channel(config.serialized_requests_io_channel_size_hint.get());
 
-    let buffers_capacity =
-        usize::try_from(config.max_pending_requests.get() + config.max_active_subscriptions)
-            .unwrap_or(usize::max_value());
+    let buffers_capacity = usize::try_from(config.max_pending_requests.get())
+        .unwrap_or(usize::max_value())
+        .saturating_add(
+            usize::try_from(config.max_active_subscriptions).unwrap_or(usize::max_value()),
+        );
 
     let task = ClientMainTask {
         inner: Box::new(Inner {
