@@ -19,7 +19,7 @@
 //!
 //! # Usage
 //!
-//! Create a new JSON-RPC service by calling [`service`] then [`ServicePrototype::start`].
+//! Create a new JSON-RPC service by calling [`service()`] then [`ServicePrototype::start`].
 //! Creating a JSON-RPC service spawns a background task (through [`PlatformRef::spawn_task`])
 //! dedicated to processing JSON-RPC requests.
 //!
@@ -52,7 +52,7 @@ use smoldot::{
     libp2p::PeerId,
 };
 
-/// Configuration for [`service`].
+/// Configuration for [`service()`].
 pub struct Config {
     /// Name of the chain, for logging purposes.
     ///
@@ -144,8 +144,7 @@ pub struct Frontend {
     /// Target to use when emitting logs.
     log_target: String,
 
-    /// Handles to abort the background tasks that hold and process the
-    /// [`Frontend::requests_subscriptions`].
+    /// Handles to abort the background tasks.
     background_aborts: Arc<[future::AbortHandle]>,
 }
 
