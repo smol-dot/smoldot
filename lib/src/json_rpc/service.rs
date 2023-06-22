@@ -17,8 +17,7 @@
 
 pub mod client_main_task;
 pub mod deliver_channel;
-pub mod getters;
 
-// TODO: ?
+// TODO: import paths?
 pub use self::client_main_task::*;
 pub use self::deliver_channel::*;
