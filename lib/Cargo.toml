@@ -54,7 +54,7 @@ futures-util = { version = "0.3.27", default-features = false, features = ["std"
 hashbrown = { version = "0.14.0", default-features = false, features = ["serde"] }   # TODO: remove serde feature
 hex = { version = "0.4.3", default-features = false }
 hmac = { version = "0.12.1", default-features = false }
-itertools = { version = "0.10.5", default-features = false }
+itertools = { version = "0.11.0", default-features = false }
 libsecp256k1 = { version = "0.7.1", default-features = false, features = ["static-context", "hmac"] }
 # The log` crate is forbidden, as it is very impolite to emit logs from a library.
 merlin = { version = "3.0", default-features = false }
