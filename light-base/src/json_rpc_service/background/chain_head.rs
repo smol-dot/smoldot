@@ -748,130 +748,43 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 _ => unreachable!(),
             },
             either::Right(request) => match request.request() {
-                methods::MethodCall::chainHead_unstable_body {
-                    follow_subscription: _,
-                    hash,
-                    network_config,
-                } => {
-                    // Determine whether the requested block hash is valid, and if yes its number.
-                    let block_number = {
-                        if let Some(header) = self.pinned_blocks_headers.get(&hash.0) {
-                            let decoded =
-                                header::decode(header, self.sync_service.block_number_bytes())
-                                    .unwrap(); // TODO: unwrap?
-                            Some(decoded.number)
-                        } else {
-                            request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
-                            return;
-                        }
-                    };
-
-                    let network_config = network_config.unwrap_or(methods::NetworkConfig {
-                        max_parallel: 1,
-                        timeout_ms: 4000,
-                        total_attempts: 3,
-                    });
-
-                    self.start_chain_head_body(
-                        request.accept(),
-                        hash,
-                        network_config,
-                        block_number,
-                    )
-                    .await;
+                methods::MethodCall::chainHead_unstable_body { .. } => {
+                    self.start_chain_head_body(request).await;
                 }
-                methods::MethodCall::chainHead_unstable_storage {
-                    follow_subscription: _,
-                    hash,
-                    key,
-                    child_trie,
-                    ty,
-                    network_config,
-                } => {
-                    // Obtain the header of the requested block.
-                    // Contains `None` if the subscription is disjoint.
-                    let block_scale_encoded_header = {
-                        if let Some(header) = self.pinned_blocks_headers.get(&hash.0) {
-                            Some(header.clone())
-                        } else {
-                            request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
-                            return;
-                        }
-                    };
-
-                    let network_config = network_config.unwrap_or(methods::NetworkConfig {
-                        max_parallel: 1,
-                        timeout_ms: 8000,
-                        total_attempts: 3,
-                    });
-
-                    self.start_chain_head_storage(
-                        request,
-                        hash,
-                        key,
-                        child_trie,
-                        ty,
-                        network_config,
-                        block_scale_encoded_header,
-                    )
-                    .await;
+                methods::MethodCall::chainHead_unstable_storage { .. } => {
+                    self.start_chain_head_storage(request).await;
                 }
-                methods::MethodCall::chainHead_unstable_call {
-                    follow_subscription: _,
-                    hash,
-                    function,
-                    call_parameters,
-                    network_config,
-                } => {
-                    // Determine whether the requested block hash is valid and start the call.
-                    let pre_runtime_call = match self.subscription {
-                        Subscription::WithRuntime {
-                            subscription_id, ..
-                        } => {
-                            if !self.pinned_blocks_headers.contains_key(&hash.0) {
-                                request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
-                                return;
-                            }
-
-                            self.runtime_service
-                                .pinned_block_runtime_access(subscription_id, &hash.0)
-                                .await
-                                .ok()
-                        }
-                        Subscription::WithoutRuntime(_) => {
-                            request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
-                            return;
-                        }
-                    };
-
-                    let network_config = network_config.unwrap_or(methods::NetworkConfig {
-                        max_parallel: 1,
-                        timeout_ms: 8000,
-                        total_attempts: 3,
-                    });
-
-                    let function = function.into_owned();
-                    self.start_chain_head_call(
-                        request.accept(),
-                        &function,
-                        call_parameters,
-                        pre_runtime_call,
-                        network_config,
-                    )
-                    .await;
+                methods::MethodCall::chainHead_unstable_call { .. } => {
+                    self.start_chain_head_call(request).await;
                 }
                 _ => unreachable!(),
             },
         }
     }
 
-    async fn start_chain_head_body(
-        &mut self,
-        mut subscription: service::Subscription,
-        hash: methods::HashHexString,
-        network_config: methods::NetworkConfig,
-        block_number: Option<u64>,
-    ) {
+    async fn start_chain_head_body(&mut self, request: service::SubscriptionStartProcess) {
+        let methods::MethodCall::chainHead_unstable_body { hash, network_config, .. } = request.request()
+            else { unreachable!() };
+
+        // Determine whether the requested block hash is valid, and if yes its number.
+        let block_number = {
+            if let Some(header) = self.pinned_blocks_headers.get(&hash.0) {
+                let decoded =
+                    header::decode(header, self.sync_service.block_number_bytes()).unwrap(); // TODO: unwrap?
+                Some(decoded.number)
+            } else {
+                request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
+                return;
+            }
+        };
+
+        let network_config = network_config.unwrap_or(methods::NetworkConfig {
+            max_parallel: 1,
+            timeout_ms: 4000,
+            total_attempts: 3,
+        });
+
+        let mut subscription = request.accept();
         let subscription_id = subscription.subscription_id().to_owned();
 
         self.platform
@@ -949,16 +862,34 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             });
     }
 
-    async fn start_chain_head_storage(
-        &mut self,
-        request: service::SubscriptionStartProcess,
-        hash: methods::HashHexString,
-        key: methods::HexString,
-        child_trie: Option<methods::HexString>,
-        ty: methods::ChainHeadStorageType,
-        network_config: methods::NetworkConfig,
-        block_scale_encoded_header: Option<Vec<u8>>,
-    ) {
+    async fn start_chain_head_storage(&mut self, request: service::SubscriptionStartProcess) {
+        let methods::MethodCall::chainHead_unstable_storage {
+            hash,
+            key,
+            child_trie,
+            ty,
+            network_config,
+            ..
+        } = request.request()
+            else { unreachable!() };
+
+        // Obtain the header of the requested block.
+        // Contains `None` if the subscription is disjoint.
+        let block_scale_encoded_header = {
+            if let Some(header) = self.pinned_blocks_headers.get(&hash.0) {
+                Some(header.clone())
+            } else {
+                request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
+                return;
+            }
+        };
+
+        let network_config = network_config.unwrap_or(methods::NetworkConfig {
+            max_parallel: 1,
+            timeout_ms: 8000,
+            total_attempts: 3,
+        });
+
         if child_trie.is_some() {
             // TODO: implement this
             request.fail(json_rpc::parse::ErrorResponse::ServerError(
@@ -1082,25 +1013,62 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         });
     }
 
-    async fn start_chain_head_call(
-        &mut self,
-        mut subscription: service::Subscription,
-        function_to_call: &str,
-        call_parameters: methods::HexString,
-        pre_runtime_call: Option<runtime_service::RuntimeAccess<TPlat>>,
-        network_config: methods::NetworkConfig,
-    ) {
+    async fn start_chain_head_call(&mut self, request: service::SubscriptionStartProcess) {
+        let (hash, function_to_call, call_parameters, network_config) = {
+            let methods::MethodCall::chainHead_unstable_call {
+                hash,
+                function,
+                call_parameters,
+                network_config,
+                ..
+            } = request.request()
+                else { unreachable!() };
+
+            let network_config = network_config.unwrap_or(methods::NetworkConfig {
+                max_parallel: 1,
+                timeout_ms: 8000,
+                total_attempts: 3,
+            });
+
+            (
+                hash,
+                function.into_owned(),
+                call_parameters.0,
+                network_config,
+            )
+        };
+
+        // Determine whether the requested block hash is valid and start the call.
+        let pre_runtime_call = match self.subscription {
+            Subscription::WithRuntime {
+                subscription_id, ..
+            } => {
+                if !self.pinned_blocks_headers.contains_key(&hash.0) {
+                    request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
+                    return;
+                }
+
+                self.runtime_service
+                    .pinned_block_runtime_access(subscription_id, &hash.0)
+                    .await
+                    .ok()
+            }
+            Subscription::WithoutRuntime(_) => {
+                request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
+                return;
+            }
+        };
+
+        let mut subscription = request.accept();
         let subscription_id = subscription.subscription_id().to_owned();
 
         self.platform
             .spawn_task(format!("{}-chain-head-call", self.log_target).into(), {
-            let function_to_call = function_to_call.to_owned();
-
             async move {
                 let pre_runtime_call = if let Some(pre_runtime_call) = &pre_runtime_call {
                     let call_future = pre_runtime_call.start(
                         &function_to_call,
-                        iter::once(&call_parameters.0),
+                        iter::once(&call_parameters),
                         cmp::min(10, network_config.total_attempts),
                         Duration::from_millis(u64::from(cmp::min(
                             20000,
@@ -1122,7 +1090,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         match runtime_host::run(runtime_host::Config {
                             virtual_machine,
                             function_to_call: &function_to_call,
-                            parameter: iter::once(&call_parameters.0),
+                            parameter: iter::once(&call_parameters),
                             offchain_storage_changes: Default::default(),
                             storage_main_trie_changes: Default::default(),
                             max_log_level: 0,
