@@ -508,11 +508,16 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     }
                 });
                 let next_message = pin::pin!(messages_rx.next());
-                // TODO: doesn't check for unsubscription /!\
 
-                match future::select(next_block, next_message).await {
-                    future::Either::Left((v, _)) => either::Left(v),
-                    future::Either::Right((v, _)) => either::Right(v),
+                match future::select(
+                    future::select(next_block, next_message),
+                    pin::pin!(subscription.wait_until_stale()),
+                )
+                .await
+                {
+                    future::Either::Left((future::Either::Left((v, _)), _)) => either::Left(v),
+                    future::Either::Left((future::Either::Right((v, _)), _)) => either::Right(v),
+                    future::Either::Right(((), _)) => return,
                 }
             };
 
