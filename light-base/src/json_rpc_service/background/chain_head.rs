@@ -35,6 +35,7 @@ use core::{
     time::Duration,
 };
 use futures_channel::mpsc;
+use futures_lite::FutureExt as _;
 use futures_util::{future, FutureExt as _, StreamExt as _};
 use hashbrown::HashMap;
 use smoldot::{
@@ -880,7 +881,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 async move {
                     if let Some(block_number) = block_number {
                         // TODO: right now we query the header because the underlying function returns an error if we don't
-                        let mut future = pin::pin!(sync_service.clone().block_query(
+                        let future = sync_service.clone().block_query(
                             block_number,
                             hash.0,
                             protocol::BlocksRequestFields {
@@ -894,18 +895,19 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                 network_config.timeout_ms,
                             ))),
                             NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
-                        ));
+                        );
 
-                        let outcome = {
-                            let unsubscribed = pin::pin!(subscription.wait_until_stale());
-                            match future::select(&mut future, unsubscribed).await {
-                                future::Either::Left((v, _)) => either::Left(v),
-                                future::Either::Right((v, _)) => either::Right(v),
-                            }
+                        let outcome = match future
+                            .map(Some)
+                            .race(subscription.wait_until_stale().map(|()| None))
+                            .await
+                        {
+                            Some(v) => v,
+                            None => return, // JSON-RPC client has unsubscribed in the meanwhile.
                         };
 
                         match outcome {
-                            either::Left(Ok(block_data)) => {
+                            Ok(block_data) => {
                                 subscription
                                     .send_notification(
                                         methods::ServerToClient::chainHead_unstable_bodyEvent {
@@ -922,7 +924,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                     )
                                     .await;
                             }
-                            either::Left(Err(())) => {
+                            Err(()) => {
                                 subscription
                                     .send_notification(
                                         methods::ServerToClient::chainHead_unstable_bodyEvent {
@@ -932,8 +934,6 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                     )
                                     .await;
                             }
-                            // TODO: useless variant
-                            either::Right(()) => {}
                         }
                     } else {
                         subscription
@@ -1005,7 +1005,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     .map(|h| header::decode(h, sync_service.block_number_bytes()))
                 {
                     Some(Ok(decoded_header)) => {
-                        let mut future = pin::pin!(sync_service.clone().storage_query(
+                        let future = sync_service.clone().storage_query(
                             decoded_header.number,
                             &hash.0,
                             decoded_header.state_root,
@@ -1016,18 +1016,19 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                 network_config.timeout_ms,
                             ))),
                             NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
-                        ));
+                        );
 
-                        let outcome = {
-                            let unsubscribed = pin::pin!(subscription.wait_until_stale());
-                            match future::select(&mut future, unsubscribed).await {
-                                future::Either::Left((v, _)) => either::Left(v),
-                                future::Either::Right((v, _)) => either::Right(v),
-                            }
+                        let outcome = match future
+                            .map(Some)
+                            .race(subscription.wait_until_stale().map(|()| None))
+                            .await
+                        {
+                            Some(v) => v,
+                            None => return,  // JSON-RPC client has unsubscribed in the meanwhile.
                         };
 
                         match outcome {
-                            either::Left(Ok(values)) => {
+                            Ok(values) => {
                                 // `storage_query` returns a list of values because it can perform
                                 // multiple queries at once. In our situation, we only start one query
                                 // and as such the outcome only ever contains one element.
@@ -1054,14 +1055,12 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                     result: methods::ChainHeadStorageEvent::Done,
                                 }).await;
                             }
-                            either::Left(Err(_)) => {
+                            Err(_) => {
                                 subscription.send_notification(methods::ServerToClient::chainHead_unstable_storageEvent {
                                     subscription: (&subscription_id).into(),
                                     result: methods::ChainHeadStorageEvent::Inaccessible {},
                                 }).await;
                             }
-                            // TODO: useless variant
-                            either::Right(()) => {}
                         }
                     }
                     Some(Err(err)) => {
@@ -1099,7 +1098,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
 
             async move {
                 let pre_runtime_call = if let Some(pre_runtime_call) = &pre_runtime_call {
-                    let mut call_future = pin::pin!(pre_runtime_call.start(
+                    let call_future = pre_runtime_call.start(
                         &function_to_call,
                         iter::once(&call_parameters.0),
                         cmp::min(10, network_config.total_attempts),
@@ -1108,21 +1107,11 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             network_config.timeout_ms,
                         ))),
                         NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
-                    ));
+                    );
 
-                    let outcome = {
-                        let unsubscribed = pin::pin!(subscription.wait_until_stale());
-                        match future::select(&mut call_future, unsubscribed).await {
-                            future::Either::Left((v, _)) => either::Left(v),
-                            future::Either::Right((v, _)) => either::Right(v),
-                        }
-                    };
-
-                    match outcome {
-                        either::Left(outcome) => Some(outcome),
-                        either::Right(()) => {
-                            return;
-                        }
+                    match call_future.map(Some).race(subscription.wait_until_stale().map(|()| None)).await {
+                        Some(v) => Some(v),
+                        None => return  // JSON-RPC client has unsubscribed in the meanwhile.
                     }
                 } else {
                     None
