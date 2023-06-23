@@ -754,6 +754,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     header::decode(header, self.sync_service.block_number_bytes()).unwrap(); // TODO: unwrap?
                 Some(decoded.number)
             } else {
+                // Block isn't pinned. Request is invalid.
                 request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
                 return;
             }
@@ -768,10 +769,10 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         let mut subscription = request.accept();
         let subscription_id = subscription.subscription_id().to_owned();
 
+        // Finish the request asynchronously.
         self.platform
             .spawn_task(format!("{}-chain-head-body", self.log_target).into(), {
                 let sync_service = self.sync_service.clone();
-
                 async move {
                     if let Some(block_number) = block_number {
                         // TODO: right now we query the header because the underlying function returns an error if we don't
@@ -791,6 +792,8 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
                         );
 
+                        // Drive the future, but cancel execution if the JSON-RPC client
+                        // unsubscribes.
                         let outcome = match future
                             .map(Some)
                             .race(subscription.wait_until_stale().map(|()| None))
@@ -860,6 +863,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             if let Some(header) = self.pinned_blocks_headers.get(&hash.0) {
                 Some(header.clone())
             } else {
+                // Block isn't pinned. Request is invalid.
                 request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
                 return;
             }
@@ -908,6 +912,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         let mut subscription = request.accept();
         let subscription_id = subscription.subscription_id().to_owned();
 
+        // Finish the call asynchronously.
         self.platform
             .spawn_task(format!("{}-chain-head-storage", self.log_target).into(), {
             let sync_service = self.sync_service.clone();
@@ -930,6 +935,8 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
                         );
 
+                        // Drive the future, but cancel execution if the JSON-RPC client
+                        // unsubscribes.
                         let outcome = match future
                             .map(Some)
                             .race(subscription.wait_until_stale().map(|()| None))
@@ -1025,6 +1032,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 subscription_id, ..
             } => {
                 if !self.pinned_blocks_headers.contains_key(&hash.0) {
+                    // Block isn't pinned. Request is invalid.
                     request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
                     return;
                 }
@@ -1035,6 +1043,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     .ok()
             }
             Subscription::WithoutRuntime(_) => {
+                // It is invalid to call this function for a "without runtime" subscription.
                 request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
                 return;
             }
@@ -1043,6 +1052,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         let mut subscription = request.accept();
         let subscription_id = subscription.subscription_id().to_owned();
 
+        // Finish the call asynchronously.
         self.platform
             .spawn_task(format!("{}-chain-head-call", self.log_target).into(), {
             async move {
@@ -1058,6 +1068,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
                     );
 
+                    // Drive the future, but cancel execution if the JSON-RPC client unsubscribes.
                     match call_future.map(Some).race(subscription.wait_until_stale().map(|()| None)).await {
                         Some(v) => Some(v),
                         None => return  // JSON-RPC client has unsubscribed in the meanwhile.
