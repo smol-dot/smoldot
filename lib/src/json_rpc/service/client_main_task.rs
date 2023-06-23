@@ -805,7 +805,7 @@ impl SerializedRequestsIo {
         {
             return Err(TrySendRequestError {
                 request,
-                cause: TrySendRequestErrorCause::TooManyRequestInFly,
+                cause: TrySendRequestErrorCause::TooManyPendingRequests,
             });
         }
 
@@ -848,7 +848,7 @@ pub enum TrySendRequestErrorCause {
     /// Limit to the maximum number of pending requests that was passed as
     /// [`Config::max_pending_requests`] has been reached. No more requests can be sent before
     /// some responses have been pulled.
-    TooManyRequestInFly,
+    TooManyPendingRequests,
     /// The attached [`ClientMainTask`] has been destroyed.
     ClientMainTaskDestroyed,
 }

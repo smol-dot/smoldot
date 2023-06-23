@@ -182,7 +182,7 @@ impl Frontend {
         {
             Ok(()) => Ok(()),
             Err(service::TrySendRequestError {
-                cause: service::TrySendRequestErrorCause::TooManyRequestInFly,
+                cause: service::TrySendRequestErrorCause::TooManyPendingRequests,
                 request,
             }) => Err(HandleRpcError::TooManyPendingRequests {
                 json_rpc_request: request,
