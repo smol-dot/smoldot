@@ -1217,6 +1217,21 @@ async fn update_round<TPlat: PlatformRef>(
                                 service::DiscoveryError::FindNode(
                                     service::KademliaFindNodeError::RequestFailed(err),
                                 ) if !err.is_protocol_error() => {}
+                                service::DiscoveryError::FindNode(
+                                    service::KademliaFindNodeError::RequestFailed(
+                                        peers::RequestError::Substream(connection::established::RequestError::ProtocolNotAvailable)
+                                    ))
+                                => {
+                                    // TODO: remove this warning in a long time
+                                    log::warn!(
+                                        target: "connections",
+                                        "Problem during discovery on {}: protocol not available. \
+                                        This might indicate that the version of Substrate used by \
+                                        the chain doesn't include \
+                                        <https://github.com/paritytech/substrate/pull/12545>.",
+                                        &shared.log_chain_names[chain_index]
+                                    );
+                                }
                                 _ => {
                                     log::warn!(
                                         target: "connections",
