@@ -584,13 +584,7 @@ impl Drop for StreamWrapper {
                 ..
             } => {
                 *connection_handles_alive -= 1;
-                let remove_connection = *connection_handles_alive == 0;
-                if remove_connection {
-                    unsafe {
-                        bindings::reset_connection(self.connection_id);
-                    }
-                }
-                remove_connection
+                *connection_handles_alive == 0
             }
         };
 
