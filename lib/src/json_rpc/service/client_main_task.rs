@@ -23,14 +23,14 @@ use alloc::{
     boxed::Box,
     collections::VecDeque,
     string::{String, ToString as _},
-    sync::Arc,
+    sync::{Arc, Weak},
 };
 use async_lock::Mutex;
 use core::{
     cmp, fmt, mem,
     num::{NonZeroU32, NonZeroUsize},
     ptr,
-    sync::atomic::{AtomicPtr, Ordering},
+    sync::atomic::{AtomicPtr, AtomicU32, Ordering},
     task::Poll,
 };
 use futures_channel::mpsc;
@@ -61,15 +61,6 @@ struct Inner {
     // TODO: better strategy than just integers?
     next_subscription_id: u64,
 
-    /// Number of requests that have have been received from the client but whose answer hasn't
-    /// been sent back to the client yet. Includes requests whose response is in
-    /// [`Inner::pending_serialized_responses`].
-    num_requests_in_fly: u32,
-    /// Maximum value that [`Inner::num_requests_in_fly`] is allowed to reach. Beyond this, the
-    /// [`Inner::serialized_rq_receiver`] is back-pressured in order to not receive any more
-    /// request.
-    max_requests_in_fly: NonZeroU32,
-
     /// List of all active subscriptions. Keys are subscription IDs.
     ///
     /// Given that the subscription IDs are allocated locally, there is no harm in using a
@@ -81,14 +72,31 @@ struct Inner {
     /// subscription start requests are automatically denied.
     max_active_subscriptions: u32,
 
-    /// Channel connected to the [`SerializedRequestsIo`]. The requests received are guaranteed to
-    /// be a valid request JSON, but not necessarily to use a known method.
-    serialized_rq_receiver: async_channel::Receiver<String>,
+    /// Structure shared with the [`SerializedRequestsIo`]. The requests received are guaranteed
+    /// to be a valid request JSON, but not necessarily to use a known method.
+    serialized_requests_queue: Arc<SerializedRequestsQueue>,
     /// Channel connected to the [`SerializedRequestsIo`].
     serialized_rp_sender: mpsc::Sender<String>,
 
     /// Queue where responses and subscriptions push responses/notifications.
     responses_notifications_queue: Arc<ResponsesNotificationsQueue>,
+}
+
+struct SerializedRequestsQueue {
+    /// The actual queue.
+    queue: crossbeam_queue::SegQueue<String>,
+
+    /// Event notified after an element from [`SerializedRequestsQueue::queue`] has been pushed.
+    on_pushed: event_listener::Event,
+
+    /// Number of requests that have have been received from the client but whose answer hasn't
+    /// been sent back to the client yet. Includes requests whose response is still in
+    /// [`Inner::pending_serialized_responses`].
+    num_requests_in_fly: AtomicU32,
+
+    /// Maximum value that [`SerializedRequestsQueue::num_requests_in_fly`] is allowed to reach.
+    /// Beyond this, no more request should be added to [`SerializedRequestsQueue::queue`].
+    max_requests_in_fly: NonZeroU32,
 }
 
 /// Queue where responses and subscriptions push responses/notifications.
@@ -137,8 +145,6 @@ pub struct Config {
 
 /// Creates a new [`ClientMainTask`] and a [`SerializedRequestsIo`] connected to it.
 pub fn client_main_task(config: Config) -> (ClientMainTask, SerializedRequestsIo) {
-    let (serialized_rq_sender, serialized_rq_receiver) =
-        async_channel::bounded(config.serialized_requests_io_channel_size_hint.get());
     let (serialized_rp_sender, serialized_rp_receiver) =
         mpsc::channel(config.serialized_requests_io_channel_size_hint.get());
 
@@ -156,8 +162,6 @@ pub fn client_main_task(config: Config) -> (ClientMainTask, SerializedRequestsIo
             )),
             pending_serialized_responses: Slab::with_capacity(cmp::min(64, buffers_capacity)),
             next_subscription_id: 1,
-            num_requests_in_fly: 0,
-            max_requests_in_fly: config.max_pending_requests,
             active_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
                 cmp::min(
                     usize::try_from(config.max_active_subscriptions).unwrap_or(usize::max_value()),
@@ -166,7 +170,12 @@ pub fn client_main_task(config: Config) -> (ClientMainTask, SerializedRequestsIo
                 Default::default(),
             ),
             max_active_subscriptions: config.max_active_subscriptions,
-            serialized_rq_receiver,
+            serialized_requests_queue: Arc::new(SerializedRequestsQueue {
+                queue: crossbeam_queue::SegQueue::new(),
+                on_pushed: event_listener::Event::new(),
+                num_requests_in_fly: AtomicU32::new(0),
+                max_requests_in_fly: config.max_pending_requests,
+            }),
             serialized_rp_sender,
             responses_notifications_queue: Arc::new(ResponsesNotificationsQueue {
                 queue: crossbeam_queue::SegQueue::new(),
@@ -178,7 +187,7 @@ pub fn client_main_task(config: Config) -> (ClientMainTask, SerializedRequestsIo
     };
 
     let serialized_requests_io = SerializedRequestsIo {
-        requests_sender: serialized_rq_sender,
+        serialized_requests_queue: Arc::downgrade(&task.inner.serialized_requests_queue),
         responses_receiver: Mutex::new(serialized_rp_receiver),
     };
 
@@ -204,12 +213,19 @@ impl ClientMainTask {
                     }
                 });
 
-                let next_serialized_request =
-                    if self.inner.num_requests_in_fly < self.inner.max_requests_in_fly.get() {
-                        either::Left(self.inner.serialized_rq_receiver.next())
-                    } else {
-                        either::Right(future::pending())
-                    };
+                let next_serialized_request = async {
+                    let mut wait = None;
+                    loop {
+                        if let Some(elem) = self.inner.serialized_requests_queue.queue.pop() {
+                            break elem;
+                        }
+                        if let Some(wait) = wait.take() {
+                            wait.await
+                        } else {
+                            wait = Some(self.inner.serialized_requests_queue.on_pushed.listen());
+                        }
+                    }
+                };
 
                 let response_notif = async {
                     let mut wait = None;
@@ -227,7 +243,7 @@ impl ClientMainTask {
                 };
 
                 match future::select(
-                    future::select(when_ready_to_send, next_serialized_request),
+                    future::select(when_ready_to_send, core::pin::pin!(next_serialized_request)),
                     core::pin::pin!(response_notif),
                 )
                 .await
@@ -238,11 +254,8 @@ impl ClientMainTask {
                     future::Either::Left((future::Either::Left((Err(_), _)), _)) => {
                         return Event::SerializedRequestsIoClosed
                     }
-                    future::Either::Left((future::Either::Right((Some(request), _)), _)) => {
+                    future::Either::Left((future::Either::Right((request, _)), _)) => {
                         WhatHappened::NewRequest(request)
-                    }
-                    future::Either::Left((future::Either::Right((None, _)), _)) => {
-                        return Event::SerializedRequestsIoClosed
                     }
                     future::Either::Right((message, _)) => WhatHappened::Message(message),
                 }
@@ -270,8 +283,12 @@ impl ClientMainTask {
                         .start_send(response_or_notif);
 
                     if is_response {
-                        debug_assert!(self.inner.num_requests_in_fly >= 1);
-                        self.inner.num_requests_in_fly -= 1;
+                        let _prev_val = self
+                            .inner
+                            .serialized_requests_queue
+                            .num_requests_in_fly
+                            .fetch_sub(1, Ordering::Release);
+                        debug_assert_ne!(_prev_val, u32::max_value()); // Check underflows.
                     }
 
                     // Shrink containers if necessary in order to reduce memory usage after a
@@ -299,13 +316,7 @@ impl ClientMainTask {
 
                     continue;
                 }
-                WhatHappened::NewRequest(request) => {
-                    self.inner.num_requests_in_fly += 1;
-                    debug_assert!(
-                        self.inner.num_requests_in_fly <= self.inner.max_requests_in_fly.get()
-                    );
-                    request
-                }
+                WhatHappened::NewRequest(request) => request,
                 WhatHappened::Message(ToMainTask::RequestResponse(response)) => {
                     let pos = self
                         .inner
@@ -729,8 +740,8 @@ pub enum Event {
 /// Object connected to the [`ClientMainTask`] that allows sending requests to the task and
 /// receiving responses.
 pub struct SerializedRequestsIo {
-    // TODO: instead of using channels we could do things manually, which would lead to less waker registrations
-    requests_sender: async_channel::Sender<String>,
+    serialized_requests_queue: Weak<SerializedRequestsQueue>,
+    // TODO: instead of using a channel we could do things manually, which would lead to less waker registrations
     responses_receiver: Mutex<mpsc::Receiver<String>>,
 }
 
@@ -768,17 +779,39 @@ impl SerializedRequestsIo {
             });
         }
 
-        match self.requests_sender.try_send(request) {
-            Ok(()) => Ok(()),
-            Err(async_channel::TrySendError::Full(request)) => Err(TrySendRequestError {
+        let Some(queue) = self.serialized_requests_queue.upgrade()
+            else {
+                return Err(TrySendRequestError {
+                    request,
+                    cause: TrySendRequestErrorCause::ClientMainTaskDestroyed,
+                });
+            };
+
+        // Try to increment `num_requests_in_fly`. Return an error if it is past the maximum.
+        if queue
+            .num_requests_in_fly
+            .fetch_update(Ordering::SeqCst, Ordering::Relaxed, |old_value| {
+                if old_value < queue.max_requests_in_fly.get() {
+                    // Considering that `old_value < max`, and `max` fits in a `u32` by
+                    // definition, then `old_value + 1` also always fits in a `u32`. QED.
+                    // There's no risk of overflow.
+                    Some(old_value + 1)
+                } else {
+                    None
+                }
+            })
+            .is_err()
+        {
+            return Err(TrySendRequestError {
                 request,
-                cause: TrySendRequestErrorCause::QueueFull,
-            }),
-            Err(async_channel::TrySendError::Closed(request)) => Err(TrySendRequestError {
-                request,
-                cause: TrySendRequestErrorCause::ClientMainTaskDestroyed,
-            }),
+                cause: TrySendRequestErrorCause::TooManyPendingRequests,
+            });
         }
+
+        // Everything successful.
+        queue.queue.push(request);
+        queue.on_pushed.notify(usize::max_value());
+        Ok(())
     }
 }
 
@@ -811,8 +844,10 @@ pub enum TrySendRequestErrorCause {
     /// Data is not JSON, or JSON is missing or has invalid fields.
     #[display(fmt = "{_0}")]
     MalformedJson(ParseError),
-    /// Queue of JSON-RPC requests to the [`ClientMainTask`] is full.
-    QueueFull,
+    /// Limit to the maximum number of pending requests that was passed as
+    /// [`Config::max_pending_requests`] has been reached. No more requests can be sent before
+    /// some responses have been pulled.
+    TooManyPendingRequests,
     /// The attached [`ClientMainTask`] has been destroyed.
     ClientMainTaskDestroyed,
 }

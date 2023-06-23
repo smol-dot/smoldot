@@ -2342,7 +2342,6 @@ name = "smoldot"
 version = "0.8.0"
 dependencies = [
  "arrayvec 0.7.4",
- "async-channel",
  "async-lock",
  "atomic-take",
  "base64 0.21.2",
