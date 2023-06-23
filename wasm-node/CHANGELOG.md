@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fix not absorbing the JavaScript exception triggered by the browser when connecting to a `ws://` node when smoldot is embedded in a web page served over `https://`. ([#795](https://github.com/smol-dot/smoldot/pull/795))
+- Fix potential panic due to race condition when smoldot wants to abort connecting to a peer that we have just failed connecting to. ([#801](https://github.com/smol-dot/smoldot/pull/801))
 
 ## 1.0.10 - 2023-06-19
 
