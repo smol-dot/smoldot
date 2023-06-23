@@ -151,7 +151,17 @@ function connect(config: ConnectionConfig): Connection {
                     connection.onclose = null;
                     connection.onmessage = null;
                     connection.onerror = null;
-                    connection.close();
+
+                    // According to the WebSocket specification, calling `close()` when a WebSocket
+                    // isn't fully opened yet is completely legal and seemingly a normal thing to
+                    // do (see <https://websockets.spec.whatwg.org/#dom-websocket-close>).
+                    // Unfortunately, browsers print a warning in the console if you do that. To
+                    // avoid these warnings, we only call `close()` if the connection is fully
+                    // opened. According to <https://websockets.spec.whatwg.org/#garbage-collection>,
+                    // removing all the event listeners will cause the WebSocket to be garbage
+                    // collected, which should have the same effect as `close()`.
+                    if (connection.readyState == WebSocket.OPEN)
+                        connection.close();
                 }
 
                 connection = null;
