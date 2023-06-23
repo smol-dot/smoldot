@@ -795,7 +795,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     // unsubscribes.
                     let outcome = match future
                         .map(Some)
-                        .race(subscription.wait_until_stale().map(|()| None))
+                        .or(subscription.wait_until_stale().map(|()| None))
                         .await
                     {
                         Some(v) => v,
@@ -944,7 +944,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     // unsubscribes.
                     let outcome = match future
                         .map(Some)
-                        .race(subscription.wait_until_stale().map(|()| None))
+                        .or(subscription.wait_until_stale().map(|()| None))
                         .await
                     {
                         Some(v) => v,
@@ -1090,7 +1090,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     );
 
                     // Drive the future, but cancel execution if the JSON-RPC client unsubscribes.
-                    match call_future.map(Some).race(subscription.wait_until_stale().map(|()| None)).await {
+                    match call_future.map(Some).or(subscription.wait_until_stale().map(|()| None)).await {
                         Some(v) => v,
                         None => return  // JSON-RPC client has unsubscribed in the meanwhile.
                     }
