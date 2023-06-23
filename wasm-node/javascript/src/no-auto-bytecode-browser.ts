@@ -81,6 +81,9 @@ export function startWithBytecode(options: ClientOptionsWithBytecode): Client {
  */
 function connect(config: ConnectionConfig): Connection {
     if (config.address.ty === "websocket") {
+        // Even though the WHATWG specification (<https://websockets.spec.whatwg.org/#dom-websocket-websocket>)
+        // doesn't mention it, `new WebSocket` can throw an exception if the URL is forbidden
+        // for security reasons. We absord this exception as soon as it is thrown.
         // `connection` can be either a `WebSocket` object (the normal case), or a string
         // indicating an error message that must be propagated with `onConnectionReset` as soon
         // as possible, or `null` if the API user considers the connection as reset.
