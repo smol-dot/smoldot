@@ -430,28 +430,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             request.respond(methods::Response::chainHead_unstable_unpin(()));
         }
     }
-
-    /// Handles a call to [`methods::MethodCall::chainHead_unstable_finalizedDatabase`].
-    pub(super) async fn chain_head_unstable_finalized_database(
-        self: &Arc<Self>,
-        request: service::RequestProcess,
-    ) {
-        let methods::MethodCall::chainHead_unstable_finalizedDatabase { max_size_bytes } = request.request()
-            else { unreachable!() };
-
-        let response = crate::database::encode_database(
-            &self.network_service.0,
-            &self.sync_service,
-            &self.genesis_block_hash,
-            usize::try_from(max_size_bytes.unwrap_or(u64::max_value()))
-                .unwrap_or(usize::max_value()),
-        )
-        .await;
-
-        request.respond(methods::Response::chainHead_unstable_finalizedDatabase(
-            response.into(),
-        ));
-    }
 }
 
 fn convert_runtime_spec(
