@@ -101,7 +101,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             either::Right(self.sync_service.subscribe_all(32, false).await)
         };
 
-        let (subscription, rx) = {
+        let (mut subscription, rx) = {
             let (tx, rx) = service::deliver_channel();
             let mut lock = self.chain_head_follow_tasks.lock().await;
             let subscription = request.accept();
@@ -110,12 +110,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         };
         let subscription_id = subscription.subscription_id().to_owned();
 
-        let (initial_notifications, non_finalized_blocks, pinned_blocks_headers, events) = {
-            let mut initial_notifications = Vec::with_capacity(match &events {
-                either::Left((sa, _)) => 1 + sa.non_finalized_blocks_ancestry_order.len(),
-                either::Right(sa) => 1 + sa.non_finalized_blocks_ancestry_order.len(),
-            });
-
+        let (non_finalized_blocks, pinned_blocks_headers, events) = {
             let mut pinned_blocks_headers =
                 HashMap::with_capacity_and_hasher(0, Default::default());
             let mut non_finalized_blocks = fork_tree::ForkTree::new();
@@ -131,18 +126,21 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         subscribe_all.finalized_block_scale_encoded_header.clone(),
                     );
 
-                    initial_notifications.push({
-                        methods::ServerToClient::chainHead_unstable_followEvent {
-                            subscription: (&subscription_id).into(),
-                            result: methods::FollowEvent::Initialized {
-                                finalized_block_hash: methods::HashHexString(finalized_block_hash),
-                                finalized_block_runtime: Some(convert_runtime_spec(
-                                    &subscribe_all.finalized_block_runtime,
-                                )),
+                    subscription
+                        .send_notification(
+                            methods::ServerToClient::chainHead_unstable_followEvent {
+                                subscription: (&subscription_id).into(),
+                                result: methods::FollowEvent::Initialized {
+                                    finalized_block_hash: methods::HashHexString(
+                                        finalized_block_hash,
+                                    ),
+                                    finalized_block_runtime: Some(convert_runtime_spec(
+                                        &subscribe_all.finalized_block_runtime,
+                                    )),
+                                },
                             },
-                        }
-                        .to_json_call_object_parameters(None)
-                    });
+                        )
+                        .await;
 
                     for block in &subscribe_all.non_finalized_blocks_ancestry_order {
                         let hash =
@@ -164,31 +162,35 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         };
                         non_finalized_blocks.insert(parent_node_index, hash);
 
-                        initial_notifications.push(
-                            methods::ServerToClient::chainHead_unstable_followEvent {
-                                subscription: (&subscription_id).into(),
-                                result: methods::FollowEvent::NewBlock {
-                                    block_hash: methods::HashHexString(hash),
-                                    new_runtime: block
-                                        .new_runtime
-                                        .as_ref()
-                                        .map(convert_runtime_spec),
-                                    parent_block_hash: methods::HashHexString(block.parent_hash),
-                                },
-                            }
-                            .to_json_call_object_parameters(None),
-                        );
-
-                        if block.is_new_best {
-                            initial_notifications.push(
+                        subscription
+                            .send_notification(
                                 methods::ServerToClient::chainHead_unstable_followEvent {
                                     subscription: (&subscription_id).into(),
-                                    result: methods::FollowEvent::BestBlockChanged {
-                                        best_block_hash: methods::HashHexString(hash),
+                                    result: methods::FollowEvent::NewBlock {
+                                        block_hash: methods::HashHexString(hash),
+                                        new_runtime: block
+                                            .new_runtime
+                                            .as_ref()
+                                            .map(convert_runtime_spec),
+                                        parent_block_hash: methods::HashHexString(
+                                            block.parent_hash,
+                                        ),
                                     },
-                                }
-                                .to_json_call_object_parameters(None),
-                            );
+                                },
+                            )
+                            .await;
+
+                        if block.is_new_best {
+                            subscription
+                                .send_notification(
+                                    methods::ServerToClient::chainHead_unstable_followEvent {
+                                        subscription: (&subscription_id).into(),
+                                        result: methods::FollowEvent::BestBlockChanged {
+                                            best_block_hash: methods::HashHexString(hash),
+                                        },
+                                    },
+                                )
+                                .await;
                         }
                     }
                 }
@@ -202,16 +204,19 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         subscribe_all.finalized_block_scale_encoded_header.clone(),
                     );
 
-                    initial_notifications.push(
-                        methods::ServerToClient::chainHead_unstable_followEvent {
-                            subscription: (&subscription_id).into(),
-                            result: methods::FollowEvent::Initialized {
-                                finalized_block_hash: methods::HashHexString(finalized_block_hash),
-                                finalized_block_runtime: None,
+                    subscription
+                        .send_notification(
+                            methods::ServerToClient::chainHead_unstable_followEvent {
+                                subscription: (&subscription_id).into(),
+                                result: methods::FollowEvent::Initialized {
+                                    finalized_block_hash: methods::HashHexString(
+                                        finalized_block_hash,
+                                    ),
+                                    finalized_block_runtime: None,
+                                },
                             },
-                        }
-                        .to_json_call_object_parameters(None),
-                    );
+                        )
+                        .await;
 
                     for block in &subscribe_all.non_finalized_blocks_ancestry_order {
                         let hash =
@@ -233,39 +238,38 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         };
                         non_finalized_blocks.insert(parent_node_index, hash);
 
-                        initial_notifications.push(
-                            methods::ServerToClient::chainHead_unstable_followEvent {
-                                subscription: (&subscription_id).into(),
-                                result: methods::FollowEvent::NewBlock {
-                                    block_hash: methods::HashHexString(hash),
-                                    new_runtime: None,
-                                    parent_block_hash: methods::HashHexString(block.parent_hash),
-                                },
-                            }
-                            .to_json_call_object_parameters(None),
-                        );
-
-                        if block.is_new_best {
-                            initial_notifications.push(
+                        subscription
+                            .send_notification(
                                 methods::ServerToClient::chainHead_unstable_followEvent {
                                     subscription: (&subscription_id).into(),
-                                    result: methods::FollowEvent::BestBlockChanged {
-                                        best_block_hash: methods::HashHexString(hash),
+                                    result: methods::FollowEvent::NewBlock {
+                                        block_hash: methods::HashHexString(hash),
+                                        new_runtime: None,
+                                        parent_block_hash: methods::HashHexString(
+                                            block.parent_hash,
+                                        ),
                                     },
-                                }
-                                .to_json_call_object_parameters(None),
-                            );
+                                },
+                            )
+                            .await;
+
+                        if block.is_new_best {
+                            subscription
+                                .send_notification(
+                                    methods::ServerToClient::chainHead_unstable_followEvent {
+                                        subscription: (&subscription_id).into(),
+                                        result: methods::FollowEvent::BestBlockChanged {
+                                            best_block_hash: methods::HashHexString(hash),
+                                        },
+                                    },
+                                )
+                                .await;
                         }
                     }
                 }
             }
 
-            (
-                initial_notifications,
-                non_finalized_blocks,
-                pinned_blocks_headers,
-                events,
-            )
+            (non_finalized_blocks, pinned_blocks_headers, events)
         };
 
         self.platform
@@ -290,7 +294,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     runtime_service,
                     sync_service,
                 }
-                .run(subscription, subscription_id, rx, initial_notifications)
+                .run(subscription, subscription_id, rx)
             });
     }
 
@@ -492,14 +496,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         mut messages_rx: service::DeliverReceiver<
             either::Either<service::RequestProcess, service::SubscriptionStartProcess>,
         >,
-        initial_notifications: Vec<String>,
     ) {
-        // Send back to the user the initial notifications.
-        for notif in initial_notifications {
-            let parsed_notif = methods::parse_notification(&notif).unwrap();
-            subscription.send_notification(parsed_notif).await;
-        }
-
         loop {
             let outcome = {
                 let next_block = pin::pin!(match &mut self.subscription {
