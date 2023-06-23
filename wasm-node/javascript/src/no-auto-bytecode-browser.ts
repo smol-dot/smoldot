@@ -81,11 +81,23 @@ export function startWithBytecode(options: ClientOptionsWithBytecode): Client {
  */
 function connect(config: ConnectionConfig): Connection {
     if (config.address.ty === "websocket") {
-        const connection = new WebSocket(config.address.url);
-        connection.binaryType = 'arraybuffer';
+        // Even though the WHATWG specification (<https://websockets.spec.whatwg.org/#dom-websocket-websocket>)
+        // doesn't mention it, `new WebSocket` can throw an exception if the URL is forbidden
+        // for security reasons. We absord this exception as soon as it is thrown.
+        // `connection` can be either a `WebSocket` object (the normal case), or a string
+        // indicating an error message that must be propagated with `onConnectionReset` as soon
+        // as possible, or `null` if the API user considers the connection as reset.
+        let connection: WebSocket | string | null;
+        try {
+            connection = new WebSocket(config.address.url);
+        } catch(error) {
+            connection = error instanceof Error ? error.toString() : "Exception thrown by new WebSocket";
+        }
 
         const bufferedAmountCheck = { quenedUnreportedBytes: 0, nextTimeout: 10 };
         const checkBufferedAmount = () => {
+            if (!(connection instanceof WebSocket))
+                return;
             if (connection.readyState != 1)
                 return;
             // Note that we might expect `bufferedAmount` to always be <= the sum of the lengths
@@ -107,31 +119,56 @@ function connect(config: ConnectionConfig): Connection {
                 config.onWritableBytes(wasSent);
         };
 
-        connection.onopen = () => {
-            config.onOpen({
-                type: 'single-stream', handshake: 'multistream-select-noise-yamux',
-                initialWritableBytes: 1024 * 1024, writeClosable: false,
-            });
-        };
-        connection.onclose = (event) => {
-            const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
-            config.onConnectionReset(message);
-        };
-        connection.onmessage = (msg) => {
-            config.onMessage(new Uint8Array(msg.data as ArrayBuffer));
-        };
+        if (connection instanceof WebSocket) {
+            connection.binaryType = 'arraybuffer';
+
+            connection.onopen = () => {
+                config.onOpen({
+                    type: 'single-stream', handshake: 'multistream-select-noise-yamux',
+                    initialWritableBytes: 1024 * 1024, writeClosable: false,
+                });
+            };
+            connection.onclose = (event) => {
+                const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
+                config.onConnectionReset(message);
+            };
+            connection.onmessage = (msg) => {
+                config.onMessage(new Uint8Array(msg.data as ArrayBuffer));
+            };
+        } else {
+            setTimeout(() => {
+                if (connection && !(connection instanceof WebSocket)) {
+                    config.onConnectionReset(connection);
+                    connection = null;
+                }
+            }, 1)
+        }
 
         return {
             reset: (): void => {
-                connection.onopen = null;
-                connection.onclose = null;
-                connection.onmessage = null;
-                connection.onerror = null;
-                connection.close();
+                if (connection instanceof WebSocket) {
+                    connection.onopen = null;
+                    connection.onclose = null;
+                    connection.onmessage = null;
+                    connection.onerror = null;
+
+                    // According to the WebSocket specification, calling `close()` when a WebSocket
+                    // isn't fully opened yet is completely legal and seemingly a normal thing to
+                    // do (see <https://websockets.spec.whatwg.org/#dom-websocket-close>).
+                    // Unfortunately, browsers print a warning in the console if you do that. To
+                    // avoid these warnings, we only call `close()` if the connection is fully
+                    // opened. According to <https://websockets.spec.whatwg.org/#garbage-collection>,
+                    // removing all the event listeners will cause the WebSocket to be garbage
+                    // collected, which should have the same effect as `close()`.
+                    if (connection.readyState == WebSocket.OPEN)
+                        connection.close();
+                }
+
+                connection = null;
             },
 
             send: (data: Uint8Array): void => {
-                connection.send(data);
+                (connection as WebSocket).send(data);
                 if (bufferedAmountCheck.quenedUnreportedBytes == 0) {
                     bufferedAmountCheck.nextTimeout = 10;
                     setTimeout(checkBufferedAmount, 10);
