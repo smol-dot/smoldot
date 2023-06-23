@@ -858,10 +858,9 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             else { unreachable!() };
 
         // Obtain the header of the requested block.
-        // Contains `None` if the subscription is disjoint.
         let block_scale_encoded_header = {
             if let Some(header) = self.pinned_blocks_headers.get(&hash.0) {
-                Some(header.clone())
+                header.clone()
             } else {
                 // Block isn't pinned. Request is invalid.
                 request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
@@ -915,90 +914,105 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         // Finish the call asynchronously.
         self.platform
             .spawn_task(format!("{}-chain-head-storage", self.log_target).into(), {
-            let sync_service = self.sync_service.clone();
-            async move {
-                match block_scale_encoded_header
-                    .as_ref()
-                    .map(|h| header::decode(h, sync_service.block_number_bytes()))
-                {
-                    Some(Ok(decoded_header)) => {
-                        let future = sync_service.clone().storage_query(
-                            decoded_header.number,
-                            &hash.0,
-                            decoded_header.state_root,
-                            iter::once(key.0.clone()), // TODO: clone :-/
-                            cmp::min(10, network_config.total_attempts),
-                            Duration::from_millis(u64::from(cmp::min(
-                                20000,
-                                network_config.timeout_ms,
-                            ))),
-                            NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
-                        );
-
-                        // Drive the future, but cancel execution if the JSON-RPC client
-                        // unsubscribes.
-                        let outcome = match future
-                            .map(Some)
-                            .race(subscription.wait_until_stale().map(|()| None))
-                            .await
-                        {
-                            Some(v) => v,
-                            None => return,  // JSON-RPC client has unsubscribed in the meanwhile.
-                        };
-
-                        match outcome {
-                            Ok(values) => {
-                                // `storage_query` returns a list of values because it can perform
-                                // multiple queries at once. In our situation, we only start one query
-                                // and as such the outcome only ever contains one element.
-                                debug_assert_eq!(values.len(), 1);
-                                let value = values.into_iter().next().unwrap();
-                                if let Some(mut value) = value {
-                                    if is_hash {
-                                        value = blake2_rfc::blake2b::blake2b(8, &[], &value).as_bytes().to_vec();
-                                    }
-
-                                    subscription.send_notification(methods::ServerToClient::chainHead_unstable_storageEvent {
+                let sync_service = self.sync_service.clone();
+                async move {
+                    let decoded_header = match header::decode(
+                        &block_scale_encoded_header,
+                        sync_service.block_number_bytes(),
+                    ) {
+                        Ok(h) => h,
+                        Err(err) => {
+                            // Header can't be decoded. Generate a single `error` event and
+                            // return.
+                            subscription
+                                .send_notification(
+                                    methods::ServerToClient::chainHead_unstable_storageEvent {
                                         subscription: (&subscription_id).into(),
-                                        result: methods::ChainHeadStorageEvent::Item {
-                                            key,
-                                            value: Some(methods::HexString(value)),
-                                            hash: None,
-                                            merkle_value: None,
+                                        result: methods::ChainHeadStorageEvent::Error {
+                                            error: err.to_string().into(),
                                         },
-                                    }).await;
+                                    },
+                                )
+                                .await;
+                            return;
+                        }
+                    };
+
+                    let future = sync_service.clone().storage_query(
+                        decoded_header.number,
+                        &hash.0,
+                        decoded_header.state_root,
+                        iter::once(key.0.clone()), // TODO: clone :-/
+                        cmp::min(10, network_config.total_attempts),
+                        Duration::from_millis(u64::from(cmp::min(
+                            20000,
+                            network_config.timeout_ms,
+                        ))),
+                        NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
+                    );
+
+                    // Drive the future, but cancel execution if the JSON-RPC client
+                    // unsubscribes.
+                    let outcome = match future
+                        .map(Some)
+                        .race(subscription.wait_until_stale().map(|()| None))
+                        .await
+                    {
+                        Some(v) => v,
+                        None => return, // JSON-RPC client has unsubscribed in the meanwhile.
+                    };
+
+                    match outcome {
+                        Ok(values) => {
+                            // `storage_query` returns a list of values because it can perform
+                            // multiple queries at once. In our situation, we only start one query
+                            // and as such the outcome only ever contains one element.
+                            debug_assert_eq!(values.len(), 1);
+                            let value = values.into_iter().next().unwrap();
+                            if let Some(mut value) = value {
+                                if is_hash {
+                                    value = blake2_rfc::blake2b::blake2b(8, &[], &value)
+                                        .as_bytes()
+                                        .to_vec();
                                 }
 
-                                subscription.send_notification(methods::ServerToClient::chainHead_unstable_storageEvent {
-                                    subscription: (&subscription_id).into(),
-                                    result: methods::ChainHeadStorageEvent::Done,
-                                }).await;
+                                subscription
+                                    .send_notification(
+                                        methods::ServerToClient::chainHead_unstable_storageEvent {
+                                            subscription: (&subscription_id).into(),
+                                            result: methods::ChainHeadStorageEvent::Item {
+                                                key,
+                                                value: Some(methods::HexString(value)),
+                                                hash: None,
+                                                merkle_value: None,
+                                            },
+                                        },
+                                    )
+                                    .await;
                             }
-                            Err(_) => {
-                                subscription.send_notification(methods::ServerToClient::chainHead_unstable_storageEvent {
-                                    subscription: (&subscription_id).into(),
-                                    result: methods::ChainHeadStorageEvent::Inaccessible {},
-                                }).await;
-                            }
+
+                            subscription
+                                .send_notification(
+                                    methods::ServerToClient::chainHead_unstable_storageEvent {
+                                        subscription: (&subscription_id).into(),
+                                        result: methods::ChainHeadStorageEvent::Done,
+                                    },
+                                )
+                                .await;
+                        }
+                        Err(_) => {
+                            subscription
+                                .send_notification(
+                                    methods::ServerToClient::chainHead_unstable_storageEvent {
+                                        subscription: (&subscription_id).into(),
+                                        result: methods::ChainHeadStorageEvent::Inaccessible {},
+                                    },
+                                )
+                                .await;
                         }
                     }
-                    Some(Err(err)) => {
-                        subscription.send_notification(methods::ServerToClient::chainHead_unstable_storageEvent {
-                            subscription: (&subscription_id).into(),
-                            result: methods::ChainHeadStorageEvent::Error {
-                                error: err.to_string().into(),
-                            },
-                        }).await;
-                    }
-                    None => {
-                        subscription.send_notification(methods::ServerToClient::chainHead_unstable_storageEvent {
-                            subscription: (&subscription_id).into(),
-                            result: methods::ChainHeadStorageEvent::Disjoint {},
-                        }).await;
-                    }
-                };
-            }
-        });
+                }
+            });
     }
 
     async fn start_chain_head_call(&mut self, request: service::SubscriptionStartProcess) {
