@@ -182,9 +182,9 @@ impl Frontend {
         {
             Ok(()) => Ok(()),
             Err(service::TrySendRequestError {
-                cause: service::TrySendRequestErrorCause::QueueFull,
+                cause: service::TrySendRequestErrorCause::TooManyRequestInFly,
                 request,
-            }) => Err(HandleRpcError::Overloaded {
+            }) => Err(HandleRpcError::TooManyPendingRequests {
                 json_rpc_request: request,
             }),
             Err(service::TrySendRequestError {
@@ -318,11 +318,12 @@ impl ServicePrototype {
 /// Error potentially returned when queuing a JSON-RPC request.
 #[derive(Debug, derive_more::Display)]
 pub enum HandleRpcError {
-    /// The JSON-RPC service cannot process this request, as it is already too busy.
+    /// The JSON-RPC service cannot process this request, as too many requests are already being
+    /// processed.
     #[display(
-        fmt = "The JSON-RPC service cannot process this request, as it is already too busy."
+        fmt = "The JSON-RPC service cannot process this request, as too many requests are already being processed."
     )]
-    Overloaded {
+    TooManyPendingRequests {
         /// Request that was being queued.
         json_rpc_request: String,
     },
@@ -338,7 +339,7 @@ impl HandleRpcError {
     /// notification.
     pub fn into_json_rpc_error(self) -> Option<String> {
         let json_rpc_request = match self {
-            HandleRpcError::Overloaded { json_rpc_request } => json_rpc_request,
+            HandleRpcError::TooManyPendingRequests { json_rpc_request } => json_rpc_request,
             HandleRpcError::MalformedJsonRpc(_) => return None,
         };
 
