@@ -6,6 +6,7 @@
 
 - Fix not absorbing the JavaScript exception triggered by the browser when connecting to a `ws://` node when smoldot is embedded in a web page served over `https://`. ([#795](https://github.com/smol-dot/smoldot/pull/795), [#800](https://github.com/smol-dot/smoldot/pull/800))
 - Smoldot no longer calls `close()` on WebSockets that aren't fully established yet (even though it is legal to do so according to the WHATWG specification) in order to avoid browsers printing warnings in the console when you do so. ([#799](https://github.com/smol-dot/smoldot/pull/799))
+- Fix panic-inducing race condition when a networking event happens right when the warp syncing finishes. ([#808](https://github.com/smol-dot/smoldot/pull/808))
 
 ## 1.0.10 - 2023-06-19
 
