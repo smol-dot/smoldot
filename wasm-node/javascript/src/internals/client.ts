@@ -27,7 +27,7 @@ export interface PlatformBindings {
      * Tries to open a new connection using the given configuration.
      *
      * @see Connection
-     * @throws {@link Error}
+     * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
      */
     connect(config: ConnectionConfig): Connection;
 
@@ -331,54 +331,40 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
             }
             case "new-connection": {
                 const connectionId = event.connectionId;
-
-                let connection;
-                try {
-                    connection = platformBindings.connect({
-                        address: event.address,
-                        onConnectionReset(message) {
-                            if (state.instance.status !== "ready")
-                                throw new Error();
-                            state.connections.delete(connectionId);
-                            state.instance.instance.connectionReset(connectionId, message);
-                        },
-                        onMessage(message, streamId) {
-                            if (state.instance.status !== "ready")
-                                throw new Error();
-                            state.instance.instance.streamMessage(connectionId, message, streamId);
-                        },
-                        onStreamOpened(streamId, direction, initialWritableBytes) {
-                            if (state.instance.status !== "ready")
-                                throw new Error();
-                            state.instance.instance.streamOpened(connectionId, streamId, direction, initialWritableBytes);
-                        },
-                        onOpen(info) {
-                            if (state.instance.status !== "ready")
-                                throw new Error();
-                            state.instance.instance.connectionOpened(connectionId, info);
-                        },
-                        onWritableBytes(numExtra, streamId) {
-                            if (state.instance.status !== "ready")
-                                throw new Error();
-                            state.instance.instance.streamWritableBytes(connectionId, numExtra, streamId);
-                        },
-                        onStreamReset(streamId) {
-                            if (state.instance.status !== "ready")
-                                throw new Error();
-                            state.instance.instance.streamReset(connectionId, streamId);
-                        },
-                    });
-
-                } catch(error) {
-                    const errorMsg = error instanceof Error ? error.toString() : "Uncaught exception while connecting";
-                    setTimeout(() => {
-                        if (state.instance.status === 'ready')
-                            state.instance.instance.connectionReset(connectionId, errorMsg);
-                    }, 0);
-                    break;
-                }
-
-                state.connections.set(connectionId, connection);
+                state.connections.set(connectionId, platformBindings.connect({
+                    address: event.address,
+                    onConnectionReset(message) {
+                        if (state.instance.status !== "ready")
+                            throw new Error();
+                        state.connections.delete(connectionId);
+                        state.instance.instance.connectionReset(connectionId, message);
+                    },
+                    onMessage(message, streamId) {
+                        if (state.instance.status !== "ready")
+                            throw new Error();
+                        state.instance.instance.streamMessage(connectionId, message, streamId);
+                    },
+                    onStreamOpened(streamId, direction, initialWritableBytes) {
+                        if (state.instance.status !== "ready")
+                            throw new Error();
+                        state.instance.instance.streamOpened(connectionId, streamId, direction, initialWritableBytes);
+                    },
+                    onOpen(info) {
+                        if (state.instance.status !== "ready")
+                            throw new Error();
+                        state.instance.instance.connectionOpened(connectionId, info);
+                    },
+                    onWritableBytes(numExtra, streamId) {
+                        if (state.instance.status !== "ready")
+                            throw new Error();
+                        state.instance.instance.streamWritableBytes(connectionId, numExtra, streamId);
+                    },
+                    onStreamReset(streamId) {
+                        if (state.instance.status !== "ready")
+                            throw new Error();
+                        state.instance.instance.streamReset(connectionId, streamId);
+                    },
+                }));
                 break;
             }
             case "connection-reset": {

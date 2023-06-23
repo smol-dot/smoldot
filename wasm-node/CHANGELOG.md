@@ -2,10 +2,6 @@
 
 ## Unreleased
 
-### Fixed
-
-- Fix not absorbing the JavaScript exception triggered by the browser when connecting to a `ws://` node when smoldot is embedded in a web page served over `https://`. ([#795](https://github.com/smol-dot/smoldot/pull/795))
-
 ## 1.0.10 - 2023-06-19
 
 ### Changed
