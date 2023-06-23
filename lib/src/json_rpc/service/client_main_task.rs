@@ -811,6 +811,7 @@ impl SerializedRequestsIo {
 
         // Everything successful.
         queue.queue.push(request);
+        queue.on_pushed.notify(usize::max_value());
         Ok(())
     }
 }
