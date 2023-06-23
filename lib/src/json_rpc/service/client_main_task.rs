@@ -90,13 +90,12 @@ struct SerializedRequestsQueue {
     on_pushed: event_listener::Event,
 
     /// Number of requests that have have been received from the client but whose answer hasn't
-    /// been sent back to the client yet. Includes requests whose response is in
+    /// been sent back to the client yet. Includes requests whose response is still in
     /// [`Inner::pending_serialized_responses`].
     num_requests_in_fly: AtomicU32,
 
-    /// Maximum value that [`Inner::num_requests_in_fly`] is allowed to reach. Beyond this, the
-    /// [`Inner::serialized_rq_receiver`] is back-pressured in order to not receive any more
-    /// request.
+    /// Maximum value that [`SerializedRequestsQueue::num_requests_in_fly`] is allowed to reach.
+    /// Beyond this, no more request should be added to [`SerializedRequestsQueue::queue`].
     max_requests_in_fly: NonZeroU32,
 }
 
