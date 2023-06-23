@@ -1037,10 +1037,28 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     return;
                 }
 
-                self.runtime_service
+                match self
+                    .runtime_service
                     .pinned_block_runtime_access(subscription_id, &hash.0)
                     .await
-                    .ok()
+                {
+                    Ok(c) => c,
+                    Err(runtime_service::PinnedBlockRuntimeAccessError::ObsoleteSubscription) => {
+                        // The runtime service subscription is dead. Generate a single "disjoint"
+                        // event.
+                        let mut subscription = request.accept();
+                        let subscription_id = subscription.subscription_id().to_owned();
+                        subscription
+                            .send_notification(
+                                methods::ServerToClient::chainHead_unstable_callEvent {
+                                    subscription: (&subscription_id).into(),
+                                    result: methods::ChainHeadCallEvent::Disjoint {},
+                                },
+                            )
+                            .await;
+                        return;
+                    }
+                }
             }
             Subscription::WithoutRuntime(_) => {
                 // It is invalid to call this function for a "without runtime" subscription.
@@ -1056,7 +1074,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         self.platform
             .spawn_task(format!("{}-chain-head-call", self.log_target).into(), {
             async move {
-                let pre_runtime_call = if let Some(pre_runtime_call) = &pre_runtime_call {
+                let pre_runtime_call = {
                     let call_future = pre_runtime_call.start(
                         &function_to_call,
                         iter::once(&call_parameters),
@@ -1070,15 +1088,13 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
 
                     // Drive the future, but cancel execution if the JSON-RPC client unsubscribes.
                     match call_future.map(Some).race(subscription.wait_until_stale().map(|()| None)).await {
-                        Some(v) => Some(v),
+                        Some(v) => v,
                         None => return  // JSON-RPC client has unsubscribed in the meanwhile.
                     }
-                } else {
-                    None
                 };
 
                 match pre_runtime_call {
-                    Some(Ok((runtime_call_lock, virtual_machine))) => {
+                    Ok((runtime_call_lock, virtual_machine)) => {
                         match runtime_host::run(runtime_host::Config {
                             virtual_machine,
                             function_to_call: &function_to_call,
@@ -1218,7 +1234,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             }
                         }
                     }
-                    Some(Err(runtime_service::RuntimeCallError::InvalidRuntime(error))) => {
+                    Err(runtime_service::RuntimeCallError::InvalidRuntime(error)) => {
                         subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
                             subscription: (&subscription_id).into(),
                             result: methods::ChainHeadCallEvent::Error {
@@ -1226,7 +1242,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             },
                         }).await;
                     }
-                    Some(Err(runtime_service::RuntimeCallError::StorageRetrieval(error))) => {
+                    Err(runtime_service::RuntimeCallError::StorageRetrieval(error)) => {
                         subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
                             subscription: (&subscription_id).into(),
                             result: methods::ChainHeadCallEvent::Error {
@@ -1234,7 +1250,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             },
                         }).await;
                     }
-                    Some(Err(runtime_service::RuntimeCallError::MissingProofEntry(_error))) => {
+                    Err(runtime_service::RuntimeCallError::MissingProofEntry(_error)) => {
                         subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
                             subscription: (&subscription_id).into(),
                             result: methods::ChainHeadCallEvent::Error {
@@ -1242,7 +1258,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             },
                         }).await;
                     }
-                    Some(Err(runtime_service::RuntimeCallError::InvalidChildTrieRoot)) => {
+                    Err(runtime_service::RuntimeCallError::InvalidChildTrieRoot) => {
                         subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
                             subscription: (&subscription_id).into(),
                             result: methods::ChainHeadCallEvent::Error {
@@ -1250,7 +1266,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             },
                         }).await;
                     }
-                    Some(Err(runtime_service::RuntimeCallError::CallProof(error))) => {
+                    Err(runtime_service::RuntimeCallError::CallProof(error)) => {
                         subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
                             subscription: (&subscription_id).into(),
                             result: methods::ChainHeadCallEvent::Error {
@@ -1258,7 +1274,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             },
                         }).await
                     }
-                    Some(Err(runtime_service::RuntimeCallError::StorageQuery(error))) => {
+                    Err(runtime_service::RuntimeCallError::StorageQuery(error)) => {
                         subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
                             subscription: (&subscription_id).into(),
                             result: methods::ChainHeadCallEvent::Error {
@@ -1266,12 +1282,6 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             },
                         }).await;
                     }
-                    None => {
-                        subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
-                            subscription: (&subscription_id).into(),
-                            result: methods::ChainHeadCallEvent::Disjoint {},
-                        }).await
-                    },
                 }
             }
         });
