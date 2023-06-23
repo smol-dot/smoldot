@@ -788,7 +788,7 @@ impl SerializedRequestsIo {
                 });
             };
 
-        // Try to increment `num_requests_in_fly`. Returns an error if it is past the maximum.
+        // Try to increment `num_requests_in_fly`. Return an error if it is past the maximum.
         if queue
             .num_requests_in_fly
             .fetch_update(Ordering::SeqCst, Ordering::Relaxed, |old_value| {
@@ -809,6 +809,7 @@ impl SerializedRequestsIo {
             });
         }
 
+        // Everything successful.
         queue.queue.push(request);
         Ok(())
     }
