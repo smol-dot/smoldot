@@ -491,6 +491,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                             keys.insert(key.clone());
                         }
                         RequestImpl::ClosestAncestorMerkleValue { key } => {
+                            // TODO: not that ideally we would request the parent of `key` (i.e. remove one nibble), but the networking protocol doesn't allow that
                             keys.insert(key.clone());
                         }
                     }
