@@ -28,7 +28,7 @@
 
 use crate::{network_service, platform::PlatformRef, runtime_service};
 
-use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use async_lock::Mutex;
 use core::{fmt, mem, num::NonZeroU32, time::Duration};
 use futures_channel::{mpsc, oneshot};
@@ -674,88 +674,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     }
                 }
             }
-        }
-    }
-
-    pub async fn storage_prefix_keys_query(
-        self: Arc<Self>,
-        block_number: u64,
-        block_hash: &[u8; 32],
-        prefix: &[u8],
-        storage_trie_root: &[u8; 32],
-        total_attempts: u32,
-        timeout_per_request: Duration,
-        _max_parallel: NonZeroU32,
-    ) -> Result<Vec<Vec<u8>>, StorageQueryError> {
-        let mut prefix_scan = prefix_proof::prefix_scan(prefix_proof::Config {
-            prefix,
-            trie_root_hash: *storage_trie_root,
-            full_storage_values_required: false,
-        });
-
-        'main_scan: loop {
-            let mut outcome_errors =
-                Vec::with_capacity(usize::try_from(total_attempts).unwrap_or(usize::max_value()));
-
-            // TODO: better peers selection ; don't just take the first
-            // TODO: handle max_parallel
-            // TODO: is the number of keys is large, split into multiple requests
-            for target in self
-                .peers_assumed_know_blocks(block_number, block_hash)
-                .await
-                .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
-            {
-                let result = self
-                    .network_service
-                    .clone()
-                    .storage_proof_request(
-                        self.network_chain_index,
-                        target,
-                        protocol::StorageProofRequestConfig {
-                            block_hash: *block_hash,
-                            keys: prefix_scan.requested_keys().map(|nibbles| {
-                                trie::nibbles_to_bytes_suffix_extend(nibbles).collect::<Vec<_>>()
-                            }),
-                        },
-                        timeout_per_request,
-                    )
-                    .await
-                    .map_err(StorageQueryErrorDetail::Network);
-
-                match result {
-                    Ok(proof) => {
-                        match prefix_scan.resume(proof.decode()) {
-                            Ok(prefix_proof::ResumeOutcome::InProgress(scan)) => {
-                                // Continue next step of the proof.
-                                prefix_scan = scan;
-                                continue 'main_scan;
-                            }
-                            Ok(prefix_proof::ResumeOutcome::Success { entries, .. }) => {
-                                // TODO :overhead
-                                return Ok(entries.into_iter().map(|(key, _)| key).collect());
-                            }
-                            Err((scan, err)) => {
-                                prefix_scan = scan;
-                                outcome_errors.push(match err {
-                                    prefix_proof::Error::InvalidProof(err) => {
-                                        StorageQueryErrorDetail::ProofVerification(err)
-                                    }
-                                    prefix_proof::Error::MissingProofEntry => {
-                                        StorageQueryErrorDetail::MissingProofEntry
-                                    }
-                                });
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        outcome_errors.push(err);
-                    }
-                }
-            }
-
-            return Err(StorageQueryError {
-                errors: outcome_errors,
-            });
         }
     }
 

@@ -705,11 +705,14 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let outcome = self
             .sync_service
             .clone()
-            .storage_prefix_keys_query(
+            .storage_query(
                 block_number,
                 &hash,
-                &prefix.0,
                 &state_root,
+                iter::once(sync_service::StorageRequestItem {
+                    key: prefix.0,
+                    ty: sync_service::StorageRequestItemTy::DescendantsHashes,
+                }),
                 3,
                 Duration::from_secs(12),
                 NonZeroU32::new(1).unwrap(),
@@ -717,8 +720,16 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             .await;
 
         match outcome {
-            Ok(keys) => {
-                let out = keys.into_iter().map(methods::HexString).collect::<Vec<_>>();
+            Ok(entries) => {
+                let out = entries
+                    .into_iter()
+                    .map(|item| match item {
+                        sync_service::StorageResultItem::DescendantHash { key, .. } => {
+                            methods::HexString(key)
+                        }
+                        _ => unreachable!(),
+                    })
+                    .collect::<Vec<_>>();
                 request.respond(methods::Response::state_getKeys(out))
             }
             Err(error) => request.fail(json_rpc::parse::ErrorResponse::ServerError(
@@ -785,11 +796,14 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let outcome = self
             .sync_service
             .clone()
-            .storage_prefix_keys_query(
+            .storage_query(
                 block_number,
                 &hash,
-                &prefix,
                 &state_root,
+                iter::once(sync_service::StorageRequestItem {
+                    key: prefix.clone(),
+                    ty: sync_service::StorageRequestItemTy::DescendantsHashes,
+                }),
                 3,
                 Duration::from_secs(12),
                 NonZeroU32::new(1).unwrap(),
@@ -797,12 +811,20 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             .await;
 
         match outcome {
-            Ok(keys) => {
+            Ok(entries) => {
                 // TODO: instead of requesting all keys with that prefix from the network, pass `start_key` to the network service
+                let keys = entries
+                    .into_iter()
+                    .map(|item| match item {
+                        sync_service::StorageResultItem::DescendantHash { key, .. } => key,
+                        _ => unreachable!(),
+                    })
+                    .collect::<Vec<_>>();
+
                 let out = keys
                     .iter()
-                    .filter(|k| start_key.as_ref().map_or(true, |start| *k >= &start.0)) // TODO: not sure if start should be in the set or not?
-                    .cloned() // TODO: instead of cloning, make `Response::state_getKeysPaged` accept references
+                    .cloned()
+                    .filter(|k| start_key.as_ref().map_or(true, |start| *k >= start.0)) // TODO: not sure if start should be in the set or not?
                     .map(methods::HexString)
                     .take(usize::try_from(count).unwrap_or(usize::max_value()))
                     .collect::<Vec<_>>();
