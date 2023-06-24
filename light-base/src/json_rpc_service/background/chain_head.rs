@@ -931,7 +931,14 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         decoded_header.number,
                         &hash.0,
                         decoded_header.state_root,
-                        iter::once(key.0.clone()), // TODO: clone :-/
+                        iter::once(sync_service::StorageRequestItem {
+                            key: key.0.clone(), // TODO: overhead
+                            ty: if is_hash {
+                                sync_service::StorageRequestItemTy::Hash
+                            } else {
+                                sync_service::StorageRequestItemTy::Value
+                            },
+                        }),
                         cmp::min(10, network_config.total_attempts),
                         Duration::from_millis(u64::from(cmp::min(
                             20000,
@@ -952,19 +959,13 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     };
 
                     match outcome {
-                        Ok(values) => {
-                            // `storage_query` returns a list of values because it can perform
-                            // multiple queries at once. In our situation, we only start one query
-                            // and as such the outcome only ever contains one element.
-                            debug_assert_eq!(values.len(), 1);
-                            let value = values.into_iter().next().unwrap();
-                            if let Some(mut value) = value {
-                                if is_hash {
-                                    value = blake2_rfc::blake2b::blake2b(8, &[], &value)
-                                        .as_bytes()
-                                        .to_vec();
-                                }
-
+                        Ok(entries) => {
+                            debug_assert!(entries.len() <= 1);
+                            if let sync_service::StorageResultItem::Value {
+                                value: Some(value),
+                                ..
+                            } = entries.into_iter().next().unwrap()
+                            {
                                 subscription
                                     .send_notification(
                                         methods::ServerToClient::chainHead_unstable_storageEvent {

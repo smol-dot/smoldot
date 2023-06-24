@@ -30,9 +30,10 @@ use crate::{network_service, platform::PlatformRef, runtime_service};
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use async_lock::Mutex;
-use core::{fmt, num::NonZeroU32, time::Duration};
+use core::{fmt, mem, num::NonZeroU32, time::Duration};
 use futures_channel::{mpsc, oneshot};
 use futures_util::{stream, SinkExt as _};
+use rand::seq::IteratorRandom as _;
 use smoldot::{
     chain,
     executor::host,
@@ -377,42 +378,127 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         Err(())
     }
 
-    /// Performs one or more storage proof requests in order to find the value of the given
-    /// `requested_keys`.
+    /// Performs one or more storage proof requests in order to fulfill the `requests` passed as
+    /// parameter.
     ///
     /// Must be passed a block hash, a block number, and the Merkle value of the root node of the
     /// storage trie of this same block. The value of `block_number` corresponds to the value
     /// in the [`smoldot::header::HeaderRef::number`] field, and the value of `storage_trie_root`
     /// corresponds to the value in the [`smoldot::header::HeaderRef::state_root`] field.
-    ///
-    /// Returns the storage values of `requested_keys` in the storage of the block, or an error if
-    /// it couldn't be determined. If `Ok`, the `Vec` is guaranteed to have the same number of
-    /// elements as `requested_keys`.
-    ///
-    /// This function is equivalent to calling
-    /// [`network_service::NetworkService::storage_proof_request`] and verifying the proof,
-    /// potentially multiple times until it succeeds. The number of attempts and the selection of
-    /// peers is done through reasonable heuristics.
+    // TODO: more documentation
+    // TODO: should return the items in a streaming way, so that we don't need to wait for all the queries to have finished
     pub async fn storage_query(
         self: Arc<Self>,
         block_number: u64,
         block_hash: &[u8; 32],
         storage_trie_root: &[u8; 32],
-        requested_keys: impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone,
+        requests: impl Iterator<Item = StorageRequestItem>,
         total_attempts: u32,
         timeout_per_request: Duration,
         _max_parallel: NonZeroU32,
-    ) -> Result<Vec<Option<Vec<u8>>>, StorageQueryError> {
-        let mut outcome_errors =
-            Vec::with_capacity(usize::try_from(total_attempts).unwrap_or(usize::max_value()));
-
-        // TODO: better peers selection ; don't just take the first
+    ) -> Result<Vec<StorageResultItem>, StorageQueryError> {
+        // TODO: this should probably be extracted to a state machine in `/lib`, with unit tests
+        // TODO: big requests should be split into multiple smaller ones
         // TODO: handle max_parallel
-        for target in self
-            .peers_assumed_know_blocks(block_number, block_hash)
-            .await
-            .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
-        {
+        enum RequestImpl {
+            PrefixScan {
+                requested_key: Vec<u8>,
+                scan: prefix_proof::PrefixScan,
+            },
+            ValueOrHash {
+                key: Vec<u8>,
+                hash: bool,
+            },
+            ClosestAncestorMerkleValue {
+                key: Vec<u8>,
+            },
+        }
+
+        let mut requests_remaining = requests
+            .map(|request| match request.ty {
+                StorageRequestItemTy::DescendantsHashes
+                | StorageRequestItemTy::DescendantsValues => RequestImpl::PrefixScan {
+                    scan: prefix_proof::prefix_scan(prefix_proof::Config {
+                        prefix: &request.key,
+                        trie_root_hash: *storage_trie_root,
+                        full_storage_values_required: matches!(
+                            request.ty,
+                            StorageRequestItemTy::DescendantsValues
+                        ),
+                    }),
+                    requested_key: request.key,
+                },
+                StorageRequestItemTy::Value => RequestImpl::ValueOrHash {
+                    key: request.key,
+                    hash: false,
+                },
+                StorageRequestItemTy::Hash => RequestImpl::ValueOrHash {
+                    key: request.key,
+                    hash: true,
+                },
+                StorageRequestItemTy::ClosestAncestorMerkleValue => {
+                    RequestImpl::ClosestAncestorMerkleValue { key: request.key }
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let total_attempts = usize::try_from(total_attempts).unwrap_or(usize::max_value());
+        let mut outcome_errors = Vec::with_capacity(total_attempts);
+
+        let mut final_results =
+            Vec::<StorageResultItem>::with_capacity(requests_remaining.len() * 4);
+
+        loop {
+            // Check if we're done.
+            if requests_remaining.is_empty() {
+                return Ok(final_results);
+            }
+
+            if outcome_errors.len() >= total_attempts {
+                return Err(StorageQueryError {
+                    errors: outcome_errors,
+                });
+            }
+
+            // Choose peer to query.
+            // TODO: better peers selection
+            let Some(target) = self
+                .peers_assumed_know_blocks(block_number, block_hash)
+                .await
+                .choose(&mut rand::thread_rng())
+                    else {
+                        // No peer knows this block. Returning with a failure.
+                        return Err(StorageQueryError {
+                            errors: outcome_errors,
+                        });
+                    };
+
+            // Build the list of keys to request.
+            let keys_to_request = {
+                let mut keys = hashbrown::HashSet::with_capacity_and_hasher(
+                    requests_remaining.len() * 4,
+                    fnv::FnvBuildHasher::default(),
+                );
+
+                for request in &requests_remaining {
+                    match request {
+                        RequestImpl::PrefixScan { scan, .. } => {
+                            keys.extend(scan.requested_keys().map(|nibbles| {
+                                trie::nibbles_to_bytes_suffix_extend(nibbles).collect::<Vec<_>>()
+                            }));
+                        }
+                        RequestImpl::ValueOrHash { key, .. } => {
+                            keys.insert(key.clone());
+                        }
+                        RequestImpl::ClosestAncestorMerkleValue { key } => {
+                            keys.insert(key.clone());
+                        }
+                    }
+                }
+
+                keys
+            };
+
             let result = self
                 .network_service
                 .clone()
@@ -421,43 +507,174 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     target,
                     protocol::StorageProofRequestConfig {
                         block_hash: *block_hash,
-                        keys: requested_keys.clone(),
+                        keys: keys_to_request.into_iter(),
                     },
                     timeout_per_request,
                 )
-                .await
-                .map_err(StorageQueryErrorDetail::Network)
-                .and_then(|outcome| {
-                    let decoded = outcome.decode();
-                    let decoded = proof_decode::decode_and_verify_proof(proof_decode::Config {
-                        proof: decoded,
-                    })
-                    .map_err(StorageQueryErrorDetail::ProofVerification)?;
+                .await;
 
-                    let mut result = Vec::with_capacity(requested_keys.clone().count());
-                    for key in requested_keys.clone() {
-                        result.push(
-                            decoded
-                                .storage_value(storage_trie_root, key.as_ref())
-                                .map_err(|_| StorageQueryErrorDetail::MissingProofEntry)?
-                                .map(|(v, _)| v.to_owned()),
-                        );
-                    }
-                    debug_assert_eq!(result.len(), result.capacity());
-                    Ok(result)
-                });
-
-            match result {
-                Ok(values) => return Ok(values),
+            let proof = match result {
+                Ok(r) => r,
                 Err(err) => {
-                    outcome_errors.push(err);
+                    outcome_errors.push(StorageQueryErrorDetail::Network(err));
+                    continue;
+                }
+            };
+
+            let decoded_proof = match proof_decode::decode_and_verify_proof(proof_decode::Config {
+                proof: proof.decode(),
+            }) {
+                Ok(d) => d,
+                Err(err) => {
+                    outcome_errors.push(StorageQueryErrorDetail::ProofVerification(err));
+                    continue;
+                }
+            };
+
+            for request in mem::take(&mut requests_remaining) {
+                match request {
+                    RequestImpl::PrefixScan {
+                        scan,
+                        requested_key,
+                    } => {
+                        match scan.resume(proof.decode()) {
+                            Ok(prefix_proof::ResumeOutcome::InProgress(scan)) => {
+                                requests_remaining.push(RequestImpl::PrefixScan {
+                                    scan,
+                                    requested_key,
+                                });
+                            }
+                            Ok(prefix_proof::ResumeOutcome::Success {
+                                entries,
+                                full_storage_values_required,
+                            }) => {
+                                // The value of `full_storage_values_required` determines whether
+                                // we wanted full values (`true`) or hashes (`false`).
+                                for (key, value) in entries {
+                                    match value {
+                                        prefix_proof::StorageValue::Hash(hash) => {
+                                            debug_assert!(!full_storage_values_required);
+                                            final_results.push(StorageResultItem::DescendantHash {
+                                                key,
+                                                hash,
+                                                requested_key: requested_key.clone(),
+                                            });
+                                        }
+                                        prefix_proof::StorageValue::Value(value)
+                                            if full_storage_values_required =>
+                                        {
+                                            final_results.push(
+                                                StorageResultItem::DescendantValue {
+                                                    requested_key: requested_key.clone(),
+                                                    key,
+                                                    value,
+                                                },
+                                            );
+                                        }
+                                        prefix_proof::StorageValue::Value(value) => {
+                                            let hashed_value =
+                                                blake2_rfc::blake2b::blake2b(32, &[], &value);
+                                            final_results.push(StorageResultItem::DescendantHash {
+                                                key,
+                                                hash: *<&[u8; 32]>::try_from(
+                                                    hashed_value.as_bytes(),
+                                                )
+                                                .unwrap(),
+                                                requested_key: requested_key.clone(),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                            Err((_, prefix_proof::Error::InvalidProof(err))) => {
+                                // Since we decode the proof above, this is never supposed to
+                                // be reachable.
+                                debug_assert!(false);
+                                outcome_errors
+                                    .push(StorageQueryErrorDetail::ProofVerification(err));
+                            }
+                            Err((_, prefix_proof::Error::MissingProofEntry)) => {
+                                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                            }
+                        }
+                    }
+                    RequestImpl::ValueOrHash { key, hash } => {
+                        // TODO: overhead
+                        match decoded_proof.trie_node_info(
+                            storage_trie_root,
+                            &trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>(),
+                        ) {
+                            Ok(node_info) => match node_info.storage_value {
+                                proof_decode::StorageValue::HashKnownValueMissing(h) if hash => {
+                                    final_results.push(StorageResultItem::Hash {
+                                        key,
+                                        hash: Some(*h),
+                                    });
+                                }
+                                proof_decode::StorageValue::HashKnownValueMissing(_) => {
+                                    outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                                }
+                                proof_decode::StorageValue::Known { value, .. } => {
+                                    if hash {
+                                        let hashed_value =
+                                            blake2_rfc::blake2b::blake2b(32, &[], value);
+                                        final_results.push(StorageResultItem::Hash {
+                                            key,
+                                            hash: Some(
+                                                *<&[u8; 32]>::try_from(hashed_value.as_bytes())
+                                                    .unwrap(),
+                                            ),
+                                        });
+                                    } else {
+                                        final_results.push(StorageResultItem::Value {
+                                            key,
+                                            value: Some(value.to_vec()),
+                                        });
+                                    }
+                                }
+                                proof_decode::StorageValue::None => {
+                                    if hash {
+                                        final_results
+                                            .push(StorageResultItem::Hash { key, hash: None });
+                                    } else {
+                                        final_results
+                                            .push(StorageResultItem::Value { key, value: None });
+                                    }
+                                }
+                            },
+                            Err(proof_decode::IncompleteProofError { .. }) => {
+                                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                            }
+                        }
+                    }
+                    RequestImpl::ClosestAncestorMerkleValue { key } => {
+                        match decoded_proof.closest_ancestor_merkle_value(
+                            storage_trie_root,
+                            &trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>(),
+                        ) {
+                            Ok(Some((ancestor_key, merkle_value))) => {
+                                final_results.push(StorageResultItem::ClosestAncestorMerkleValue {
+                                    requested_key: key,
+                                    merkle_value: Some((
+                                        ancestor_key.to_vec(),
+                                        merkle_value.as_ref().to_vec(),
+                                    )),
+                                })
+                            }
+                            Ok(None) => {
+                                final_results.push(StorageResultItem::ClosestAncestorMerkleValue {
+                                    requested_key: key,
+                                    merkle_value: None,
+                                })
+                            }
+                            Err(proof_decode::IncompleteProofError { .. }) => {
+                                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                            }
+                        }
+                    }
                 }
             }
         }
-
-        Err(StorageQueryError {
-            errors: outcome_errors,
-        })
     }
 
     pub async fn storage_prefix_keys_query(
@@ -513,7 +730,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                                 prefix_scan = scan;
                                 continue 'main_scan;
                             }
-                            Ok(prefix_proof::ResumeOutcome::Success { entries }) => {
+                            Ok(prefix_proof::ResumeOutcome::Success { entries, .. }) => {
                                 // TODO :overhead
                                 return Ok(entries.into_iter().map(|(key, _)| key).collect());
                             }
@@ -596,6 +813,44 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             errors: outcome_errors,
         })
     }
+}
+
+pub struct StorageRequestItem {
+    pub key: Vec<u8>,
+    pub ty: StorageRequestItemTy,
+}
+
+pub enum StorageRequestItemTy {
+    Value,
+    Hash,
+    DescendantsValues,
+    DescendantsHashes,
+    ClosestAncestorMerkleValue,
+}
+
+pub enum StorageResultItem {
+    Value {
+        key: Vec<u8>,
+        value: Option<Vec<u8>>,
+    },
+    Hash {
+        key: Vec<u8>,
+        hash: Option<[u8; 32]>,
+    },
+    DescendantValue {
+        requested_key: Vec<u8>,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    DescendantHash {
+        requested_key: Vec<u8>,
+        key: Vec<u8>,
+        hash: [u8; 32],
+    },
+    ClosestAncestorMerkleValue {
+        requested_key: Vec<u8>,
+        merkle_value: Option<(Vec<trie::Nibble>, Vec<u8>)>,
+    },
 }
 
 /// Error that can happen when calling [`SyncService::storage_query`].

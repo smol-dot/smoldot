@@ -19,7 +19,7 @@
 
 use super::{Background, GetKeysPagedCacheKey, PlatformRef};
 
-use crate::runtime_service;
+use crate::{runtime_service, sync_service};
 
 use alloc::{borrow::ToOwned as _, format, string::ToString as _, sync::Arc, vec, vec::Vec};
 use async_lock::MutexGuard;
@@ -1161,7 +1161,10 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                         block_number,
                                         &block_hash,
                                         state_trie_root,
-                                        iter::once(&key.0),
+                                        iter::once(sync_service::StorageRequestItem {
+                                            key: key.0.clone(),
+                                            ty: sync_service::StorageRequestItemTy::Value,
+                                        }),
                                         4,
                                         Duration::from_secs(12),
                                         NonZeroU32::new(2).unwrap(),
@@ -1169,7 +1172,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                     .await
                                 {
                                     Ok(mut values) => {
-                                        let value = values.pop().unwrap();
+                                        let Some(sync_service::StorageResultItem::Value { value, .. }) = values.pop()
+                                            else { unreachable!() };
                                         match &mut known_values[key_index] {
                                             Some(v) if *v == value => {}
                                             v => {
