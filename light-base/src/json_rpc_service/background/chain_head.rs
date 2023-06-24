@@ -838,9 +838,8 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
     async fn start_chain_head_storage(&mut self, request: service::SubscriptionStartProcess) {
         let methods::MethodCall::chainHead_unstable_storage {
             hash,
-            key,
+            items,
             child_trie,
-            ty,
             network_config,
             ..
         } = request.request()
@@ -877,26 +876,6 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             return;
         }
 
-        let is_hash = match ty {
-            methods::ChainHeadStorageType::Value => false,
-            methods::ChainHeadStorageType::Hash => true,
-            methods::ChainHeadStorageType::DescendantsValues
-            | methods::ChainHeadStorageType::DescendantsHashes
-            | methods::ChainHeadStorageType::ClosestAncestorMerkleValue => {
-                // TODO: implement this
-                request.fail(json_rpc::parse::ErrorResponse::ServerError(
-                    -32000,
-                    "Child key storage queries not supported yet",
-                ));
-                log::warn!(
-                    target: &self.log_target,
-                    "chainHead_unstable_storage has been called with a type other than value or hash. \
-                    This isn't supported by smoldot yet."
-                );
-                return;
-            }
-        };
-
         let mut subscription = request.accept();
         let subscription_id = subscription.subscription_id().to_owned();
 
@@ -927,18 +906,36 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         }
                     };
 
+                    // Perform some API conversions.
+                    let queries = items
+                        .into_iter()
+                        .map(|item| sync_service::StorageRequestItem {
+                            key: item.key.0,
+                            ty: match item.ty {
+                                methods::ChainHeadStorageType::Value => {
+                                    sync_service::StorageRequestItemTy::Value
+                                }
+                                methods::ChainHeadStorageType::Hash => {
+                                    sync_service::StorageRequestItemTy::Hash
+                                }
+                                methods::ChainHeadStorageType::ClosestAncestorMerkleValue => {
+                                    sync_service::StorageRequestItemTy::ClosestAncestorMerkleValue
+                                }
+                                methods::ChainHeadStorageType::DescendantsValues => {
+                                    sync_service::StorageRequestItemTy::DescendantsValues
+                                }
+                                methods::ChainHeadStorageType::DescendantsHashes => {
+                                    sync_service::StorageRequestItemTy::DescendantsHashes
+                                }
+                            },
+                        })
+                        .collect::<Vec<_>>();
+
                     let future = sync_service.clone().storage_query(
                         decoded_header.number,
                         &hash.0,
                         decoded_header.state_root,
-                        iter::once(sync_service::StorageRequestItem {
-                            key: key.0.clone(), // TODO: overhead
-                            ty: if is_hash {
-                                sync_service::StorageRequestItemTy::Hash
-                            } else {
-                                sync_service::StorageRequestItemTy::Value
-                            },
-                        }),
+                        queries.into_iter(),
                         cmp::min(10, network_config.total_attempts),
                         Duration::from_millis(u64::from(cmp::min(
                             20000,
@@ -960,22 +957,65 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
 
                     match outcome {
                         Ok(entries) => {
-                            debug_assert!(entries.len() <= 1);
-                            if let sync_service::StorageResultItem::Value {
-                                value: Some(value),
-                                ..
-                            } = entries.into_iter().next().unwrap()
-                            {
+                            // Perform some API conversions.
+                            let items = entries
+                                .into_iter()
+                                .filter_map(|item| match item {
+                                    sync_service::StorageResultItem::Value { key, value } => {
+                                        Some(methods::ChainHeadStorageResponseItem {
+                                            key: methods::HexString(key),
+                                            value: Some(methods::HexString(value?)),
+                                            hash: None,
+                                            merkle_value: None,
+                                            merkle_value_key: None,
+                                        })
+                                    }
+                                    sync_service::StorageResultItem::Hash { key, hash } => {
+                                        Some(methods::ChainHeadStorageResponseItem {
+                                            key: methods::HexString(key),
+                                            value: None,
+                                            hash: Some(methods::HexString(hash?.to_vec())),
+                                            merkle_value: None,
+                                            merkle_value_key: None,
+                                        })
+                                    }
+                                    sync_service::StorageResultItem::DescendantValue { key, value, .. } => {
+                                        Some(methods::ChainHeadStorageResponseItem {
+                                            key: methods::HexString(key),
+                                            value: Some(methods::HexString(value)),
+                                            hash: None,
+                                            merkle_value: None,
+                                            merkle_value_key: None,
+                                        })
+                                    }
+                                    sync_service::StorageResultItem::DescendantHash { key, hash, .. } => {
+                                        Some(methods::ChainHeadStorageResponseItem {
+                                            key: methods::HexString(key),
+                                            value: None,
+                                            hash: Some(methods::HexString(hash.to_vec())),
+                                            merkle_value: None,
+                                            merkle_value_key: None,
+                                        })
+                                    }
+                                    sync_service::StorageResultItem::ClosestAncestorMerkleValue { requested_key, merkle_value } => {
+                                        let (merkle_value_of, merkle_value) = merkle_value?;
+                                        Some(methods::ChainHeadStorageResponseItem {
+                                            key: methods::HexString(requested_key),
+                                            value: None,
+                                            hash: None,
+                                            merkle_value: Some(methods::HexString(merkle_value)),
+                                            merkle_value_key: Some(format!("0x{}", merkle_value_of.iter().map(|n| format!("{:x}", n)).collect::<String>())),
+                                        })
+                                    }
+                                })
+                                .collect::<Vec<_>>();
+
+                            if !items.is_empty() {
                                 subscription
                                     .send_notification(
                                         methods::ServerToClient::chainHead_unstable_storageEvent {
                                             subscription: (&subscription_id).into(),
-                                            result: methods::ChainHeadStorageEvent::Item {
-                                                key,
-                                                value: Some(methods::HexString(value)),
-                                                hash: None,
-                                                merkle_value: None,
-                                            },
+                                            result: methods::ChainHeadStorageEvent::Items { items },
                                         },
                                     )
                                     .await;
