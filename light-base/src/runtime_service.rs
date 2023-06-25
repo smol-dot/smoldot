@@ -1977,7 +1977,17 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                     block_number,
                                     &block_hash,
                                     &state_root,
-                                    iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
+                                    [
+                                        sync_service::StorageRequestItem {
+                                            key: b":code".to_vec(),
+                                            ty: sync_service::StorageRequestItemTy::Value,
+                                        },
+                                        sync_service::StorageRequestItem {
+                                            key: b":heappages".to_vec(),
+                                            ty: sync_service::StorageRequestItemTy::Value,
+                                        },
+                                    ]
+                                    .into_iter(),
                                     3,
                                     Duration::from_secs(20),
                                     NonZeroU32::new(3).unwrap(),
@@ -1985,9 +1995,31 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                 .await;
 
                             let result = match result {
-                                Ok(mut c) => {
-                                    let heap_pages = c.pop().unwrap();
-                                    let code = c.pop().unwrap();
+                                Ok(entries) => {
+                                    let heap_pages = entries
+                                        .iter()
+                                        .find_map(|entry| match entry {
+                                            sync_service::StorageResultItem::Value {
+                                                key,
+                                                value,
+                                            } if key == b":heappages" => {
+                                                Some(value.clone()) // TODO: overhead
+                                            }
+                                            _ => None,
+                                        })
+                                        .unwrap();
+                                    let code = entries
+                                        .iter()
+                                        .find_map(|entry| match entry {
+                                            sync_service::StorageResultItem::Value {
+                                                key,
+                                                value,
+                                            } if key == b":code" => {
+                                                Some(value.clone()) // TODO: overhead
+                                            }
+                                            _ => None,
+                                        })
+                                        .unwrap();
                                     Ok((code, heap_pages))
                                 }
                                 Err(error) => Err(RuntimeDownloadError::StorageQuery(error)),

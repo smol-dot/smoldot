@@ -478,9 +478,8 @@ define_methods! {
     chainHead_unstable_storage(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString,
-        key: HexString,
+        items: Vec<ChainHeadStorageRequestItem>,
         #[rename = "childTrie"] child_trie: Option<HexString>,
-        #[rename = "type"] ty: ChainHeadStorageType,
         #[rename = "networkConfig"] network_config: Option<NetworkConfig>
     ) -> Cow<'a, str>,
     chainHead_unstable_storageContinue(
@@ -742,6 +741,26 @@ pub enum ChainHeadCallEvent<'a> {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ChainHeadStorageRequestItem {
+    pub key: HexString,
+    #[serde(rename = "type")]
+    pub ty: ChainHeadStorageType,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ChainHeadStorageResponseItem {
+    pub key: HexString,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<HexString>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<HexString>,
+    #[serde(rename = "merkle-value-key", skip_serializing_if = "Option::is_none")]
+    pub merkle_value_key: Option<String>, // TODO: `String` because the number of hex digits can be uneven
+    #[serde(rename = "merkle-value", skip_serializing_if = "Option::is_none")]
+    pub merkle_value: Option<HexString>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ChainHeadStorageType {
     #[serde(rename = "value")]
     Value,
@@ -758,15 +777,9 @@ pub enum ChainHeadStorageType {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event")]
 pub enum ChainHeadStorageEvent<'a> {
-    #[serde(rename = "item")]
-    Item {
-        key: HexString,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        value: Option<HexString>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<HexString>,
-        #[serde(rename = "merkle-value", skip_serializing_if = "Option::is_none")]
-        merkle_value: Option<HexString>,
+    #[serde(rename = "items")]
+    Items {
+        items: Vec<ChainHeadStorageResponseItem>,
     },
     #[serde(rename = "done")]
     Done,

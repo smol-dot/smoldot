@@ -14500,7 +14500,7 @@ fn regression_test_174() {
                 prefix_scan = scan;
                 continue;
             }
-            Ok(ResumeOutcome::Success { mut entries }) => {
+            Ok(ResumeOutcome::Success { mut entries, .. }) => {
                 let mut expected = EXPECTED.to_owned();
                 expected.sort();
                 entries.sort_by(|(key1, _), (key2, _)| key1.cmp(&key2));
