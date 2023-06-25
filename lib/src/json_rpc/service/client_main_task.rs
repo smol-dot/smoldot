@@ -1249,5 +1249,8 @@ impl Drop for Subscription {
             .push(ToMainTask::SubscriptionDestroyed {
                 subscription_id: mem::take(&mut self.subscription_id),
             });
+        self.responses_notifications_queue
+            .on_pushed
+            .notify(usize::max_value());
     }
 }
