@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.11 - 2023-06-25
+
 ### Changed
 
 - The runtime specification yielded by the `chainHead_unstable_follow` JSON-RPC function no longer includes the `authoringVersion` field, in accordance with the latest changes in the JSON-RPC API specification. ([#815](https://github.com/smol-dot/smoldot/pull/815))
