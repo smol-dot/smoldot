@@ -383,7 +383,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
     ///
     /// Must be passed a block hash, a block number, and the Merkle value of the root node of the
     /// storage trie of this same block. The value of `block_number` corresponds to the value
-    /// in the [`smoldot::header::HeaderRef::number`] field, and the value of `storage_trie_root`
+    /// in the [`smoldot::header::HeaderRef::number`] field, and the value of `main_trie_root_hash`
     /// corresponds to the value in the [`smoldot::header::HeaderRef::state_root`] field.
     // TODO: more documentation
     // TODO: should return the items in a streaming way, so that we don't need to wait for all the queries to have finished
@@ -391,7 +391,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         self: Arc<Self>,
         block_number: u64,
         block_hash: &[u8; 32],
-        storage_trie_root: &[u8; 32],
+        main_trie_root_hash: &[u8; 32],
         requests: impl Iterator<Item = StorageRequestItem>,
         total_attempts: u32,
         timeout_per_request: Duration,
@@ -420,7 +420,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 | StorageRequestItemTy::DescendantsValues => RequestImpl::PrefixScan {
                     scan: prefix_proof::prefix_scan(prefix_proof::Config {
                         prefix: &request.key,
-                        trie_root_hash: *storage_trie_root,
+                        trie_root_hash: *main_trie_root_hash,
                         full_storage_values_required: matches!(
                             request.ty,
                             StorageRequestItemTy::DescendantsValues
@@ -602,7 +602,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     RequestImpl::ValueOrHash { key, hash } => {
                         // TODO: overhead
                         match decoded_proof.trie_node_info(
-                            storage_trie_root,
+                            main_trie_root_hash,
                             &trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>(),
                         ) {
                             Ok(node_info) => match node_info.storage_value {
@@ -650,7 +650,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     }
                     RequestImpl::ClosestAncestorMerkleValue { key } => {
                         match decoded_proof.closest_ancestor_merkle_value(
-                            storage_trie_root,
+                            main_trie_root_hash,
                             &trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>(),
                         ) {
                             Ok(Some((ancestor_key, merkle_value))) => {
