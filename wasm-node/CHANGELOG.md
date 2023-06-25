@@ -5,6 +5,10 @@
 ### Changed
 
 - The runtime specification yielded by the `chainHead_unstable_follow` JSON-RPC function no longer includes the `authoringVersion` field, in accordance with the latest changes in the JSON-RPC API specification. ([#815](https://github.com/smol-dot/smoldot/pull/815))
+- The `chainHead_unstable_unpin` JSON-RPC function now accepts either a single hash or an array of hashes, in accordance with the latest changes in the JSON-RPC API specification. ([#814](https://github.com/smol-dot/smoldot/pull/814))
+- Add support for the `descendants-values`, `descendants-hashes`, and `closest-ancestor-merkle-value` types for the `chainHead_unstable_storage` JSON-RPC function. ([#813](https://github.com/smol-dot/smoldot/pull/813))
+- The `chainHead_unstable_storage` JSON-RPC function now accepts an array of `items` as parameter instead of a `key` and `type`, in accordance with the latest changes in the JSON-RPC API specification. ([#813](https://github.com/smol-dot/smoldot/pull/813))
+- The `chainHead_unstable_storage` JSON-RPC function now generates `items` notifications containin an array of multiple `items`, in accordance with the latest changes in the JSON-RPC API specification. ([#813](https://github.com/smol-dot/smoldot/pull/813))
 
 ### Fixed
 

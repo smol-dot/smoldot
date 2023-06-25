@@ -948,13 +948,32 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 block_number,
                 hash,
                 &state_trie_root_hash,
-                keys,
+                keys.clone().map(|key| sync_service::StorageRequestItem {
+                    key: key.as_ref().to_vec(), // TODO: overhead
+                    ty: sync_service::StorageRequestItemTy::Value,
+                }),
                 total_attempts,
                 timeout_per_request,
                 max_parallel,
             )
             .await
             .map_err(StorageQueryError::StorageRetrieval)?;
+
+        let result = keys
+            .map(|key| {
+                result
+                    .iter()
+                    .find_map(|entry| match entry {
+                        sync_service::StorageResultItem::Value { key: k, value }
+                            if k == key.as_ref() =>
+                        {
+                            Some(value.clone()) // TODO: overhead
+                        }
+                        _ => None,
+                    })
+                    .unwrap()
+            })
+            .collect();
 
         Ok(result)
     }
@@ -1000,14 +1019,24 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             // Download the runtime of this block. This takes a long time as the runtime is rather
             // big (around 1MiB in general).
             let (storage_code, storage_heap_pages) = {
-                let mut code_query_result = self
+                let entries = self
                     .sync_service
                     .clone()
                     .storage_query(
                         block_number,
                         block_hash,
                         &state_trie_root_hash,
-                        iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
+                        [
+                            sync_service::StorageRequestItem {
+                                key: b":code".to_vec(),
+                                ty: sync_service::StorageRequestItemTy::Value,
+                            },
+                            sync_service::StorageRequestItem {
+                                key: b":heappages".to_vec(),
+                                ty: sync_service::StorageRequestItemTy::Value,
+                            },
+                        ]
+                        .into_iter(),
                         3,
                         Duration::from_secs(20),
                         NonZeroU32::new(1).unwrap(),
@@ -1015,8 +1044,29 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     .await
                     .map_err(runtime_service::RuntimeCallError::StorageQuery)
                     .map_err(RuntimeCallError::Call)?;
-                let heap_pages = code_query_result.pop().unwrap();
-                let code = code_query_result.pop().unwrap();
+                // TODO: not elegant
+                let heap_pages = entries
+                    .iter()
+                    .find_map(|entry| match entry {
+                        sync_service::StorageResultItem::Value { key, value }
+                            if key == b":heappages" =>
+                        {
+                            Some(value.clone()) // TODO: overhead
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                let code = entries
+                    .iter()
+                    .find_map(|entry| match entry {
+                        sync_service::StorageResultItem::Value { key, value }
+                            if key == b":code" =>
+                        {
+                            Some(value.clone()) // TODO: overhead
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
                 (code, heap_pages)
             };
 

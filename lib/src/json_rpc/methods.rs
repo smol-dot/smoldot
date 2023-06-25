@@ -478,9 +478,8 @@ define_methods! {
     chainHead_unstable_storage(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString,
-        key: HexString,
+        items: Vec<ChainHeadStorageRequestItem>,
         #[rename = "childTrie"] child_trie: Option<HexString>,
-        #[rename = "type"] ty: ChainHeadStorageType,
         #[rename = "networkConfig"] network_config: Option<NetworkConfig>
     ) -> Cow<'a, str>,
     chainHead_unstable_storageContinue(
@@ -491,7 +490,7 @@ define_methods! {
     ) -> (),
     chainHead_unstable_unpin(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
-        hash: HashHexString
+        hash: HashHexStringSingleOrArray
     ) -> (),
 
     chainSpec_unstable_chainName() -> Cow<'a, str>,
@@ -599,6 +598,13 @@ impl<'a> serde::Deserialize<'a> for HashHexString {
         out.copy_from_slice(&bytes);
         Ok(HashHexString(out))
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum HashHexStringSingleOrArray {
+    Single(HashHexString),
+    Array(Vec<HashHexString>),
 }
 
 /// Removes the length prefix at the beginning of `metadata`. Used for the `Metadata_metadata`
@@ -735,6 +741,26 @@ pub enum ChainHeadCallEvent<'a> {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ChainHeadStorageRequestItem {
+    pub key: HexString,
+    #[serde(rename = "type")]
+    pub ty: ChainHeadStorageType,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ChainHeadStorageResponseItem {
+    pub key: HexString,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<HexString>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<HexString>,
+    #[serde(rename = "merkle-value-key", skip_serializing_if = "Option::is_none")]
+    pub merkle_value_key: Option<String>, // TODO: `String` because the number of hex digits can be uneven
+    #[serde(rename = "merkle-value", skip_serializing_if = "Option::is_none")]
+    pub merkle_value: Option<HexString>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ChainHeadStorageType {
     #[serde(rename = "value")]
     Value,
@@ -751,15 +777,9 @@ pub enum ChainHeadStorageType {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event")]
 pub enum ChainHeadStorageEvent<'a> {
-    #[serde(rename = "item")]
-    Item {
-        key: HexString,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        value: Option<HexString>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<HexString>,
-        #[serde(rename = "merkle-value", skip_serializing_if = "Option::is_none")]
-        merkle_value: Option<HexString>,
+    #[serde(rename = "items")]
+    Items {
+        items: Vec<ChainHeadStorageResponseItem>,
     },
     #[serde(rename = "done")]
     Done,
