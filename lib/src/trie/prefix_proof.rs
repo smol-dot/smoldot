@@ -269,6 +269,7 @@ impl PrefixScan {
             if next.is_empty() && self.next_queries.is_empty() {
                 return Ok(ResumeOutcome::Success {
                     entries: self.final_result,
+                    full_storage_values_required: self.full_storage_values_required,
                 });
             }
 
@@ -303,6 +304,8 @@ pub enum ResumeOutcome {
     Success {
         /// List of entries who key starts with the requested prefix.
         entries: Vec<(Vec<u8>, StorageValue)>,
+        /// Value that was passed as [`Config::full_storage_values_required`].
+        full_storage_values_required: bool,
     },
 }
 
