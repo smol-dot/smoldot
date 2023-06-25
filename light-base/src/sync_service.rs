@@ -385,7 +385,11 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
     /// storage trie of this same block. The value of `block_number` corresponds to the value
     /// in the [`smoldot::header::HeaderRef::number`] field, and the value of `main_trie_root_hash`
     /// corresponds to the value in the [`smoldot::header::HeaderRef::state_root`] field.
-    // TODO: more documentation
+    ///
+    /// The result will contain items corresponding to the requests, but in no particular order.
+    ///
+    /// See the documentation of [`StorageRequestItem`] and [`StorageResultItem`] for more
+    /// information.
     // TODO: should return the items in a streaming way, so that we don't need to wait for all the queries to have finished
     pub async fn storage_query(
         self: Arc<Self>,
@@ -734,39 +738,90 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
     }
 }
 
+/// An item requested with [`SyncService::storage_query`].
+#[derive(Debug, Clone)]
 pub struct StorageRequestItem {
+    /// Key to request. Exactly what is requested depends on [`StorageRequestItem::ty`].
     pub key: Vec<u8>,
+    /// Detail about what is being requested.
     pub ty: StorageRequestItemTy,
 }
 
+/// See [`StorageRequestItem::ty`].
+#[derive(Debug, Clone)]
 pub enum StorageRequestItemTy {
+    /// The storage value associated to the [`StorageRequestItem::key`] is requested.
+    /// A [`StorageResultItem::Value`] will be returned containing the potential value.
     Value,
+
+    /// The hash of the storage value associated to the [`StorageRequestItem::key`] is requested.
+    /// A [`StorageResultItem::Hash`] will be returned containing the potential hash.
     Hash,
+
+    /// The list of the descendants of the [`StorageRequestItem::key`] (including the `key`
+    /// itself) that have a storage value is requested.
+    ///
+    /// Zero or more [`StorageResultItem::DescendantValue`] will be returned where the
+    /// [`StorageResultItem::DescendantValue::requested_key`] is equal to
+    /// [`StorageRequestItem::key`].
     DescendantsValues,
+
+    /// The list of the descendants of the [`StorageRequestItem::key`] (including the `key`
+    /// itself) that have a storage value is requested.
+    ///
+    /// Zero or more [`StorageResultItem::DescendantHash`] will be returned where the
+    /// [`StorageResultItem::DescendantHash::requested_key`] is equal to
+    /// [`StorageRequestItem::key`].
     DescendantsHashes,
+
+    /// The Merkle value of the trie node that is the closest ancestor to
+    /// [`StorageRequestItem::key`] is requested.
+    /// A [`StorageResultItem::ClosestAncestorMerkleValue`] will be returned where
+    /// [`StorageResultItem::ClosestAncestorMerkleValue::requested_key`] is equal to
+    /// [`StorageRequestItem::key`].
     ClosestAncestorMerkleValue,
 }
 
+/// An item returned by [`SyncService::storage_query`].
+#[derive(Debug, Clone)]
 pub enum StorageResultItem {
+    /// Corresponds to a [`StorageRequestItem::Value`].
     Value {
+        /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
         key: Vec<u8>,
+        /// Storage value of the key, or `None` if there is no storage value associated with that
+        /// key.
         value: Option<Vec<u8>>,
     },
+    /// Corresponds to a [`StorageRequestItem::Hash`].
     Hash {
+        /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
         key: Vec<u8>,
+        /// Hash of the storage value of the key, or `None` if there is no storage value
+        /// associated with that key.
         hash: Option<[u8; 32]>,
     },
+    /// Corresponds to a [`StorageRequestItem::DescendantsValues`].
     DescendantValue {
+        /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
         requested_key: Vec<u8>,
+        /// Equal or a descendant of [`StorageResultItem::DescendantValue::requested_key`].
         key: Vec<u8>,
+        /// Storage value associated with [`StorageResultItem::DescendantValue::key`].
         value: Vec<u8>,
     },
+    /// Corresponds to a [`StorageRequestItem::DescendantsHashes`].
     DescendantHash {
+        /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
         requested_key: Vec<u8>,
+        /// Equal or a descendant of [`StorageResultItem::DescendantHash::requested_key`].
         key: Vec<u8>,
+        /// Hash of the storage value associated with [`StorageResultItem::DescendantHash::key`].
         hash: [u8; 32],
     },
+    /// Corresponds to a [`StorageRequestItem::ClosestAncestorMerkleValue`].
     ClosestAncestorMerkleValue {
+        /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
         requested_key: Vec<u8>,
         merkle_value: Option<(Vec<trie::Nibble>, Vec<u8>)>,
     },
