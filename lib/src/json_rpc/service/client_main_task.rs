@@ -29,17 +29,15 @@ use async_lock::Mutex;
 use core::{
     cmp, fmt, mem,
     num::{NonZeroU32, NonZeroUsize},
-    ptr,
-    sync::atomic::{AtomicPtr, AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
     task::Poll,
 };
 use futures_channel::mpsc;
+use futures_lite::FutureExt as _;
 use futures_util::{future, StreamExt as _};
 use slab::Slab;
 
 pub use crate::json_rpc::parse::{ErrorResponse, ParseError};
-
-// TODO: this module contains unsafe code, consider extracting it to a separate module for easier reviewing
 
 /// See [module-level-documentation](..).
 pub struct ClientMainTask {
@@ -65,9 +63,12 @@ struct Inner {
     ///
     /// Given that the subscription IDs are allocated locally, there is no harm in using a
     /// non-HashDoS-resilient hash function.
-    // TODO: shrink to fit from time to time?
-    active_subscriptions:
-        hashbrown::HashMap<String, Arc<SubscriptionKillChannel>, fnv::FnvBuildHasher>,
+    ///
+    /// Entries are removed only when the [`SubscriptionStartProcess`] or [`Subscription`] object
+    /// is destroyed. This is necessary given that the maximum number of subscriptions exists in
+    /// order to avoid spam attacks, and that resources are free'd only when the
+    /// [`SubscriptionStartProcess`] or [`Subscription`] is destroyed.
+    active_subscriptions: hashbrown::HashMap<String, InnerSubscription, fnv::FnvBuildHasher>,
     /// Maximum size that [`Inner::active_subscriptions`] is allowed to reach. Beyond this,
     /// subscription start requests are automatically denied.
     max_active_subscriptions: u32,
@@ -80,6 +81,13 @@ struct Inner {
 
     /// Queue where responses and subscriptions push responses/notifications.
     responses_notifications_queue: Arc<ResponsesNotificationsQueue>,
+}
+
+struct InnerSubscription {
+    /// Shared with the subscription. Used to notify the subscription that it should be killed.
+    kill_channel: Arc<SubscriptionKillChannel>,
+    /// Response to an unsubscribe request that must be sent out once the subscription is killed.
+    unsubscribe_response: Option<String>,
 }
 
 struct SerializedRequestsQueue {
@@ -104,9 +112,10 @@ struct ResponsesNotificationsQueue {
     /// The actual queue.
     queue: crossbeam_queue::SegQueue<ToMainTask>,
     /// Maximum size that [`ResponsesNotificationsQueue::queue`] should reach.
-    /// This is however not a hard limit. Pushing a response to a request ignores this maximum
-    /// (as doing so must always be lock-free), and pushing a notification checks against this
-    /// limit in a racy way. For this reason, in the worst case scenario the queue can reach up to
+    /// This is however not a hard limit. Pushing a response to a request and pushing a
+    /// subscription destroyed event ignore this maximum (as doing so must always be lock-free),
+    /// and pushing a notification checks against this limit in a racy way. For this reason, in
+    /// the worst case scenario the queue can reach up to
     /// `max_requests_in_fly + max_active_subscriptions` elements. What matters, however, is that
     /// the queue is bounded in a way or the other more than the exact bound.
     max_len: usize,
@@ -120,6 +129,7 @@ struct ResponsesNotificationsQueue {
 enum ToMainTask {
     RequestResponse(String),
     Notification(String),
+    SubscriptionDestroyed { subscription_id: String },
 }
 
 /// Configuration for [`client_main_task`].
@@ -317,6 +327,36 @@ impl ClientMainTask {
                     continue;
                 }
                 WhatHappened::NewRequest(request) => request,
+                WhatHappened::Message(ToMainTask::SubscriptionDestroyed { subscription_id }) => {
+                    let InnerSubscription {
+                        unsubscribe_response,
+                        ..
+                    } = self
+                        .inner
+                        .active_subscriptions
+                        .remove(&subscription_id)
+                        .unwrap();
+                    // TODO: post a `stop`/`error` event for chainhead subscriptions
+                    if let Some(unsubscribe_response) = unsubscribe_response {
+                        let pos = self
+                            .inner
+                            .pending_serialized_responses
+                            .insert((unsubscribe_response, true));
+                        self.inner.pending_serialized_responses_queue.push_back(pos);
+                    }
+
+                    // Shrink the list of active subscriptions if necessary.
+                    if self.inner.active_subscriptions.capacity()
+                        >= 2 * self.inner.active_subscriptions.len() + 16
+                    {
+                        self.inner.active_subscriptions.shrink_to_fit();
+                    }
+
+                    return Event::SubscriptionDestroyed {
+                        task: self,
+                        subscription_id,
+                    };
+                }
                 WhatHappened::Message(ToMainTask::RequestResponse(response)) => {
                     let pos = self
                         .inner
@@ -478,12 +518,16 @@ impl ClientMainTask {
                     // with the subscription object and is used to notify when a subscription
                     // should be killed.
                     let kill_channel = Arc::new(SubscriptionKillChannel {
-                        state: AtomicPtr::new(ptr::null_mut()),
-                        on_state_changed: event_listener::Event::new(),
+                        dead: AtomicBool::new(false),
+                        on_dead_changed: event_listener::Event::new(),
                     });
-                    self.inner
-                        .active_subscriptions
-                        .insert(subscription_id.clone(), kill_channel.clone());
+                    self.inner.active_subscriptions.insert(
+                        subscription_id.clone(),
+                        InnerSubscription {
+                            kill_channel: kill_channel.clone(),
+                            unsubscribe_response: None,
+                        },
+                    );
 
                     return Event::HandleSubscriptionStart {
                         subscription_start: SubscriptionStartProcess {
@@ -515,68 +559,49 @@ impl ClientMainTask {
                     ..
                 } => {
                     // TODO: must check whether type of subscription matches
-                    match self.inner.active_subscriptions.remove(&**subscription) {
-                        Some(kill_channel) => {
-                            let unsubscribe = match parsed_request {
-                                methods::MethodCall::author_unwatchExtrinsic { .. } => {
-                                    methods::Response::author_unwatchExtrinsic(true)
+                    match self.inner.active_subscriptions.get_mut(&**subscription) {
+                        Some(InnerSubscription {
+                            kill_channel,
+                            unsubscribe_response,
+                        }) if unsubscribe_response.is_none() => {
+                            *unsubscribe_response = Some(
+                                match parsed_request {
+                                    methods::MethodCall::author_unwatchExtrinsic { .. } => {
+                                        methods::Response::author_unwatchExtrinsic(true)
+                                    }
+                                    methods::MethodCall::state_unsubscribeRuntimeVersion {
+                                        ..
+                                    } => methods::Response::state_unsubscribeRuntimeVersion(true),
+                                    methods::MethodCall::state_unsubscribeStorage { .. } => {
+                                        methods::Response::state_unsubscribeStorage(true)
+                                    }
+                                    methods::MethodCall::transaction_unstable_unwatch {
+                                        ..
+                                    } => methods::Response::transaction_unstable_unwatch(()),
+                                    methods::MethodCall::network_unstable_unsubscribeEvents {
+                                        ..
+                                    } => methods::Response::network_unstable_unsubscribeEvents(()),
+                                    methods::MethodCall::chainHead_unstable_stopBody { .. } => {
+                                        methods::Response::chainHead_unstable_stopBody(())
+                                    }
+                                    methods::MethodCall::chainHead_unstable_stopStorage {
+                                        ..
+                                    } => methods::Response::chainHead_unstable_stopStorage(()),
+                                    methods::MethodCall::chainHead_unstable_stopCall { .. } => {
+                                        methods::Response::chainHead_unstable_stopCall(())
+                                    }
+                                    methods::MethodCall::chainHead_unstable_unfollow { .. } => {
+                                        methods::Response::chainHead_unstable_unfollow(())
+                                    }
+                                    _ => unreachable!(),
                                 }
-                                methods::MethodCall::state_unsubscribeRuntimeVersion { .. } => {
-                                    methods::Response::state_unsubscribeRuntimeVersion(true)
-                                }
-                                methods::MethodCall::state_unsubscribeStorage { .. } => {
-                                    methods::Response::state_unsubscribeStorage(true)
-                                }
-                                methods::MethodCall::transaction_unstable_unwatch { .. } => {
-                                    methods::Response::transaction_unstable_unwatch(())
-                                }
-                                methods::MethodCall::network_unstable_unsubscribeEvents {
-                                    ..
-                                } => methods::Response::network_unstable_unsubscribeEvents(()),
-                                methods::MethodCall::chainHead_unstable_stopBody { .. } => {
-                                    methods::Response::chainHead_unstable_stopBody(())
-                                }
-                                methods::MethodCall::chainHead_unstable_stopStorage { .. } => {
-                                    methods::Response::chainHead_unstable_stopStorage(())
-                                }
-                                methods::MethodCall::chainHead_unstable_stopCall { .. } => {
-                                    methods::Response::chainHead_unstable_stopCall(())
-                                }
-                                methods::MethodCall::chainHead_unstable_unfollow { .. } => {
-                                    methods::Response::chainHead_unstable_unfollow(())
-                                }
-                                _ => unreachable!(),
-                            }
-                            .to_json_response(request_id);
+                                .to_json_response(request_id),
+                            );
 
-                            if kill_channel
-                                .state
-                                .swap(Box::into_raw(Box::new(unsubscribe)), Ordering::AcqRel)
-                                .is_null()
-                            {
-                                // Subscription isn't currently sending a message. We can grab
-                                // back the message and send it from here.
-                                let ptr = kill_channel
-                                    .state
-                                    .swap(&DEAD_STATE as *const _ as *mut _, Ordering::AcqRel);
-                                if ptr != &SENDING_STATE as *const _ as *mut _ {
-                                    let unsubscribe = unsafe { Box::from_raw(ptr) };
-                                    // Note that we push to the end of the concurrent queue, as
-                                    // there could be pending notifications earlier in that queue.
-                                    self.inner
-                                        .responses_notifications_queue
-                                        .queue
-                                        .push(ToMainTask::RequestResponse(*unsubscribe));
-                                    // Don't notify that an event is pushed, as there is no
-                                    // listener except the currently function.
-                                }
-                            }
-
-                            // Notify of the state change only at the end. There is no advantage
-                            // in notifying during the intermediary state.
-                            kill_channel.on_state_changed.notify(usize::max_value());
+                            kill_channel.dead.store(true, Ordering::Release);
+                            kill_channel.on_dead_changed.notify(usize::max_value());
                         }
-                        None => {
+                        _ => {
                             let response = match parsed_request {
                                 methods::MethodCall::author_unwatchExtrinsic { .. } => {
                                     methods::Response::author_unwatchExtrinsic(false)
@@ -610,9 +635,12 @@ impl ClientMainTask {
                 | methods::MethodCall::chain_unsubscribeNewHeads { subscription, .. } => {
                     // TODO: DRY with above
                     // TODO: must check whether type of subscription matches
-                    match self.inner.active_subscriptions.remove(&**subscription) {
-                        Some(kill_channel) => {
-                            let unsubscribe = match parsed_request {
+                    match self.inner.active_subscriptions.get_mut(&**subscription) {
+                        Some(InnerSubscription {
+                            unsubscribe_response,
+                            kill_channel,
+                        }) if unsubscribe_response.is_none() => {
+                            *unsubscribe_response = Some(match parsed_request {
                                 methods::MethodCall::chain_unsubscribeAllHeads { .. } => {
                                     methods::Response::chain_unsubscribeAllHeads(true)
                                         .to_json_response(request_id)
@@ -626,36 +654,12 @@ impl ClientMainTask {
                                         .to_json_response(request_id)
                                 }
                                 _ => unreachable!(),
-                            };
+                            });
 
-                            if kill_channel
-                                .state
-                                .swap(Box::into_raw(Box::new(unsubscribe)), Ordering::AcqRel)
-                                .is_null()
-                            {
-                                // Subscription isn't currently sending a message. We can grab
-                                // back the message and send it from here.
-                                let ptr = kill_channel
-                                    .state
-                                    .swap(&DEAD_STATE as *const _ as *mut _, Ordering::AcqRel);
-                                if ptr != &SENDING_STATE as *const _ as *mut _ {
-                                    let unsubscribe = unsafe { Box::from_raw(ptr) };
-                                    // Note that we push to the end of the concurrent queue, as
-                                    // there could be pending notifications earlier in that queue.
-                                    self.inner
-                                        .responses_notifications_queue
-                                        .queue
-                                        .push(ToMainTask::RequestResponse(*unsubscribe));
-                                    // Don't notify that an event is pushed, as there is no
-                                    // listener except the currently function.
-                                }
-                            }
-
-                            // Notify of the state change only at the end. There is no advantage
-                            // in notifying during the intermediary state.
-                            kill_channel.on_state_changed.notify(usize::max_value());
+                            kill_channel.dead.store(true, Ordering::Release);
+                            kill_channel.on_dead_changed.notify(usize::max_value());
                         }
-                        None => {
+                        _ => {
                             let response = match parsed_request {
                                 methods::MethodCall::chain_unsubscribeAllHeads { .. } => {
                                     methods::Response::chain_unsubscribeAllHeads(false)
@@ -700,11 +704,9 @@ impl fmt::Debug for ClientMainTask {
 impl Drop for ClientMainTask {
     fn drop(&mut self) {
         // Mark all active subscriptions as dead.
-        for (_, kill_channel) in self.inner.active_subscriptions.drain() {
-            kill_channel
-                .state
-                .store(&DEAD_STATE as *const _ as *mut _, Ordering::Release);
-            kill_channel.on_state_changed.notify(usize::max_value());
+        for (_, InnerSubscription { kill_channel, .. }) in self.inner.active_subscriptions.drain() {
+            kill_channel.dead.store(true, Ordering::Release);
+            kill_channel.on_dead_changed.notify(usize::max_value());
         }
     }
 }
@@ -731,6 +733,15 @@ pub enum Event {
         /// Object connected to the [`ClientMainTask`] and containing the information about the
         /// request to process.
         subscription_start: SubscriptionStartProcess,
+    },
+
+    /// A [`SubscriptionStartProcess`] object or a [`Subscription`] object has been destroyed.
+    SubscriptionDestroyed {
+        /// The task that generated the event.
+        task: ClientMainTask,
+        /// Id of the subscription that was destroyed. Equals to the value that
+        /// [`Subscription::subscription_id`] would have returned for the now-dead subscription.
+        subscription_id: String,
     },
 
     /// The [`SerializedRequestsIo`] has been dropped. The [`ClientMainTask`] has been destroyed.
@@ -1074,6 +1085,11 @@ impl SubscriptionStartProcess {
             .queue
             .push(ToMainTask::RequestResponse(serialized));
         self.responses_notifications_queue
+            .queue
+            .push(ToMainTask::SubscriptionDestroyed {
+                subscription_id: mem::take(&mut self.subscription_id),
+            });
+        self.responses_notifications_queue
             .on_pushed
             .notify(usize::max_value());
         self.has_sent_response = true;
@@ -1096,6 +1112,11 @@ impl Drop for SubscriptionStartProcess {
                 .queue
                 .push(ToMainTask::RequestResponse(serialized));
             self.responses_notifications_queue
+                .queue
+                .push(ToMainTask::SubscriptionDestroyed {
+                    subscription_id: mem::take(&mut self.subscription_id),
+                });
+            self.responses_notifications_queue
                 .on_pushed
                 .notify(usize::max_value());
         }
@@ -1103,9 +1124,6 @@ impl Drop for SubscriptionStartProcess {
 }
 
 /// Object connected to the [`ClientMainTask`] representing an active subscription.
-///
-/// Dropping this object doesn't have any particular effect and is the same as not sending any
-/// notification anymore.
 pub struct Subscription {
     /// Queue where responses and subscriptions push responses/notifications.
     responses_notifications_queue: Arc<ResponsesNotificationsQueue>,
@@ -1116,43 +1134,12 @@ pub struct Subscription {
     subscription_id: String,
 }
 
-/// See [`SubscriptionKillChannel::state`].
-static SENDING_STATE: String = String::new();
-/// See [`SubscriptionKillChannel::state`].
-static DEAD_STATE: String = String::new();
-
 /// See [`Subscription::kill_channel`].
 struct SubscriptionKillChannel {
-    /// State of the subscription.
-    ///
-    /// This variable can be in the follow states:
-    ///
-    /// - `null`, which means "alive and idle".
-    /// - [`SENDING_STATE`], which means that the subscription is alive and is currently pushing
-    /// a message to the queue.
-    /// - [`DEAD_STATE`], which means that the subscription is dead and shouldn't send any more
-    /// notification.
-    /// - Any other value is an unsubscribe confirmation message.
-    ///
-    /// The reason for this complicated design is that we want to avoid race conditions between
-    /// the main task pushing an unsubscribe confirmation message to the queue, and the
-    /// subscription sending a notification to the same queue. Unsubscribe confirmation messages
-    /// should always be pushed after any notification.
-    ///
-    /// Before the subscription starts pushing a message to the queue for the main task, it
-    /// switches this state to [`SENDING_STATE`]. Having having finished sending, it switches it
-    /// back to `null`. If an unsubscribe confirmation message is grabbed while switching states,
-    /// the subscription sends it to the queue.
-    ///
-    /// Destroying a subscription is done in two steps: first, store a unsubscribe confirmation
-    /// message, then switch to [`DEAD_STATE`]. When switching to [`DEAD_STATE`], the unsubscribe
-    /// confirmation message will likely be grabbed back and can be pushed to the queue  If
-    /// [`SENDING_STATE`] is grabbed instead, then it is the job of the subscription to send the
-    /// unsubscribe confirmation message.
-    state: AtomicPtr<String>,
-
-    /// Notified whenever [`SubscriptionKillChannel::state`] is modified.
-    on_state_changed: event_listener::Event,
+    /// `true` if this subscription should be destroyed as soon as possible.
+    dead: AtomicBool,
+    /// Notified whenever [`SubscriptionKillChannel::dead`] is modified.
+    on_dead_changed: event_listener::Event,
 }
 
 impl Subscription {
@@ -1178,62 +1165,32 @@ impl Subscription {
     pub async fn send_notification(&mut self, notification: methods::ServerToClient<'_>) {
         let serialized = notification.to_json_call_object_parameters(None);
 
-        // We first check and update the state in order to prevent race conditions with the
-        // subscription being killed by the main task.
-        match self
-            .kill_channel
-            .state
-            .swap(&SENDING_STATE as *const _ as *mut _, Ordering::AcqRel)
-        {
-            ptr if ptr.is_null() => {
-                // Normal case. Can send notification.
-            }
-            ptr if ptr == &DEAD_STATE as *const _ as *mut _ => {
-                // Subscription is already dead. Don't send the notification.
-                self.kill_channel
-                    .state
-                    .store(&DEAD_STATE as *const _ as *mut _, Ordering::Release);
-                return;
-            }
-            ptr if ptr == &SENDING_STATE as *const _ as *mut _ => {
-                // This is never supposed to happen. In theory, this could be a `debug_assert`,
-                // but given that we use unsafe code below, it's not a bad idea to check this
-                // even when debug assertions are disabled.
-                unreachable!()
-            }
-            ptr => {
-                // Grabbed an unsubscribe confirmation message.
-                // The subscription is currently being killed by the main task. We finish its
-                // job and skip the notification.
-                let message = unsafe { Box::from_raw(ptr) };
-                self.responses_notifications_queue
-                    .queue
-                    .push(ToMainTask::RequestResponse(*message));
-                self.responses_notifications_queue
-                    .on_pushed
-                    .notify(usize::max_value());
-                self.kill_channel
-                    .state
-                    .store(&DEAD_STATE as *const _ as *mut _, Ordering::Release);
-                return;
-            }
-        }
-
-        // Wait until there is space in the queue.
+        // Wait until there is space in the queue or that the subscription is dead.
         // Note that this is intentionally racy.
         {
             let mut wait = None;
             loop {
+                // If the subscription is dead, simply do nothing. This is purely an optimization.
+                if self.kill_channel.dead.load(Ordering::Relaxed) {
+                    return;
+                }
+
+                // If there is space, break out of the loop in order to send.
                 if self.responses_notifications_queue.queue.len()
                     < self.responses_notifications_queue.max_len
                 {
                     break;
                 }
-                // TODO: also check for state update
+
                 if let Some(wait) = wait.take() {
                     wait.await
                 } else {
-                    wait = Some(self.responses_notifications_queue.on_popped.listen());
+                    wait = Some(
+                        self.responses_notifications_queue
+                            .on_popped
+                            .listen()
+                            .or(self.kill_channel.on_dead_changed.listen()),
+                    );
                 }
             }
         }
@@ -1245,38 +1202,6 @@ impl Subscription {
         self.responses_notifications_queue
             .on_pushed
             .notify(usize::max_value());
-
-        // Now switch the state back.
-        match self
-            .kill_channel
-            .state
-            .swap(ptr::null_mut(), Ordering::AcqRel)
-        {
-            ptr if ptr == &SENDING_STATE as *const _ as *mut _ => {
-                // We back found the state that we put there. Normal case.
-            }
-            ptr if ptr.is_null() => {
-                // Shouldn't be happening.
-                unreachable!()
-            }
-            ptr if ptr == &DEAD_STATE as *const _ as *mut _ => {
-                // The subscription has been killed by the main task.
-            }
-            ptr => {
-                // Grabbed an unsubscribe confirmation message.
-                // The subscription has been killed by the main task. We finish its job.
-                let message = unsafe { Box::from_raw(ptr) };
-                self.responses_notifications_queue
-                    .queue
-                    .push(ToMainTask::RequestResponse(*message));
-                self.kill_channel
-                    .state
-                    .store(&DEAD_STATE as *const _ as *mut _, Ordering::Release);
-                self.responses_notifications_queue
-                    .on_pushed
-                    .notify(usize::max_value());
-            }
-        }
     }
 
     /// Returns `true` if the JSON-RPC client has unsubscribed, or the [`ClientMainTask`] has been
@@ -1287,7 +1212,7 @@ impl Subscription {
     /// `true` and thus should be interpreted as "maybe". A value of `true`, however, actually
     /// means "yes", as it can't ever switch back to `false`.
     pub fn is_stale(&self) -> bool {
-        self.kill_channel.state.load(Ordering::Relaxed) == &DEAD_STATE as *const _ as *mut _
+        self.kill_channel.dead.load(Ordering::Relaxed)
     }
 
     /// Run indefinitely until [`Subscription::is_stale`] returns `true`.
@@ -1296,15 +1221,14 @@ impl Subscription {
         // easy to understand.
         let mut wait = None;
         loop {
-            if self.kill_channel.state.load(Ordering::Relaxed) == &DEAD_STATE as *const _ as *mut _
-            {
+            if self.kill_channel.dead.load(Ordering::Acquire) {
                 return;
             }
 
             if let Some(wait) = wait.take() {
                 wait.await;
             } else {
-                wait = Some(self.kill_channel.on_state_changed.listen());
+                wait = Some(self.kill_channel.on_dead_changed.listen());
             }
         }
     }
@@ -1315,5 +1239,18 @@ impl fmt::Debug for Subscription {
         f.debug_tuple("Subscription")
             .field(&self.subscription_id)
             .finish()
+    }
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        self.responses_notifications_queue
+            .queue
+            .push(ToMainTask::SubscriptionDestroyed {
+                subscription_id: mem::take(&mut self.subscription_id),
+            });
+        self.responses_notifications_queue
+            .on_pushed
+            .notify(usize::max_value());
     }
 }
