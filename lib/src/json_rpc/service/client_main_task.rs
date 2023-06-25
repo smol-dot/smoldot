@@ -39,8 +39,6 @@ use slab::Slab;
 
 pub use crate::json_rpc::parse::{ErrorResponse, ParseError};
 
-// TODO: this module contains unsafe code, consider extracting it to a separate module for easier reviewing
-
 /// See [module-level-documentation](..).
 pub struct ClientMainTask {
     /// Because we move the task around a lot, all the fields are actually within a `Box`.
