@@ -1038,15 +1038,12 @@ pub struct RuntimeSpec<'a> {
     pub spec_name: Cow<'a, str>,
     #[serde(rename = "implName")]
     pub impl_name: Cow<'a, str>,
-    #[serde(rename = "authoringVersion")]
-    pub authoring_version: u32,
     #[serde(rename = "specVersion")]
     pub spec_version: u32,
     #[serde(rename = "implVersion")]
     pub impl_version: u32,
     #[serde(rename = "transactionVersion", skip_serializing_if = "Option::is_none")]
     pub transaction_version: Option<u32>,
-    // TODO: add `state_version`? would need a JSON-RPC API interface spec change
     pub apis: HashMap<HexString, u32, fnv::FnvBuildHasher>,
 }
 
