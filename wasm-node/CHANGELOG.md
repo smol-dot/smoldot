@@ -4,7 +4,7 @@
 
 ### Changed
 
-- The `chainHead_unstable_unpin` JSON-RPC function now accepts either a single hash or an array of hashes, in accordance with the latest changes in the JSON-RPC API specification.
+- The `chainHead_unstable_unpin` JSON-RPC function now accepts either a single hash or an array of hashes, in accordance with the latest changes in the JSON-RPC API specification. ([#814](https://github.com/smol-dot/smoldot/pull/814))
 
 ### Fixed
 
