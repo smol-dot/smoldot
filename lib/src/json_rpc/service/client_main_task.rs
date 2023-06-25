@@ -352,7 +352,10 @@ impl ClientMainTask {
                         self.inner.active_subscriptions.shrink_to_fit();
                     }
 
-                    continue;
+                    return Event::SubscriptionDestroyed {
+                        task: self,
+                        subscription_id,
+                    };
                 }
                 WhatHappened::Message(ToMainTask::RequestResponse(response)) => {
                     let pos = self
