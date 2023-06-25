@@ -70,7 +70,6 @@ struct Inner {
     /// is destroyed. This is necessary given that the maximum number of subscriptions exists in
     /// order to avoid spam attacks, and that resources are free'd only when the
     /// [`SubscriptionStartProcess`] or [`Subscription`] is destroyed.
-    // TODO: shrink to fit from time to time?
     active_subscriptions: hashbrown::HashMap<String, InnerSubscription, fnv::FnvBuildHasher>,
     /// Maximum size that [`Inner::active_subscriptions`] is allowed to reach. Beyond this,
     /// subscription start requests are automatically denied.
@@ -347,6 +346,14 @@ impl ClientMainTask {
                             .insert((unsubscribe_response, true));
                         self.inner.pending_serialized_responses_queue.push_back(pos);
                     }
+
+                    // Shrink the list of active subscriptions if necessary.
+                    if self.inner.active_subscriptions.capacity()
+                        >= 2 * self.inner.active_subscriptions.len() + 16
+                    {
+                        self.inner.active_subscriptions.shrink_to_fit();
+                    }
+
                     continue;
                 }
                 WhatHappened::Message(ToMainTask::RequestResponse(response)) => {
