@@ -448,7 +448,6 @@ fn convert_runtime_spec(
                     spec_name: runtime.spec_name.into(),
                     impl_version: runtime.impl_version,
                     spec_version: runtime.spec_version,
-                    authoring_version: runtime.authoring_version,
                     transaction_version: runtime.transaction_version,
                     apis: runtime
                         .apis
