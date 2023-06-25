@@ -784,7 +784,7 @@ pub enum StorageRequestItemTy {
 /// An item returned by [`SyncService::storage_query`].
 #[derive(Debug, Clone)]
 pub enum StorageResultItem {
-    /// Corresponds to a [`StorageRequestItem::Value`].
+    /// Corresponds to a [`StorageRequestItemTy::Value`].
     Value {
         /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
         key: Vec<u8>,
@@ -792,7 +792,7 @@ pub enum StorageResultItem {
         /// key.
         value: Option<Vec<u8>>,
     },
-    /// Corresponds to a [`StorageRequestItem::Hash`].
+    /// Corresponds to a [`StorageRequestItemTy::Hash`].
     Hash {
         /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
         key: Vec<u8>,
@@ -800,7 +800,7 @@ pub enum StorageResultItem {
         /// associated with that key.
         hash: Option<[u8; 32]>,
     },
-    /// Corresponds to a [`StorageRequestItem::DescendantsValues`].
+    /// Corresponds to a [`StorageRequestItemTy::DescendantsValues`].
     DescendantValue {
         /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
         requested_key: Vec<u8>,
@@ -809,7 +809,7 @@ pub enum StorageResultItem {
         /// Storage value associated with [`StorageResultItem::DescendantValue::key`].
         value: Vec<u8>,
     },
-    /// Corresponds to a [`StorageRequestItem::DescendantsHashes`].
+    /// Corresponds to a [`StorageRequestItemTy::DescendantsHashes`].
     DescendantHash {
         /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
         requested_key: Vec<u8>,
@@ -818,7 +818,7 @@ pub enum StorageResultItem {
         /// Hash of the storage value associated with [`StorageResultItem::DescendantHash::key`].
         hash: [u8; 32],
     },
-    /// Corresponds to a [`StorageRequestItem::ClosestAncestorMerkleValue`].
+    /// Corresponds to a [`StorageRequestItemTy::ClosestAncestorMerkleValue`].
     ClosestAncestorMerkleValue {
         /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
         requested_key: Vec<u8>,
