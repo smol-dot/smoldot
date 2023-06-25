@@ -491,7 +491,7 @@ define_methods! {
     ) -> (),
     chainHead_unstable_unpin(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
-        hash: HashHexString
+        hash: HashHexStringSingleOrArray
     ) -> (),
 
     chainSpec_unstable_chainName() -> Cow<'a, str>,
@@ -599,6 +599,13 @@ impl<'a> serde::Deserialize<'a> for HashHexString {
         out.copy_from_slice(&bytes);
         Ok(HashHexString(out))
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum HashHexStringSingleOrArray {
+    Single(HashHexString),
+    Array(Vec<HashHexString>),
 }
 
 /// Removes the length prefix at the beginning of `metadata`. Used for the `Metadata_metadata`

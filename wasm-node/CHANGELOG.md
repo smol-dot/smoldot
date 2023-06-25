@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The `chainHead_unstable_unpin` JSON-RPC function now accepts either a single hash or an array of hashes, in accordance with the latest changes in the JSON-RPC API specification.
+
 ### Fixed
 
 - Fix not absorbing the JavaScript exception triggered by the browser when connecting to a `ws://` node when smoldot is embedded in a web page served over `https://`. ([#795](https://github.com/smol-dot/smoldot/pull/795), [#800](https://github.com/smol-dot/smoldot/pull/800))
