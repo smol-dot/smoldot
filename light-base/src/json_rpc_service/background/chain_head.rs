@@ -704,23 +704,32 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     follow_subscription: _,
                     hash,
                 } => {
-                    let valid = {
-                        if self.pinned_blocks_headers.remove(&hash.0).is_some() {
+                    let all_hashes = match &hash {
+                        methods::HashHexStringSingleOrArray::Single(hash) => {
+                            either::Left(iter::once(&hash.0))
+                        }
+                        methods::HashHexStringSingleOrArray::Array(hashes) => {
+                            either::Right(hashes.iter().map(|h| &h.0))
+                        }
+                    };
+
+                    let is_valid = all_hashes
+                        .clone()
+                        .all(|hash| self.pinned_blocks_headers.contains_key(hash));
+
+                    if is_valid {
+                        for hash in all_hashes {
+                            self.pinned_blocks_headers.remove(hash);
                             if let Subscription::WithRuntime {
                                 subscription_id, ..
                             } = self.subscription
                             {
                                 self.runtime_service
-                                    .unpin_block(subscription_id, &hash.0)
+                                    .unpin_block(subscription_id, hash)
                                     .await;
                             }
-                            true
-                        } else {
-                            false
                         }
-                    };
 
-                    if valid {
                         request.respond(methods::Response::chainHead_unstable_unpin(()));
                     } else {
                         request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
