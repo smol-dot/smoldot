@@ -16,7 +16,10 @@
     "url": "https://github.com/smol-dot/smoldot/issues"
   },
   "files": [
-    "dist"
+    "dist",
+    "worker",
+    "no-auto-bytecode",
+    "bytecode"
   ],
   "main": "dist/cjs/index-browser.js",
   "types": "dist/mjs/index-browser.d.ts",
@@ -64,7 +67,7 @@
     }
   },
   "scripts": {
-    "buildModules": "tsc -p tsconfig-mjs.json && tsc -p tsconfig-cjs.json && bash fix-package-type.sh",
+    "buildModules": "tsc -p tsconfig-mjs.json && tsc -p tsconfig-cjs.json && bash fix-package-type.sh && bash ./create-subpath-for-legacy-types.sh",
     "prepublishOnly": "node prepare.mjs --release && rm -rf ./dist && npm run buildModules",
     "build": "node prepare.mjs --release && rm -rf ./dist && npm run buildModules",
     "start": "node prepare.mjs --debug && rm -rf ./dist && npm run buildModules && node demo/demo.mjs",
