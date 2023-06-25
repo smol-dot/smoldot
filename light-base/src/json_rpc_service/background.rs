@@ -220,6 +220,7 @@ pub(super) fn start<TPlat: PlatformRef>(
     me.platform
         .clone()
         .spawn_task(format!("{}-main-task", me.log_target).into(), {
+            let me = me.clone();
             async move {
                 loop {
                     match requests_processing_task.run_until_event().await {
@@ -236,6 +237,17 @@ pub(super) fn start<TPlat: PlatformRef>(
                         } => {
                             requests_processing_task = task;
                             tx.send(either::Right(subscription_start)).await.unwrap();
+                        }
+                        service::Event::SubscriptionDestroyed {
+                            task,
+                            subscription_id,
+                        } => {
+                            requests_processing_task = task;
+                            let _ = me
+                                .chain_head_follow_tasks
+                                .lock()
+                                .await
+                                .remove(&subscription_id);
                         }
                         service::Event::SerializedRequestsIoClosed => {
                             break;

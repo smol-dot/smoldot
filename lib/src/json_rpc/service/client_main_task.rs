@@ -727,6 +727,15 @@ pub enum Event {
         subscription_start: SubscriptionStartProcess,
     },
 
+    /// A [`SubscriptionStartProcess`] object or a [`Subscription`] object has been destroyed.
+    SubscriptionDestroyed {
+        /// The task that generated the event.
+        task: ClientMainTask,
+        /// Id of the subscription that was destroyed. Equals to the value that
+        /// [`Subscription::subscription_id`] would have returned for the now-dead subscription.
+        subscription_id: String,
+    },
+
     /// The [`SerializedRequestsIo`] has been dropped. The [`ClientMainTask`] has been destroyed.
     SerializedRequestsIoClosed,
 }
