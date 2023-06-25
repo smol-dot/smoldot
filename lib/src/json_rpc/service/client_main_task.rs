@@ -1167,15 +1167,16 @@ impl Subscription {
         {
             let mut wait = None;
             loop {
+                // If the subscription is dead, simply do nothing. This is purely an optimization.
+                if self.kill_channel.dead.load(Ordering::Relaxed) {
+                    return;
+                }
+
+                // If there is space, break out of the loop in order to send.
                 if self.responses_notifications_queue.queue.len()
                     < self.responses_notifications_queue.max_len
                 {
                     break;
-                }
-
-                // If the subscription is dead, simply do nothing. This is purely an optimization.
-                if self.kill_channel.dead.load(Ordering::Relaxed) {
-                    return;
                 }
 
                 if let Some(wait) = wait.take() {
