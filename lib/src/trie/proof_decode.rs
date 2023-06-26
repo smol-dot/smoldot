@@ -1011,6 +1011,35 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
             }
         }
     }
+
+    /// Returns the key and Merkle value of the closest ancestor to the given key.
+    ///
+    /// Returns `None` if the key has no ancestor within the trie.
+    pub fn closest_ancestor_merkle_value<'a>(
+        &'a self,
+        trie_root_merkle_value: &[u8; 32],
+        key: &[nibble::Nibble],
+    ) -> Result<Option<(&'a [nibble::Nibble], trie_node::MerkleValueOutput)>, IncompleteProofError>
+    {
+        let (full_key, (_, node_value_range, _)) =
+            match self.closest_ancestor(trie_root_merkle_value, key) {
+                Ok(Some(v)) => v,
+                Ok(None) => return Ok(None),
+                Err(err) => return Err(err),
+            };
+
+        let node_value = &self.proof.as_ref()[node_value_range.clone()];
+        if node_value.len() < 32 {
+            Ok(Some((
+                full_key,
+                trie_node::MerkleValueOutput::from_bytes(node_value),
+            )))
+        } else {
+            let hash = blake2_rfc::blake2b::blake2b(32, &[], node_value);
+            let merkle_value = trie_node::MerkleValueOutput::from_bytes(hash.as_bytes());
+            Ok(Some((full_key, merkle_value)))
+        }
+    }
 }
 
 /// Proof doesn't contain enough information to answer the request.

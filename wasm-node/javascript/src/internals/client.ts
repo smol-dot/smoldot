@@ -27,7 +27,6 @@ export interface PlatformBindings {
      * Tries to open a new connection using the given configuration.
      *
      * @see Connection
-     * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
      */
     connect(config: ConnectionConfig): Connection;
 

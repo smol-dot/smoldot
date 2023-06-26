@@ -147,6 +147,8 @@ pub enum AddChainConfigJsonRpc {
         ///
         /// This parameter is necessary in order to prevent JSON-RPC clients from using up too
         /// much memory within the client.
+        /// If the JSON-RPC client is entirely trusted, then passing `u32::max_value()` is
+        /// completely reasonable.
         ///
         /// A typical value is 128.
         max_pending_requests: NonZeroU32,
@@ -158,6 +160,8 @@ pub enum AddChainConfigJsonRpc {
         ///
         /// This parameter is necessary in order to prevent JSON-RPC clients from using up too
         /// much memory within the client.
+        /// If the JSON-RPC client is entirely trusted, then passing `u32::max_value()` is
+        /// completely reasonable.
         ///
         /// While a typical reasonable value would be for example 64, existing UIs tend to start
         /// a lot of subscriptions, and a value such as 1024 is recommended.
@@ -865,7 +869,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 // supposed to know what happens within the client, they can't rationally decide
                 // what value is appropriate.
                 max_parallel_requests: NonZeroU32::new(24).unwrap(),
-                max_parallel_subscription_updates: NonZeroU32::new(8).unwrap(),
             });
 
             let system_name = self.platform.client_name().into_owned();
@@ -963,9 +966,15 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
     /// Since most JSON-RPC requests can only be answered asynchronously, the request is only
     /// queued and will be decoded and processed later.
     ///
-    /// Returns an error if the node is overloaded and is capable of processing more JSON-RPC
-    /// requests before some time has passed or the [`AddChainSuccess::json_rpc_responses`]
-    /// stream is emptied.
+    /// Returns an error if the number of requests that have been sent but whose answer hasn't been
+    /// pulled with [`JsonRpcResponses::next`] is superior or equal to the value that was passed
+    /// through [`AddChainConfigJsonRpc::Enabled::max_pending_requests`]. In that situation, the
+    /// API user is encouraged to stop sending requests and start pulling answers with
+    /// [`JsonRpcResponses::next`].
+    ///
+    /// Passing `u32::max_value()` to [`AddChainConfigJsonRpc::Enabled::max_pending_requests`] is
+    /// a good way to avoid errors here, but this should only be done if the JSON-RPC client is
+    /// trusted.
     ///
     /// Also returns an error if the request could not be parsed as a valid JSON-RPC request, as
     /// in that situation smoldot is unable to send back a corresponding JSON-RPC error message.

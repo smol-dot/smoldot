@@ -407,8 +407,7 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 /// This function returns:
 /// - 0 on success.
 /// - 1 if the request couldn't be parsed as a valid JSON-RPC request.
-/// - 2 if the chain is currently overloaded with JSON-RPC requests and refuses to queue another
-/// one.
+/// - 2 if the chain has too many pending JSON-RPC requests and refuses to queue another one.
 ///
 #[no_mangle]
 pub extern "C" fn json_rpc_send(text_buffer_index: u32, chain_id: u32) -> u32 {
