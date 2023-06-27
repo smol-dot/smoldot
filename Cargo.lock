@@ -2393,6 +2393,7 @@ dependencies = [
  "wasmi",
  "wasmtime",
  "wat",
+ "zeroize",
 ]
 
 [[package]]
