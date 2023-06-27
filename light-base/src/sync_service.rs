@@ -28,7 +28,7 @@
 
 use crate::{network_service, platform::PlatformRef, runtime_service};
 
-use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
+use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use async_lock::Mutex;
 use core::{fmt, mem, num::NonZeroU32, time::Duration};
 use futures_channel::{mpsc, oneshot};
