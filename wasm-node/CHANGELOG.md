@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The `chainHead_unstable_storage` JSON-RPC function now supports a `type` equal to `closest-descendant-merkle-value` and no longer supports `closest-ancestor-merkle-value`, in accordance with the latest changes in the JSON-RPC API specification. ([#813](https://github.com/smol-dot/smoldot/pull/813))
+
 ## 1.0.11 - 2023-06-25
 
 ### Changed
