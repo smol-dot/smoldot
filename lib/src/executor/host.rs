@@ -3076,7 +3076,7 @@ impl ExternalOffchainStorageGet {
         };
 
         if let Some(value) = value {
-            let value = iter::once(&value[..]);
+            let value = iter::once(value);
             // Writing `Some(value)`.
             debug_assert_eq!(
                 value.clone().fold(0, |a, b| a + b.as_ref().len()),
@@ -3183,7 +3183,7 @@ impl OffchainSubmitTransaction {
         };
 
         let (value, value_total_len) = value;
-        let value = iter::once(&value[..]);
+        let value = iter::once(value);
         debug_assert_eq!(
             value.clone().fold(0, |a, b| a + b.as_ref().len()),
             value_total_len

@@ -30,6 +30,7 @@
 
 mod allocator; // TODO: make public after refactoring
 pub mod host;
+pub mod offchain_runtime_host;
 pub mod read_only_runtime_host;
 pub mod runtime_host;
 pub mod storage_diff;
