@@ -277,6 +277,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
     // Determine which networking key to use.
     //
     // This is either passed as a CLI option, loaded from disk, or generated randomly.
+    // TODO: move this code to `/lib/src/identity`?
     let libp2p_key = if let Some(node_key) = cli_options.libp2p_key {
         node_key
     } else if let Some(dir) = base_storage_directory.as_ref() {
