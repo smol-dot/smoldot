@@ -277,20 +277,25 @@ async fn run(cli_options: cli::CliOptionsRun) {
     // Determine which networking key to use.
     //
     // This is either passed as a CLI option, loaded from disk, or generated randomly.
-    let libp2p_key = if let Some(node_key) = &cli_options.libp2p_key {
-        *node_key
+    let libp2p_key = if let Some(node_key) = cli_options.libp2p_key {
+        node_key
     } else if let Some(dir) = base_storage_directory.as_ref() {
         let path = dir.join("libp2p_ed25519_secret_key.secret");
         let libp2p_key = if path.exists() {
-            let file_content =
-                fs::read_to_string(&path).expect("failed to read libp2p secret key file content");
-            let hex_decoded =
-                hex::decode(file_content).expect("invalid libp2p secret key file content");
-            <[u8; 32]>::try_from(hex_decoded).expect("invalid libp2p secret key file content")
+            let file_content = zeroize::Zeroizing::new(
+                fs::read_to_string(&path).expect("failed to read libp2p secret key file content"),
+            );
+            let mut hex_decoded = Box::new([0u8; 32]);
+            hex::decode_to_slice(file_content, &mut *hex_decoded)
+                .expect("invalid libp2p secret key file content");
+            hex_decoded
         } else {
-            let actual_key: [u8; 32] = rand::random();
-            fs::write(&path, hex::encode(actual_key))
-                .expect("failed to write libp2p secret key file");
+            let mut actual_key = Box::new([0u8; 32]);
+            rand::Fill::try_fill(&mut *actual_key, &mut rand::thread_rng()).unwrap();
+            let mut hex_encoded = Box::new([0; 64]);
+            hex::encode_to_slice(&*actual_key, &mut *hex_encoded).unwrap();
+            fs::write(&path, &*hex_encoded).expect("failed to write libp2p secret key file");
+            zeroize::Zeroize::zeroize(&mut *hex_encoded);
             actual_key
         };
         // On Unix platforms, set the permission as 0o400 (only reading and by owner is permitted).
@@ -299,7 +304,9 @@ async fn run(cli_options: cli::CliOptionsRun) {
         let _ = fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o400));
         libp2p_key
     } else {
-        rand::random()
+        let mut key = Box::new([0u8; 32]);
+        rand::Fill::try_fill(&mut *key, &mut rand::thread_rng()).unwrap();
+        key
     };
 
     // Create an executor where tasks are going to be spawned onto.

@@ -75,7 +75,7 @@ pub struct CliOptionsRun {
     pub color: ColorChoice,
     /// Ed25519 private key of network identity (as a seed phrase).
     #[arg(long, value_parser = decode_ed25519_private_key)]
-    pub libp2p_key: Option<[u8; 32]>,
+    pub libp2p_key: Option<Box<[u8; 32]>>,
     /// `Multiaddr` to listen on.
     #[arg(long, value_parser = decode_multiaddr)]
     pub listen_addr: Vec<Multiaddr>,
@@ -88,7 +88,7 @@ pub struct CliOptionsRun {
     /// List of secret phrases to insert in the keystore of the node. Used to author blocks.
     #[arg(long, value_parser = decode_sr25519_private_key)]
     // TODO: also automatically add the same keys through ed25519?
-    pub keystore_memory: Vec<[u8; 64]>,
+    pub keystore_memory: Vec<Box<[u8; 64]>>,
     /// Address of a Jaeger agent to send traces to (hint: port is typically 6831).
     #[arg(long)]
     pub jaeger: Option<SocketAddr>,
@@ -293,10 +293,10 @@ fn parse_max_bytes(string: &str) -> Result<MaxBytes, String> {
 
 // `clap` requires error types to implement the `std::error::Error` trait.
 // For this reason, we locally define some wrappers.
-fn decode_ed25519_private_key(phrase: &str) -> Result<[u8; 32], String> {
+fn decode_ed25519_private_key(phrase: &str) -> Result<Box<[u8; 32]>, String> {
     seed_phrase::decode_ed25519_private_key(phrase).map_err(|err| err.to_string())
 }
-fn decode_sr25519_private_key(phrase: &str) -> Result<[u8; 64], String> {
+fn decode_sr25519_private_key(phrase: &str) -> Result<Box<[u8; 64]>, String> {
     seed_phrase::decode_sr25519_private_key(phrase).map_err(|err| err.to_string())
 }
 fn decode_multiaddr(addr: &str) -> Result<Multiaddr, String> {
