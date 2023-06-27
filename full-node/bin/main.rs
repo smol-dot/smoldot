@@ -220,9 +220,11 @@ async fn run(cli_options: cli::CliOptionsRun) {
     };
 
     // Directory supposed to contain the database.
-    let sqlite_database_path = base_storage_directory
-        .as_ref()
-        .map(|d| d.join(parsed_chain_spec.id()).join("database"));
+    let sqlite_database_path = base_storage_directory.as_ref().map(|d| {
+        d.join(parsed_chain_spec.id())
+            .join("database")
+            .join("database.sqlite")
+    });
     // Directory supposed to contain the keystore.
     let keystore_path = base_storage_directory
         .as_ref()
@@ -256,9 +258,11 @@ async fn run(cli_options: cli::CliOptionsRun) {
                 chain_spec: spec_json,
                 additional_bootnodes: Vec::new(),
                 keystore_memory: Vec::new(),
-                sqlite_database_path: base_storage_directory
-                    .as_ref()
-                    .map(|d| d.join(parsed_relay_spec.id()).join("database")),
+                sqlite_database_path: base_storage_directory.as_ref().map(|d| {
+                    d.join(parsed_relay_spec.id())
+                        .join("database")
+                        .join("database.sqlite")
+                }),
                 sqlite_cache_size: cli_options.relay_chain_database_cache_size.0,
                 keystore_path: base_storage_directory
                     .as_ref()
