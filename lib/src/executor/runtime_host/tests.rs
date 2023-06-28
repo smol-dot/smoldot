@@ -179,6 +179,9 @@ fn execute_blocks() {
 
                     execution = req.inject_key(next_key.map(|nk| nk.into_iter()));
                 }
+                RuntimeHostVm::Offchain(_req) => {
+                    unimplemented!("Offchain calls are not supported yet.")
+                }
             }
         }
     }

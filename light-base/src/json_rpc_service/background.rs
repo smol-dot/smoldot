@@ -1305,6 +1305,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
                     runtime_call = sig.verify_and_resume();
                 }
+                runtime_host::RuntimeHostVm::Offchain(_) => {
+                    unimplemented!("Offchain calls are not supported yet.")
+                }
             }
         }
     }

@@ -412,14 +412,19 @@ pub enum RuntimeHostVm {
     NextKey(NextKey),
     /// Verifying whether a signature is correct is required in order to continue.
     SignatureVerification(SignatureVerification),
+    /// Offchain context is required in order to continue.
+    Offchain(OffchainContext),
+}
+
+pub enum OffchainContext {
     /// Loading an offchain storage value is required in order to continue.
-    OffchainStorageGet(OffchainStorageGet),
+    StorageGet(OffchainStorageGet),
     /// Timestamp for offchain worker.
-    OffchainTimestamp(OffchainTimestamp),
+    Timestamp(OffchainTimestamp),
     /// Random seed for offchain worker.
-    OffchainRandomSeed(OffchainRandomSeed),
+    RandomSeed(OffchainRandomSeed),
     /// Submit transaction from offchain worker.
-    OffchainSubmitTransaction(OffchainSubmitTransaction),
+    SubmitTransaction(OffchainSubmitTransaction),
 }
 
 impl RuntimeHostVm {
@@ -432,10 +437,12 @@ impl RuntimeHostVm {
             RuntimeHostVm::ClosestDescendantMerkleValue(inner) => inner.inner.vm.into_prototype(),
             RuntimeHostVm::NextKey(inner) => inner.inner.vm.into_prototype(),
             RuntimeHostVm::SignatureVerification(inner) => inner.inner.vm.into_prototype(),
-            RuntimeHostVm::OffchainStorageGet(inner) => inner.inner.vm.into_prototype(),
-            RuntimeHostVm::OffchainTimestamp(inner) => inner.inner.vm.into_prototype(),
-            RuntimeHostVm::OffchainRandomSeed(inner) => inner.inner.vm.into_prototype(),
-            RuntimeHostVm::OffchainSubmitTransaction(inner) => inner.inner.vm.into_prototype(),
+            RuntimeHostVm::Offchain(inner) => match inner {
+                OffchainContext::StorageGet(inner) => inner.inner.vm.into_prototype(),
+                OffchainContext::Timestamp(inner) => inner.inner.vm.into_prototype(),
+                OffchainContext::RandomSeed(inner) => inner.inner.vm.into_prototype(),
+                OffchainContext::SubmitTransaction(inner) => inner.inner.vm.into_prototype(),
+            },
         }
     }
 }
@@ -1439,9 +1446,9 @@ impl Inner {
                         Some(value) => self.vm = req.resume(value.as_ref().map(|v| &v[..])),
                         None => {
                             self.vm = req.into();
-                            return RuntimeHostVm::OffchainStorageGet(OffchainStorageGet {
-                                inner: self,
-                            });
+                            return RuntimeHostVm::Offchain(OffchainContext::StorageGet(
+                                OffchainStorageGet { inner: self },
+                            ));
                         }
                     }
                 }
@@ -1560,17 +1567,21 @@ impl Inner {
                 }
                 host::HostVm::OffchainTimestamp(req) => {
                     self.vm = req.into();
-                    return RuntimeHostVm::OffchainTimestamp(OffchainTimestamp { inner: self });
+                    return RuntimeHostVm::Offchain(OffchainContext::Timestamp(
+                        OffchainTimestamp { inner: self },
+                    ));
                 }
                 host::HostVm::OffchainRandomSeed(req) => {
                     self.vm = req.into();
-                    return RuntimeHostVm::OffchainRandomSeed(OffchainRandomSeed { inner: self });
+                    return RuntimeHostVm::Offchain(OffchainContext::RandomSeed(
+                        OffchainRandomSeed { inner: self },
+                    ));
                 }
                 host::HostVm::OffchainSubmitTransaction(req) => {
                     self.vm = req.into();
-                    return RuntimeHostVm::OffchainSubmitTransaction(OffchainSubmitTransaction {
-                        inner: self,
-                    });
+                    return RuntimeHostVm::Offchain(OffchainContext::SubmitTransaction(
+                        OffchainSubmitTransaction { inner: self },
+                    ));
                 }
             }
         }

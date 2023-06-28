@@ -592,17 +592,8 @@ impl VerifyInner {
                     self.inner = sig.verify_and_resume();
                     self.phase = phase;
                 }
-                (runtime_host::RuntimeHostVm::OffchainStorageGet(_inner), _phase) => {
-                    unimplemented!()
-                }
-                (runtime_host::RuntimeHostVm::OffchainTimestamp(_inner), _phase) => {
-                    unimplemented!()
-                }
-                (runtime_host::RuntimeHostVm::OffchainRandomSeed(_inner), _phase) => {
-                    unimplemented!()
-                }
-                (runtime_host::RuntimeHostVm::OffchainSubmitTransaction(_inner), _phase) => {
-                    unimplemented!()
+                (runtime_host::RuntimeHostVm::Offchain(_inner), _phase) => {
+                    unreachable!()
                 }
             }
         }

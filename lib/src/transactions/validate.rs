@@ -490,17 +490,8 @@ impl Query {
                     inner = sig.verify_and_resume();
                     continue;
                 }
-                runtime_host::RuntimeHostVm::OffchainStorageGet(_inner) => {
-                    unimplemented!()
-                }
-                runtime_host::RuntimeHostVm::OffchainTimestamp(_inner) => {
-                    unimplemented!()
-                }
-                runtime_host::RuntimeHostVm::OffchainRandomSeed(_inner) => {
-                    unimplemented!()
-                }
-                runtime_host::RuntimeHostVm::OffchainSubmitTransaction(_inner) => {
-                    unimplemented!()
+                runtime_host::RuntimeHostVm::Offchain(_inner) => {
+                    unreachable!()
                 }
             };
         }
@@ -562,17 +553,8 @@ impl Query {
                     inner = sig.verify_and_resume();
                     continue;
                 }
-                runtime_host::RuntimeHostVm::OffchainStorageGet(_inner) => {
-                    unimplemented!()
-                }
-                runtime_host::RuntimeHostVm::OffchainTimestamp(_inner) => {
-                    unimplemented!()
-                }
-                runtime_host::RuntimeHostVm::OffchainRandomSeed(_inner) => {
-                    unimplemented!()
-                }
-                runtime_host::RuntimeHostVm::OffchainSubmitTransaction(_inner) => {
-                    unimplemented!()
+                runtime_host::RuntimeHostVm::Offchain(_inner) => {
+                    unreachable!()
                 }
             };
         }
