@@ -664,13 +664,15 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                             Ok(Some(merkle_value)) => final_results.push(
                                 StorageResultItem::ClosestDescendantMerkleValue {
                                     requested_key: key,
-                                    merkle_value: Some(merkle_value.as_ref().to_vec()),
+                                    closest_descendant_merkle_value: Some(
+                                        merkle_value.as_ref().to_vec(),
+                                    ),
                                 },
                             ),
                             Ok(None) => final_results.push(
                                 StorageResultItem::ClosestDescendantMerkleValue {
                                     requested_key: key,
-                                    merkle_value: None,
+                                    closest_descendant_merkle_value: None,
                                 },
                             ),
                             Err(proof_decode::IncompleteProofError { .. }) => {
@@ -824,7 +826,10 @@ pub enum StorageResultItem {
     ClosestDescendantMerkleValue {
         /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
         requested_key: Vec<u8>,
-        merkle_value: Option<Vec<u8>>,
+        /// Merkle value of the closest descendant of
+        /// [`StorageResultItem::DescendantValue::requested_key`]. The key that corresponds
+        /// to this Merkle value is not included. `None` if the key has no descendant.
+        closest_descendant_merkle_value: Option<Vec<u8>>,
     },
 }
 
