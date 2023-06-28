@@ -3119,7 +3119,7 @@ impl fmt::Debug for OffchainTimestamp {
     }
 }
 
-/// Must return the current timestamp.
+/// Must return a random seed.
 pub struct OffchainRandomSeed {
     inner: Box<Inner>,
 
@@ -3146,7 +3146,7 @@ impl fmt::Debug for OffchainRandomSeed {
     }
 }
 
-/// Must return the current timestamp.
+/// Must submit an off-chain transaction.
 pub struct OffchainSubmitTransaction {
     inner: Box<Inner>,
 
