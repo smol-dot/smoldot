@@ -490,9 +490,12 @@ impl Query {
                     inner = sig.verify_and_resume();
                     continue;
                 }
-                runtime_host::RuntimeHostVm::Offchain(_inner) => {
-                    unreachable!()
-                }
+                runtime_host::RuntimeHostVm::Offchain(ctx) => Query::Finished {
+                    result: Err(Error::WasmVmReadWrite(
+                        runtime_host::ErrorDetail::ForbiddenHostCall,
+                    )),
+                    virtual_machine: ctx.into_prototype(),
+                },
             };
         }
     }
@@ -553,9 +556,12 @@ impl Query {
                     inner = sig.verify_and_resume();
                     continue;
                 }
-                runtime_host::RuntimeHostVm::Offchain(_inner) => {
-                    unreachable!()
-                }
+                runtime_host::RuntimeHostVm::Offchain(ctx) => Query::Finished {
+                    result: Err(Error::WasmVmReadWrite(
+                        runtime_host::ErrorDetail::ForbiddenHostCall,
+                    )),
+                    virtual_machine: ctx.into_prototype(),
+                },
             };
         }
     }

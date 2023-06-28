@@ -592,8 +592,11 @@ impl VerifyInner {
                     self.inner = sig.verify_and_resume();
                     self.phase = phase;
                 }
-                (runtime_host::RuntimeHostVm::Offchain(_inner), _phase) => {
-                    unreachable!()
+                (runtime_host::RuntimeHostVm::Offchain(ctx), _phase) => {
+                    return Verify::Finished(Err((
+                        Error::WasmVm(runtime_host::ErrorDetail::ForbiddenHostCall),
+                        ctx.into_prototype(),
+                    )))
                 }
             }
         }
