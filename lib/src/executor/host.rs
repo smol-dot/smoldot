@@ -3076,19 +3076,13 @@ impl ExternalOffchainStorageGet {
         };
 
         if let Some(value) = value {
-            let value = iter::once(&value[..]);
-            // Writing `Some(value)`.
-            debug_assert_eq!(
-                value.clone().fold(0, |a, b| a + b.as_ref().len()),
-                value.len()
-            );
             let value_len_enc = util::encode_scale_compact_usize(value.len());
             self.inner.alloc_write_and_return_pointer_size(
                 host_fn.name(),
                 iter::once(&[1][..])
                     .chain(iter::once(value_len_enc.as_ref()))
                     .map(either::Left)
-                    .chain(value.map(either::Right)),
+                    .chain(iter::once(value).map(either::Right)),
             )
         } else {
             // Write a SCALE-encoded `None`.
@@ -3183,18 +3177,15 @@ impl OffchainSubmitTransaction {
         };
 
         let (value, value_total_len) = value;
-        let value = iter::once(&value[..]);
-        debug_assert_eq!(
-            value.clone().fold(0, |a, b| a + b.as_ref().len()),
-            value_total_len
-        );
+        debug_assert_eq!(value.len(), value_total_len);
+
         let value_len_enc = util::encode_scale_compact_usize(value_total_len);
         self.inner.alloc_write_and_return_pointer_size(
             host_fn.name(),
             iter::once(&[1][..])
                 .chain(iter::once(value_len_enc.as_ref()))
                 .map(either::Left)
-                .chain(value.map(either::Right)),
+                .chain(iter::once(value).map(either::Right)),
         )
     }
 }

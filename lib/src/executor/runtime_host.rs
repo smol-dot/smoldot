@@ -920,21 +920,10 @@ impl OffchainStorageGet {
     }
 
     /// Injects the corresponding storage value.
-    pub fn inject_value(
-        mut self,
-        value: Option<impl Iterator<Item = impl AsRef<[u8]>>>,
-    ) -> RuntimeHostVm {
-        let value = value.map(|value| {
-            let value = value.fold(Vec::new(), |mut a, b| {
-                a.extend_from_slice(b.as_ref());
-                a
-            });
-            value
-        });
-
+    pub fn inject_value(mut self, value: Option<impl AsRef<[u8]>>) -> RuntimeHostVm {
         match self.inner.vm {
             host::HostVm::ExternalOffchainStorageGet(req) => {
-                self.inner.vm = req.resume(value.as_ref().map(|v| &v[..]));
+                self.inner.vm = req.resume(value.as_ref().map(|v| v.as_ref()));
             }
             // We only create a `OffchainStorageGet` if the state is one of the above.
             _ => unreachable!(),
@@ -1001,10 +990,10 @@ impl OffchainSubmitTransaction {
         }
     }
     /// Injects outcome.
-    pub fn inject_outcome(mut self, value: &[u8]) -> RuntimeHostVm {
+    pub fn inject_outcome(mut self, value: impl AsRef<[u8]>) -> RuntimeHostVm {
         match self.inner.vm {
             host::HostVm::OffchainSubmitTransaction(req) => {
-                self.inner.vm = req.resume((value, value.len()));
+                self.inner.vm = req.resume((value.as_ref(), value.as_ref().len()));
             }
             // We only create a `OffchainSubmitTransaction` if the state is one of the above.
             _ => unreachable!(),
