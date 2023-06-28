@@ -974,7 +974,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             key: methods::HexString(key),
                                             value: Some(methods::HexString(value?)),
                                             hash: None,
-                                            merkle_value: None,
+                                            closest_descendant_merkle_value: None,
                                         })
                                     }
                                     sync_service::StorageResultItem::Hash { key, hash } => {
@@ -982,7 +982,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             key: methods::HexString(key),
                                             value: None,
                                             hash: Some(methods::HexString(hash?.to_vec())),
-                                            merkle_value: None,
+                                            closest_descendant_merkle_value: None,
                                         })
                                     }
                                     sync_service::StorageResultItem::DescendantValue { key, value, .. } => {
@@ -990,7 +990,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             key: methods::HexString(key),
                                             value: Some(methods::HexString(value)),
                                             hash: None,
-                                            merkle_value: None,
+                                            closest_descendant_merkle_value: None,
                                         })
                                     }
                                     sync_service::StorageResultItem::DescendantHash { key, hash, .. } => {
@@ -998,7 +998,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             key: methods::HexString(key),
                                             value: None,
                                             hash: Some(methods::HexString(hash.to_vec())),
-                                            merkle_value: None,
+                                            closest_descendant_merkle_value: None,
                                         })
                                     }
                                     sync_service::StorageResultItem::ClosestDescendantMerkleValue { requested_key, merkle_value } => {
@@ -1006,7 +1006,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             key: methods::HexString(requested_key),
                                             value: None,
                                             hash: None,
-                                            merkle_value: Some(methods::HexString(merkle_value?)),
+                                            closest_descendant_merkle_value: Some(methods::HexString(merkle_value?)),
                                         })
                                     }
                                 })
