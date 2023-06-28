@@ -1308,9 +1308,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 runtime_host::RuntimeHostVm::Offchain(ctx) => {
                     runtime_call_lock
                         .unlock(runtime_host::RuntimeHostVm::Offchain(ctx).into_prototype());
-                    break Err(RuntimeCallError::RuntimeError(
-                        runtime_host::ErrorDetail::ForbiddenHostCall,
-                    ));
+                    break Err(RuntimeCallError::ForbiddenHostCall);
                 }
             }
         }
@@ -1348,6 +1346,8 @@ enum RuntimeCallError {
         /// Version that the runtime supports.
         actual_version: u32,
     },
+    /// Runtime called a forbidden host call.
+    ForbiddenHostCall,
 }
 
 /// Error potentially returned by [`Background::state_trie_root_hash`].

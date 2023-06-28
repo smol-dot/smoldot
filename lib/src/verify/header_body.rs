@@ -213,6 +213,8 @@ pub enum Error {
     /// Block has modified the `:heappages` key in a way that fails to parse.
     #[display(fmt = "Block has modified `:heappages` key in invalid way: {_0}")]
     HeapPagesParseError(executor::InvalidHeapPagesError),
+    /// Runtime called a forbidden host call.
+    ForbiddenHostCall,
 }
 
 /// Verifies whether a block is valid.
@@ -593,10 +595,7 @@ impl VerifyInner {
                     self.phase = phase;
                 }
                 (runtime_host::RuntimeHostVm::Offchain(ctx), _phase) => {
-                    return Verify::Finished(Err((
-                        Error::WasmVm(runtime_host::ErrorDetail::ForbiddenHostCall),
-                        ctx.into_prototype(),
-                    )))
+                    return Verify::Finished(Err((Error::ForbiddenHostCall, ctx.into_prototype())))
                 }
             }
         }

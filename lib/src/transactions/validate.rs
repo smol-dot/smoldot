@@ -213,6 +213,8 @@ pub enum Error {
     /// the runtime to always provide a non-empty list of tags. This error is consequently a bug
     /// in the runtime.
     EmptyProvidedTags,
+    /// Runtime called a forbidden host call.
+    ForbiddenHostCall,
 }
 
 /// Error that can happen during the decoding.
@@ -491,9 +493,7 @@ impl Query {
                     continue;
                 }
                 runtime_host::RuntimeHostVm::Offchain(ctx) => Query::Finished {
-                    result: Err(Error::WasmVmReadWrite(
-                        runtime_host::ErrorDetail::ForbiddenHostCall,
-                    )),
+                    result: Err(Error::ForbiddenHostCall),
                     virtual_machine: ctx.into_prototype(),
                 },
             };
@@ -557,9 +557,7 @@ impl Query {
                     continue;
                 }
                 runtime_host::RuntimeHostVm::Offchain(ctx) => Query::Finished {
-                    result: Err(Error::WasmVmReadWrite(
-                        runtime_host::ErrorDetail::ForbiddenHostCall,
-                    )),
+                    result: Err(Error::ForbiddenHostCall),
                     virtual_machine: ctx.into_prototype(),
                 },
             };
