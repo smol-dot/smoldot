@@ -992,7 +992,7 @@ pub struct OffchainSubmitTransaction {
 }
 
 impl OffchainSubmitTransaction {
-    /// Returns the SCALE-encoded transaction to submit to the chain.
+    /// Returns the SCALE-encoded transaction that must be submitted.
     pub fn transaction(&'_ self) -> impl AsRef<[u8]> + '_ {
         match &self.inner.vm {
             host::HostVm::OffchainSubmitTransaction(req) => req.transaction(),
