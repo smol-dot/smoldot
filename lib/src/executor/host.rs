@@ -1725,7 +1725,7 @@ impl ReadyToRun {
             }
             HostFunction::ext_offchain_is_validator_version_1 => HostVm::ReadyToRun(ReadyToRun {
                 inner: self.inner,
-                resume_value: Some(vm::WasmValue::I32(1)),
+                resume_value: Some(vm::WasmValue::I32(1)), // TODO: ask the API user
             }),
             HostFunction::ext_offchain_submit_transaction_version_1 => {
                 let (tx_ptr, tx_size) = expect_pointer_size_raw!(0);
@@ -1752,9 +1752,10 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_offchain_local_storage_set_version_1 => {
-                let _kind = expect_u32!(0);
+                let _kind = expect_u32!(0); // TODO: parse and provide the storage kind
                 let (key_ptr, key_size) = expect_pointer_size_raw!(1);
                 let (value_ptr, value_size) = expect_pointer_size_raw!(2);
+                // TODO: the API user should be able to differentiate between the `ext_offchain_index_*` and `ext_offchain_*` functions.
                 HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
                     key_ptr,
                     key_size,
@@ -1764,10 +1765,11 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_offchain_local_storage_compare_and_set_version_1 => {
-                let _kind = expect_u32!(0);
+                let _kind = expect_u32!(0); // TODO: parse and provide the storage kind
                 let (key_ptr, key_size) = expect_pointer_size_raw!(1);
                 let (old_value_ptr, old_value_size) = expect_pointer_size_raw!(2);
                 let (value_ptr, value_size) = expect_pointer_size_raw!(3);
+                // TODO: the API user should be able to differentiate between the `ext_offchain_index_*` and `ext_offchain_*` functions.
                 HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
                     key_ptr,
                     key_size,
@@ -1777,7 +1779,7 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_offchain_local_storage_get_version_1 => {
-                let _kind = expect_u32!(0);
+                let _kind = expect_u32!(0); // TODO: parse and provide the storage kind
                 let (key_ptr, key_size) = expect_pointer_size_raw!(1);
 
                 HostVm::ExternalOffchainStorageGet(ExternalOffchainStorageGet {
@@ -1788,8 +1790,9 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_offchain_local_storage_clear_version_1 => {
-                let _kind = expect_u32!(0);
+                let _kind = expect_u32!(0); // TODO: parse and provide the storage kind
                 let (key_ptr, key_size) = expect_pointer_size_raw!(1);
+                // TODO: the API user should be able to differentiate between the `ext_offchain_index_*` and `ext_offchain_*` functions.
                 HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
                     key_ptr,
                     key_size,
@@ -3014,7 +3017,7 @@ impl ExternalOffchainStorageSet {
         }
     }
 
-    /// Returns the old value.
+    /// Returns the value the current value should be compared against. The operation is a no-op if they don't compare equal.
     pub fn old_value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         if let Some((ptr, size)) = self.old_value {
             Some(self.inner.vm.read_memory(ptr, size).unwrap())
@@ -3023,7 +3026,7 @@ impl ExternalOffchainStorageSet {
         }
     }
 
-    /// Resumes execution after having set the value.
+    /// Resumes execution after having set the value. Must indicate whether a value was written.
     pub fn resume(self, replaced: bool) -> HostVm {
         if self.old_value.is_some() {
             HostVm::ReadyToRun(ReadyToRun {
@@ -3098,7 +3101,7 @@ impl fmt::Debug for ExternalOffchainStorageGet {
     }
 }
 
-/// Must return the current timestamp.
+/// Must return the current UNIX timestamp.
 pub struct OffchainTimestamp {
     inner: Box<Inner>,
 }
@@ -3119,7 +3122,7 @@ impl fmt::Debug for OffchainTimestamp {
     }
 }
 
-/// Must return a random seed.
+/// Must provide a randomly-generate number.
 pub struct OffchainRandomSeed {
     inner: Box<Inner>,
 
@@ -3162,6 +3165,7 @@ pub struct OffchainSubmitTransaction {
 }
 
 impl OffchainSubmitTransaction {
+    /// Returns the SCALE-encoded transaction that must be submitted.
     pub fn transaction(&'_ self) -> impl AsRef<[u8]> + '_ {
         self.inner
             .vm
@@ -3169,23 +3173,20 @@ impl OffchainSubmitTransaction {
             .unwrap()
     }
 
-    /// Resumes execution after having set the value.
-    pub fn resume(self, value: (&[u8], usize)) -> HostVm {
+    /// Resumes execution after having submitted the transaction.
+    pub fn resume(self, success: bool) -> HostVm {
         let host_fn = match self.inner.common.registered_functions[self.calling] {
             FunctionImport::Resolved(f) => f,
             FunctionImport::Unresolved { .. } => unreachable!(),
         };
 
-        let (value, value_total_len) = value;
-        debug_assert_eq!(value.len(), value_total_len);
-
-        let value_len_enc = util::encode_scale_compact_usize(value_total_len);
         self.inner.alloc_write_and_return_pointer_size(
             host_fn.name(),
-            iter::once(&[1][..])
-                .chain(iter::once(value_len_enc.as_ref()))
-                .map(either::Left)
-                .chain(iter::once(value).map(either::Right)),
+            if success {
+                iter::once(&[0x00])
+            } else {
+                iter::once(&[0x01])
+            },
         )
     }
 }

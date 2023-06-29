@@ -1286,7 +1286,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
                                                 subscription: (&subscription_id).into(),
                                                 result: methods::ChainHeadCallEvent::Error {
-                                                    error: "Offchain calls are not supported".to_string().into(),
+                                                    error: "Runtime has called an offchain host function".to_string().into(),
                                                 },
                                             }).await;
                                             break;

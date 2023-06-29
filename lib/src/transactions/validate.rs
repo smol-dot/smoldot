@@ -213,7 +213,7 @@ pub enum Error {
     /// the runtime to always provide a non-empty list of tags. This error is consequently a bug
     /// in the runtime.
     EmptyProvidedTags,
-    /// Runtime called a forbidden host call.
+    /// Runtime called a forbidden host function.
     ForbiddenHostCall,
 }
 

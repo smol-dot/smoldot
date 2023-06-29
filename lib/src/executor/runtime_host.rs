@@ -412,7 +412,7 @@ pub enum RuntimeHostVm {
     NextKey(NextKey),
     /// Verifying whether a signature is correct is required in order to continue.
     SignatureVerification(SignatureVerification),
-    /// Offchain context is required in order to continue.
+    /// Functions that can only be called within the context of an offchain worker.
     Offchain(OffchainContext),
 }
 
@@ -929,6 +929,10 @@ impl OffchainStorageGet {
     pub fn inject_value(mut self, value: Option<impl AsRef<[u8]>>) -> RuntimeHostVm {
         match self.inner.vm {
             host::HostVm::ExternalOffchainStorageGet(req) => {
+                self.inner.offchain_storage_changes.insert(
+                    req.key().as_ref().to_vec(),
+                    value.as_ref().map(|v| v.as_ref().to_vec()),
+                );
                 self.inner.vm = req.resume(value.as_ref().map(|v| v.as_ref()));
             }
             // We only create a `OffchainStorageGet` if the state is one of the above.
@@ -939,14 +943,14 @@ impl OffchainStorageGet {
     }
 }
 
-/// Loading timestamp is required in order to continue.
+/// Providing the current UNIX timestamp is required in order to continue.
 #[must_use]
 pub struct OffchainTimestamp {
     inner: Inner,
 }
 
 impl OffchainTimestamp {
-    /// Injects timestamp.
+    /// Resume execution by providing the current UNIX timestamp.
     pub fn inject_timestamp(mut self, value: u64) -> RuntimeHostVm {
         match self.inner.vm {
             host::HostVm::OffchainTimestamp(req) => {
@@ -960,14 +964,14 @@ impl OffchainTimestamp {
     }
 }
 
-/// Loading random seed is required in order to continue.
+/// Providing a random number is required in order to continue.
 #[must_use]
 pub struct OffchainRandomSeed {
     inner: Inner,
 }
 
 impl OffchainRandomSeed {
-    /// Injects random seed.
+    /// Resume execution by providing a random number.
     pub fn inject_random_seed(mut self, value: [u8; 32]) -> RuntimeHostVm {
         match self.inner.vm {
             host::HostVm::OffchainRandomSeed(req) => {
@@ -981,13 +985,14 @@ impl OffchainRandomSeed {
     }
 }
 
-/// Submit transaction is required in order to continue.
+/// The runtime requests submitting a transaction.
 #[must_use]
 pub struct OffchainSubmitTransaction {
     inner: Inner,
 }
 
 impl OffchainSubmitTransaction {
+    /// Returns the SCALE-encoded transaction to submit to the chain.
     pub fn transaction(&'_ self) -> impl AsRef<[u8]> + '_ {
         match &self.inner.vm {
             host::HostVm::OffchainSubmitTransaction(req) => req.transaction(),
@@ -995,11 +1000,11 @@ impl OffchainSubmitTransaction {
             _ => unreachable!(),
         }
     }
-    /// Injects outcome.
-    pub fn inject_outcome(mut self, value: impl AsRef<[u8]>) -> RuntimeHostVm {
+    /// Resume execution. Must indicate whether the transaction has been successfully submitted.
+    pub fn resume(mut self, success: bool) -> RuntimeHostVm {
         match self.inner.vm {
             host::HostVm::OffchainSubmitTransaction(req) => {
-                self.inner.vm = req.resume((value.as_ref(), value.as_ref().len()));
+                self.inner.vm = req.resume(success);
             }
             // We only create a `OffchainSubmitTransaction` if the state is one of the above.
             _ => unreachable!(),

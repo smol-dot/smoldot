@@ -1346,7 +1346,7 @@ enum RuntimeCallError {
         /// Version that the runtime supports.
         actual_version: u32,
     },
-    /// Runtime called a forbidden host call.
+    /// Runtime called a forbidden host function.
     ForbiddenHostCall,
 }
 

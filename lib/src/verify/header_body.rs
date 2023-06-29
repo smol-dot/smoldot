@@ -213,7 +213,7 @@ pub enum Error {
     /// Block has modified the `:heappages` key in a way that fails to parse.
     #[display(fmt = "Block has modified `:heappages` key in invalid way: {_0}")]
     HeapPagesParseError(executor::InvalidHeapPagesError),
-    /// Runtime called a forbidden host call.
+    /// Runtime called a forbidden host function.
     ForbiddenHostCall,
 }
 
