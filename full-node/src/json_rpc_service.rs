@@ -30,9 +30,11 @@ use std::{
 mod requests_handler;
 
 /// Configuration for a [`JsonRpcService`].
-pub struct Config<'a> {
-    /// Closure that spawns background tasks.
-    pub tasks_executor: &'a mut dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>),
+pub struct Config {
+    /// Function that can be used to spawn background tasks.
+    ///
+    /// The tasks passed as parameter must be executed until they shut down.
+    pub tasks_executor: Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>,
 
     /// Function called in order to notify of something.
     pub log_callback: Arc<dyn LogCallback + Send + Sync>,
@@ -61,7 +63,7 @@ impl Drop for JsonRpcService {
 
 impl JsonRpcService {
     /// Initializes a new [`JsonRpcService`].
-    pub async fn new(config: Config<'_>) -> Result<Self, InitError> {
+    pub async fn new(config: Config) -> Result<Self, InitError> {
         let server = {
             let result = websocket_server::WsServer::new(websocket_server::Config {
                 bind_address: config.bind_address,
@@ -98,6 +100,7 @@ impl JsonRpcService {
         let (to_requests_handlers, from_background) = async_channel::bounded(8);
         for _ in 0..config.max_parallel_requests {
             requests_handler::spawn_requests_handler(requests_handler::Config {
+                tasks_executor: config.tasks_executor.clone(),
                 receiver: from_background.clone(),
             });
         }
@@ -107,6 +110,7 @@ impl JsonRpcService {
         let background = JsonRpcBackground {
             server,
             on_service_dropped,
+            tasks_executor: config.tasks_executor.clone(),
             log_callback: config.log_callback,
             to_requests_handlers,
             from_client_io_tasks,
@@ -147,6 +151,9 @@ struct JsonRpcBackground {
 
     /// Event notified when the frontend is dropped.
     on_service_dropped: event_listener::EventListener,
+
+    /// See [`Config::tasks_executor`].
+    tasks_executor: Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>,
 
     /// See [`Config::log_callback`].
     log_callback: Arc<dyn LogCallback + Send + Sync>,
@@ -198,12 +205,17 @@ impl JsonRpcBackground {
                         address,
                     });
                     spawn_client_io_task(
+                        &self.tasks_executor,
                         from_background,
                         self.to_background.clone(),
                         io,
                         connection_id,
                     );
-                    spawn_client_main_task(self.to_requests_handlers.clone(), client_main_task);
+                    spawn_client_main_task(
+                        &&self.tasks_executor,
+                        self.to_requests_handlers.clone(),
+                        client_main_task,
+                    );
                 }
                 either::Right(websocket_server::Event::ConnectionError {
                     user_data: JsonRpcClientConnection { address, .. },
@@ -248,12 +260,13 @@ impl JsonRpcBackground {
 }
 
 fn spawn_client_io_task(
+    tasks_executor: &Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>,
     mut from_background: async_channel::Receiver<String>,
     to_background: async_channel::Sender<(websocket_server::ConnectionId, String)>,
     io: service::SerializedRequestsIo,
     connection_id: websocket_server::ConnectionId,
 ) {
-    smol::spawn(async move {
+    tasks_executor(Box::pin(async move {
         loop {
             match future::or(
                 async { either::Left(from_background.next().await) },
@@ -292,15 +305,15 @@ fn spawn_client_io_task(
                 }
             }
         }
-    })
-    .detach();
+    }));
 }
 
 fn spawn_client_main_task(
+    tasks_executor: &Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>,
     to_requests_handlers: async_channel::Sender<requests_handler::Message>,
     mut client_main_task: service::ClientMainTask,
 ) {
-    smol::spawn(async move {
+    tasks_executor(Box::pin(async move {
         loop {
             match client_main_task.run_until_event().await {
                 service::Event::HandleRequest {
@@ -334,6 +347,5 @@ fn spawn_client_main_task(
                 }
             }
         }
-    })
-    .detach();
+    }));
 }
