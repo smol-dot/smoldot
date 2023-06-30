@@ -2401,6 +2401,7 @@ dependencies = [
  "wasmi",
  "wasmtime",
  "wat",
+ "zeroize",
 ]
 
 [[package]]
@@ -2428,6 +2429,7 @@ dependencies = [
  "smol",
  "smoldot",
  "terminal_size",
+ "zeroize",
 ]
 
 [[package]]

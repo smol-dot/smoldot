@@ -33,7 +33,7 @@ fn basic_block_generated() {
                 keystore_path: None,
             },
             relay_chain: None,
-            libp2p_key: [0; 32],
+            libp2p_key: Box::new([0; 32]),
             listen_addresses: Vec::new(),
             json_rpc_address: None,
             tasks_executor: Arc::new(|task| smol::spawn(task).detach()),

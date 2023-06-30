@@ -34,7 +34,8 @@ use smoldot::{
     trie,
 };
 use std::{
-    array, borrow::Cow, iter, net::SocketAddr, path::PathBuf, sync::Arc, thread, time::Duration,
+    array, borrow::Cow, iter, mem, net::SocketAddr, path::PathBuf, sync::Arc, thread,
+    time::Duration,
 };
 
 mod consensus_service;
@@ -51,7 +52,7 @@ pub struct Config<'a> {
     /// relay chain.
     pub relay_chain: Option<ChainConfig<'a>>,
     /// Ed25519 private key of network identity.
-    pub libp2p_key: [u8; 32],
+    pub libp2p_key: Box<[u8; 32]>,
     /// List of addresses to listen on.
     pub listen_addresses: Vec<multiaddr::Multiaddr>,
     /// Bind point of the JSON-RPC server. If `None`, no server is started.
@@ -102,7 +103,7 @@ pub struct ChainConfig<'a> {
     pub additional_bootnodes: Vec<(peer_id::PeerId, multiaddr::Multiaddr)>,
     /// List of secret phrases to insert in the keystore of the node. Used to author blocks.
     // TODO: also automatically add the same keys through ed25519?
-    pub keystore_memory: Vec<[u8; 64]>,
+    pub keystore_memory: Vec<Box<[u8; 64]>>,
     /// Path to the SQLite database. If `None`, the database is opened in memory.
     pub sqlite_database_path: Option<PathBuf>,
     /// Maximum size, in bytes, of the cache SQLite uses.
@@ -158,7 +159,7 @@ impl Client {
 /// Runs the node using the given configuration. Catches `SIGINT` signals and stops if one is
 /// detected.
 // TODO: should return an error if something bad happens instead of panicking
-pub async fn start(config: Config<'_>) -> Client {
+pub async fn start(mut config: Config<'_>) -> Client {
     let chain_spec = {
         smoldot::chain_spec::ChainSpec::from_json_bytes(&config.chain.chain_spec)
             .expect("Failed to decode chain specs")
@@ -230,6 +231,7 @@ pub async fn start(config: Config<'_>) -> Client {
     .number;
 
     let noise_key = connection::NoiseKey::new(&config.libp2p_key);
+    zeroize::Zeroize::zeroize(&mut *config.libp2p_key);
     let local_peer_id =
         peer_id::PublicKey::Ed25519(*noise_key.libp2p_public_ed25519_key()).into_peer_id();
 
@@ -372,8 +374,9 @@ pub async fn start(config: Config<'_>) -> Client {
         let mut keystore = keystore::Keystore::new(config.chain.keystore_path, rand::random())
             .await
             .unwrap();
-        for private_key in config.chain.keystore_memory {
+        for mut private_key in config.chain.keystore_memory {
             keystore.insert_sr25519_memory(keystore::KeyNamespace::all(), &private_key);
+            zeroize::Zeroize::zeroize(&mut *private_key);
         }
         keystore
     });
@@ -424,8 +427,11 @@ pub async fn start(config: Config<'_>) -> Client {
                     )
                     .await
                     .unwrap();
-                    for private_key in &config.relay_chain.as_ref().unwrap().keystore_memory {
-                        keystore.insert_sr25519_memory(keystore::KeyNamespace::all(), private_key);
+                    for mut private_key in
+                        mem::take(&mut config.relay_chain.as_mut().unwrap().keystore_memory)
+                    {
+                        keystore.insert_sr25519_memory(keystore::KeyNamespace::all(), &private_key);
+                        zeroize::Zeroize::zeroize(&mut *private_key);
                     }
                     keystore
                 }),
