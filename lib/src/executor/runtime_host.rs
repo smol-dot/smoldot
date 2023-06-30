@@ -1441,8 +1441,8 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalOffchainStorageGet(req) => {
-                    let overlay = self.offchain_storage_changes.get(req.key().as_ref());
-                    match overlay {
+                    let current_value = self.offchain_storage_changes.get(req.key().as_ref());
+                    match current_value {
                         Some(value) => self.vm = req.resume(value.as_ref().map(|v| &v[..])),
                         None => {
                             self.vm = req.into();
@@ -1454,11 +1454,11 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalOffchainStorageSet(req) => {
-                    let overlay = self.offchain_storage_changes.get(req.key().as_ref());
+                    let current_value = self.offchain_storage_changes.get(req.key().as_ref());
 
-                    let replace = match (overlay, req.old_value()) {
-                        (Some(Some(overlay)), Some(old_value)) => {
-                            old_value.as_ref().to_vec().eq(overlay)
+                    let replace = match (current_value, req.old_value()) {
+                        (Some(Some(current_value)), Some(old_value)) => {
+                            old_value.as_ref().to_vec().eq(current_value)
                         }
                         _ => true,
                     };
