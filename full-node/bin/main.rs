@@ -391,6 +391,17 @@ async fn run(cli_options: cli::CliOptionsRun) {
     })
     .await;
 
+    if let Some(addr) = client.json_rpc_server_addr() {
+        log_callback.log(
+            smoldot_full_node::LogLevel::Info,
+            format!(
+                "JSON-RPC server listening on {addr}. Visit \
+                <https://cloudflare-ipfs.com/ipns/dotapps.io/?rpc=ws%3A%2F%2F{addr}> in order to \
+                interact with the node."
+            ),
+        );
+    }
+
     // Starting from here, a SIGINT (or equivalent) handler is set up. If the user does Ctrl+C,
     // an event will be triggered on `ctrlc_detected`.
     // This should be performed after all the expensive initialization is done, as otherwise these

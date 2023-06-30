@@ -2408,6 +2408,7 @@ dependencies = [
 name = "smoldot-full-node"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "blake2-rfc",
  "clap",
  "ctrlc",
