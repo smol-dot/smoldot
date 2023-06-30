@@ -54,7 +54,7 @@
 //! [here](https://wiki.polkadot.network/docs/build-ss58-registry).
 //!
 //! The checksum is verified when the human-readable format is turned into a public key. Its
-//! presence of a checksum guarantees that simple copying mistakes will be caught.
+//! presence guarantees that simple copying mistakes will be caught.
 //!
 //! ## Private keys
 //!
