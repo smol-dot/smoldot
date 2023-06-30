@@ -460,7 +460,7 @@ pub async fn start(mut config: Config<'_>) -> Client {
     // something else.
     let json_rpc_service = if let Some(bind_address) = config.json_rpc_address {
         let result = json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
-            tasks_executor: { &mut |task| (config.tasks_executor)(task) },
+            tasks_executor: config.tasks_executor.clone(),
             log_callback: config.log_callback.clone(),
             bind_address,
             max_parallel_requests: 32,

@@ -17,8 +17,14 @@
 
 use smol::stream::StreamExt as _;
 use smoldot::json_rpc::{methods, service};
+use std::{future::Future, pin::Pin, sync::Arc};
 
 pub struct Config {
+    /// Function that can be used to spawn background tasks.
+    ///
+    /// The tasks passed as parameter must be executed until they shut down.
+    pub tasks_executor: Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>,
+
     pub receiver: async_channel::Receiver<Message>,
 }
 
@@ -28,7 +34,7 @@ pub enum Message {
 }
 
 pub fn spawn_requests_handler(mut config: Config) {
-    smol::spawn(async move {
+    (config.tasks_executor)(Box::pin(async move {
         loop {
             match config.receiver.next().await {
                 Some(Message::Request(request)) => match request.request() {
@@ -60,6 +66,5 @@ pub fn spawn_requests_handler(mut config: Config) {
                 None => return,
             }
         }
-    })
-    .detach();
+    }));
 }
