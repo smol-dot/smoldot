@@ -107,9 +107,6 @@ pub struct PinnedRuntimeId(Arc<Runtime>);
 
 /// See [the module-level documentation](..).
 pub struct RuntimeService<TPlat: PlatformRef> {
-    /// See [`Config::platform`].
-    platform: TPlat,
-
     /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService<TPlat>>,
 
@@ -177,7 +174,6 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         });
 
         RuntimeService {
-            platform: config.platform,
             sync_service: config.sync_service,
             guarded,
             background_task_abort,
