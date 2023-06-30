@@ -117,7 +117,7 @@ pub struct ChainConfig<'a> {
 /// Running client. As long as this object is alive, the client reads/writes the database and has
 /// a JSON-RPC server open.
 pub struct Client {
-    _json_rpc_service: Option<json_rpc_service::JsonRpcService>,
+    json_rpc_service: Option<json_rpc_service::JsonRpcService>,
     consensus_service: Arc<consensus_service::ConsensusService>,
     relay_chain_consensus_service: Option<Arc<consensus_service::ConsensusService>>,
     network_service: Arc<network_service::NetworkService>,
@@ -125,6 +125,13 @@ pub struct Client {
 }
 
 impl Client {
+    /// Returns the address the JSON-RPC server is listening on.
+    ///
+    /// Returns `None` if and only if [`Config::json_rpc_address`] was `None`.
+    pub fn json_rpc_server_addr(&self) -> Option<SocketAddr> {
+        self.json_rpc_service.as_ref().map(|j| j.listen_addr())
+    }
+
     /// Returns the best block according to the networking.
     pub async fn network_known_best(&self) -> Option<u64> {
         *self.network_known_best.lock().await
@@ -456,6 +463,7 @@ pub async fn start(mut config: Config<'_>) -> Client {
             tasks_executor: { &mut |task| (config.tasks_executor)(task) },
             log_callback: config.log_callback.clone(),
             bind_address,
+            max_parallel_requests: 32,
         })
         .await;
 
@@ -533,7 +541,7 @@ pub async fn start(mut config: Config<'_>) -> Client {
     Client {
         consensus_service,
         relay_chain_consensus_service,
-        _json_rpc_service: json_rpc_service,
+        json_rpc_service,
         network_service,
         network_known_best,
     }
