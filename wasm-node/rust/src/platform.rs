@@ -46,7 +46,6 @@ pub(crate) struct PlatformRef {}
 // TODO: this trait implementation was written before GATs were stable in Rust; now that the associated types have lifetimes, it should be possible to considerably simplify this code
 impl smoldot_light::platform::PlatformRef for PlatformRef {
     type Delay = Delay;
-    type Yield = Yield;
     type Instant = Instant;
     type MultiStream = MultiStreamWrapper; // Entry in the ̀`CONNECTIONS` map.
     type Stream = StreamWrapper; // Entry in the ̀`STREAMS` map and a read buffer.
@@ -141,10 +140,6 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
 
     fn client_version(&self) -> Cow<str> {
         env!("CARGO_PKG_VERSION").into()
-    }
-
-    fn yield_after_cpu_intensive(&self) -> Self::Yield {
-        Yield { has_yielded: false }
     }
 
     fn connect(&self, url: &str) -> Self::ConnectFuture {
@@ -503,24 +498,6 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         }
 
         *write_closed = true;
-    }
-}
-
-pub(crate) struct Yield {
-    has_yielded: bool,
-}
-
-impl future::Future for Yield {
-    type Output = ();
-
-    fn poll(mut self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
-        if !self.has_yielded {
-            self.has_yielded = true;
-            cx.waker().wake_by_ref();
-            task::Poll::Pending
-        } else {
-            task::Poll::Ready(())
-        }
     }
 }
 

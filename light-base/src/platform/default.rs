@@ -51,7 +51,6 @@ impl DefaultPlatform {
 
 impl PlatformRef for Arc<DefaultPlatform> {
     type Delay = future::BoxFuture<'static, ()>;
-    type Yield = future::Ready<()>;
     type Instant = std::time::Instant;
     type MultiStream = std::convert::Infallible;
     type Stream = Stream;
@@ -95,11 +94,6 @@ impl PlatformRef for Arc<DefaultPlatform> {
 
     fn client_version(&self) -> Cow<str> {
         Cow::Borrowed(&self.client_version)
-    }
-
-    fn yield_after_cpu_intensive(&self) -> Self::Yield {
-        // No-op.
-        future::ready(())
     }
 
     fn connect(&self, multiaddr: &str) -> Self::ConnectFuture {

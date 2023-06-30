@@ -28,7 +28,6 @@ pub mod default;
 /// then create a connection on one clone, then access this connection on the other clone.
 pub trait PlatformRef: Clone + Send + Sync + 'static {
     type Delay: Future<Output = ()> + Unpin + Send + 'static;
-    type Yield: Future<Output = ()> + Unpin + Send + 'static;
     type Instant: Clone
         + ops::Add<Duration, Output = Self::Instant>
         + ops::Sub<Self::Instant, Output = Duration>
@@ -100,11 +99,6 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// Value returned when a JSON-RPC client requests the version of the client, or when a peer
     /// performs an identification request. Reasonable value is `env!("CARGO_PKG_VERSION")`.
     fn client_version(&self) -> Cow<str>;
-
-    /// Should be called after a CPU-intensive operation in order to yield back control.
-    ///
-    /// This function can be implemented as no-op on platforms where this is irrelevant.
-    fn yield_after_cpu_intensive(&self) -> Self::Yield;
 
     /// Starts a connection attempt to the given multiaddress.
     ///

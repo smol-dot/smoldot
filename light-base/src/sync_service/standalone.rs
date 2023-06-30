@@ -138,9 +138,8 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
             if has_done_verif {
                 queue_empty = false;
 
-                // As explained in the documentation of `yield_after_cpu_intensive`, we should
-                // yield after a CPU-intensive operation. This helps provide a better granularity.
-                task.platform.yield_after_cpu_intensive().await;
+                // Yield after a CPU-intensive operation. This helps provide a better granularity.
+                futures_lite::future::yield_now().await;
             }
 
             queue_empty
