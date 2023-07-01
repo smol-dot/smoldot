@@ -1464,12 +1464,10 @@ impl Inner {
                     };
 
                     if replace {
-                        if let Some(value) = req.value() {
-                            self.offchain_storage_changes
-                                .insert(req.key().as_ref().to_vec(), Some(value.as_ref().to_vec()));
-                        } else {
-                            self.offchain_storage_changes.remove(req.key().as_ref());
-                        }
+                        self.offchain_storage_changes.insert(
+                            req.key().as_ref().to_vec(),
+                            req.value().map(|v| v.as_ref().to_vec()),
+                        );
                     }
 
                     self.vm = req.resume(replace);
