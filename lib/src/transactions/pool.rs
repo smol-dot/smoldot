@@ -362,16 +362,6 @@ impl<TTx> Pool<TTx> {
         })
     }
 
-    /// Returns the transactions from the pool that haven't been included yet in the order in
-    /// which they should be inserted in authored blocks.
-    pub fn inclusion_order(&'_ self) -> impl Iterator<Item = TransactionId> + '_ {
-        // FIXME: /!\
-        // TODO: /!\
-        #![allow(unreachable_code)]
-        todo!();
-        core::iter::empty()
-    }
-
     /// Returns the list of all transactions within the pool.
     pub fn iter(&'_ self) -> impl Iterator<Item = (TransactionId, &'_ TTx)> + '_ {
         self.transactions
@@ -762,6 +752,23 @@ pub struct AppendBlock<TTx> {
 }
 
 impl<TTx> AppendBlock<TTx> {
+    /// Returns all the transactions that can be included in the block at this point.
+    ///
+    /// Use this function if you are authoring a block.
+    ///
+    /// The transactions are returned by decreasing priority. Re-ordering the transactions might
+    /// lead to the runtime returning errors. It is safe, however, to skip some transactions
+    /// altogether if desired.
+    pub fn includable_transactions(
+        &'_ self,
+    ) -> impl Iterator<Item = (TransactionId, &'_ TTx)> + '_ {
+        self.inner
+            .includable
+            .iter()
+            .rev()
+            .map(|(_, tx_id)| (*tx_id, &self.inner.transactions[tx_id.0].user_data))
+    }
+
     /// Adds a single-SCALE-encoded transaction to the block being appended.
     ///
     /// The transaction is compared against the list of non-included transactions that are already
@@ -769,11 +776,16 @@ impl<TTx> AppendBlock<TTx> {
     /// the "included" state and  [`AppendBlockTransaction::NonIncludedUpdated`] is returned.
     /// Otherwise, [`AppendBlockTransaction::Unknown`] is returned and the transaction can be
     /// inserted in the pool.
-    pub fn block_transaction<'a, 'b>(
+    ///
+    /// > **Note**: This function is equivalent to calling
+    /// >           [`Pool::transactions_by_scale_encoding`], removing the transactions that are
+    /// >           already included (see [`Pool::included_block_height`]), then calling
+    /// >           [`AppendBlock::add_transaction_by_id`] with one of the transactions that
+    /// >           remain.
+    pub fn add_transaction_by_scale_encoding<'a, 'b>(
         &'a mut self,
         bytes: &'b [u8],
     ) -> AppendBlockTransaction<'a, 'b, TTx> {
-        // Try find a non-included transaction with these bytes.
         let non_included = {
             let hash = blake2_hash(bytes);
             self.inner
@@ -793,22 +805,33 @@ impl<TTx> AppendBlock<TTx> {
                 .map(|(_, tx_id)| *tx_id)
         };
 
-        // Early return if the transaction isn't known by the pool.
-        let Some(tx_id) = non_included
-            else {
-                return AppendBlockTransaction::Unknown(Vacant {
-                    inner: &mut self.inner,
-                    bytes,
-                })
-            };
+        if let Some(tx_id) = non_included {
+            debug_assert_eq!(self.inner.transactions[tx_id.0].scale_encoded, bytes);
+            self.add_transaction_by_id(tx_id);
+            AppendBlockTransaction::NonIncludedUpdated {
+                id: tx_id,
+                user_data: &mut self.inner.transactions[tx_id.0].user_data,
+            }
+        } else {
+            AppendBlockTransaction::Unknown(Vacant {
+                inner: &mut self.inner,
+                bytes,
+            })
+        }
+    }
 
-        // Basic sanity checks.
-        debug_assert_eq!(self.inner.transactions[tx_id.0].scale_encoded, bytes);
-        debug_assert!(self.inner.transactions[tx_id.0]
+    /// Adds a transaction to the block being appended.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the transaction with the given id is invalid.
+    /// Panics if the transaction with the given id was already included in the chain.
+    ///
+    pub fn add_transaction_by_id(&mut self, id: TransactionId) {
+        // Sanity check.
+        assert!(self.inner.transactions[id.0]
             .included_block_height
             .is_none());
-
-        // Update the transaction stored in the pool.
 
         // We can in principle always discard the current validation status of the transaction.
         // However, if the transaction has been validated against the parent of the block, we want
@@ -816,7 +839,7 @@ impl<TTx> AppendBlock<TTx> {
         // Since updating the status of a transaction is a rather complicated state change, the
         // approach taken here is to always un-validate the transaction then re-validate it.
         let revalidation =
-            if let Some(validation) = self.inner.transactions[tx_id.0].validation.as_ref() {
+            if let Some(validation) = self.inner.transactions[id.0].validation.as_ref() {
                 if validation.0 + 1 == self.inner.best_block_height {
                     Some(validation.clone())
                 } else {
@@ -825,23 +848,18 @@ impl<TTx> AppendBlock<TTx> {
             } else {
                 None
             };
-        self.inner.unvalidate_transaction(tx_id);
+        self.inner.unvalidate_transaction(id);
 
         // Mark the transaction as included.
-        self.inner.transactions[tx_id.0].included_block_height = Some(self.inner.best_block_height);
+        self.inner.transactions[id.0].included_block_height = Some(self.inner.best_block_height);
         self.inner
             .by_height
-            .insert((self.inner.best_block_height, tx_id));
+            .insert((self.inner.best_block_height, id));
 
         // Re-set the validation status of the transaction that was extracted earlier.
         if let Some((block_number_validated_against, result)) = revalidation {
             self.inner
-                .set_validation_result(tx_id, block_number_validated_against, result);
-        }
-
-        AppendBlockTransaction::NonIncludedUpdated {
-            id: tx_id,
-            user_data: &mut self.inner.transactions[tx_id.0].user_data,
+                .set_validation_result(id, block_number_validated_against, result);
         }
     }
 
