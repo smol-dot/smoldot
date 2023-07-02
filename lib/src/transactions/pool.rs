@@ -49,11 +49,11 @@
 //! properties:
 //!
 //! - Whether or not it has been validated, and if yes, the block against which it has been
-//! validated and the characteristics of the transaction (as provided by the runtime): the tags it
-//! provides and requires, its longevity, and its priority. See [the `validate` module](../validate)
-//! for more information.
+//! validated and the characteristics of the transaction (as provided by the runtime). These
+//! characterstics are: the tags it provides and requires, its longevity, and its priority.
+//! See [the `validate` module](../validate) for more information.
 //! - The height of the block, if any, in which the transaction has been included.
-//! - A so-called user data, an opaque field controller by the API user.
+//! - A so-called user data, an opaque field controlled by the API user.
 //!
 //! Use [`Pool::add_unvalidated`] to add to the pool a transaction that should be included in a
 //! block at a later point in time.
@@ -82,8 +82,11 @@
 
 use super::validate::{TransactionValidityError, ValidTransaction};
 
-use alloc::{collections::BTreeSet, vec::Vec};
-use core::fmt;
+use alloc::{
+    collections::{btree_set, BTreeSet},
+    vec::Vec,
+};
+use core::{fmt, iter, mem};
 use hashbrown::HashSet;
 
 /// Identifier of a transaction stored within the [`Pool`].
@@ -108,8 +111,8 @@ pub struct Config {
     /// Height of the finalized block at initialization.
     ///
     /// The [`Pool`] doesn't track which block is finalized. This value is only used to initialize
-    /// the best block number. The field could also have been called `best_block_height`, but it
-    /// might have created confusion.
+    /// the best block number. The field could also have been called `best_block_height`, but doing
+    /// so might created confusion.
     ///
     /// Non-finalized blocks should be added to the pool after initialization using
     /// [`Pool::append_block`].
@@ -159,12 +162,12 @@ impl<TTx> Pool<TTx> {
         self.transactions.len()
     }
 
-    /// Inserts a new unverified transaction in the pool.
+    /// Inserts a new non-validated transaction in the pool.
     pub fn add_unvalidated(&mut self, scale_encoded: Vec<u8>, user_data: TTx) -> TransactionId {
         self.add_unvalidated_inner(scale_encoded, None, user_data)
     }
 
-    /// Inserts a new unverified transaction in the pool.
+    /// Inserts a new non-validated transaction in the pool.
     fn add_unvalidated_inner(
         &mut self,
         scale_encoded: impl AsRef<[u8]> + Into<Vec<u8>>,
