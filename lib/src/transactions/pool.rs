@@ -80,14 +80,14 @@
 
 // TODO: this code is completely untested
 
-use super::validate::{TransactionValidityError, ValidTransaction};
-
 use alloc::{
     collections::{btree_set, BTreeSet},
     vec::Vec,
 };
 use core::{fmt, iter, mem, ops};
 use hashbrown::HashSet;
+
+pub use super::validate::ValidTransaction;
 
 /// Identifier of a transaction stored within the [`Pool`].
 ///
@@ -126,6 +126,7 @@ pub struct Pool<TTx> {
 
     /// List of transactions (represented as indices within [`Pool::transactions`]) whose status
     /// is "not validated".
+    // TODO: shrink_to_fit from time to time?
     not_validated: HashSet<TransactionId, fnv::FnvBuildHasher>,
 
     /// Transaction ids (i.e. indices within [`Pool::transactions`]) indexed by the BLAKE2 hash
@@ -136,8 +137,38 @@ pub struct Pool<TTx> {
     /// in which the transaction is included.
     by_height: BTreeSet<(u64, TransactionId)>,
 
+    /// Validated transaction ids (i.e. indices within [`Pool::transactions`]) that are includable
+    /// in the chain, indexed by the priority value provided by the validation.
+    includable: BTreeSet<(u64, TransactionId)>,
+
+    /// Validated transaction ids (i.e. indices within [`Pool::transactions`]) indexed by the
+    /// block height at which their validation expires.
+    by_validation_expiration: BTreeSet<(u64, TransactionId)>,
+
+    /// List of all tags that are in the `provides` or `requires` tag lists of any of the validated
+    /// transactions.
+    // TODO: shrink_to_fit from time to time?
+    tags: hashbrown::HashMap<Vec<u8>, TagInfo>,
+
     /// Height of the latest best block, as known from the pool.
     best_block_height: u64,
+}
+
+struct TagInfo {
+    /// List of validated transactions that have the tag in their `provides` tags list.
+    // TODO: shrink_to_fit from time to time?
+    provided_by: hashbrown::HashSet<TransactionId, fnv::FnvBuildHasher>,
+
+    /// List of validated transactions that have the tag in their `requires` tags list.
+    // TODO: shrink_to_fit from time to time?
+    required_by: hashbrown::HashSet<TransactionId, fnv::FnvBuildHasher>,
+
+    /// Number of transactions in [`TagInfo::provided_by`] that are included in the chain.
+    ///
+    /// Note that a value strictly superior to 1 indicates some kind of bug in the logic of the
+    /// runtime. However, we don't care about this in the pool and just want the pool to function
+    /// properly.
+    known_to_be_included_in_chain: usize,
 }
 
 impl<TTx> Pool<TTx> {
@@ -148,6 +179,9 @@ impl<TTx> Pool<TTx> {
             not_validated: HashSet::with_capacity_and_hasher(config.capacity, Default::default()),
             by_hash: BTreeSet::new(),
             by_height: BTreeSet::new(),
+            includable: BTreeSet::new(),
+            by_validation_expiration: BTreeSet::new(),
+            tags: hashbrown::HashMap::with_capacity_and_hasher(8, Default::default()),
             best_block_height: config.finalized_block_height,
         }
     }
@@ -205,12 +239,11 @@ impl<TTx> Pool<TTx> {
     ///
     #[track_caller]
     pub fn remove(&mut self, id: TransactionId) -> TTx {
-        let tx = self.transactions.remove(id.0); // Panics if `id` is invalid.
+        self.unvalidate_transaction(id);
+        let _removed = self.not_validated.remove(&id);
+        debug_assert!(_removed);
 
-        if tx.validation.is_none() {
-            let _removed = self.not_validated.remove(&id);
-            debug_assert!(_removed);
-        }
+        let tx = self.transactions.remove(id.0);
 
         if let Some(included_block_height) = tx.included_block_height {
             let _removed = self.by_height.remove(&(included_block_height, id));
@@ -234,6 +267,22 @@ impl<TTx> Pool<TTx> {
         &'_ mut self,
         block_inferior_of_equal: u64,
     ) -> impl Iterator<Item = (TransactionId, TTx)> + '_ {
+        // First, unvalidate all the transactions that we are going to remove.
+        // This is done separately ahead of time in order to guarantee that there is no state
+        // mismatch when `unvalidate_transaction` is entered.
+        for tx_id in self
+            .by_height
+            .range(
+                (0, TransactionId(usize::min_value()))
+                    ..=(block_inferior_of_equal, TransactionId(usize::max_value())),
+            )
+            .map(|(_, id)| *id)
+            .collect::<Vec<_>>()
+        {
+            self.unvalidate_transaction(tx_id);
+        }
+
+        // Extracts all the transactions that we are about to remove from `by_height`.
         let to_remove = {
             let remaining_txs = self.by_height.split_off(&(
                 block_inferior_of_equal + 1,
@@ -258,12 +307,8 @@ impl<TTx> Pool<TTx> {
                 let (_height, tx_id) = self.transactions.next()?;
 
                 let tx = self.pool.transactions.remove(tx_id.0);
+                debug_assert!(tx.validation.is_none());
                 debug_assert_eq!(tx.included_block_height, Some(_height));
-
-                if tx.validation.is_none() {
-                    let _removed = self.pool.not_validated.remove(&tx_id);
-                    debug_assert!(_removed);
-                }
 
                 let _removed = self
                     .pool
@@ -392,22 +437,17 @@ impl<TTx> Pool<TTx> {
     pub fn append_block(mut self) -> AppendBlock<TTx> {
         self.best_block_height = self.best_block_height.checked_add(1).unwrap();
 
-        // Un-validate non-included transactions whose longevity has expired.
-        // TODO: O(n) :-/
-        for (_, tx) in &mut self.transactions {
-            if tx.included_block_height.is_some() {
-                continue;
-            }
-
-            match tx.validation {
-                Some((block_validated, Ok(ValidTransaction { longevity, .. })))
-                    if block_validated.saturating_add(longevity.get())
-                        <= self.best_block_height =>
-                {
-                    tx.validation = None;
-                }
-                _ => {}
-            };
+        // Un-validate the transactions whose validation longevity has expired.
+        for tx_id in self
+            .by_validation_expiration
+            .range(
+                (0, TransactionId(usize::min_value()))
+                    ..=(self.best_block_height, TransactionId(usize::max_value())),
+            )
+            .map(|(_, id)| *id)
+            .collect::<Vec<_>>()
+        {
+            self.unvalidate_transaction(tx_id);
         }
 
         AppendBlock { inner: self }
@@ -458,22 +498,13 @@ impl<TTx> Pool<TTx> {
 
         // Set `included_block_height` to `None` for each of them.
         for (transaction_id, _) in &transactions_to_retract {
+            self.unvalidate_transaction(*transaction_id);
+
             let tx_data = self.transactions.get_mut(transaction_id.0).unwrap();
             debug_assert!(tx_data.included_block_height.unwrap() > self.best_block_height);
+            self.by_height
+                .remove(&(tx_data.included_block_height.unwrap(), *transaction_id));
             tx_data.included_block_height = None;
-        }
-
-        // Must cancel validation results against blocks that have been retracted.
-        // TODO: this is O(n), do better
-        for (_, transaction) in &mut self.transactions {
-            let best_block_height = self.best_block_height;
-            if transaction
-                .validation
-                .as_ref()
-                .map_or(false, |(b, _)| *b > best_block_height)
-            {
-                transaction.validation = None;
-            }
         }
 
         // Return retracted transactions from highest block to lowest block.
@@ -485,8 +516,15 @@ impl<TTx> Pool<TTx> {
     /// The block number must be the block number against which the transaction has been
     /// validated.
     ///
-    /// The validation result might be ignored if it doesn't match one of the entries returned by
-    /// [`Pool::unvalidated_transactions`].
+    /// Has no effect if the transaction has been included in the chain and the validation has
+    /// been performed against a block other than the parent of the block in which it was included.
+    ///
+    /// Has no effect if the transaction has already been validated against the same or a higher
+    /// block.
+    ///
+    /// > **Note**: If the transaction validation fails, use [`Pool::remove`] to remove the
+    /// >           transaction instead. Invalid transactions stay invalid forever and thus aren't
+    /// >           meant to be left in the pool.
     ///
     /// # Panic
     ///
@@ -496,20 +534,197 @@ impl<TTx> Pool<TTx> {
         &mut self,
         id: TransactionId,
         block_number_validated_against: u64,
-        result: Result<ValidTransaction, TransactionValidityError>,
+        result: ValidTransaction,
     ) {
-        let tx = self.transactions.get_mut(id.0).unwrap();
-
         // If the transaction has been included in a block, immediately return if the validation
         // has been performed against a different block.
-        if tx
+        if self
+            .transactions
+            .get(id.0)
+            .unwrap()
             .included_block_height
             .map_or(false, |b| b != block_number_validated_against + 1)
         {
             return;
         }
 
-        tx.validation = Some((block_number_validated_against, result));
+        // Immediately return if the transaction has been validated against a better block.
+        if self
+            .transactions
+            .get(id.0)
+            .unwrap()
+            .validation
+            .as_ref()
+            .map_or(false, |(b, _)| *b >= block_number_validated_against)
+        {
+            return;
+        }
+
+        // If the transaction was already validated, we don't try to update all the fields of
+        // `self` as it would be rather complicated. Instead we mark the transaction as not
+        // validated then mark it again as validated.
+        self.unvalidate_transaction(id);
+        debug_assert!(self.transactions[id.0].validation.is_none());
+
+        // Whether the transaction can be included at the head of the chain. Set to `false` below
+        // if there is a reason why not.
+        let mut includable = self.transactions[id.0].included_block_height.is_none();
+
+        for tag in &result.provides {
+            let tag_info = self.tags.entry(tag.clone()).or_insert_with(|| TagInfo {
+                provided_by: Default::default(),
+                required_by: Default::default(),
+                known_to_be_included_in_chain: 0,
+            });
+
+            if self.transactions[id.0].included_block_height.is_some() {
+                tag_info.known_to_be_included_in_chain += 1;
+
+                if tag_info.known_to_be_included_in_chain == 1 {
+                    // All other transactions that provide the same tag are not longer includable.
+                    for other_tx_id in &tag_info.provided_by {
+                        let _was_in = self.includable.remove(&(
+                            self.transactions[other_tx_id.0]
+                                .validation
+                                .as_ref()
+                                .unwrap()
+                                .1
+                                .priority,
+                            *other_tx_id,
+                        ));
+                        debug_assert!(_was_in);
+                    }
+
+                    // All other transactions that require this tag are now includable.
+                    for other_tx_id in &tag_info.required_by {
+                        let _was_inserted = self.includable.insert((
+                            self.transactions[other_tx_id.0]
+                                .validation
+                                .as_ref()
+                                .unwrap()
+                                .1
+                                .priority,
+                            *other_tx_id,
+                        ));
+                        debug_assert!(_was_inserted);
+                    }
+                }
+            }
+
+            if tag_info.known_to_be_included_in_chain >= 1 {
+                includable = false;
+            }
+
+            tag_info.provided_by.insert(id);
+        }
+
+        for tag in &result.requires {
+            let tag_info = self.tags.entry(tag.clone()).or_insert_with(|| TagInfo {
+                provided_by: Default::default(),
+                required_by: Default::default(),
+                known_to_be_included_in_chain: 0,
+            });
+
+            tag_info.required_by.insert(id);
+
+            if tag_info.known_to_be_included_in_chain == 0 {
+                includable = false;
+            }
+        }
+
+        self.by_validation_expiration.insert((
+            block_number_validated_against.saturating_add(result.longevity.get()),
+            id,
+        ));
+
+        if includable {
+            self.includable.insert((result.priority, id));
+        }
+
+        self.transactions[id.0].validation = Some((block_number_validated_against, result));
+    }
+
+    /// Sets a transaction's status to "not validated".
+    ///
+    /// # Panic
+    ///
+    /// Panics if the identifier is invalid.
+    ///
+    fn unvalidate_transaction(&mut self, tx_id: TransactionId) {
+        // No effect if wasn't validated.
+        let Some((block_height_validated_against, validation)) = self.transactions[tx_id.0].validation.take()
+            else { return; };
+
+        // We don't care in this context whether the transaction was includable or not, and we
+        // call `remove` in both cases.
+        self.includable.remove(&(validation.priority, tx_id));
+
+        for tag in validation.provides {
+            let tag_info = self.tags.get_mut(&tag).unwrap();
+
+            let _was_in = tag_info.provided_by.remove(&tx_id);
+            debug_assert!(_was_in);
+
+            if self.transactions[tx_id.0].included_block_height.is_some() {
+                tag_info.known_to_be_included_in_chain -= 1;
+
+                if tag_info.known_to_be_included_in_chain == 0 {
+                    // All other transactions that provide the same tag are now includable.
+                    // Note that in practice they most likely are not, but we prioritize the
+                    // consistency and simplify of the pool implementation rather than trying to
+                    // be smart.
+                    for other_tx_id in &tag_info.provided_by {
+                        let _was_inserted = self.includable.insert((
+                            self.transactions[other_tx_id.0]
+                                .validation
+                                .as_ref()
+                                .unwrap()
+                                .1
+                                .priority,
+                            *other_tx_id,
+                        ));
+                        debug_assert!(_was_inserted);
+                    }
+
+                    // All other transactions that require this tag are no longer includable.
+                    for other_tx_id in &tag_info.required_by {
+                        let _was_in = self.includable.remove(&(
+                            self.transactions[other_tx_id.0]
+                                .validation
+                                .as_ref()
+                                .unwrap()
+                                .1
+                                .priority,
+                            *other_tx_id,
+                        ));
+                        debug_assert!(_was_in);
+                    }
+                }
+            }
+
+            if tag_info.provided_by.is_empty() && tag_info.required_by.is_empty() {
+                self.tags.remove(&tag).unwrap();
+            }
+        }
+
+        for tag in validation.requires {
+            let tag_info = self.tags.get_mut(&tag).unwrap();
+
+            let _was_in = tag_info.required_by.remove(&tx_id);
+            debug_assert!(_was_in);
+
+            if tag_info.provided_by.is_empty() && tag_info.required_by.is_empty() {
+                self.tags.remove(&tag).unwrap();
+            }
+        }
+
+        self.not_validated.insert(tx_id);
+
+        let _was_in = self.by_validation_expiration.remove(&(
+            block_height_validated_against.saturating_add(validation.longevity.get()),
+            tx_id,
+        ));
+        debug_assert!(_was_in);
     }
 }
 
@@ -554,64 +769,79 @@ impl<TTx> AppendBlock<TTx> {
     /// the "included" state and  [`AppendBlockTransaction::NonIncludedUpdated`] is returned.
     /// Otherwise, [`AppendBlockTransaction::Unknown`] is returned and the transaction can be
     /// inserted in the pool.
-    // TODO: update for the fact that it's a single-encoded transaction
     pub fn block_transaction<'a, 'b>(
         &'a mut self,
         bytes: &'b [u8],
     ) -> AppendBlockTransaction<'a, 'b, TTx> {
-        let hash = blake2_hash(bytes);
+        // Try find a non-included transaction with these bytes.
+        let non_included = {
+            let hash = blake2_hash(bytes);
+            self.inner
+                .by_hash
+                .range(
+                    (hash, TransactionId(usize::min_value()))
+                        ..=(hash, TransactionId(usize::max_value())),
+                )
+                .find(|(_, tx_id)| {
+                    self.inner
+                        .transactions
+                        .get(tx_id.0)
+                        .unwrap()
+                        .included_block_height
+                        .is_none()
+                })
+                .map(|(_, tx_id)| *tx_id)
+        };
 
-        // Try find a non-included transaction with that hash.
-        let non_included = self
-            .inner
-            .by_hash
-            .range(
-                (hash, TransactionId(usize::min_value()))
-                    ..=(hash, TransactionId(usize::max_value())),
-            )
-            .find(|(_, tx_id)| {
-                self.inner
-                    .transactions
-                    .get(tx_id.0)
-                    .unwrap()
-                    .included_block_height
-                    .is_none()
-            })
-            .map(|(_, tx_id)| *tx_id);
+        // Early return if the transaction isn't known by the pool.
+        let Some(tx_id) = non_included
+            else {
+                return AppendBlockTransaction::Unknown(Vacant {
+                    inner: &mut self.inner,
+                    bytes,
+                })
+            };
 
-        // If `non_included` is `Some`, check that its bytes are actually equal to `bytes`.
-        debug_assert!(non_included.map_or(true, |id| self
-            .inner
-            .transactions
-            .get(id.0)
-            .unwrap()
-            .scale_encoded
-            == bytes));
+        // Basic sanity checks.
+        debug_assert_eq!(self.inner.transactions[tx_id.0].scale_encoded, bytes);
+        debug_assert!(self.inner.transactions[tx_id.0]
+            .included_block_height
+            .is_none());
 
-        match non_included {
-            Some(id) => {
-                // Update the transaction stored in the pool.
-                let tx = self.inner.transactions.get_mut(id.0).unwrap();
-                let best_block_height = self.inner.best_block_height;
+        // Update the transaction stored in the pool.
 
-                debug_assert!(tx.included_block_height.is_none());
-                tx.included_block_height = Some(best_block_height);
-
-                if tx
-                    .validation
-                    .as_ref()
-                    .map_or(false, |(b, _)| *b + 1 != best_block_height)
-                {
-                    tx.validation = None;
+        // We can in principle always discard the current validation status of the transaction.
+        // However, if the transaction has been validated against the parent of the block, we want
+        // to keep this validation status as an optimization.
+        // Since updating the status of a transaction is a rather complicated state change, the
+        // approach taken here is to always un-validate the transaction then re-validate it.
+        let revalidation =
+            if let Some(validation) = self.inner.transactions[tx_id.0].validation.as_ref() {
+                if validation.0 + 1 == self.inner.best_block_height {
+                    Some(validation.clone())
+                } else {
+                    None
                 }
+            } else {
+                None
+            };
+        self.inner.unvalidate_transaction(tx_id);
 
-                let user_data = &mut tx.user_data;
-                AppendBlockTransaction::NonIncludedUpdated { id, user_data }
-            }
-            None => AppendBlockTransaction::Unknown(Vacant {
-                inner: &mut self.inner,
-                bytes,
-            }),
+        // Mark the transaction as included.
+        self.inner.transactions[tx_id.0].included_block_height = Some(self.inner.best_block_height);
+        self.inner
+            .by_height
+            .insert((self.inner.best_block_height, tx_id));
+
+        // Re-set the validation status of the transaction that was extracted earlier.
+        if let Some((block_number_validated_against, result)) = revalidation {
+            self.inner
+                .set_validation_result(tx_id, block_number_validated_against, result);
+        }
+
+        AppendBlockTransaction::NonIncludedUpdated {
+            id: tx_id,
+            user_data: &mut self.inner.transactions[tx_id.0].user_data,
         }
     }
 
@@ -679,7 +909,7 @@ struct Transaction<TTx> {
 
     /// If `Some`, contains the outcome of the validation of this transaction and the block height
     /// it was validated against.
-    validation: Option<(u64, Result<ValidTransaction, TransactionValidityError>)>,
+    validation: Option<(u64, ValidTransaction)>,
 
     /// If `Some`, the height of the block at which the transaction has been included.
     included_block_height: Option<u64>,
