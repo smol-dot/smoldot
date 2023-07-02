@@ -47,7 +47,6 @@
 
 use crate::{
     chain::{blocks_tree, chain_information},
-    executor::host,
     header,
 };
 
@@ -63,10 +62,6 @@ use core::{
     time::Duration,
 };
 use hashbrown::HashMap;
-
-pub use blocks_tree::{
-    Nibble, StorageChanges, TrieChange, TrieChangeStorageValue, TrieEntryVersion,
-};
 
 mod verification_queue;
 
@@ -998,26 +993,6 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
 
         self.parent
     }
-}
-
-pub struct BlockVerificationSuccessFull {
-    /// Changes to the storage made by this block compared to its parent.
-    pub storage_changes: StorageChanges,
-
-    /// State trie version indicated by the runtime. All the storage changes indicated by
-    /// [`BlockVerificationSuccessFull::storage_changes`] should store this version
-    /// alongside with them.
-    pub state_trie_version: TrieEntryVersion,
-
-    /// List of changes to the off-chain storage that this block performs.
-    pub offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
-
-    /// Runtime of the parent, as was provided at the beginning of the verification.
-    pub parent_runtime: host::HostVmPrototype,
-
-    /// If `Some`, the block has modified the runtime compared to its parent. Contains the new
-    /// runtime.
-    pub new_runtime: Option<host::HostVmPrototype>,
 }
 
 /// Start the processing of a justification verification.

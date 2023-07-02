@@ -33,10 +33,6 @@ use super::{
 use alloc::boxed::Box;
 use core::cmp::Ordering;
 
-pub use verify::header_body::{
-    Nibble, StorageChanges, TrieChange, TrieChangeStorageValue, TrieEntryVersion,
-};
-
 impl<T> NonFinalizedTree<T> {
     /// Verifies the given block.
     ///
@@ -352,26 +348,6 @@ impl<T> VerifyContext<T> {
         &mut self,
         success_consensus: verify::header_only::Success,
     ) -> (bool, BlockConsensus, BlockFinality) {
-        let success_consensus = match success_consensus {
-            verify::header_only::Success::Aura { authorities_change } => {
-                verify::header_body::SuccessConsensus::Aura { authorities_change }
-            }
-            verify::header_only::Success::Babe {
-                epoch_transition_target,
-                slot_number,
-            } => verify::header_body::SuccessConsensus::Babe {
-                epoch_transition_target,
-                slot_number,
-            },
-        };
-
-        self.apply_success_body(success_consensus)
-    }
-
-    fn apply_success_body(
-        &mut self,
-        success_consensus: verify::header_body::SuccessConsensus,
-    ) -> (bool, BlockConsensus, BlockFinality) {
         let decoded_header = header::decode(&self.header, self.chain.block_number_bytes).unwrap();
 
         let is_new_best = if let Some(current_best) = self.chain.current_best {
@@ -394,7 +370,7 @@ impl<T> VerifyContext<T> {
                 .map(|idx| self.chain.blocks.get(idx).unwrap().consensus.clone()),
         ) {
             (
-                verify::header_body::SuccessConsensus::Aura { authorities_change },
+                verify::header_only::Success::Aura { authorities_change },
                 Some(BlockConsensus::Aura {
                     authorities_list: parent_authorities,
                 }),
@@ -414,7 +390,7 @@ impl<T> VerifyContext<T> {
             }
 
             (
-                verify::header_body::SuccessConsensus::Babe {
+                verify::header_only::Success::Babe {
                     epoch_transition_target: Some(epoch_transition_target),
                     ..
                 },
@@ -427,7 +403,7 @@ impl<T> VerifyContext<T> {
             },
 
             (
-                verify::header_body::SuccessConsensus::Babe {
+                verify::header_only::Success::Babe {
                     epoch_transition_target: Some(epoch_transition_target),
                     slot_number,
                     ..
@@ -448,7 +424,7 @@ impl<T> VerifyContext<T> {
             },
 
             (
-                verify::header_body::SuccessConsensus::Babe {
+                verify::header_only::Success::Babe {
                     epoch_transition_target: None,
                     ..
                 },
@@ -464,7 +440,7 @@ impl<T> VerifyContext<T> {
             },
 
             (
-                verify::header_body::SuccessConsensus::Babe {
+                verify::header_only::Success::Babe {
                     epoch_transition_target: Some(epoch_transition_target),
                     ..
                 },
@@ -480,7 +456,7 @@ impl<T> VerifyContext<T> {
             },
 
             (
-                verify::header_body::SuccessConsensus::Babe {
+                verify::header_only::Success::Babe {
                     epoch_transition_target: Some(epoch_transition_target),
                     slot_number,
                     ..
@@ -504,7 +480,7 @@ impl<T> VerifyContext<T> {
             },
 
             (
-                verify::header_body::SuccessConsensus::Babe {
+                verify::header_only::Success::Babe {
                     epoch_transition_target: None,
                     ..
                 },

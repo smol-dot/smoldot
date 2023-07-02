@@ -40,9 +40,9 @@ use smoldot::{
     informant::HashDisplay,
     libp2p,
     network::{self, protocol::BlockData},
-    sync::all::{self, TrieEntryVersion},
+    sync::all,
     trie,
-    verify::body_only,
+    verify::body_only::{self, TrieEntryVersion},
 };
 use std::{
     array,
@@ -1301,7 +1301,7 @@ impl SyncBackground {
                                             iter::empty::<Vec<u8>>(), // TODO:,no /!\
                                             storage_changes.trie_changes_iter_ordered().filter_map(
                                                 |(_child_trie, key, change)| {
-                                                    let all::TrieChange::InsertUpdate {
+                                                    let body_only::TrieChange::InsertUpdate {
                                                         new_merkle_value,
                                                         partial_key,
                                                         children_merkle_values,
@@ -1322,16 +1322,16 @@ impl SyncBackground {
                                                                 .map(|v| From::from(&v[..]))
                                                         }),
                                                         storage_value: match new_storage_value {
-                                                            all::TrieChangeStorageValue::Modified {
+                                                            body_only::TrieChangeStorageValue::Modified {
                                                                 new_value: Some(value),
                                                             } => full_sqlite::InsertTrieNodeStorageValue::Value {
                                                                 value: Cow::Borrowed(value),
                                                                 references_merkle_value,
                                                             },
-                                                            all::TrieChangeStorageValue::Modified {
+                                                            body_only::TrieChangeStorageValue::Modified {
                                                                 new_value: None,
                                                             } => full_sqlite::InsertTrieNodeStorageValue::NoValue,
-                                                            all::TrieChangeStorageValue::Unmodified => {
+                                                            body_only::TrieChangeStorageValue::Unmodified => {
                                                                 full_sqlite::InsertTrieNodeStorageValue::SameAsParent
                                                             }
                                                         },
