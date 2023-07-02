@@ -380,7 +380,14 @@ async fn run(cli_options: cli::CliOptionsRun) {
         relay_chain,
         libp2p_key,
         listen_addresses: cli_options.listen_addr,
-        json_rpc_address: cli_options.json_rpc_address.0,
+        json_rpc: if let Some(address) = cli_options.json_rpc_address.0 {
+            Some(smoldot_full_node::JsonRpcConfig {
+                address,
+                max_json_rpc_clients: cli_options.json_rpc_max_clients,
+            })
+        } else {
+            None
+        },
         tasks_executor: {
             let executor = executor.clone();
             Arc::new(move |task| executor.spawn(task).detach())

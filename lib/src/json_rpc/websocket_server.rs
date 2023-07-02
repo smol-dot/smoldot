@@ -113,6 +113,8 @@
 #![cfg(feature = "std")]
 #![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
+// TODO: consider removing this module altogether
+
 #[cfg(test)]
 mod tests;
 
