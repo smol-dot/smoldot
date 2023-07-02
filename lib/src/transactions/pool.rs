@@ -234,36 +234,68 @@ impl<TTx> Pool<TTx> {
         &'_ mut self,
         block_inferior_of_equal: u64,
     ) -> impl Iterator<Item = (TransactionId, TTx)> + '_ {
-        let to_remove = self
-            .by_height
-            .range(
-                (u64::min_value(), TransactionId(usize::min_value()))
-                    ..=(block_inferior_of_equal, TransactionId(usize::max_value())),
-            )
-            .map(|(_, tx_id)| *tx_id)
-            .collect::<Vec<_>>();
+        let to_remove = {
+            let remaining_txs = self.by_height.split_off(&(
+                block_inferior_of_equal + 1,
+                TransactionId(usize::min_value()),
+            ));
+            mem::replace(&mut self.by_height, remaining_txs)
+        };
 
-        // TODO: implement more efficiently by not allocating this `out` Vec but removing directly in iterator
-        let mut out = Vec::with_capacity(to_remove.len());
-
-        for tx_id in to_remove {
-            let tx = self.transactions.remove(tx_id.0);
-            out.push((tx_id, tx.user_data));
-
-            debug_assert!(tx.included_block_height.is_some());
-
-            if tx.validation.is_none() {
-                let _removed = self.not_validated.remove(&tx_id);
-                debug_assert!(_removed);
-            }
-
-            let _removed = self
-                .by_hash
-                .remove(&(blake2_hash(&tx.scale_encoded), tx_id));
-            debug_assert!(_removed);
+        struct ToRemoveIterator<'a, TTx> {
+            pool: &'a mut Pool<TTx>,
+            transactions: btree_set::IntoIter<(u64, TransactionId)>,
         }
 
-        out.into_iter()
+        impl<'a, TTx> Iterator for ToRemoveIterator<'a, TTx>
+        where
+            // `FusedIterator` is necessary in order for the `Drop` implementation to not panic.
+            btree_set::IntoIter<(u64, TransactionId)>: iter::FusedIterator,
+        {
+            type Item = (TransactionId, TTx);
+
+            fn next(&mut self) -> Option<Self::Item> {
+                let (_height, tx_id) = self.transactions.next()?;
+
+                let tx = self.pool.transactions.remove(tx_id.0);
+                debug_assert_eq!(tx.included_block_height, Some(_height));
+
+                if tx.validation.is_none() {
+                    let _removed = self.pool.not_validated.remove(&tx_id);
+                    debug_assert!(_removed);
+                }
+
+                let _removed = self
+                    .pool
+                    .by_hash
+                    .remove(&(blake2_hash(&tx.scale_encoded), tx_id));
+                debug_assert!(_removed);
+
+                Some((tx_id, tx.user_data))
+            }
+
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                self.transactions.size_hint()
+            }
+        }
+
+        impl<'a, TTx> ExactSizeIterator for ToRemoveIterator<'a, TTx> where
+            btree_set::IntoIter<(u64, TransactionId)>: ExactSizeIterator
+        {
+        }
+
+        impl<'a, TTx> Drop for ToRemoveIterator<'a, TTx> {
+            fn drop(&mut self) {
+                // Drain the rest of the iterator in order to remove the transactions even if
+                // the iterator is dropped early.
+                while self.next().is_some() {}
+            }
+        }
+
+        ToRemoveIterator {
+            pool: self,
+            transactions: to_remove.into_iter(),
+        }
     }
 
     /// Returns a list of transactions whose state is "not validated", their user data, and the
