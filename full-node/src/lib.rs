@@ -55,8 +55,8 @@ pub struct Config<'a> {
     pub libp2p_key: Box<[u8; 32]>,
     /// List of addresses to listen on.
     pub listen_addresses: Vec<multiaddr::Multiaddr>,
-    /// Bind point of the JSON-RPC server. If `None`, no server is started.
-    pub json_rpc_address: Option<SocketAddr>,
+    /// Configuration of the JSON-RPC server. If `None`, no server is started.
+    pub json_rpc: Option<JsonRpcConfig>,
     /// Function that can be used to spawn background tasks.
     ///
     /// The tasks passed as parameter must be executed until they shut down.
@@ -67,6 +67,14 @@ pub struct Config<'a> {
     pub jaeger_agent: Option<SocketAddr>,
     // TODO: option is a bit weird
     pub show_informant: bool,
+}
+
+/// See [`Config::json_rpc`].
+pub struct JsonRpcConfig {
+    /// Bind point of the JSON-RPC server.
+    pub address: SocketAddr,
+    /// Maximum number of JSON-RPC clients that can be connected at the same time.
+    pub max_json_rpc_clients: u32,
 }
 
 /// Allow generating logs.
@@ -458,12 +466,13 @@ pub async fn start(mut config: Config<'_>) -> Client {
     // preferable to fail to start the node altogether rather than make the user believe that they
     // are connected to the JSON-RPC endpoint of the node while they are in reality connected to
     // something else.
-    let json_rpc_service = if let Some(bind_address) = config.json_rpc_address {
+    let json_rpc_service = if let Some(json_rpc_config) = config.json_rpc {
         let result = json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
             tasks_executor: config.tasks_executor.clone(),
             log_callback: config.log_callback.clone(),
-            bind_address,
+            bind_address: json_rpc_config.address,
             max_parallel_requests: 32,
+            max_json_rpc_clients: json_rpc_config.max_json_rpc_clients,
         })
         .await;
 

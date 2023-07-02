@@ -28,7 +28,10 @@ use std::{
     net::SocketAddr,
     num::{NonZeroU32, NonZeroUsize},
     pin::Pin,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -49,6 +52,9 @@ pub struct Config {
 
     /// Maximum number of requests to process in parallel.
     pub max_parallel_requests: u32,
+
+    /// Maximum number of JSON-RPC clients until new ones are rejected.
+    pub max_json_rpc_clients: u32,
 }
 
 /// Running JSON-RPC service. Holds a server open for as long as it is alive.
@@ -106,6 +112,8 @@ impl JsonRpcService {
             tasks_executor: config.tasks_executor.clone(),
             log_callback: config.log_callback,
             to_requests_handlers,
+            num_json_rpc_clients: Arc::new(AtomicU32::new(0)),
+            max_json_rpc_clients: config.max_json_rpc_clients,
         };
 
         (config.tasks_executor)(Box::pin(async move { background.run().await }));
@@ -151,6 +159,12 @@ struct JsonRpcBackground {
 
     /// Channel used to send requests to the tasks that process said requests.
     to_requests_handlers: async_channel::Sender<requests_handler::Message>,
+
+    /// Number of clients currently alive.
+    num_json_rpc_clients: Arc<AtomicU32>,
+
+    /// See [`Config::max_json_rpc_clients`].
+    max_json_rpc_clients: u32,
 }
 
 impl JsonRpcBackground {
@@ -165,6 +179,33 @@ impl JsonRpcBackground {
             match accept_result {
                 Ok((tcp_socket, address)) => {
                     // New incoming TCP connection.
+
+                    // Try to increase `num_json_rpc_clients`. Fails if the maximum is reached.
+                    if self
+                        .num_json_rpc_clients
+                        .fetch_update(Ordering::SeqCst, Ordering::Relaxed, |old_value| {
+                            if old_value < self.max_json_rpc_clients {
+                                // Considering that `old_value < max`, and `max` fits in a `u32` by
+                                // definition, then `old_value + 1` also always fits in a `u32`. QED.
+                                // There's no risk of overflow.
+                                Some(old_value + 1)
+                            } else {
+                                None
+                            }
+                        })
+                        .is_err()
+                    {
+                        // Reject the socket without sending back anything. Sending back a status
+                        // code would require allocating resources for that socket, which we
+                        // specifically don't want to do.
+                        self.log_callback.log(
+                            LogLevel::Debug,
+                            format!("json-rpc-incoming-connection-rejected; address={}", address),
+                        );
+                        smol::Timer::after(Duration::from_millis(50)).await;
+                        continue;
+                    }
+
                     // Spawn two tasks: one for the socket I/O, and one to process requests.
                     self.log_callback.log(
                         LogLevel::Debug,
@@ -181,6 +222,7 @@ impl JsonRpcBackground {
                         tcp_socket,
                         address,
                         io,
+                        self.num_json_rpc_clients.clone(),
                     );
                     spawn_client_main_task(
                         &self.tasks_executor,
@@ -209,8 +251,9 @@ fn spawn_client_io_task(
     tcp_socket: TcpStream,
     socket_address: SocketAddr,
     io: service::SerializedRequestsIo,
+    num_json_rpc_clients: Arc<AtomicU32>,
 ) {
-    tasks_executor(Box::pin(async move {
+    let run_future = async move {
         // Perform the WebSocket handshake.
         let (mut ws_sender, mut ws_receiver) = {
             let mut ws_server = soketto::handshake::Server::new(tcp_socket);
@@ -372,7 +415,12 @@ fn spawn_client_io_task(
                 );
             }
         }
-    }));
+    };
+
+    tasks_executor(Box::pin(async move {
+        run_future.await;
+        num_json_rpc_clients.fetch_sub(1, Ordering::Release);
+    }))
 }
 
 fn spawn_client_main_task(

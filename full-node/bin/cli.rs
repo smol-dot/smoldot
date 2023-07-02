@@ -85,6 +85,9 @@ pub struct CliOptionsRun {
     /// Bind point of the JSON-RPC server ("none" or `<ip>:<port>`).
     #[arg(long, default_value = "127.0.0.1:9944", value_parser = parse_json_rpc_address)]
     pub json_rpc_address: JsonRpcAddress,
+    /// Maximum number of JSON-RPC clients that can be connected simultaneously. Ignored if no server.
+    #[arg(long, default_value = "64")]
+    pub json_rpc_max_clients: u32,
     /// List of secret phrases to insert in the keystore of the node. Used to author blocks.
     #[arg(long, value_parser = decode_sr25519_private_key)]
     // TODO: also automatically add the same keys through ed25519?
