@@ -121,6 +121,9 @@ pub struct Config {
     /// Non-finalized blocks should be added to the pool after initialization using
     /// [`Pool::append_block`].
     pub finalized_block_height: u64,
+
+    /// Seed for randomness used to avoid HashDoS attacks.
+    pub randomness_seed: [u8; 16],
 }
 
 /// Data structure containing transactions. See the module-level documentation for more info.
@@ -152,7 +155,7 @@ pub struct Pool<TTx> {
     /// List of all tags that are in the `provides` or `requires` tag lists of any of the validated
     /// transactions.
     // TODO: shrink_to_fit from time to time?
-    tags: hashbrown::HashMap<Vec<u8>, TagInfo>,
+    tags: hashbrown::HashMap<Vec<u8>, TagInfo, crate::util::SipHasherBuild>,
 
     /// Height of the latest best block, as known from the pool.
     best_block_height: u64,
@@ -185,7 +188,10 @@ impl<TTx> Pool<TTx> {
             by_height: BTreeSet::new(),
             includable: BTreeSet::new(),
             by_validation_expiration: BTreeSet::new(),
-            tags: hashbrown::HashMap::with_capacity_and_hasher(8, Default::default()),
+            tags: hashbrown::HashMap::with_capacity_and_hasher(
+                8,
+                crate::util::SipHasherBuild::new(config.randomness_seed),
+            ),
             best_block_height: config.finalized_block_height,
         }
     }
