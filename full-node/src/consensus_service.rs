@@ -1608,8 +1608,8 @@ impl SyncBackground {
                     .jaeger_service
                     .block_header_verify_span(&hash_to_verify);
 
-                match verify.perform(unix_time, NonFinalizedBlock::NotVerified) {
-                    all::HeaderVerifyOutcome::Success { sync: sync_out, .. } => {
+                match verify.perform(unix_time) {
+                    all::HeaderVerifyOutcome::Success { success, .. } => {
                         self.log_callback.log(
                             LogLevel::Debug,
                             format!(
@@ -1618,7 +1618,7 @@ impl SyncBackground {
                                 height_to_verify
                             ),
                         );
-                        self.sync = sync_out;
+                        self.sync = success.finish(NonFinalizedBlock::NotVerified);
                         (self, true)
                     }
                     all::HeaderVerifyOutcome::Error {

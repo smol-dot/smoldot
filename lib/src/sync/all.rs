@@ -2401,11 +2401,7 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
     }
 
     /// Perform the verification.
-    pub fn perform(
-        self,
-        now_from_unix_epoch: Duration,
-        user_data: TBl,
-    ) -> HeaderVerifyOutcome<TRq, TSrc, TBl> {
+    pub fn perform(self, now_from_unix_epoch: Duration) -> HeaderVerifyOutcome<TRq, TSrc, TBl> {
         match self.inner {
             HeaderVerifyInner::AllForks(verify) => {
                 let verified_block_height = verify.height();
@@ -2415,19 +2411,15 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                     all_forks::HeaderVerifyOutcome::Success {
                         is_new_best,
                         success,
-                    } => {
-                        let mut sync = success.finish();
-                        *sync.block_user_data_mut(verified_block_height, &verified_block_hash) =
-                            Some(user_data);
-
-                        HeaderVerifyOutcome::Success {
-                            is_new_best,
-                            sync: AllSync {
-                                inner: AllSyncInner::AllForks(sync),
-                                shared: self.shared,
-                            },
-                        }
-                    }
+                    } => HeaderVerifyOutcome::Success {
+                        is_new_best,
+                        success: HeaderVerifySuccess {
+                            inner: HeaderVerifySuccessInner::AllForks(success),
+                            shared: self.shared,
+                            verified_block_height,
+                            verified_block_hash,
+                        },
+                    },
                     all_forks::HeaderVerifyOutcome::Error { sync, error } => {
                         HeaderVerifyOutcome::Error {
                             sync: AllSync {
@@ -2445,7 +2437,6 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                                     HeaderVerifyError::ConsensusMismatch
                                 }
                             },
-                            user_data,
                         }
                     }
                 }
@@ -2460,8 +2451,7 @@ pub enum HeaderVerifyOutcome<TRq, TSrc, TBl> {
     Success {
         /// True if the newly-verified block is considered the new best block.
         is_new_best: bool,
-        /// State machine yielded back. Use to continue the processing.
-        sync: AllSync<TRq, TSrc, TBl>,
+        success: HeaderVerifySuccess<TRq, TSrc, TBl>,
     },
 
     /// Header verification failed.
@@ -2470,8 +2460,6 @@ pub enum HeaderVerifyOutcome<TRq, TSrc, TBl> {
         sync: AllSync<TRq, TSrc, TBl>,
         /// Error that happened.
         error: HeaderVerifyError,
-        /// User data that was passed to [`HeaderVerify::perform`] and is unused.
-        user_data: TBl,
     },
 }
 
@@ -2485,6 +2473,40 @@ pub enum HeaderVerifyError {
     /// The block verification has failed. The block is invalid and should be thrown away.
     #[display(fmt = "{_0}")]
     VerificationFailed(verify::header_only::Error),
+}
+
+pub struct HeaderVerifySuccess<TRq, TSrc, TBl> {
+    inner: HeaderVerifySuccessInner<TRq, TSrc, TBl>,
+    shared: Shared<TRq>,
+    verified_block_height: u64,
+    verified_block_hash: [u8; 32],
+}
+
+enum HeaderVerifySuccessInner<TRq, TSrc, TBl> {
+    AllForks(
+        all_forks::HeaderVerifySuccess<
+            Option<TBl>,
+            AllForksRequestExtra<TRq>,
+            AllForksSourceExtra<TSrc>,
+        >,
+    ),
+}
+
+impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
+    /// Finish inserting the block header.
+    pub fn finish(self, user_data: TBl) -> AllSync<TRq, TSrc, TBl> {
+        match self.inner {
+            HeaderVerifySuccessInner::AllForks(inner) => {
+                let mut sync = inner.finish();
+                *sync.block_user_data_mut(self.verified_block_height, &self.verified_block_hash) =
+                    Some(user_data);
+                AllSync {
+                    inner: AllSyncInner::AllForks(sync),
+                    shared: self.shared,
+                }
+            }
+        }
+    }
 }
 
 // TODO: should be used by the optimistic syncing as well
