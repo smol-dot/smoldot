@@ -1211,7 +1211,7 @@ impl SyncBackground {
                     .map(|e| e.as_ref().to_owned())
                     .collect::<Vec<_>>(); // TODO: copy :-/
 
-                let _jaeger_span = self.jaeger_service.block_body_verify_span(&hash_to_verify);
+                let _jaeger_span = self.jaeger_service.block_verify_span(&hash_to_verify);
 
                 let (is_new_best, header_verification_success) =
                     match verify.verify_header(unix_time) {
