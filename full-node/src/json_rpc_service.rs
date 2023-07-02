@@ -16,15 +16,20 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{LogCallback, LogLevel};
-use smol::{future, stream::StreamExt as _};
-use smoldot::json_rpc::{service, websocket_server};
+use futures_util::FutureExt;
+use smol::{
+    future,
+    net::{TcpListener, TcpStream},
+};
+use smoldot::json_rpc::service;
 use std::{
     future::Future,
-    io,
+    io, mem,
     net::SocketAddr,
     num::{NonZeroU32, NonZeroUsize},
     pin::Pin,
     sync::Arc,
+    time::Duration,
 };
 
 mod requests_handler;
@@ -64,27 +69,17 @@ impl Drop for JsonRpcService {
 impl JsonRpcService {
     /// Initializes a new [`JsonRpcService`].
     pub async fn new(config: Config) -> Result<Self, InitError> {
-        let server = {
-            let result = websocket_server::WsServer::new(websocket_server::Config {
-                bind_address: config.bind_address,
-                capacity: 1,
-                max_frame_size: 4096,
-                send_buffer_len: 16384,
-            })
-            .await;
-
-            match result {
-                Ok(server) => server,
-                Err(error) => {
-                    return Err(InitError::ListenError {
-                        bind_address: config.bind_address,
-                        error,
-                    })
-                }
+        let tcp_listener = match TcpListener::bind(&config.bind_address).await {
+            Ok(s) => s,
+            Err(error) => {
+                return Err(InitError::ListenError {
+                    bind_address: config.bind_address,
+                    error,
+                })
             }
         };
 
-        let listen_addr = match server.local_addr() {
+        let listen_addr = match tcp_listener.local_addr() {
             Ok(addr) => addr,
             Err(error) => {
                 return Err(InitError::ListenError {
@@ -105,16 +100,12 @@ impl JsonRpcService {
             });
         }
 
-        let (to_background, from_client_io_tasks) = async_channel::unbounded();
-
         let background = JsonRpcBackground {
-            server,
+            tcp_listener,
             on_service_dropped,
             tasks_executor: config.tasks_executor.clone(),
             log_callback: config.log_callback,
             to_requests_handlers,
-            from_client_io_tasks,
-            to_background,
         };
 
         (config.tasks_executor)(Box::pin(async move { background.run().await }));
@@ -146,8 +137,8 @@ pub enum InitError {
 }
 
 struct JsonRpcBackground {
-    /// State machine of the WebSocket server. Holds the TCP socket.
-    server: websocket_server::WsServer<JsonRpcClientConnection>,
+    /// TCP listener for new incoming connections.
+    tcp_listener: TcpListener,
 
     /// Event notified when the frontend is dropped.
     on_service_dropped: event_listener::EventListener,
@@ -160,99 +151,52 @@ struct JsonRpcBackground {
 
     /// Channel used to send requests to the tasks that process said requests.
     to_requests_handlers: async_channel::Sender<requests_handler::Message>,
-
-    /// Receives responses and notifications from the client I/O tasks.
-    from_client_io_tasks: async_channel::Receiver<(websocket_server::ConnectionId, String)>,
-
-    /// Sending side of [`JsonRpcBackground::from_client_io_tasks`].
-    to_background: async_channel::Sender<(websocket_server::ConnectionId, String)>,
-}
-
-struct JsonRpcClientConnection {
-    /// Sends requests.
-    to_client_io_task: async_channel::Sender<String>,
-
-    /// Address to the client as provided by the operating system.
-    address: SocketAddr,
 }
 
 impl JsonRpcBackground {
     async fn run(mut self) {
         loop {
-            let Some(event) = future::or(
-                async { Some(either::Left(self.from_client_io_tasks.next().await.unwrap())) },
-                future::or(
-                    async { (&mut self.on_service_dropped).await; None },
-                    async { Some(either::Right(self.server.next_event().await)) }
-                )
+            let Some(accept_result) = future::or(
+                async { (&mut self.on_service_dropped).await; None },
+                async { Some(self.tcp_listener.accept().await) }
             ).await
                 else { return };
 
-            match event {
-                either::Right(websocket_server::Event::ConnectionOpen { address, .. }) => {
+            match accept_result {
+                Ok((tcp_socket, address)) => {
+                    // New incoming TCP connection.
+                    // Spawn two tasks: one for the socket I/O, and one to process requests.
                     self.log_callback.log(
                         LogLevel::Debug,
-                        format!("incoming-connection; address={}", address),
+                        format!("json-rpc-incoming-connection; address={}", address),
                     );
                     let (client_main_task, io) = service::client_main_task(service::Config {
                         max_active_subscriptions: 128,
                         max_pending_requests: NonZeroU32::new(64).unwrap(),
                         serialized_requests_io_channel_size_hint: NonZeroUsize::new(8).unwrap(),
                     });
-                    let (to_client_io_task, from_background) = async_channel::bounded(4);
-                    let connection_id = self.server.accept(JsonRpcClientConnection {
-                        to_client_io_task,
-                        address,
-                    });
                     spawn_client_io_task(
                         &self.tasks_executor,
-                        from_background,
-                        self.to_background.clone(),
+                        self.log_callback.clone(),
+                        tcp_socket,
+                        address,
                         io,
-                        connection_id,
                     );
                     spawn_client_main_task(
-                        &&self.tasks_executor,
+                        &self.tasks_executor,
                         self.to_requests_handlers.clone(),
                         client_main_task,
                     );
                 }
-                either::Right(websocket_server::Event::ConnectionError {
-                    user_data: JsonRpcClientConnection { address, .. },
-                    ..
-                }) => {
+                Err(error) => {
+                    // Failing to accept an incoming TCP connection generally happens due to
+                    // the limit of file descriptors being reached.
+                    // Sleep a little bit and try again.
                     self.log_callback.log(
-                        LogLevel::Debug,
-                        format!("connection-closed; address={}", address),
+                        LogLevel::Warn,
+                        format!("json-rpc-tcp-listener-error; error={error}"),
                     );
-                }
-                either::Right(websocket_server::Event::TextFrame {
-                    message,
-                    user_data: json_rpc_connection,
-                    ..
-                }) => {
-                    self.log_callback.log(
-                        LogLevel::Debug,
-                        format!(
-                            "request; address={}; request={}",
-                            json_rpc_connection.address,
-                            crate::util::truncated_str(
-                                message.chars().filter(|c| !c.is_control()),
-                                128
-                            )
-                        ),
-                    );
-                    json_rpc_connection
-                        .to_client_io_task
-                        .send(message)
-                        .await
-                        .unwrap();
-                }
-
-                either::Left((connection_id, response)) => {
-                    // TODO: this is completely racy, as the `connection_id` can be obsolete
-                    // TODO: log the response
-                    self.server.queue_send(connection_id, response);
+                    smol::Timer::after(Duration::from_millis(50)).await;
                 }
             };
         }
@@ -261,48 +205,171 @@ impl JsonRpcBackground {
 
 fn spawn_client_io_task(
     tasks_executor: &Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>,
-    mut from_background: async_channel::Receiver<String>,
-    to_background: async_channel::Sender<(websocket_server::ConnectionId, String)>,
+    log_callback: Arc<dyn LogCallback + Send + Sync>,
+    tcp_socket: TcpStream,
+    socket_address: SocketAddr,
     io: service::SerializedRequestsIo,
-    connection_id: websocket_server::ConnectionId,
 ) {
     tasks_executor(Box::pin(async move {
-        loop {
-            match future::or(
-                async { either::Left(from_background.next().await) },
-                async { either::Right(io.wait_next_response().await) },
-            )
-            .await
-            {
-                either::Left(None) => return,
-                either::Left(Some(request)) => {
-                    match io.try_send_request(request) {
-                        Ok(()) => {}
-                        Err(service::TrySendRequestError {
-                            cause: service::TrySendRequestErrorCause::MalformedJson(_),
-                            ..
-                        }) => {}
-                        Err(service::TrySendRequestError {
-                            cause: service::TrySendRequestErrorCause::ClientMainTaskDestroyed,
-                            ..
-                        }) => {
-                            unreachable!()
+        // Perform the WebSocket handshake.
+        let (mut ws_sender, mut ws_receiver) = {
+            let mut ws_server = soketto::handshake::Server::new(tcp_socket);
+
+            // TODO: enabling the `deflate` extension leads to "flate stream corrupted" errors
+            //let deflate = soketto::extension::deflate::Deflate::new(soketto::Mode::Server);
+            //ws_server.add_extension(Box::new(deflate));
+
+            let key = match ws_server.receive_request().await {
+                Ok(req) => req.key(),
+                Err(error) => {
+                    log_callback.log(
+                        LogLevel::Debug,
+                        format!(
+                            "json-rpc-connection-error; address={socket_address}, error={error}"
+                        ),
+                    );
+                    return;
+                }
+            };
+
+            let accept = soketto::handshake::server::Response::Accept {
+                key,
+                protocol: None,
+            };
+
+            match ws_server.send_response(&accept).await {
+                Ok(()) => {}
+                Err(error) => {
+                    log_callback.log(
+                        LogLevel::Debug,
+                        format!(
+                            "json-rpc-connection-error; address={socket_address}, error={error}"
+                        ),
+                    );
+                    return;
+                }
+            }
+
+            ws_server.into_builder().finish()
+        };
+
+        // Create a future responsible for pulling responses and sending them back.
+        let sending_future = async {
+            let mut must_flush_asap = false;
+
+            loop {
+                // If `must_flush_asap`, we simply peek for the next response but without awaiting.
+                // If `!must_flush_asap`, we wait for as long as necessary.
+                let maybe_response = if must_flush_asap {
+                    io.wait_next_response().now_or_never()
+                } else {
+                    Some(io.wait_next_response().await)
+                };
+
+                match maybe_response {
+                    None => {
+                        if let Err(err) = ws_sender.flush().await {
+                            break Err(err.to_string());
                         }
-                        Err(service::TrySendRequestError {
-                            cause: service::TrySendRequestErrorCause::TooManyPendingRequests,
-                            ..
-                        }) => {
-                            // TODO: shouldn't use `try_send_request` but just a blocking `send_request`
-                            todo!()
+                        must_flush_asap = false;
+                    }
+                    Some(Ok(response)) => {
+                        log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "json-rpc-response; address={}; response={}",
+                                socket_address,
+                                crate::util::truncated_str(
+                                    response.chars().filter(|c| !c.is_control()),
+                                    128
+                                )
+                            ),
+                        );
+
+                        if let Err(err) = ws_sender.send_text_owned(response).await {
+                            break Err(err.to_string());
                         }
+                        must_flush_asap = true;
+                    }
+                    Some(Err(service::WaitNextResponseError::ClientMainTaskDestroyed)) => {
+                        // The client main task never closes by itself but only as a consequence
+                        // to the I/O task closing.
+                        unreachable!()
+                    }
+                };
+            }
+        };
+
+        // Create a future responsible for pulling messages from the socket and sending them to
+        // the main task.
+        let receiving_future = async {
+            let mut message = Vec::new();
+            loop {
+                message.clear();
+
+                match ws_receiver.receive_data(&mut message).await {
+                    Ok(soketto::Data::Binary(_)) => {
+                        break Err("Unexpected binary frame".to_string());
+                    }
+                    Ok(soketto::Data::Text(_)) => {} // Handled below.
+                    Err(soketto::connection::Error::Closed) => break Ok(()),
+                    Err(err) => {
+                        break Err(err.to_string());
                     }
                 }
-                either::Right(Ok(response)) => {
-                    let _ = to_background.send((connection_id, response)).await;
+
+                let request = match String::from_utf8(mem::take(&mut message)) {
+                    Ok(r) => r,
+                    Err(error) => {
+                        break Err(format!("Non-UTF8 text frame: {error}"));
+                    }
+                };
+
+                log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "json-rpc-request; address={}; request={}",
+                        socket_address,
+                        crate::util::truncated_str(
+                            request.chars().filter(|c| !c.is_control()),
+                            128
+                        )
+                    ),
+                );
+
+                match io.send_request(request).await {
+                    Ok(()) => {}
+                    Err(service::SendRequestError {
+                        cause: service::SendRequestErrorCause::ClientMainTaskDestroyed,
+                        ..
+                    }) => {
+                        // The client main task never closes by itself but only as a
+                        // consequence to the I/O task closing.
+                        unreachable!()
+                    }
+                    Err(service::SendRequestError {
+                        cause: service::SendRequestErrorCause::MalformedJson(error),
+                        ..
+                    }) => {
+                        break Err(format!("Malformed JSON-RPC request: {error}"));
+                    }
                 }
-                either::Right(Err(service::WaitNextResponseError::ClientMainTaskDestroyed)) => {
-                    unreachable!()
-                }
+            }
+        };
+
+        // Run these two futures until completion.
+        match future::or(sending_future, receiving_future).await {
+            Ok(()) => {
+                log_callback.log(
+                    LogLevel::Debug,
+                    format!("json-rpc-connection-closed; address={socket_address}"),
+                );
+            }
+            Err(error) => {
+                log_callback.log(
+                    LogLevel::Debug,
+                    format!("json-rpc-connection-error; address={socket_address}, error={error}"),
+                );
             }
         }
     }));
