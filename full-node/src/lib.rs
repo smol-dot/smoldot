@@ -135,7 +135,7 @@ pub struct Client {
 impl Client {
     /// Returns the address the JSON-RPC server is listening on.
     ///
-    /// Returns `None` if and only if [`Config::json_rpc_address`] was `None`.
+    /// Returns `None` if and only if [`Config::json_rpc`] was `None`.
     pub fn json_rpc_server_addr(&self) -> Option<SocketAddr> {
         self.json_rpc_service.as_ref().map(|j| j.listen_addr())
     }
