@@ -22,12 +22,11 @@
 
 use crate::{
     chain::{chain_information, fork_tree},
-    executor::host,
     header, verify,
 };
 
 use super::{
-    best_block, fmt, Arc, Block, BlockAccess, BlockConsensus, BlockFinality, Duration, Finality,
+    best_block, fmt, Arc, Block, BlockConsensus, BlockFinality, Duration, Finality,
     FinalizedConsensus, NonFinalizedTree, NonFinalizedTreeInner, Vec,
 };
 
@@ -55,7 +54,7 @@ impl<T> NonFinalizedTree<T> {
         now_from_unix_epoch: Duration,
     ) -> Result<HeaderVerifySuccess, HeaderVerifyError> {
         let self_inner = self.inner.take().unwrap();
-        match self_inner.verify(scale_encoded_header, now_from_unix_epoch, false) {
+        match self_inner.verify(scale_encoded_header, now_from_unix_epoch) {
             VerifyOut::HeaderErr(self_inner, err) => {
                 self.inner = Some(self_inner);
                 Err(err)
@@ -72,8 +71,6 @@ impl<T> NonFinalizedTree<T> {
                 self.inner = Some(self_inner);
                 Ok(HeaderVerifySuccess::Duplicate)
             }
-            // Can't happen when asked for non-full verification.
-            VerifyOut::Body(..) => unreachable!(),
         }
     }
 
@@ -132,37 +129,6 @@ impl<T> NonFinalizedTree<T> {
             inner.current_best = Some(new_node_index);
         }
     }
-
-    /// Verifies the given block.
-    ///
-    /// The verification is performed in the context of the chain. In particular, the
-    /// verification will fail if the parent block isn't already in the chain.
-    ///
-    /// This method takes ownership of both the block's information and the [`NonFinalizedTree`].
-    /// It turns an object that must be driver by the user, until either the verification is
-    /// finished or the process aborted, at which point the [`NonFinalizedTree`] can be retrieved
-    /// back. The state of the [`NonFinalizedTree`] isn't modified until [`BodyInsert::insert`] is
-    /// called after the end of the verification.
-    ///
-    /// Must be passed the current UNIX time in order to verify that the block doesn't pretend to
-    /// come from the future.
-    pub fn verify_body(
-        self,
-        scale_encoded_header: Vec<u8>,
-        now_from_unix_epoch: Duration,
-    ) -> BodyVerifyStep1<T> {
-        match self
-            .inner
-            .unwrap()
-            .verify(scale_encoded_header, now_from_unix_epoch, true)
-        {
-            VerifyOut::Body(step) => step,
-            VerifyOut::HeaderDuplicate(..) | VerifyOut::HeaderOk(..) | VerifyOut::HeaderErr(..) => {
-                // Can't happen when asked for full verification.
-                unreachable!()
-            }
-        }
-    }
 }
 
 /// Successfully-verified block header that can be inserted into the chain.
@@ -201,33 +167,17 @@ impl<T> NonFinalizedTreeInner<T> {
         self: Box<Self>,
         scale_encoded_header: Vec<u8>,
         now_from_unix_epoch: Duration,
-        full: bool,
     ) -> VerifyOut<T> {
         let decoded_header = match header::decode(&scale_encoded_header, self.block_number_bytes) {
             Ok(h) => h,
-            Err(err) => {
-                return if full {
-                    VerifyOut::Body(BodyVerifyStep1::InvalidHeader(
-                        NonFinalizedTree { inner: Some(self) },
-                        err,
-                    ))
-                } else {
-                    VerifyOut::HeaderErr(self, HeaderVerifyError::InvalidHeader(err))
-                }
-            }
+            Err(err) => return VerifyOut::HeaderErr(self, HeaderVerifyError::InvalidHeader(err)),
         };
 
         let hash = header::hash_from_scale_encoded_header(&scale_encoded_header);
 
         // Check for duplicates.
         if self.blocks_by_hash.contains_key(&hash) {
-            return if full {
-                VerifyOut::Body(BodyVerifyStep1::Duplicate(NonFinalizedTree {
-                    inner: Some(self),
-                }))
-            } else {
-                VerifyOut::HeaderDuplicate(self)
-            };
+            return VerifyOut::HeaderDuplicate(self);
         }
 
         // Try to find the parent block in the tree of known blocks.
@@ -241,14 +191,10 @@ impl<T> NonFinalizedTreeInner<T> {
                     Some(parent) => Some(*parent),
                     None => {
                         let parent_hash = *decoded_header.parent_hash;
-                        return if full {
-                            VerifyOut::Body(BodyVerifyStep1::BadParent {
-                                chain: NonFinalizedTree { inner: Some(self) },
-                                parent_hash,
-                            })
-                        } else {
-                            VerifyOut::HeaderErr(self, HeaderVerifyError::BadParent { parent_hash })
-                        };
+                        return VerifyOut::HeaderErr(
+                            self,
+                            HeaderVerifyError::BadParent { parent_hash },
+                        );
                     }
                 }
             }
@@ -309,91 +255,80 @@ impl<T> NonFinalizedTreeInner<T> {
             finality,
         });
 
-        if full {
-            VerifyOut::Body(BodyVerifyStep1::ParentRuntimeRequired(
-                BodyVerifyRuntimeRequired {
-                    context,
+        let parent_block_header = if let Some(parent_tree_index) = parent_tree_index {
+            &context.chain.blocks.get(parent_tree_index).unwrap().header
+        } else {
+            &context.chain.finalized_block_header
+        };
+
+        let result = verify::header_only::verify(verify::header_only::Config {
+            consensus: match (&context.chain.finalized_consensus, &context.consensus) {
+                (
+                    FinalizedConsensus::Aura { slot_duration, .. },
+                    Some(BlockConsensus::Aura { authorities_list }),
+                ) => verify::header_only::ConfigConsensus::Aura {
+                    current_authorities: header::AuraAuthoritiesIter::from_slice(authorities_list),
+                    now_from_unix_epoch,
+                    slot_duration: *slot_duration,
+                },
+                (
+                    FinalizedConsensus::Babe {
+                        slots_per_epoch, ..
+                    },
+                    Some(BlockConsensus::Babe {
+                        current_epoch,
+                        next_epoch,
+                    }),
+                ) => verify::header_only::ConfigConsensus::Babe {
+                    parent_block_epoch: current_epoch.as_ref().map(|v| (&**v).into()),
+                    parent_block_next_epoch: (&**next_epoch).into(),
+                    slots_per_epoch: *slots_per_epoch,
                     now_from_unix_epoch,
                 },
-            ))
-        } else {
-            let parent_block_header = if let Some(parent_tree_index) = parent_tree_index {
-                &context.chain.blocks.get(parent_tree_index).unwrap().header
-            } else {
-                &context.chain.finalized_block_header
-            };
-
-            let result = verify::header_only::verify(verify::header_only::Config {
-                consensus: match (&context.chain.finalized_consensus, &context.consensus) {
-                    (
-                        FinalizedConsensus::Aura { slot_duration, .. },
-                        Some(BlockConsensus::Aura { authorities_list }),
-                    ) => verify::header_only::ConfigConsensus::Aura {
-                        current_authorities: header::AuraAuthoritiesIter::from_slice(
-                            authorities_list,
-                        ),
-                        now_from_unix_epoch,
-                        slot_duration: *slot_duration,
-                    },
-                    (
-                        FinalizedConsensus::Babe {
-                            slots_per_epoch, ..
-                        },
-                        Some(BlockConsensus::Babe {
-                            current_epoch,
-                            next_epoch,
-                        }),
-                    ) => verify::header_only::ConfigConsensus::Babe {
-                        parent_block_epoch: current_epoch.as_ref().map(|v| (&**v).into()),
-                        parent_block_next_epoch: (&**next_epoch).into(),
-                        slots_per_epoch: *slots_per_epoch,
-                        now_from_unix_epoch,
-                    },
-                    (FinalizedConsensus::Unknown, None) => {
-                        return VerifyOut::HeaderErr(
-                            context.chain,
-                            HeaderVerifyError::UnknownConsensusEngine,
-                        )
-                    }
-                    _ => {
-                        return VerifyOut::HeaderErr(
-                            context.chain,
-                            HeaderVerifyError::ConsensusMismatch,
-                        )
-                    }
-                },
-                finality: match &context.finality {
-                    BlockFinality::Outsourced => verify::header_only::ConfigFinality::Outsourced,
-                    BlockFinality::Grandpa { .. } => verify::header_only::ConfigFinality::Grandpa,
-                },
-                allow_unknown_consensus_engines: context.chain.allow_unknown_consensus_engines,
-                block_header: header::decode(&context.header, context.chain.block_number_bytes)
-                    .unwrap(), // TODO: inefficiency ; in case of header only verify we do an extra allocation to build the context above
-                block_number_bytes: context.chain.block_number_bytes,
-                parent_block_header: header::decode(
-                    parent_block_header,
-                    context.chain.block_number_bytes,
-                )
-                .unwrap(),
-            })
-            .map_err(HeaderVerifyError::VerificationFailed);
-
-            match result {
-                Ok(success) => {
-                    let (is_new_best, consensus, finality) = context.apply_success_header(success);
-                    VerifyOut::HeaderOk(
+                (FinalizedConsensus::Unknown, None) => {
+                    return VerifyOut::HeaderErr(
                         context.chain,
-                        VerifiedHeader {
-                            scale_encoded_header: context.header,
-                            is_new_best,
-                            consensus,
-                            finality,
-                            hash,
-                        },
+                        HeaderVerifyError::UnknownConsensusEngine,
                     )
                 }
-                Err(err) => VerifyOut::HeaderErr(context.chain, err),
+                _ => {
+                    return VerifyOut::HeaderErr(
+                        context.chain,
+                        HeaderVerifyError::ConsensusMismatch,
+                    )
+                }
+            },
+            finality: match &context.finality {
+                BlockFinality::Outsourced => verify::header_only::ConfigFinality::Outsourced,
+                BlockFinality::Grandpa { .. } => verify::header_only::ConfigFinality::Grandpa,
+            },
+            allow_unknown_consensus_engines: context.chain.allow_unknown_consensus_engines,
+            block_header: header::decode(&context.header, context.chain.block_number_bytes)
+                .unwrap(), // TODO: inefficiency ; in case of header only verify we do an extra allocation to build the context above
+            block_number_bytes: context.chain.block_number_bytes,
+            parent_block_header: header::decode(
+                parent_block_header,
+                context.chain.block_number_bytes,
+            )
+            .unwrap(),
+        })
+        .map_err(HeaderVerifyError::VerificationFailed);
+
+        match result {
+            Ok(success) => {
+                let (is_new_best, consensus, finality) = context.apply_success_header(success);
+                VerifyOut::HeaderOk(
+                    context.chain,
+                    VerifiedHeader {
+                        scale_encoded_header: context.header,
+                        is_new_best,
+                        consensus,
+                        finality,
+                        hash,
+                    },
+                )
             }
+            Err(err) => VerifyOut::HeaderErr(context.chain, err),
         }
     }
 }
@@ -402,7 +337,6 @@ enum VerifyOut<T> {
     HeaderOk(Box<NonFinalizedTreeInner<T>>, VerifiedHeader),
     HeaderErr(Box<NonFinalizedTreeInner<T>>, HeaderVerifyError),
     HeaderDuplicate(Box<NonFinalizedTreeInner<T>>),
-    Body(BodyVerifyStep1<T>),
 }
 
 struct VerifyContext<T> {
@@ -678,516 +612,6 @@ impl<T> VerifyContext<T> {
 
         (is_new_best, consensus, finality)
     }
-
-    fn with_body_verify(
-        mut self: Box<Self>,
-        inner: verify::header_body::Verify,
-    ) -> BodyVerifyStep2<T> {
-        match inner {
-            verify::header_body::Verify::Finished(Ok(success)) => {
-                // TODO: lots of code in common with header verification
-
-                // Block verification is successful!
-                let (is_new_best, consensus, finality) = self.apply_success_body(success.consensus);
-                let hash = header::hash_from_scale_encoded_header(&self.header);
-
-                BodyVerifyStep2::Finished {
-                    parent_runtime: success.parent_runtime,
-                    new_runtime: success.new_runtime,
-                    storage_changes: success.storage_changes,
-                    state_trie_version: success.state_trie_version,
-                    offchain_storage_changes: success.offchain_storage_changes,
-                    insert: BodyInsert(Box::new(BodyInsertInner {
-                        context: self,
-                        is_new_best,
-                        hash,
-                        consensus,
-                        finality,
-                    })),
-                }
-            }
-            verify::header_body::Verify::Finished(Err((error, parent_runtime))) => {
-                BodyVerifyStep2::Error {
-                    chain: NonFinalizedTree {
-                        inner: Some(self.chain),
-                    },
-                    error: BodyVerifyError::Consensus(error),
-                    parent_runtime,
-                }
-            }
-            verify::header_body::Verify::StorageGet(inner) => {
-                BodyVerifyStep2::StorageGet(StorageGet {
-                    context: self,
-                    inner,
-                })
-            }
-            verify::header_body::Verify::StorageClosestDescendantMerkleValue(inner) => {
-                BodyVerifyStep2::StorageClosestDescendantMerkleValue(
-                    StorageClosestDescendantMerkleValue {
-                        context: self,
-                        inner,
-                    },
-                )
-            }
-            verify::header_body::Verify::StorageNextKey(inner) => {
-                BodyVerifyStep2::StorageNextKey(StorageNextKey {
-                    context: self,
-                    inner,
-                })
-            }
-            verify::header_body::Verify::RuntimeCompilation(inner) => {
-                BodyVerifyStep2::RuntimeCompilation(RuntimeCompilation {
-                    context: self,
-                    inner,
-                })
-            }
-        }
-    }
-}
-
-/// Block verification, either just finished or still in progress.
-///
-/// Holds ownership of both the block to verify and the [`NonFinalizedTree`].
-#[must_use]
-#[derive(Debug)]
-pub enum BodyVerifyStep1<T> {
-    /// Block is already known.
-    Duplicate(NonFinalizedTree<T>),
-
-    /// Error while decoding the header.
-    InvalidHeader(NonFinalizedTree<T>, header::Error),
-
-    /// The parent of the block isn't known.
-    BadParent {
-        chain: NonFinalizedTree<T>,
-        /// Hash of the parent block in question.
-        parent_hash: [u8; 32],
-    },
-
-    /// Verification is pending. In order to continue, a [`host::HostVmPrototype`] of the
-    /// runtime of the parent block must be provided.
-    ParentRuntimeRequired(BodyVerifyRuntimeRequired<T>),
-}
-
-/// Verification is pending. In order to continue, a [`host::HostVmPrototype`] of the runtime
-/// of the parent block must be provided.
-#[must_use]
-pub struct BodyVerifyRuntimeRequired<T> {
-    context: Box<VerifyContext<T>>,
-    now_from_unix_epoch: Duration,
-}
-
-impl<T> BodyVerifyRuntimeRequired<T> {
-    /// Access to the parent block's information and hierarchy. Returns `None` if the parent is
-    /// the finalized block.
-    pub fn parent_block(&mut self) -> Option<BlockAccess<T>> {
-        Some(BlockAccess {
-            tree: &mut self.context.chain,
-            node_index: self.context.parent_tree_index?,
-        })
-    }
-
-    /// Access to the Nth ancestor's information and hierarchy. Returns `None` if `n` is too
-    /// large. A value of `0` for `n` corresponds to the parent block. A value of `1` corresponds
-    /// to the parent's parent. And so on.
-    pub fn nth_ancestor(&mut self, n: u64) -> Option<BlockAccess<T>> {
-        let parent_index = self.context.parent_tree_index?;
-        let n = usize::try_from(n).ok()?;
-        let ret = self
-            .context
-            .chain
-            .blocks
-            .node_to_root_path(parent_index)
-            .nth(n)?;
-        Some(BlockAccess {
-            tree: &mut self.context.chain,
-            node_index: ret,
-        })
-    }
-
-    /// Returns the number of non-finalized blocks in the tree that are ancestors to the block
-    /// being verified.
-    pub fn num_non_finalized_ancestors(&self) -> u64 {
-        let parent_index = match self.context.parent_tree_index {
-            Some(p) => p,
-            None => return 0,
-        };
-
-        u64::try_from(
-            self.context
-                .chain
-                .blocks
-                .node_to_root_path(parent_index)
-                .count(),
-        )
-        .unwrap()
-    }
-
-    /// Resume the verification process by passing the requested information.
-    ///
-    /// `parent_runtime` must be a Wasm virtual machine containing the runtime code of the parent
-    /// block.
-    pub fn resume(
-        self,
-        parent_runtime: host::HostVmPrototype,
-        block_body: impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone,
-    ) -> BodyVerifyStep2<T> {
-        let parent_block_header = if let Some(parent_tree_index) = self.context.parent_tree_index {
-            &self
-                .context
-                .chain
-                .blocks
-                .get(parent_tree_index)
-                .unwrap()
-                .header
-        } else {
-            &self.context.chain.finalized_block_header
-        };
-
-        let config_consensus = match (
-            &self.context.chain.finalized_consensus,
-            &self.context.consensus,
-        ) {
-            (FinalizedConsensus::Unknown, None) => {
-                return BodyVerifyStep2::Error {
-                    chain: NonFinalizedTree {
-                        inner: Some(self.context.chain),
-                    },
-                    error: BodyVerifyError::UnknownConsensusEngine,
-                    parent_runtime,
-                }
-            }
-            (
-                FinalizedConsensus::Aura { slot_duration, .. },
-                Some(BlockConsensus::Aura { authorities_list }),
-            ) => verify::header_body::ConfigConsensus::Aura {
-                current_authorities: header::AuraAuthoritiesIter::from_slice(authorities_list),
-                slot_duration: *slot_duration,
-            },
-            (
-                FinalizedConsensus::Babe {
-                    slots_per_epoch, ..
-                },
-                Some(BlockConsensus::Babe {
-                    current_epoch,
-                    next_epoch,
-                }),
-            ) => verify::header_body::ConfigConsensus::Babe {
-                parent_block_epoch: current_epoch.as_ref().map(|v| (&**v).into()),
-                parent_block_next_epoch: (&**next_epoch).into(),
-                slots_per_epoch: *slots_per_epoch,
-            },
-            _ => {
-                return BodyVerifyStep2::Error {
-                    chain: NonFinalizedTree {
-                        inner: Some(self.context.chain),
-                    },
-                    error: BodyVerifyError::ConsensusMismatch,
-                    parent_runtime,
-                }
-            }
-        };
-
-        let process = verify::header_body::verify(verify::header_body::Config {
-            parent_runtime,
-            consensus: config_consensus,
-            allow_unknown_consensus_engines: self.context.chain.allow_unknown_consensus_engines,
-            now_from_unix_epoch: self.now_from_unix_epoch,
-            block_header: header::decode(
-                &self.context.header,
-                self.context.chain.block_number_bytes,
-            )
-            .unwrap(),
-            block_number_bytes: self.context.chain.block_number_bytes,
-            parent_block_header: header::decode(
-                parent_block_header,
-                self.context.chain.block_number_bytes,
-            )
-            .unwrap(),
-            block_body,
-            max_log_level: 0,
-        });
-
-        self.context.with_body_verify(process)
-    }
-
-    /// Abort the verification and return the unmodified tree.
-    pub fn abort(self) -> NonFinalizedTree<T> {
-        NonFinalizedTree {
-            inner: Some(self.context.chain),
-        }
-    }
-}
-
-impl<T> fmt::Debug for BodyVerifyRuntimeRequired<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("BodyVerifyRuntimeRequired").finish()
-    }
-}
-
-/// Block verification, either just finished or still in progress.
-///
-/// Holds ownership of both the block to verify and the [`NonFinalizedTree`].
-#[must_use]
-pub enum BodyVerifyStep2<T> {
-    /// Verification is over.
-    ///
-    /// Use the provided [`BodyInsert`] to insert the block in the chain if desired.
-    Finished {
-        /// Value that was passed to [`BodyVerifyRuntimeRequired::resume`].
-        parent_runtime: host::HostVmPrototype,
-        /// Contains `Some` if and only if [`BodyVerifyStep2::Finished::storage_changes`]
-        /// contains a change in the `:code` or `:heappages` keys, indicating that the runtime has
-        /// been modified. Contains the new runtime.
-        new_runtime: Option<host::HostVmPrototype>,
-        /// List of changes to the storage main trie that the block performs.
-        storage_changes: StorageChanges,
-        /// State trie version indicated by the runtime. All the storage changes indicated by
-        /// [`BodyVerifyStep2::Finished::storage_changes`] should store this version
-        /// alongside with them.
-        state_trie_version: TrieEntryVersion,
-        /// List of changes to the off-chain storage that this block performs.
-        offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
-        /// Use to insert the block in the chain.
-        insert: BodyInsert<T>,
-    },
-    /// Verification has failed. The block is invalid.
-    Error {
-        /// Chain yielded back.
-        chain: NonFinalizedTree<T>,
-        /// Error that happened during the verification.
-        error: BodyVerifyError,
-        /// Value that was passed to [`BodyVerifyRuntimeRequired::resume`].
-        parent_runtime: host::HostVmPrototype,
-    },
-    /// Loading a storage value is required in order to continue.
-    StorageGet(StorageGet<T>),
-    /// Obtaining the Merkle value of the closest descendant of a trie node is required in order
-    /// to continue.
-    StorageClosestDescendantMerkleValue(StorageClosestDescendantMerkleValue<T>),
-    /// Fetching the key that follows a given one is required in order to continue.
-    StorageNextKey(StorageNextKey<T>),
-    /// A new runtime must be compiled.
-    ///
-    /// This variant doesn't require any specific input from the user, but is provided in order to
-    /// make it possible to benchmark the time it takes to compile runtimes.
-    RuntimeCompilation(RuntimeCompilation<T>),
-}
-
-/// Error while verifying a block body.
-#[derive(Debug, derive_more::Display)]
-pub enum BodyVerifyError {
-    /// Error during the consensus-related check.
-    #[display(fmt = "{_0}")]
-    Consensus(verify::header_body::Error),
-    /// Block can't be verified as it uses an unknown consensus engine.
-    UnknownConsensusEngine,
-    /// Block uses a different consensus than the rest of the chain.
-    ConsensusMismatch,
-}
-
-/// Loading a storage value is required in order to continue.
-#[must_use]
-pub struct StorageGet<T> {
-    inner: verify::header_body::StorageGet,
-    context: Box<VerifyContext<T>>,
-}
-
-impl<T> StorageGet<T> {
-    /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.inner.key()
-    }
-
-    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
-        self.inner.child_trie()
-    }
-
-    /// Access to the Nth ancestor's information and hierarchy. Returns `None` if `n` is too
-    /// large. A value of `0` for `n` corresponds to the parent block. A value of `1` corresponds
-    /// to the parent's parent. And so on.
-    pub fn nth_ancestor(&mut self, n: u64) -> Option<BlockAccess<T>> {
-        let parent_index = self.context.parent_tree_index?;
-        let n = usize::try_from(n).ok()?;
-        let ret = self
-            .context
-            .chain
-            .blocks
-            .node_to_root_path(parent_index)
-            .nth(n)?;
-        Some(BlockAccess {
-            tree: &mut self.context.chain,
-            node_index: ret,
-        })
-    }
-
-    /// Returns the number of non-finalized blocks in the tree that are ancestors to the block
-    /// being verified.
-    pub fn num_non_finalized_ancestors(&self) -> u64 {
-        let parent_index = match self.context.parent_tree_index {
-            Some(p) => p,
-            None => return 0,
-        };
-
-        u64::try_from(
-            self.context
-                .chain
-                .blocks
-                .node_to_root_path(parent_index)
-                .count(),
-        )
-        .unwrap()
-    }
-
-    /// Injects the corresponding storage value.
-    pub fn inject_value(
-        self,
-        value: Option<(impl Iterator<Item = impl AsRef<[u8]>>, TrieEntryVersion)>,
-    ) -> BodyVerifyStep2<T> {
-        let inner = self.inner.inject_value(value);
-        self.context.with_body_verify(inner)
-    }
-}
-
-/// Obtaining the Merkle value of the closest descendant of a trie node is required in order
-/// to continue.
-#[must_use]
-pub struct StorageClosestDescendantMerkleValue<T> {
-    inner: verify::header_body::StorageClosestDescendantMerkleValue,
-    context: Box<VerifyContext<T>>,
-}
-
-impl<T> StorageClosestDescendantMerkleValue<T> {
-    /// Returns the key whose closest descendant Merkle value must be passed back.
-    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
-        self.inner.key()
-    }
-
-    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
-        self.inner.child_trie()
-    }
-
-    /// Indicate that the value is unknown and resume the calculation.
-    ///
-    /// This function be used if you are unaware of the Merkle value. The algorithm will perform
-    /// the calculation of this Merkle value manually, which takes more time.
-    pub fn resume_unknown(self) -> BodyVerifyStep2<T> {
-        let inner = self.inner.resume_unknown();
-        self.context.with_body_verify(inner)
-    }
-
-    /// Injects the corresponding Merkle value.
-    ///
-    /// `None` can be passed if there is no descendant or, in the case of a child trie read, in
-    /// order to indicate that the child trie does not exist.
-    pub fn inject_merkle_value(self, merkle_value: Option<&[u8]>) -> BodyVerifyStep2<T> {
-        let inner = self.inner.inject_merkle_value(merkle_value);
-        self.context.with_body_verify(inner)
-    }
-}
-
-/// Fetching the key that follows a given one is required in order to continue.
-#[must_use]
-pub struct StorageNextKey<T> {
-    inner: verify::header_body::StorageNextKey,
-    context: Box<VerifyContext<T>>,
-}
-
-impl<T> StorageNextKey<T> {
-    /// Returns the key whose next key must be passed back.
-    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
-        self.inner.key()
-    }
-
-    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
-        self.inner.child_trie()
-    }
-
-    /// If `true`, then the provided value must the one superior or equal to the requested key.
-    /// If `false`, then the provided value must be strictly superior to the requested key.
-    pub fn or_equal(&self) -> bool {
-        self.inner.or_equal()
-    }
-
-    /// If `true`, then the search must include both branch nodes and storage nodes. If `false`,
-    /// the search only covers storage nodes.
-    pub fn branch_nodes(&self) -> bool {
-        self.inner.branch_nodes()
-    }
-
-    /// Returns the prefix the next key must start with. If the next key doesn't start with the
-    /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
-        self.inner.prefix()
-    }
-
-    /// Access to the Nth ancestor's information and hierarchy. Returns `None` if `n` is too
-    /// large. A value of `0` for `n` corresponds to the parent block. A value of `1` corresponds
-    /// to the parent's parent. And so on.
-    pub fn nth_ancestor(&mut self, n: u64) -> Option<BlockAccess<T>> {
-        let parent_index = self.context.parent_tree_index?;
-        let n = usize::try_from(n).ok()?;
-        let ret = self
-            .context
-            .chain
-            .blocks
-            .node_to_root_path(parent_index)
-            .nth(n)?;
-        Some(BlockAccess {
-            tree: &mut self.context.chain,
-            node_index: ret,
-        })
-    }
-
-    /// Returns the number of non-finalized blocks in the tree that are ancestors to the block
-    /// being verified.
-    pub fn num_non_finalized_ancestors(&self) -> u64 {
-        let parent_index = match self.context.parent_tree_index {
-            Some(p) => p,
-            None => return 0,
-        };
-
-        u64::try_from(
-            self.context
-                .chain
-                .blocks
-                .node_to_root_path(parent_index)
-                .count(),
-        )
-        .unwrap()
-    }
-
-    /// Injects the key.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the key passed as parameter isn't strictly superior to the requested key.
-    ///
-    pub fn inject_key(self, key: Option<impl Iterator<Item = Nibble>>) -> BodyVerifyStep2<T> {
-        let inner = self.inner.inject_key(key);
-        self.context.with_body_verify(inner)
-    }
-}
-
-/// A new runtime must be compiled.
-///
-/// This variant doesn't require any specific input from the user, but is provided in order to
-/// make it possible to benchmark the time it takes to compile runtimes.
-#[must_use]
-pub struct RuntimeCompilation<T> {
-    inner: verify::header_body::RuntimeCompilation,
-    context: Box<VerifyContext<T>>,
-}
-
-impl<T> RuntimeCompilation<T> {
-    /// Performs the runtime compilation.
-    pub fn build(self) -> BodyVerifyStep2<T> {
-        let inner = self.inner.build();
-        self.context.with_body_verify(inner)
-    }
 }
 
 ///
@@ -1224,78 +648,4 @@ pub enum HeaderVerifyError {
     /// The block verification has failed. The block is invalid and should be thrown away.
     #[display(fmt = "{_0}")]
     VerificationFailed(verify::header_only::Error),
-}
-
-/// Holds the [`NonFinalizedTree`] and allows insert a successfully-verified block into it.
-#[must_use]
-pub struct BodyInsert<T>(Box<BodyInsertInner<T>>);
-
-struct BodyInsertInner<T> {
-    context: Box<VerifyContext<T>>,
-    hash: [u8; 32],
-    is_new_best: bool,
-    consensus: BlockConsensus,
-    finality: BlockFinality,
-}
-
-impl<T> BodyInsert<T> {
-    /// Returns the header of the block about to be inserted.
-    pub fn header(&self) -> header::HeaderRef {
-        header::decode(
-            &self.0.context.header,
-            self.0.context.chain.block_number_bytes,
-        )
-        .unwrap()
-    }
-
-    /// Inserts the block with the given user data.
-    pub fn insert(mut self, user_data: T) -> NonFinalizedTree<T> {
-        debug_assert_eq!(
-            self.0.context.chain.blocks.len(),
-            self.0.context.chain.blocks_by_hash.len()
-        );
-
-        let new_node_index = self.0.context.chain.blocks.insert(
-            self.0.context.parent_tree_index,
-            Block {
-                header: self.0.context.header,
-                hash: self.0.hash,
-                consensus: self.0.consensus,
-                finality: self.0.finality,
-                user_data,
-            },
-        );
-
-        let _prev_value = self
-            .0
-            .context
-            .chain
-            .blocks_by_hash
-            .insert(self.0.hash, new_node_index);
-        // A bug here would be serious enough that it is worth being an `assert!`
-        assert!(_prev_value.is_none());
-
-        if self.0.is_new_best {
-            self.0.context.chain.current_best = Some(new_node_index);
-        }
-
-        NonFinalizedTree {
-            inner: Some(self.0.context.chain),
-        }
-    }
-
-    /// Destroys the object without inserting the block in the chain.
-    pub fn abort(self) -> NonFinalizedTree<T> {
-        NonFinalizedTree {
-            inner: Some(self.0.context.chain),
-        }
-    }
-}
-
-impl<T> fmt::Debug for BodyInsert<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("BodyInsert")
-            .field(&self.0.context.header)
-            .finish()
-    }
 }
