@@ -95,9 +95,8 @@ pub struct Config {
     /// block requests.
     pub download_ahead_blocks: NonZeroU32,
 
-    /// If `true`, the block bodies and storage are also synchronized and the block bodies are
-    /// verified.
-    pub full_mode: bool,
+    /// If `true`, the downloaded block bodies are stored in the state machine.
+    pub download_bodies: bool,
 }
 
 /// Identifier for an ongoing request in the [`OptimisticSync`].
@@ -141,8 +140,8 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
     /// Used if the `chain` field needs to be recreated.
     finalized_chain_information: blocks_tree::Config,
 
-    /// See [`Config::full_mode`].
-    full_mode: bool,
+    /// See [`Config::download_bodies`].
+    download_bodies: bool,
 
     /// See [`Config::download_ahead_blocks`].
     download_ahead_blocks: NonZeroU32,
@@ -263,7 +262,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             chain,
             inner: Box::new(OptimisticSyncInner {
                 finalized_chain_information: blocks_tree_config,
-                full_mode: config.full_mode,
+                download_bodies: config.download_bodies,
                 sources: HashMap::with_capacity_and_hasher(
                     config.sources_capacity,
                     Default::default(),
@@ -568,12 +567,11 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     ///
     /// Returns the user data that was associated to that request.
     ///
-    /// If the state machine only handles light clients, that is if [`Config::full_mode`] was
-    /// `false`, then the values of [`RequestSuccessBlock::scale_encoded_extrinsics`] are
-    /// silently ignored.
+    /// If [`Config::download_bodies`] was `false`, then the values of
+    /// [`RequestSuccessBlock::scale_encoded_extrinsics`] are silently ignored.
     ///
-    /// > **Note**: If [`Config::full_mode`] is `false`, you are encouraged to not request the
-    /// >           block's body from the source altogether, and to fill the
+    /// > **Note**: If [`Config::download_bodies`] is `false`, you are encouraged to not request
+    /// >           the block's body from the source altogether, and to fill the
     /// >           [`RequestSuccessBlock::scale_encoded_extrinsics`] fields with `Vec::new()`.
     ///
     /// # Panic
@@ -796,11 +794,6 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
         }
     }
 
-    /// Returns true if [`Config::full_mode`] was `true` at initialization.
-    pub fn is_full_verification(&self) -> bool {
-        self.inner.full_mode
-    }
-
     /// Returns the SCALE-encoded header of the block about to be verified.
     pub fn scale_encoded_header(&self) -> &[u8] {
         &self
@@ -813,11 +806,11 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
 
     /// Returns the list of SCALE-encoded extrinsics of the block to verify.
     ///
-    /// This is `Some` if and only if [`Config::full`] is `true`
+    /// This is `Some` if and only if [`Config::download_bodies`] is `true`
     pub fn scale_encoded_extrinsics(
         &'_ self,
     ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + '_> + '_> {
-        if self.inner.full_mode {
+        if self.inner.download_bodies {
             let block = self.inner.verification_queue.first_block().unwrap();
             Some(block.scale_encoded_extrinsics.iter())
         } else {
@@ -829,14 +822,6 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
     ///
     /// Must be passed the current UNIX time in order to verify that the block doesn't pretend to
     /// come from the future.
-    ///
-    /// If the syncing is in "full mode", then the rnutime of the parent must also be passed.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `parent_runtime` is `None` while [`Config::full_mode`] was `true`, or
-    /// vice-versa.
-    ///
     pub fn start(mut self, now_from_unix_epoch: Duration) -> BlockVerification<TRq, TSrc, TBl> {
         // Extract the block to process. We are guaranteed that a block is available because a
         // `Verify` is built only when that is the case.

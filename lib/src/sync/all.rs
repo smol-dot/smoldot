@@ -107,6 +107,7 @@ pub struct Config {
 
     /// If `true`, the block bodies and storage are also synchronized and the block bodies are
     /// verified.
+    // TODO: change this now that we don't verify block bodies here
     pub full_mode: bool,
 }
 
@@ -175,7 +176,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         sources_capacity: config.sources_capacity,
                         blocks_capacity: config.blocks_capacity,
                         download_ahead_blocks: config.download_ahead_blocks,
-                        full_mode: config.full_mode,
+                        download_bodies: config.full_mode,
                     }),
                 }
             } else {
@@ -202,7 +203,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                                 sources_capacity: config.sources_capacity,
                                 blocks_capacity: config.blocks_capacity,
                                 download_ahead_blocks: config.download_ahead_blocks,
-                                full_mode: false,
+                                download_bodies: false,
                             }),
                         }
                     }
