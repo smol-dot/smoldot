@@ -163,6 +163,23 @@ pub struct Pool<TTx> {
     best_block_height: u64,
 }
 
+/// Entry in [`Pool::transactions`].
+struct Transaction<TTx> {
+    /// Bytes corresponding to the SCALE-encoded transaction.
+    scale_encoded: Vec<u8>,
+
+    /// If `Some`, contains the outcome of the validation of this transaction and the block height
+    /// it was validated against.
+    validation: Option<(u64, ValidTransaction)>,
+
+    /// If `Some`, the height of the block at which the transaction has been included.
+    included_block_height: Option<u64>,
+
+    /// User data chosen by the user.
+    user_data: TTx,
+}
+
+/// Entry in [`Pool::tags`].
 struct TagInfo {
     /// List of validated transactions that have the tag in their `provides` tags list.
     // TODO: shrink_to_fit from time to time?
@@ -885,22 +902,6 @@ impl<'a, 'b, TTx: fmt::Debug> fmt::Debug for Vacant<'a, 'b, TTx> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.inner, f)
     }
-}
-
-/// Entry in [`Pool::transactions`].
-struct Transaction<TTx> {
-    /// Bytes corresponding to the SCALE-encoded transaction.
-    scale_encoded: Vec<u8>,
-
-    /// If `Some`, contains the outcome of the validation of this transaction and the block height
-    /// it was validated against.
-    validation: Option<(u64, ValidTransaction)>,
-
-    /// If `Some`, the height of the block at which the transaction has been included.
-    included_block_height: Option<u64>,
-
-    /// User data chosen by the user.
-    user_data: TTx,
 }
 
 /// Utility. Calculates the BLAKE2 hash of the given bytes.
