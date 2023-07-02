@@ -2060,6 +2060,17 @@ pub struct HeaderVerifySuccess<TBl, TRq, TSrc> {
 }
 
 impl<TBl, TRq, TSrc> HeaderVerifySuccess<TBl, TRq, TSrc> {
+    /// Reject the block and mark it as bad.
+    pub fn reject_bad_block(mut self) -> AllForksSync<TBl, TRq, TSrc> {
+        // Remove the block from `pending_blocks`.
+        self.parent.inner.blocks.mark_unverified_block_as_bad(
+            self.block_to_verify.block_number,
+            &self.block_to_verify.block_hash,
+        );
+
+        self.parent
+    }
+
     /// Finish inserting the block header.
     pub fn finish(mut self) -> AllForksSync<TBl, TRq, TSrc> {
         // Remove the block from `pending_blocks`.

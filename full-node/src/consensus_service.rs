@@ -1213,29 +1213,30 @@ impl SyncBackground {
 
                 let _jaeger_span = self.jaeger_service.block_body_verify_span(&hash_to_verify);
 
-                let (is_new_best, header_verification_success) = match verify.verify_header(unix_time) {
-                    all::HeaderVerifyOutcome::Success {
-                        is_new_best,
-                        success,
-                    } => (is_new_best, success),
-                    all::HeaderVerifyOutcome::Error { sync, error } => {
-                        // Print a separate warning because it is important for the user
-                        // to be aware of the verification failure.
-                        // `error` is last because it's quite big.
-                        self.log_callback.log(
-                            LogLevel::Warn,
-                            format!(
-                                "failed-block-verification; hash={}; height={};  error={}",
-                                HashDisplay(&hash_to_verify),
-                                height_to_verify,
-                                error
-                            ),
-                        );
-                        *parent_runtime_arc.try_lock().unwrap() = Some(parent_runtime);
-                        self.sync = sync;
-                        return (self, true);
-                    }
-                };
+                let (is_new_best, header_verification_success) =
+                    match verify.verify_header(unix_time) {
+                        all::HeaderVerifyOutcome::Success {
+                            is_new_best,
+                            success,
+                        } => (is_new_best, success),
+                        all::HeaderVerifyOutcome::Error { sync, error } => {
+                            // Print a separate warning because it is important for the user
+                            // to be aware of the verification failure.
+                            // `error` is last because it's quite big.
+                            self.log_callback.log(
+                                LogLevel::Warn,
+                                format!(
+                                    "failed-block-verification; hash={}; height={};  error={}",
+                                    HashDisplay(&hash_to_verify),
+                                    height_to_verify,
+                                    error
+                                ),
+                            );
+                            *parent_runtime_arc.try_lock().unwrap() = Some(parent_runtime);
+                            self.sync = sync;
+                            return (self, true);
+                        }
+                    };
 
                 let parent_scale_encoded_header =
                     header_verification_success.parent_scale_encoded_header();
@@ -1276,9 +1277,7 @@ impl SyncBackground {
                                 ),
                             );
                             *parent_runtime_arc.try_lock().unwrap() = Some(parent_runtime);
-                            // TODO: self.sync = sync_out;
-                            // TODO: reject the header verification
-                            todo!();
+                            self.sync = header_verification_success.reject_bad_block();
                             return (self, true);
                         }
                         body_only::Verify::Finished(Ok(body_only::Success {

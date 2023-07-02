@@ -2575,6 +2575,26 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
         }
     }
 
+    /// Reject the block and mark it as bad.
+    pub fn reject_bad_block(self) -> AllSync<TRq, TSrc, TBl> {
+        match self.inner {
+            HeaderVerifySuccessInner::AllForks(inner) => {
+                let sync = inner.reject_bad_block();
+                AllSync {
+                    inner: AllSyncInner::AllForks(sync),
+                    shared: self.shared,
+                }
+            }
+            HeaderVerifySuccessInner::Optimistic(inner) => {
+                let sync = inner.reject_bad_block();
+                AllSync {
+                    inner: AllSyncInner::Optimistic { inner: sync },
+                    shared: self.shared,
+                }
+            }
+        }
+    }
+
     /// Finish inserting the block header.
     pub fn finish(self, user_data: TBl) -> AllSync<TRq, TSrc, TBl> {
         match self.inner {

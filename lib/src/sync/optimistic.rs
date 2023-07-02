@@ -875,6 +875,7 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                         },
                         verified_header,
                         scale_encoded_justifications: block.scale_encoded_justifications.clone(),
+                        source_id,
                     },
                     new_best_hash,
                     new_best_number,
@@ -947,6 +948,7 @@ pub struct BlockVerifySuccess<TRq, TSrc, TBl> {
     parent: OptimisticSync<TRq, TSrc, TBl>,
     verified_header: blocks_tree::VerifiedHeader,
     scale_encoded_justifications: Vec<([u8; 4], Vec<u8>)>,
+    source_id: SourceId,
 }
 
 impl<TRq, TSrc, TBl> BlockVerifySuccess<TRq, TSrc, TBl> {
@@ -957,6 +959,24 @@ impl<TRq, TSrc, TBl> BlockVerifySuccess<TRq, TSrc, TBl> {
             .chain
             .best_block_header()
             .scale_encoding_vec(self.parent.chain.block_number_bytes())
+    }
+
+    /// Reject the block and mark it as bad.
+    pub fn reject_bad_block(mut self) -> OptimisticSync<TRq, TSrc, TBl> {
+        if let Some(src) = self.parent.inner.sources.get_mut(&self.source_id) {
+            src.banned = true;
+        }
+
+        // If all sources are banned, unban them.
+        if self.parent.inner.sources.iter().all(|(_, s)| s.banned) {
+            for src in self.parent.inner.sources.values_mut() {
+                src.banned = false;
+            }
+        }
+
+        self.parent.inner.make_requests_obsolete(&self.parent.chain);
+
+        self.parent
     }
 
     /// Finish inserting the block header.
