@@ -69,6 +69,10 @@
 //! Use [`Pool::remove_included`] when a block has been finalized to remove from the pool the
 //! transactions that are present in the finalized block and below.
 //!
+//! When authoring a block, use [`Pool::append_block`] and [`AppendBlock::includable_transactions`]
+//! to determine which transaction to include next. Use [`AppendBlock::add_transaction_by_id`] when
+//! the transaction has been included.
+//!
 //! # Out of scope
 //!
 //! The following are examples of things that are related transactions pool to but out of scope of
@@ -773,7 +777,7 @@ impl<TTx> AppendBlock<TTx> {
     ///
     /// The transaction is compared against the list of non-included transactions that are already
     /// in the pool. If a non-included transaction with the same bytes is found, it is switched to
-    /// the "included" state and  [`AppendBlockTransaction::NonIncludedUpdated`] is returned.
+    /// the "included" state and [`AppendBlockTransaction::NonIncludedUpdated`] is returned.
     /// Otherwise, [`AppendBlockTransaction::Unknown`] is returned and the transaction can be
     /// inserted in the pool.
     ///
