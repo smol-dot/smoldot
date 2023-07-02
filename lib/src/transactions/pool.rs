@@ -451,7 +451,7 @@ impl<TTx> Pool<TTx> {
     }
 
     /// Adds a block to the chain tracked by the transactions pool.
-    pub fn append_empty_block(mut self) {
+    pub fn append_empty_block(&mut self) {
         self.best_block_height = self.best_block_height.checked_add(1).unwrap();
 
         // Un-validate the transactions whose validation longevity has expired.
