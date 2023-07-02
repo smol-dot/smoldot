@@ -2568,6 +2568,14 @@ enum HeaderVerifySuccessInner<TRq, TSrc, TBl> {
 }
 
 impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
+    /// Returns the SCALE-encoded header of the parent of the block.
+    pub fn parent_scale_encoded_header(&self) -> Vec<u8> {
+        match &self.inner {
+            HeaderVerifySuccessInner::AllForks(inner) => todo!(), // TODO: /!\
+            HeaderVerifySuccessInner::Optimistic(inner) => inner.parent_scale_encoded_header(),
+        }
+    }
+
     /// Finish inserting the block header.
     pub fn finish(self, user_data: TBl) -> AllSync<TRq, TSrc, TBl> {
         match self.inner {
@@ -2859,6 +2867,7 @@ impl<TRq, TSrc, TBl> HeaderBodyVerify<TRq, TSrc, TBl> {
     }
 
     /// Returns the hash of the parent of the block to be verified.
+    // TODO: shouldn't be available since the header might be invalid
     pub fn parent_hash(&self) -> [u8; 32] {
         match &self.inner {
             HeaderBodyVerifyInner::Optimistic(verify) => verify.parent_hash(),
@@ -2867,6 +2876,7 @@ impl<TRq, TSrc, TBl> HeaderBodyVerify<TRq, TSrc, TBl> {
 
     /// Returns the user data of the parent of the block to be verified, or `None` if the parent
     /// is the finalized block.
+    // TODO: shouldn't be available since the header might be invalid
     pub fn parent_user_data(&self) -> Option<&TBl> {
         match &self.inner {
             HeaderBodyVerifyInner::Optimistic(verify) => verify.parent_user_data(),

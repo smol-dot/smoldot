@@ -1015,6 +1015,15 @@ pub struct HeaderVerifySuccess<TRq, TSrc, TBl> {
 }
 
 impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
+    /// Returns the SCALE-encoded header of the parent of the block.
+    pub fn parent_scale_encoded_header(&self) -> Vec<u8> {
+        // TODO: return &[u8]
+        self.parent
+            .chain
+            .best_block_header()
+            .scale_encoding_vec(self.parent.chain.block_number_bytes())
+    }
+
     /// Finish inserting the block header.
     pub fn finish(mut self, user_data: TBl) -> OptimisticSync<TRq, TSrc, TBl> {
         // TODO: don't copy the header

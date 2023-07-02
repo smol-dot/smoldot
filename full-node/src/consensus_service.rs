@@ -1237,9 +1237,15 @@ impl SyncBackground {
                     }
                 };
 
+                let parent_scale_encoded_header =
+                    header_verification_success.parent_scale_encoded_header();
                 let mut body_verification = body_only::verify(body_only::Config {
                     parent_runtime,
-                    parent_block_header: todo!(),
+                    parent_block_header: header::decode(
+                        &parent_scale_encoded_header,
+                        block_number_bytes,
+                    )
+                    .unwrap(),
                     now_from_unix_epoch: unix_time,
                     block_header: header::decode(
                         &scale_encoded_header_to_verify,
