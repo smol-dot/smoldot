@@ -620,7 +620,7 @@ impl NetworkService {
         config: protocol::BlocksRequestConfig,
     ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
         self.log_callback.log(LogLevel::Debug, format!(
-            "blocks-request-start; perr_id={}; chain_index={}; start={}; desired_count={}; direction={}",
+            "blocks-request-start; peer_id={}; chain_index={}; start={}; desired_count={}; direction={}",
             target, chain_index,
             match &config.start {
                 protocol::BlocksRequestConfigStart::Hash(h) => either::Left(HashDisplay(h)),
