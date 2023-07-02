@@ -1205,6 +1205,11 @@ impl SyncBackground {
                     .unwrap_or_else(|| self.finalized_runtime.clone());
                 let parent_runtime = parent_runtime_arc.try_lock().unwrap().take().unwrap();
                 let scale_encoded_header_to_verify = verify.scale_encoded_header().to_owned(); // TODO: copy :-/
+                let scale_encoded_extrinsics = verify
+                    .scale_encoded_extrinsics()
+                    .unwrap()
+                    .map(|e| e.as_ref().to_owned())
+                    .collect::<Vec<_>>(); // TODO: copy :-/
 
                 let _jaeger_span = self.jaeger_service.block_body_verify_span(&hash_to_verify);
 
@@ -1242,7 +1247,7 @@ impl SyncBackground {
                     )
                     .unwrap(),
                     block_number_bytes,
-                    block_body: iter::empty::<Vec<u8>>(), // TODO: /!\ wrong
+                    block_body: scale_encoded_extrinsics.into_iter(),
                     max_log_level: 3,
                 });
 

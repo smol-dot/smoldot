@@ -816,6 +816,20 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
             .scale_encoded_header
     }
 
+    /// Returns the list of SCALE-encoded extrinsics of the block to verify.
+    ///
+    /// This is `Some` if and only if [`Config::full`] is `true`
+    pub fn scale_encoded_extrinsics(
+        &'_ self,
+    ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + '_> + '_> {
+        if self.inner.full_mode {
+            let block = self.inner.verification_queue.first_block().unwrap();
+            Some(block.scale_encoded_extrinsics.iter())
+        } else {
+            None
+        }
+    }
+
     /// Start the verification of the block.
     ///
     /// Must be passed the current UNIX time in order to verify that the block doesn't pretend to

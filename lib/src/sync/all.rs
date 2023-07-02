@@ -2402,6 +2402,18 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
         }
     }
 
+    /// Returns the list of SCALE-encoded extrinsics of the block to verify.
+    ///
+    /// This is `Some` if and only if [`Config::full`] is `true`
+    pub fn scale_encoded_extrinsics(
+        &'_ self,
+    ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + '_> + '_> {
+        match &self.inner {
+            HeaderVerifyInner::AllForks(verify) => todo!(), // TODO: /!\
+            HeaderVerifyInner::Optimistic(verify) => verify.scale_encoded_extrinsics(),
+        }
+    }
+
     /// Returns the hash of the parent of the block to be verified.
     pub fn parent_hash(&self) -> [u8; 32] {
         match &self.inner {
