@@ -359,8 +359,14 @@ impl<TTx> Pool<TTx> {
         Some(&self.transactions.get(id.0)?.scale_encoded)
     }
 
-    /// Tries to find a transaction in the pool whose bytes are `scale_encoded`.
-    pub fn find(&'_ self, scale_encoded: &[u8]) -> impl Iterator<Item = TransactionId> + '_ {
+    /// Finds the transactions in the pool whose bytes are `scale_encoded`.
+    ///
+    /// This operation has a complexity of `O(log n)` where `n` is the number of entries in the
+    /// pool.
+    pub fn transactions_by_scale_encoding(
+        &'_ self,
+        scale_encoded: &[u8],
+    ) -> impl Iterator<Item = TransactionId> + '_ {
         let hash = blake2_hash(scale_encoded);
         self.by_hash
             .range(
