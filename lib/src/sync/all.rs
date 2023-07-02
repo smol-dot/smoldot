@@ -2414,8 +2414,9 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                 match verify.perform(now_from_unix_epoch) {
                     all_forks::HeaderVerifyOutcome::Success {
                         is_new_best,
-                        mut sync,
+                        success,
                     } => {
+                        let mut sync = success.finish();
                         *sync.block_user_data_mut(verified_block_height, &verified_block_hash) =
                             Some(user_data);
 

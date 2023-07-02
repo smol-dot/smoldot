@@ -1980,41 +1980,7 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
                 is_new_best,
             }) => {
                 // Block is valid!
-
-                // Remove the block from `pending_blocks`.
-                let pending_block = self.parent.inner.blocks.remove_unverified_block(
-                    self.block_to_verify.block_number,
-                    &self.block_to_verify.block_hash,
-                );
-
-                // Now insert the block in `chain`.
-                // TODO: cloning the header :-/
-                let block = Block {
-                    header: header::decode(
-                        verified_header.scale_encoded_header(),
-                        self.parent.chain.block_number_bytes(),
-                    )
-                    .unwrap()
-                    .into(),
-                    user_data: pending_block.user_data,
-                };
-                self.parent
-                    .chain
-                    .insert_verified_header(verified_header, block);
-
-                // Because a new block is now in the chain, all the previously-unverifiable
-                // finality proofs might have now become verifiable.
-                // TODO: this way of doing it is correct but quite inefficient
-                for source in self.parent.inner.blocks.sources_user_data_iter_mut() {
-                    let pending = mem::replace(
-                        &mut source.pending_finality_proofs,
-                        SourcePendingJustificationProofs::None,
-                    );
-
-                    source.unverified_finality_proofs.merge(pending)
-                }
-
-                Ok(is_new_best)
+                Ok((verified_header, is_new_best))
             }
             Err(blocks_tree::HeaderVerifyError::VerificationFailed(error)) => {
                 // Remove the block from `pending_blocks`.
@@ -2051,9 +2017,13 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
         };
 
         match result {
-            Ok(is_new_best) => HeaderVerifyOutcome::Success {
+            Ok((verified_header, is_new_best)) => HeaderVerifyOutcome::Success {
                 is_new_best,
-                sync: self.parent,
+                success: HeaderVerifySuccess {
+                    parent: self.parent,
+                    block_to_verify: self.block_to_verify,
+                    verified_header,
+                },
             },
             Err(error) => HeaderVerifyOutcome::Error {
                 sync: self.parent,
@@ -2064,6 +2034,55 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
 
     /// Do not actually proceed with the verification.
     pub fn cancel(self) -> AllForksSync<TBl, TRq, TSrc> {
+        self.parent
+    }
+}
+
+/// Header verification successful.
+///
+/// Internally holds the [`AllForksSync`].
+pub struct HeaderVerifySuccess<TBl, TRq, TSrc> {
+    parent: AllForksSync<TBl, TRq, TSrc>,
+    block_to_verify: pending_blocks::TreeRoot,
+    verified_header: blocks_tree::VerifiedHeader,
+}
+
+impl<TBl, TRq, TSrc> HeaderVerifySuccess<TBl, TRq, TSrc> {
+    /// Finish inserting the block header.
+    pub fn finish(mut self) -> AllForksSync<TBl, TRq, TSrc> {
+        // Remove the block from `pending_blocks`.
+        let pending_block = self.parent.inner.blocks.remove_unverified_block(
+            self.block_to_verify.block_number,
+            &self.block_to_verify.block_hash,
+        );
+
+        // Now insert the block in `chain`.
+        // TODO: cloning the header :-/
+        let block = Block {
+            header: header::decode(
+                self.verified_header.scale_encoded_header(),
+                self.parent.chain.block_number_bytes(),
+            )
+            .unwrap()
+            .into(),
+            user_data: pending_block.user_data,
+        };
+        self.parent
+            .chain
+            .insert_verified_header(self.verified_header, block);
+
+        // Because a new block is now in the chain, all the previously-unverifiable
+        // finality proofs might have now become verifiable.
+        // TODO: this way of doing it is correct but quite inefficient
+        for source in self.parent.inner.blocks.sources_user_data_iter_mut() {
+            let pending = mem::replace(
+                &mut source.pending_finality_proofs,
+                SourcePendingJustificationProofs::None,
+            );
+
+            source.unverified_finality_proofs.merge(pending)
+        }
+
         self.parent
     }
 }
@@ -2226,8 +2245,7 @@ pub enum HeaderVerifyOutcome<TBl, TRq, TSrc> {
     Success {
         /// True if the newly-verified block is considered the new best block.
         is_new_best: bool,
-        /// State machine yielded back. Use to continue the processing.
-        sync: AllForksSync<TBl, TRq, TSrc>,
+        success: HeaderVerifySuccess<TBl, TRq, TSrc>,
     },
 
     /// Header verification failed.
