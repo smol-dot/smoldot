@@ -84,14 +84,14 @@
 //! - Sending transactions to other peers.
 //!
 
-// TODO: this code is completely untested
-
 use alloc::{
     collections::{btree_set, BTreeSet},
     vec::Vec,
 };
 use core::{fmt, iter, mem, ops};
 use hashbrown::HashSet;
+
+mod tests;
 
 pub use super::validate::ValidTransaction;
 
@@ -908,5 +908,3 @@ impl<'a, 'b, TTx: fmt::Debug> fmt::Debug for Vacant<'a, 'b, TTx> {
 fn blake2_hash(bytes: &[u8]) -> [u8; 32] {
     <[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], bytes).as_bytes()).unwrap()
 }
-
-// TODO: needs tests
