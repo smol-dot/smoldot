@@ -619,6 +619,15 @@ impl<TTx> AppendBlock<TTx> {
     pub fn finish(self) -> Pool<TTx> {
         self.inner
     }
+
+    /// Aborts the block insertion process and reverts all the changes that were made.
+    ///
+    /// > **Note**: Not everything is reverted to the exact state where it was before. Some
+    /// >           transactions might have to be revalidated.
+    pub fn revert_block_insertion(mut self) -> Pool<TTx> {
+        let _ = self.inner.retract_blocks(1);
+        self.inner
+    }
 }
 
 impl<TTx: fmt::Debug> fmt::Debug for AppendBlock<TTx> {
