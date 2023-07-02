@@ -1341,8 +1341,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     ProcessOne::AllSync(self)
                 }
                 optimistic::ProcessOne::VerifyBlock(inner) => {
-                    ProcessOne::VerifyBodyHeader(HeaderBodyVerify {
-                        inner: HeaderBodyVerifyInner::Optimistic(inner),
+                    ProcessOne::VerifyHeader(HeaderVerify {
+                        inner: HeaderVerifyInner::Optimistic(inner),
                         shared: self.shared,
                     })
                 }
@@ -2383,6 +2383,9 @@ enum HeaderVerifyInner<TRq, TSrc, TBl> {
     AllForks(
         all_forks::HeaderVerify<Option<TBl>, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>,
     ),
+    Optimistic(
+        optimistic::BlockVerify<OptimisticRequestExtra<TRq>, OptimisticSourceExtra<TSrc>, TBl>,
+    ),
 }
 
 impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
@@ -2390,6 +2393,7 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
     pub fn height(&self) -> u64 {
         match &self.inner {
             HeaderVerifyInner::AllForks(verify) => verify.height(),
+            HeaderVerifyInner::Optimistic(verify) => verify.height(),
         }
     }
 
@@ -2397,6 +2401,7 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
     pub fn hash(&self) -> [u8; 32] {
         match &self.inner {
             HeaderVerifyInner::AllForks(verify) => *verify.hash(),
+            HeaderVerifyInner::Optimistic(verify) => verify.hash(),
         }
     }
 
@@ -2439,6 +2444,35 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                             },
                         }
                     }
+                }
+            }
+            HeaderVerifyInner::Optimistic(verify) => {
+                let verified_block_height = verify.height();
+                let verified_block_hash = verify.hash();
+
+                // TODO: `None` is temporary
+                match verify.start(now_from_unix_epoch, None) {
+                    optimistic::BlockVerification::NewBest { success, .. } => {
+                        HeaderVerifyOutcome::Success {
+                            is_new_best: true,
+                            success: HeaderVerifySuccess {
+                                inner: HeaderVerifySuccessInner::Optimistic(success),
+                                shared: self.shared,
+                                verified_block_height,
+                                verified_block_hash,
+                            },
+                        }
+                    }
+                    optimistic::BlockVerification::Reset { sync, .. } => {
+                        HeaderVerifyOutcome::Error {
+                            sync: AllSync {
+                                inner: AllSyncInner::Optimistic { inner: sync },
+                                shared: self.shared,
+                            },
+                            error: HeaderVerifyError::ConsensusMismatch, // TODO: dummy error cause /!\
+                        }
+                    }
+                    _ => unreachable!(), // TODO: temporary
                 }
             }
         }
@@ -2490,6 +2524,13 @@ enum HeaderVerifySuccessInner<TRq, TSrc, TBl> {
             AllForksSourceExtra<TSrc>,
         >,
     ),
+    Optimistic(
+        optimistic::HeaderVerifySuccess<
+            OptimisticRequestExtra<TRq>,
+            OptimisticSourceExtra<TSrc>,
+            TBl,
+        >,
+    ),
 }
 
 impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
@@ -2502,6 +2543,13 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
                     Some(user_data);
                 AllSync {
                     inner: AllSyncInner::AllForks(sync),
+                    shared: self.shared,
+                }
+            }
+            HeaderVerifySuccessInner::Optimistic(inner) => {
+                let sync = inner.finish(user_data);
+                AllSync {
+                    inner: AllSyncInner::Optimistic { inner: sync },
                     shared: self.shared,
                 }
             }
@@ -2891,7 +2939,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
     ) -> Self {
         match inner {
             optimistic::BlockVerification::NewBest {
-                sync,
+                success,
                 full:
                     Some(optimistic::BlockVerificationSuccessFull {
                         storage_changes,
@@ -2911,7 +2959,9 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     parent_runtime,
                     new_runtime,
                     sync: AllSync {
-                        inner: AllSyncInner::Optimistic { inner: sync },
+                        inner: AllSyncInner::Optimistic {
+                            inner: success.finish(user_data),
+                        },
                         shared,
                     },
                 }

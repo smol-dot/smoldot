@@ -868,7 +868,7 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
         } else {
             assert!(parent_runtime.is_none());
 
-            let error = match self
+            let outcome = match self
                 .chain
                 .verify_header(block.scale_encoded_header, now_from_unix_epoch)
             {
@@ -876,70 +876,61 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                     verified_header,
                     is_new_best: true,
                     ..
-                }) => {
-                    // TODO: don't copy the header
-                    let header = header::decode(
-                        verified_header.scale_encoded_header(),
-                        self.chain.block_number_bytes(),
-                    )
-                    .unwrap()
-                    .into();
-                    self.chain.insert_verified_header(
-                        verified_header,
-                        Block {
-                            header,
-                            justifications: block.scale_encoded_justifications.clone(),
-                            user_data: block.user_data,
-                            full: None,
-                        },
-                    );
-                    None
-                }
+                }) => Ok(verified_header),
                 Ok(
                     blocks_tree::HeaderVerifySuccess::Duplicate
                     | blocks_tree::HeaderVerifySuccess::Verified {
                         is_new_best: false, ..
                     },
-                ) => Some(ResetCause::NonCanonical),
-                Err(err) => Some(ResetCause::HeaderError(err)),
+                ) => Err(ResetCause::NonCanonical),
+                Err(err) => Err(ResetCause::HeaderError(err)),
             };
 
-            if let Some(reason) = error {
-                if let Some(src) = self.inner.sources.get_mut(&source_id) {
-                    src.banned = true;
-                }
+            match outcome {
+                Ok(verified_header) => {
+                    let new_best_hash = self.chain.best_block_hash();
+                    let new_best_number = self.chain.best_block_header().number;
 
-                // If all sources are banned, unban them.
-                if self.inner.sources.iter().all(|(_, s)| s.banned) {
-                    for src in self.inner.sources.values_mut() {
-                        src.banned = false;
+                    BlockVerification::NewBest {
+                        success: HeaderVerifySuccess {
+                            parent: OptimisticSync {
+                                inner: self.inner,
+                                chain: self.chain,
+                            },
+                            verified_header,
+                            scale_encoded_justifications: block
+                                .scale_encoded_justifications
+                                .clone(),
+                        },
+                        new_best_hash,
+                        new_best_number,
+                        full: None,
                     }
                 }
+                Err(reason) => {
+                    if let Some(src) = self.inner.sources.get_mut(&source_id) {
+                        src.banned = true;
+                    }
 
-                self.inner.make_requests_obsolete(&self.chain);
+                    // If all sources are banned, unban them.
+                    if self.inner.sources.iter().all(|(_, s)| s.banned) {
+                        for src in self.inner.sources.values_mut() {
+                            src.banned = false;
+                        }
+                    }
 
-                let previous_best_height = self.chain.best_block_header().number;
-                BlockVerification::Reset {
-                    sync: OptimisticSync {
-                        inner: self.inner,
-                        chain: self.chain,
-                    },
-                    parent_runtime: None,
-                    previous_best_height,
-                    reason,
-                }
-            } else {
-                let new_best_hash = self.chain.best_block_hash();
-                let new_best_number = self.chain.best_block_header().number;
+                    self.inner.make_requests_obsolete(&self.chain);
 
-                BlockVerification::NewBest {
-                    sync: OptimisticSync {
-                        inner: self.inner,
-                        chain: self.chain,
-                    },
-                    new_best_hash,
-                    new_best_number,
-                    full: None,
+                    let previous_best_height = self.chain.best_block_header().number;
+                    BlockVerification::Reset {
+                        sync: OptimisticSync {
+                            inner: self.inner,
+                            chain: self.chain,
+                        },
+                        parent_runtime: None,
+                        previous_best_height,
+                        reason,
+                    }
                 }
             }
         }
@@ -976,7 +967,7 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
         /// The state machine.
         /// The [`OptimisticSync::process_one`] method takes ownership of the
         /// [`OptimisticSync`]. This field yields it back.
-        sync: OptimisticSync<TRq, TSrc, TBl>,
+        success: HeaderVerifySuccess<TRq, TSrc, TBl>,
 
         new_best_number: u64,
         new_best_hash: [u8; 32],
@@ -998,6 +989,40 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
 
     /// Compiling a runtime is required in order to continue.
     RuntimeCompilation(RuntimeCompilation<TRq, TSrc, TBl>),
+}
+
+/// Header verification successful.
+///
+/// Internally holds the [`AllForksSync`].
+pub struct HeaderVerifySuccess<TRq, TSrc, TBl> {
+    parent: OptimisticSync<TRq, TSrc, TBl>,
+    verified_header: blocks_tree::VerifiedHeader,
+    scale_encoded_justifications: Vec<([u8; 4], Vec<u8>)>,
+}
+
+impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
+    /// Finish inserting the block header.
+    pub fn finish(mut self, user_data: TBl) -> OptimisticSync<TRq, TSrc, TBl> {
+        // TODO: don't copy the header
+        let header = header::decode(
+            self.verified_header.scale_encoded_header(),
+            self.parent.chain.block_number_bytes(),
+        )
+        .unwrap()
+        .into();
+
+        self.parent.chain.insert_verified_header(
+            self.verified_header,
+            Block {
+                header,
+                justifications: self.scale_encoded_justifications,
+                user_data,
+                full: None,
+            },
+        );
+
+        self.parent
+    }
 }
 
 pub struct BlockVerificationSuccessFull {
@@ -1087,21 +1112,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
 
                     let new_best_hash = chain.best_block_hash();
                     let new_best_number = chain.best_block_header().number;
-                    break BlockVerification::NewBest {
-                        sync: OptimisticSync {
-                            chain,
-                            inner: shared.inner,
-                        },
-                        new_best_hash,
-                        new_best_number,
-                        full: Some(BlockVerificationSuccessFull {
-                            storage_changes,
-                            offchain_storage_changes,
-                            state_trie_version,
-                            parent_runtime,
-                            new_runtime,
-                        }),
-                    };
+                    todo!() // TODO: temporary for the PR
                 }
 
                 Inner::Step2(blocks_tree::BodyVerifyStep2::StorageGet(req)) => {
