@@ -2309,9 +2309,6 @@ pub enum ProcessOne<TRq, TSrc, TBl> {
     /// Ready to start verifying a proof of finality.
     VerifyFinalityProof(FinalityProofVerify<TRq, TSrc, TBl>),
 
-    /// Ready to start verifying a header and a body.
-    VerifyBodyHeader(HeaderBodyVerify<TRq, TSrc, TBl>),
-
     /// Ready to start verifying a warp sync fragment.
     VerifyWarpSyncFragment(WarpSyncFragmentVerify<TRq, TSrc, TBl>),
 }
@@ -2402,6 +2399,31 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
         match &self.inner {
             HeaderVerifyInner::AllForks(verify) => *verify.hash(),
             HeaderVerifyInner::Optimistic(verify) => verify.hash(),
+        }
+    }
+
+    /// Returns the hash of the parent of the block to be verified.
+    pub fn parent_hash(&self) -> [u8; 32] {
+        match &self.inner {
+            HeaderVerifyInner::AllForks(verify) => *verify.parent_hash(),
+            HeaderVerifyInner::Optimistic(verify) => verify.parent_hash(),
+        }
+    }
+
+    /// Returns the user data of the parent of the block to be verified, or `None` if the parent
+    /// is the finalized block.
+    pub fn parent_user_data(&self) -> Option<&TBl> {
+        match &self.inner {
+            HeaderVerifyInner::AllForks(verify) => todo!(), // TODO: /!\
+            HeaderVerifyInner::Optimistic(verify) => verify.parent_user_data(),
+        }
+    }
+
+    /// Returns the SCALE-encoded header of the block about to be verified.
+    pub fn scale_encoded_header(&self) -> Vec<u8> {
+        match &self.inner {
+            HeaderVerifyInner::AllForks(verify) => verify.scale_encoded_header(),
+            HeaderVerifyInner::Optimistic(verify) => verify.scale_encoded_header().to_vec(),
         }
     }
 

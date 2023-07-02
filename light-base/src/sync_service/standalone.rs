@@ -929,9 +929,6 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     }
                 }
             }
-
-            // Can't verify header and body in non-full mode.
-            all::ProcessOne::VerifyBodyHeader(_) => unreachable!(),
         }
 
         (self, true)

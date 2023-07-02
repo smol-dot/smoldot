@@ -42,6 +42,7 @@ use smoldot::{
     network::{self, protocol::BlockData},
     sync::all::{self, TrieEntryVersion},
     trie,
+    verify::body_only,
 };
 use std::{
     array,
@@ -1173,6 +1174,9 @@ impl SyncBackground {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap();
 
+        // TODO: move this?
+        let block_number_bytes = self.sync.block_number_bytes();
+
         match self.sync.process_one() {
             all::ProcessOne::AllSync(idle) => {
                 self.sync = idle;
@@ -1182,7 +1186,7 @@ impl SyncBackground {
             | all::ProcessOne::WarpSyncBuildRuntime(_)
             | all::ProcessOne::WarpSyncBuildChainInformation(_)
             | all::ProcessOne::WarpSyncFinished { .. } => unreachable!(),
-            all::ProcessOne::VerifyBodyHeader(verify) => {
+            all::ProcessOne::VerifyHeader(verify) => {
                 let when_verification_started = Instant::now();
                 let mut database_accesses_duration = Duration::new(0, 0);
                 let mut runtime_build_duration = Duration::new(0, 0);
@@ -1204,18 +1208,48 @@ impl SyncBackground {
 
                 let _jaeger_span = self.jaeger_service.block_body_verify_span(&hash_to_verify);
 
-                let mut verify =
-                    verify.start(unix_time, parent_runtime, NonFinalizedBlock::NotVerified);
+                let (is_new_best, header_verification_success) = match verify.perform(unix_time) {
+                    all::HeaderVerifyOutcome::Success {
+                        is_new_best,
+                        success,
+                    } => (is_new_best, success),
+                    all::HeaderVerifyOutcome::Error { sync, error } => {
+                        // Print a separate warning because it is important for the user
+                        // to be aware of the verification failure.
+                        // `error` is last because it's quite big.
+                        self.log_callback.log(
+                            LogLevel::Warn,
+                            format!(
+                                "failed-block-verification; hash={}; height={};  error={}",
+                                HashDisplay(&hash_to_verify),
+                                height_to_verify,
+                                error
+                            ),
+                        );
+                        *parent_runtime_arc.try_lock().unwrap() = Some(parent_runtime);
+                        self.sync = sync;
+                        return (self, true);
+                    }
+                };
+
+                let mut body_verification = body_only::verify(body_only::Config {
+                    parent_runtime,
+                    parent_block_header: todo!(),
+                    now_from_unix_epoch: unix_time,
+                    block_header: header::decode(
+                        &scale_encoded_header_to_verify,
+                        block_number_bytes,
+                    )
+                    .unwrap(),
+                    block_number_bytes,
+                    block_body: iter::empty::<Vec<u8>>(), // TODO: /!\ wrong
+                    max_log_level: 3,
+                });
 
                 // TODO: check this block against the chain spec's badBlocks
                 loop {
-                    match verify {
-                        all::BlockVerification::Error {
-                            sync: sync_out,
-                            parent_runtime,
-                            error,
-                            ..
-                        } => {
+                    match body_verification {
+                        body_only::Verify::Finished(Err((error, parent_runtime))) => {
                             // Print a separate warning because it is important for the user
                             // to be aware of the verification failure.
                             // `error` is last because it's quite big.
@@ -1231,18 +1265,18 @@ impl SyncBackground {
                                 ),
                             );
                             *parent_runtime_arc.try_lock().unwrap() = Some(parent_runtime);
-                            self.sync = sync_out;
+                            // TODO: self.sync = sync_out;
+                            // TODO: reject the header verification
+                            todo!();
                             return (self, true);
                         }
-                        all::BlockVerification::Success {
-                            is_new_best,
-                            sync: mut sync_out,
+                        body_only::Verify::Finished(Ok(body_only::Success {
                             storage_changes,
                             state_trie_version,
                             parent_runtime,
                             new_runtime,
                             ..
-                        } => {
+                        })) => {
                             // Insert the block in the database.
                             let when_database_access_started = Instant::now();
                             self.database
@@ -1330,8 +1364,11 @@ impl SyncBackground {
 
                             *parent_runtime_arc.try_lock().unwrap() = Some(parent_runtime);
 
+                            self.sync =
+                                header_verification_success.finish(NonFinalizedBlock::NotVerified);
+
                             // Store the storage of the children.
-                            sync_out[(height_to_verify, &hash_to_verify)] =
+                            self.sync[(height_to_verify, &hash_to_verify)] =
                                 NonFinalizedBlock::Verified {
                                     runtime: if let Some(new_runtime) = new_runtime {
                                         Arc::new(Mutex::new(Some(new_runtime)))
@@ -1344,8 +1381,8 @@ impl SyncBackground {
                                 // Update the networking.
                                 let fut = self.network_service.set_local_best_block(
                                     self.network_chain_index,
-                                    sync_out.best_block_hash(),
-                                    sync_out.best_block_number(),
+                                    self.sync.best_block_hash(),
+                                    self.sync.best_block_number(),
                                 );
                                 fut.await;
 
@@ -1353,8 +1390,6 @@ impl SyncBackground {
                                 // block on top of this new best.
                                 self.block_authoring = None;
                             }
-
-                            self.sync = sync_out;
 
                             // Announce the newly-verified block to all the sources that might
                             // not be aware of it. We can never be guaranteed that a certain
@@ -1414,7 +1449,7 @@ impl SyncBackground {
                             return (self, true);
                         }
 
-                        all::BlockVerification::ParentStorageGet(req) => {
+                        body_only::Verify::StorageGet(req) => {
                             let when_database_access_started = Instant::now();
                             let parent_paths = req.child_trie().map(|child_trie| {
                                 trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
@@ -1440,15 +1475,15 @@ impl SyncBackground {
                                 .expect("database access error");
                             let value = value.as_ref().map(|(val, vers)| {
                                 (
-                                    &val[..],
+                                    iter::once(&val[..]),
                                     TrieEntryVersion::try_from(*vers).expect("corrupted database"),
                                 )
                             });
 
                             database_accesses_duration += when_database_access_started.elapsed();
-                            verify = req.inject_value(value);
+                            body_verification = req.inject_value(value);
                         }
-                        all::BlockVerification::ParentStorageMerkleValue(req) => {
+                        body_only::Verify::StorageClosestDescendantMerkleValue(req) => {
                             let when_database_access_started = Instant::now();
 
                             let parent_paths = req.child_trie().map(|child_trie| {
@@ -1474,9 +1509,10 @@ impl SyncBackground {
                                 .expect("database access error");
 
                             database_accesses_duration += when_database_access_started.elapsed();
-                            verify = req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
+                            body_verification =
+                                req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
                         }
-                        all::BlockVerification::ParentStorageNextKey(req) => {
+                        body_only::Verify::StorageNextKey(req) => {
                             let when_database_access_started = Instant::now();
 
                             let parent_paths = req.child_trie().map(|child_trie| {
@@ -1510,15 +1546,15 @@ impl SyncBackground {
                                 .expect("database access error");
 
                             database_accesses_duration += when_database_access_started.elapsed();
-                            verify = req.inject_key(next_key.map(|k| {
+                            body_verification = req.inject_key(next_key.map(|k| {
                                 k.into_iter().map(|b| trie::Nibble::try_from(b).unwrap())
                             }));
                         }
-                        all::BlockVerification::RuntimeCompilation(rt) => {
+                        body_only::Verify::RuntimeCompilation(rt) => {
                             let before_runtime_build = Instant::now();
                             let outcome = rt.build();
                             runtime_build_duration += before_runtime_build.elapsed();
-                            verify = outcome;
+                            body_verification = outcome;
                         }
                     }
                 }
@@ -1593,47 +1629,6 @@ impl SyncBackground {
                         self.log_callback.log(
                             LogLevel::Warn,
                             format!("finality-proof-verification-failure; error={}", error),
-                        );
-                        self.sync = sync_out;
-                        (self, true)
-                    }
-                }
-            }
-
-            all::ProcessOne::VerifyHeader(verify) => {
-                let hash_to_verify = verify.hash();
-                let height_to_verify = verify.height();
-
-                let _jaeger_span = self
-                    .jaeger_service
-                    .block_header_verify_span(&hash_to_verify);
-
-                match verify.perform(unix_time) {
-                    all::HeaderVerifyOutcome::Success { success, .. } => {
-                        self.log_callback.log(
-                            LogLevel::Debug,
-                            format!(
-                                "header-verification; hash={}; height={}; outcome=success",
-                                HashDisplay(&hash_to_verify),
-                                height_to_verify
-                            ),
-                        );
-                        self.sync = success.finish(NonFinalizedBlock::NotVerified);
-                        (self, true)
-                    }
-                    all::HeaderVerifyOutcome::Error {
-                        sync: sync_out,
-                        error,
-                        ..
-                    } => {
-                        self.log_callback.log(
-                            LogLevel::Debug,
-                            format!(
-                            "header-verification; hash={}; height={}; outcome=failure; error={}",
-                            HashDisplay(&hash_to_verify),
-                            height_to_verify,
-                            error
-                        ),
                         );
                         self.sync = sync_out;
                         (self, true)

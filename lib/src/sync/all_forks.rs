@@ -1955,10 +1955,14 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
         &self.block_to_verify.block_hash
     }
 
-    /// Perform the verification.
-    pub fn perform(mut self, now_from_unix_epoch: Duration) -> HeaderVerifyOutcome<TBl, TRq, TSrc> {
-        let to_verify_scale_encoded_header = self
-            .parent
+    /// Returns the hash of the parent of the block to be verified.
+    pub fn parent_hash(&self) -> &[u8; 32] {
+        &self.block_to_verify.parent_block_hash
+    }
+
+    /// Returns the SCALE-encoded header of the block about to be verified.
+    pub fn scale_encoded_header(&self) -> Vec<u8> {
+        self.parent
             .inner
             .blocks
             .unverified_block_user_data(
@@ -1968,7 +1972,12 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
             .header
             .as_ref()
             .unwrap()
-            .scale_encoding_vec(self.parent.chain.block_number_bytes());
+            .scale_encoding_vec(self.parent.chain.block_number_bytes())
+    }
+
+    /// Perform the verification.
+    pub fn perform(mut self, now_from_unix_epoch: Duration) -> HeaderVerifyOutcome<TBl, TRq, TSrc> {
+        let to_verify_scale_encoded_header = self.scale_encoded_header();
 
         let result = match self
             .parent
