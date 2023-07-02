@@ -58,9 +58,11 @@
 //! Use [`Pool::add_unvalidated`] to add to the pool a transaction that should be included in a
 //! block at a later point in time.
 //!
-//! Use [`Pool::append_block`] and [`Pool::retract_blocks`] when a new block is considered as
-//! best in order to let the [`Pool`] track the state of the best block of the chain. The
-//! block bodies that are passed to [`Pool::append_block`] are added to the pool.
+//! When a new block is considered as best, use [`Pool::retract_blocks`] to remove all the re-orged
+//! blocks, then [`Pool::append_empty_block`] and
+//! [`Pool::best_block_add_transaction_by_scale_encoding`] to add the new block(s). The
+//! transactions that are passed to [`Pool::best_block_add_transaction_by_scale_encoding`] are
+//! added to the pool.
 //!
 //! Use [`Pool::unvalidated_transactions`] to obtain the list of transactions that should be
 //! validated. Validation should be performed using the [`validate`](../validate) module, and
@@ -69,9 +71,9 @@
 //! Use [`Pool::remove_included`] when a block has been finalized to remove from the pool the
 //! transactions that are present in the finalized block and below.
 //!
-//! When authoring a block, use [`Pool::append_block`] and [`AppendBlock::includable_transactions`]
-//! to determine which transaction to include next. Use [`AppendBlock::add_transaction_by_id`] when
-//! the transaction has been included.
+//! When authoring a block, use [`Pool::append_empty_block`] and
+//! [`Pool::best_block_includable_transactions`] to determine which transaction to include
+//! next. Use [`Pool::best_block_add_transaction_by_id`] when the transaction has been included.
 //!
 //! # Out of scope
 //!
@@ -119,7 +121,7 @@ pub struct Config {
     /// so might created confusion.
     ///
     /// Non-finalized blocks should be added to the pool after initialization using
-    /// [`Pool::append_block`].
+    /// [`Pool::append_empty_block`].
     pub finalized_block_height: u64,
 
     /// Seed for randomness used to avoid HashDoS attacks.
@@ -389,7 +391,8 @@ impl<TTx> Pool<TTx> {
     /// Returns the block height at which the given transaction has been included.
     ///
     /// A transaction has been included if it has been added to the pool with
-    /// [`Pool::append_block`].
+    /// [`Pool::best_block_add_transaction_by_scale_encoding`] or
+    /// [`Pool::best_block_add_transaction_by_id`].
     ///
     /// Returns `None` if the identifier is invalid or the transaction doesn't belong to any
     /// block.
@@ -424,17 +427,14 @@ impl<TTx> Pool<TTx> {
     /// Returns the best block height according to the pool.
     ///
     /// This initially corresponds to the value in [`Config::finalized_block_height`], is
-    /// incremented by one every time [`Pool::append_block`], and is decreased when
+    /// incremented by one every time [`Pool::append_empty_block`], and is decreased when
     /// [`Pool::retract_blocks`] is called.
     pub fn best_block_height(&self) -> u64 {
         self.best_block_height
     }
 
     /// Adds a block to the chain tracked by the transactions pool.
-    ///
-    /// This function returns an [`AppendBlock`] struct that wraps around the [`Pool`] and lets
-    /// you insert transactions that belong to the body of the new block.
-    pub fn append_block(mut self) -> AppendBlock<TTx> {
+    pub fn append_empty_block(mut self) {
         self.best_block_height = self.best_block_height.checked_add(1).unwrap();
 
         // Un-validate the transactions whose validation longevity has expired.
@@ -449,8 +449,6 @@ impl<TTx> Pool<TTx> {
         {
             self.unvalidate_transaction(tx_id);
         }
-
-        AppendBlock { inner: self }
     }
 
     /// Pop a certain number of blocks from the list of blocks.
@@ -509,6 +507,105 @@ impl<TTx> Pool<TTx> {
 
         // Return retracted transactions from highest block to lowest block.
         transactions_to_retract.into_iter().rev()
+    }
+
+    /// Returns all the transactions that can be included in the highest block.
+    ///
+    /// Use this function if you are currently authoring a block.
+    ///
+    /// The transactions are returned by decreasing priority. Re-ordering the transactions might
+    /// lead to the runtime returning errors. It is safe, however, to skip some transactions
+    /// altogether if desired.
+    pub fn best_block_includable_transactions(
+        &'_ self,
+    ) -> impl Iterator<Item = (TransactionId, &'_ TTx)> + '_ {
+        self.includable
+            .iter()
+            .rev()
+            .map(|(_, tx_id)| (*tx_id, &self.transactions[tx_id.0].user_data))
+    }
+
+    /// Adds a single-SCALE-encoded transaction to the highest block.
+    ///
+    /// The transaction is compared against the list of non-included transactions that are already
+    /// in the pool. If a non-included transaction with the same bytes is found, it is switched to
+    /// the "included" state and [`AppendBlockTransaction::NonIncludedUpdated`] is returned.
+    /// Otherwise, [`AppendBlockTransaction::Unknown`] is returned and the transaction can be
+    /// inserted in the pool.
+    ///
+    /// > **Note**: This function is equivalent to calling
+    /// >           [`Pool::transactions_by_scale_encoding`], removing the transactions that are
+    /// >           already included (see [`Pool::included_block_height`]), then calling
+    /// >           [`Pool::best_block_add_transaction_by_id`] with one of the transactions
+    /// >           that remain.
+    pub fn best_block_add_transaction_by_scale_encoding<'a, 'b>(
+        &'a mut self,
+        bytes: &'b [u8],
+    ) -> AppendBlockTransaction<'a, 'b, TTx> {
+        let non_included = {
+            let hash = blake2_hash(bytes);
+            self.by_hash
+                .range(
+                    (hash, TransactionId(usize::min_value()))
+                        ..=(hash, TransactionId(usize::max_value())),
+                )
+                .find(|(_, tx_id)| {
+                    self.transactions
+                        .get(tx_id.0)
+                        .unwrap()
+                        .included_block_height
+                        .is_none()
+                })
+                .map(|(_, tx_id)| *tx_id)
+        };
+
+        if let Some(tx_id) = non_included {
+            debug_assert_eq!(self.transactions[tx_id.0].scale_encoded, bytes);
+            self.best_block_add_transaction_by_id(tx_id);
+            AppendBlockTransaction::NonIncludedUpdated {
+                id: tx_id,
+                user_data: &mut self.transactions[tx_id.0].user_data,
+            }
+        } else {
+            AppendBlockTransaction::Unknown(Vacant { inner: self, bytes })
+        }
+    }
+
+    /// Adds a transaction to the block being appended.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the transaction with the given id is invalid.
+    /// Panics if the transaction with the given id was already included in the chain.
+    ///
+    pub fn best_block_add_transaction_by_id(&mut self, id: TransactionId) {
+        // Sanity check.
+        assert!(self.transactions[id.0].included_block_height.is_none());
+
+        // We can in principle always discard the current validation status of the transaction.
+        // However, if the transaction has been validated against the parent of the block, we want
+        // to keep this validation status as an optimization.
+        // Since updating the status of a transaction is a rather complicated state change, the
+        // approach taken here is to always un-validate the transaction then re-validate it.
+        let revalidation = if let Some(validation) = self.transactions[id.0].validation.as_ref() {
+            if validation.0 + 1 == self.best_block_height {
+                Some(validation.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        self.unvalidate_transaction(id);
+
+        // Mark the transaction as included.
+        self.transactions[id.0].included_block_height = Some(self.best_block_height);
+        self.by_height.insert((self.best_block_height, id));
+
+        // Re-set the validation status of the transaction that was extracted earlier.
+        if let Some((block_number_validated_against, result)) = revalidation {
+            self.set_validation_result(id, block_number_validated_against, result);
+        }
     }
 
     /// Sets the outcome of validating the transaction with the given identifier.
@@ -751,146 +848,6 @@ impl<TTx: fmt::Debug> fmt::Debug for Pool<TTx> {
                     .map(|t| (TransactionId(t.0), &t.1.user_data)),
             )
             .finish()
-    }
-}
-
-/// Wraps around [`Pool`] while a new best block is being inserted. See [`Pool::append_block`].
-#[must_use]
-pub struct AppendBlock<TTx> {
-    /// The pool. The best block number has already been incremented.
-    inner: Pool<TTx>,
-}
-
-impl<TTx> AppendBlock<TTx> {
-    /// Returns all the transactions that can be included in the block at this point.
-    ///
-    /// Use this function if you are authoring a block.
-    ///
-    /// The transactions are returned by decreasing priority. Re-ordering the transactions might
-    /// lead to the runtime returning errors. It is safe, however, to skip some transactions
-    /// altogether if desired.
-    pub fn includable_transactions(
-        &'_ self,
-    ) -> impl Iterator<Item = (TransactionId, &'_ TTx)> + '_ {
-        self.inner
-            .includable
-            .iter()
-            .rev()
-            .map(|(_, tx_id)| (*tx_id, &self.inner.transactions[tx_id.0].user_data))
-    }
-
-    /// Adds a single-SCALE-encoded transaction to the block being appended.
-    ///
-    /// The transaction is compared against the list of non-included transactions that are already
-    /// in the pool. If a non-included transaction with the same bytes is found, it is switched to
-    /// the "included" state and [`AppendBlockTransaction::NonIncludedUpdated`] is returned.
-    /// Otherwise, [`AppendBlockTransaction::Unknown`] is returned and the transaction can be
-    /// inserted in the pool.
-    ///
-    /// > **Note**: This function is equivalent to calling
-    /// >           [`Pool::transactions_by_scale_encoding`], removing the transactions that are
-    /// >           already included (see [`Pool::included_block_height`]), then calling
-    /// >           [`AppendBlock::add_transaction_by_id`] with one of the transactions that
-    /// >           remain.
-    pub fn add_transaction_by_scale_encoding<'a, 'b>(
-        &'a mut self,
-        bytes: &'b [u8],
-    ) -> AppendBlockTransaction<'a, 'b, TTx> {
-        let non_included = {
-            let hash = blake2_hash(bytes);
-            self.inner
-                .by_hash
-                .range(
-                    (hash, TransactionId(usize::min_value()))
-                        ..=(hash, TransactionId(usize::max_value())),
-                )
-                .find(|(_, tx_id)| {
-                    self.inner
-                        .transactions
-                        .get(tx_id.0)
-                        .unwrap()
-                        .included_block_height
-                        .is_none()
-                })
-                .map(|(_, tx_id)| *tx_id)
-        };
-
-        if let Some(tx_id) = non_included {
-            debug_assert_eq!(self.inner.transactions[tx_id.0].scale_encoded, bytes);
-            self.add_transaction_by_id(tx_id);
-            AppendBlockTransaction::NonIncludedUpdated {
-                id: tx_id,
-                user_data: &mut self.inner.transactions[tx_id.0].user_data,
-            }
-        } else {
-            AppendBlockTransaction::Unknown(Vacant {
-                inner: &mut self.inner,
-                bytes,
-            })
-        }
-    }
-
-    /// Adds a transaction to the block being appended.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the transaction with the given id is invalid.
-    /// Panics if the transaction with the given id was already included in the chain.
-    ///
-    pub fn add_transaction_by_id(&mut self, id: TransactionId) {
-        // Sanity check.
-        assert!(self.inner.transactions[id.0]
-            .included_block_height
-            .is_none());
-
-        // We can in principle always discard the current validation status of the transaction.
-        // However, if the transaction has been validated against the parent of the block, we want
-        // to keep this validation status as an optimization.
-        // Since updating the status of a transaction is a rather complicated state change, the
-        // approach taken here is to always un-validate the transaction then re-validate it.
-        let revalidation =
-            if let Some(validation) = self.inner.transactions[id.0].validation.as_ref() {
-                if validation.0 + 1 == self.inner.best_block_height {
-                    Some(validation.clone())
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-        self.inner.unvalidate_transaction(id);
-
-        // Mark the transaction as included.
-        self.inner.transactions[id.0].included_block_height = Some(self.inner.best_block_height);
-        self.inner
-            .by_height
-            .insert((self.inner.best_block_height, id));
-
-        // Re-set the validation status of the transaction that was extracted earlier.
-        if let Some((block_number_validated_against, result)) = revalidation {
-            self.inner
-                .set_validation_result(id, block_number_validated_against, result);
-        }
-    }
-
-    /// Finishes the block insertion process.
-    pub fn finish(self) -> Pool<TTx> {
-        self.inner
-    }
-
-    /// Aborts the block insertion process and reverts all the changes that were made.
-    ///
-    /// > **Note**: Not everything is reverted to the exact state where it was before. Some
-    /// >           transactions might have to be revalidated.
-    pub fn revert_block_insertion(mut self) -> Pool<TTx> {
-        let _ = self.inner.retract_blocks(1);
-        self.inner
-    }
-}
-
-impl<TTx: fmt::Debug> fmt::Debug for AppendBlock<TTx> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Debug::fmt(&self.inner, f)
     }
 }
 
