@@ -1321,8 +1321,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     ProcessOne::AllSync(self)
                 }
                 all_forks::ProcessOne::HeaderVerify(verify) => {
-                    ProcessOne::VerifyHeader(HeaderVerify {
-                        inner: HeaderVerifyInner::AllForks(verify),
+                    ProcessOne::VerifyHeader(BlockVerify {
+                        inner: BlockVerifyInner::AllForks(verify),
                         shared: self.shared,
                     })
                 }
@@ -1339,8 +1339,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     ProcessOne::AllSync(self)
                 }
                 optimistic::ProcessOne::VerifyBlock(inner) => {
-                    ProcessOne::VerifyHeader(HeaderVerify {
-                        inner: HeaderVerifyInner::Optimistic(inner),
+                    ProcessOne::VerifyHeader(BlockVerify {
+                        inner: BlockVerifyInner::Optimistic(inner),
                         shared: self.shared,
                     })
                 }
@@ -2302,7 +2302,7 @@ pub enum ProcessOne<TRq, TSrc, TBl> {
     },
 
     /// Ready to start verifying a header.
-    VerifyHeader(HeaderVerify<TRq, TSrc, TBl>),
+    VerifyHeader(BlockVerify<TRq, TSrc, TBl>),
 
     /// Ready to start verifying a proof of finality.
     VerifyFinalityProof(FinalityProofVerify<TRq, TSrc, TBl>),
@@ -2369,34 +2369,34 @@ pub struct BlockFull {
     pub body: Vec<Vec<u8>>,
 }
 
-pub struct HeaderVerify<TRq, TSrc, TBl> {
-    inner: HeaderVerifyInner<TRq, TSrc, TBl>,
+pub struct BlockVerify<TRq, TSrc, TBl> {
+    inner: BlockVerifyInner<TRq, TSrc, TBl>,
     shared: Shared<TRq>,
 }
 
-enum HeaderVerifyInner<TRq, TSrc, TBl> {
+enum BlockVerifyInner<TRq, TSrc, TBl> {
     AllForks(
-        all_forks::HeaderVerify<Option<TBl>, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>,
+        all_forks::BlockVerify<Option<TBl>, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>,
     ),
     Optimistic(
         optimistic::BlockVerify<OptimisticRequestExtra<TRq>, OptimisticSourceExtra<TSrc>, TBl>,
     ),
 }
 
-impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
+impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
     /// Returns the height of the block to be verified.
     pub fn height(&self) -> u64 {
         match &self.inner {
-            HeaderVerifyInner::AllForks(verify) => verify.height(),
-            HeaderVerifyInner::Optimistic(verify) => verify.height(),
+            BlockVerifyInner::AllForks(verify) => verify.height(),
+            BlockVerifyInner::Optimistic(verify) => verify.height(),
         }
     }
 
     /// Returns the hash of the block to be verified.
     pub fn hash(&self) -> [u8; 32] {
         match &self.inner {
-            HeaderVerifyInner::AllForks(verify) => *verify.hash(),
-            HeaderVerifyInner::Optimistic(verify) => verify.hash(),
+            BlockVerifyInner::AllForks(verify) => *verify.hash(),
+            BlockVerifyInner::Optimistic(verify) => verify.hash(),
         }
     }
 
@@ -2407,16 +2407,16 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
         &'_ self,
     ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + '_> + '_> {
         match &self.inner {
-            HeaderVerifyInner::AllForks(verify) => todo!(), // TODO: /!\
-            HeaderVerifyInner::Optimistic(verify) => verify.scale_encoded_extrinsics(),
+            BlockVerifyInner::AllForks(verify) => todo!(), // TODO: /!\
+            BlockVerifyInner::Optimistic(verify) => verify.scale_encoded_extrinsics(),
         }
     }
 
     /// Returns the hash of the parent of the block to be verified.
     pub fn parent_hash(&self) -> [u8; 32] {
         match &self.inner {
-            HeaderVerifyInner::AllForks(verify) => *verify.parent_hash(),
-            HeaderVerifyInner::Optimistic(verify) => verify.parent_hash(),
+            BlockVerifyInner::AllForks(verify) => *verify.parent_hash(),
+            BlockVerifyInner::Optimistic(verify) => verify.parent_hash(),
         }
     }
 
@@ -2424,27 +2424,30 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
     /// is the finalized block.
     pub fn parent_user_data(&self) -> Option<&TBl> {
         match &self.inner {
-            HeaderVerifyInner::AllForks(verify) => todo!(), // TODO: /!\
-            HeaderVerifyInner::Optimistic(verify) => verify.parent_user_data(),
+            BlockVerifyInner::AllForks(verify) => todo!(), // TODO: /!\
+            BlockVerifyInner::Optimistic(verify) => verify.parent_user_data(),
         }
     }
 
     /// Returns the SCALE-encoded header of the block about to be verified.
     pub fn scale_encoded_header(&self) -> Vec<u8> {
         match &self.inner {
-            HeaderVerifyInner::AllForks(verify) => verify.scale_encoded_header(),
-            HeaderVerifyInner::Optimistic(verify) => verify.scale_encoded_header().to_vec(),
+            BlockVerifyInner::AllForks(verify) => verify.scale_encoded_header(),
+            BlockVerifyInner::Optimistic(verify) => verify.scale_encoded_header().to_vec(),
         }
     }
 
-    /// Perform the verification.
-    pub fn perform(self, now_from_unix_epoch: Duration) -> HeaderVerifyOutcome<TRq, TSrc, TBl> {
+    /// Verify the header of the block.
+    pub fn verify_header(
+        self,
+        now_from_unix_epoch: Duration,
+    ) -> HeaderVerifyOutcome<TRq, TSrc, TBl> {
         match self.inner {
-            HeaderVerifyInner::AllForks(verify) => {
+            BlockVerifyInner::AllForks(verify) => {
                 let verified_block_height = verify.height();
                 let verified_block_hash = *verify.hash();
 
-                match verify.perform(now_from_unix_epoch) {
+                match verify.verify_header(now_from_unix_epoch) {
                     all_forks::HeaderVerifyOutcome::Success {
                         is_new_best,
                         success,
@@ -2478,11 +2481,11 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                     }
                 }
             }
-            HeaderVerifyInner::Optimistic(verify) => {
+            BlockVerifyInner::Optimistic(verify) => {
                 let verified_block_height = verify.height();
                 let verified_block_hash = verify.hash();
 
-                match verify.start(now_from_unix_epoch) {
+                match verify.verify_header(now_from_unix_epoch) {
                     optimistic::BlockVerification::NewBest { success, .. } => {
                         HeaderVerifyOutcome::Success {
                             is_new_best: true,
@@ -2555,7 +2558,7 @@ enum HeaderVerifySuccessInner<TRq, TSrc, TBl> {
         >,
     ),
     Optimistic(
-        optimistic::HeaderVerifySuccess<
+        optimistic::BlockVerifySuccess<
             OptimisticRequestExtra<TRq>,
             OptimisticSourceExtra<TSrc>,
             TBl,

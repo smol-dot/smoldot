@@ -1213,7 +1213,7 @@ impl SyncBackground {
 
                 let _jaeger_span = self.jaeger_service.block_body_verify_span(&hash_to_verify);
 
-                let (is_new_best, header_verification_success) = match verify.perform(unix_time) {
+                let (is_new_best, header_verification_success) = match verify.verify_header(unix_time) {
                     all::HeaderVerifyOutcome::Success {
                         is_new_best,
                         success,

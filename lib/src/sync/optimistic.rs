@@ -818,11 +818,14 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
         }
     }
 
-    /// Start the verification of the block.
+    /// Verify the header of the block.
     ///
     /// Must be passed the current UNIX time in order to verify that the block doesn't pretend to
     /// come from the future.
-    pub fn start(mut self, now_from_unix_epoch: Duration) -> BlockVerification<TRq, TSrc, TBl> {
+    pub fn verify_header(
+        mut self,
+        now_from_unix_epoch: Duration,
+    ) -> BlockVerification<TRq, TSrc, TBl> {
         // Extract the block to process. We are guaranteed that a block is available because a
         // `Verify` is built only when that is the case.
         // Be aware that `source_id` might refer to an obsolete source.
@@ -865,7 +868,7 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                 let new_best_number = self.chain.best_block_header().number;
 
                 BlockVerification::NewBest {
-                    success: HeaderVerifySuccess {
+                    success: BlockVerifySuccess {
                         parent: OptimisticSync {
                             inner: self.inner,
                             chain: self.chain,
@@ -930,23 +933,23 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
         /// The state machine.
         /// The [`OptimisticSync::process_one`] method takes ownership of the
         /// [`OptimisticSync`]. This field yields it back.
-        success: HeaderVerifySuccess<TRq, TSrc, TBl>,
+        success: BlockVerifySuccess<TRq, TSrc, TBl>,
 
         new_best_number: u64,
         new_best_hash: [u8; 32],
     },
 }
 
-/// Header verification successful.
+/// Block verification successful.
 ///
-/// Internally holds the [`AllForksSync`].
-pub struct HeaderVerifySuccess<TRq, TSrc, TBl> {
+/// Internally holds the [`OptimisticSync`].
+pub struct BlockVerifySuccess<TRq, TSrc, TBl> {
     parent: OptimisticSync<TRq, TSrc, TBl>,
     verified_header: blocks_tree::VerifiedHeader,
     scale_encoded_justifications: Vec<([u8; 4], Vec<u8>)>,
 }
 
-impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
+impl<TRq, TSrc, TBl> BlockVerifySuccess<TRq, TSrc, TBl> {
     /// Returns the SCALE-encoded header of the parent of the block.
     pub fn parent_scale_encoded_header(&self) -> Vec<u8> {
         // TODO: return &[u8]

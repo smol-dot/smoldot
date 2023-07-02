@@ -703,7 +703,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 // Header to verify.
                 let verified_hash = verify.hash();
                 let verified_height = verify.height();
-                match verify.perform(self.platform.now_from_unix_epoch()) {
+                match verify.verify_header(self.platform.now_from_unix_epoch()) {
                     all::HeaderVerifyOutcome::Success {
                         success,
                         is_new_best,

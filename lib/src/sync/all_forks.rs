@@ -1049,7 +1049,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         });
 
         if let Some(block) = block {
-            ProcessOne::HeaderVerify(HeaderVerify {
+            ProcessOne::HeaderVerify(BlockVerify {
                 parent: self,
                 block_to_verify: block,
             })
@@ -1935,16 +1935,16 @@ impl<'a, TBl, TRq, TSrc> AddSourceUnknown<'a, TBl, TRq, TSrc> {
     }
 }
 
-/// Header verification to be performed.
+/// Block verification to be performed.
 ///
 /// Internally holds the [`AllForksSync`].
-pub struct HeaderVerify<TBl, TRq, TSrc> {
+pub struct BlockVerify<TBl, TRq, TSrc> {
     parent: AllForksSync<TBl, TRq, TSrc>,
     /// Block that can be verified.
     block_to_verify: pending_blocks::TreeRoot,
 }
 
-impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
+impl<TBl, TRq, TSrc> BlockVerify<TBl, TRq, TSrc> {
     /// Returns the height of the block to be verified.
     pub fn height(&self) -> u64 {
         self.block_to_verify.block_number
@@ -1976,7 +1976,10 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
     }
 
     /// Perform the verification.
-    pub fn perform(mut self, now_from_unix_epoch: Duration) -> HeaderVerifyOutcome<TBl, TRq, TSrc> {
+    pub fn verify_header(
+        mut self,
+        now_from_unix_epoch: Duration,
+    ) -> HeaderVerifyOutcome<TBl, TRq, TSrc> {
         let to_verify_scale_encoded_header = self.scale_encoded_header();
 
         let result = match self
@@ -2242,7 +2245,7 @@ pub enum ProcessOne<TBl, TRq, TSrc> {
     },
 
     /// A header is ready for verification.
-    HeaderVerify(HeaderVerify<TBl, TRq, TSrc>),
+    HeaderVerify(BlockVerify<TBl, TRq, TSrc>),
 
     /// A justification is ready for verification.
     FinalityProofVerify(FinalityProofVerify<TBl, TRq, TSrc>),
