@@ -872,23 +872,32 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                 .chain
                 .verify_header(block.scale_encoded_header, now_from_unix_epoch)
             {
-                Ok(blocks_tree::HeaderVerifySuccess::Insert {
-                    insert,
+                Ok(blocks_tree::HeaderVerifySuccess::Verified {
+                    verified_header,
                     is_new_best: true,
                     ..
                 }) => {
-                    let header = insert.header().into();
-                    insert.insert(Block {
-                        header,
-                        justifications: block.scale_encoded_justifications.clone(),
-                        user_data: block.user_data,
-                        full: None,
-                    });
+                    // TODO: don't copy the header
+                    let header = header::decode(
+                        verified_header.scale_encoded_header(),
+                        self.chain.block_number_bytes(),
+                    )
+                    .unwrap()
+                    .into();
+                    self.chain.insert_verified_header(
+                        verified_header,
+                        Block {
+                            header,
+                            justifications: block.scale_encoded_justifications.clone(),
+                            user_data: block.user_data,
+                            full: None,
+                        },
+                    );
                     None
                 }
                 Ok(
                     blocks_tree::HeaderVerifySuccess::Duplicate
-                    | blocks_tree::HeaderVerifySuccess::Insert {
+                    | blocks_tree::HeaderVerifySuccess::Verified {
                         is_new_best: false, ..
                     },
                 ) => Some(ResetCause::NonCanonical),

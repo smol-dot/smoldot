@@ -1975,10 +1975,9 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
             .chain
             .verify_header(to_verify_scale_encoded_header, now_from_unix_epoch)
         {
-            Ok(blocks_tree::HeaderVerifySuccess::Insert {
-                insert,
+            Ok(blocks_tree::HeaderVerifySuccess::Verified {
+                verified_header,
                 is_new_best,
-                ..
             }) => {
                 // Block is valid!
 
@@ -1991,10 +1990,17 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
                 // Now insert the block in `chain`.
                 // TODO: cloning the header :-/
                 let block = Block {
-                    header: insert.header().into(),
+                    header: header::decode(
+                        verified_header.scale_encoded_header(),
+                        self.parent.chain.block_number_bytes(),
+                    )
+                    .unwrap()
+                    .into(),
                     user_data: pending_block.user_data,
                 };
-                insert.insert(block);
+                self.parent
+                    .chain
+                    .insert_verified_header(verified_header, block);
 
                 // Because a new block is now in the chain, all the previously-unverifiable
                 // finality proofs might have now become verifiable.
