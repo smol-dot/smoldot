@@ -868,7 +868,7 @@ impl<TTx: fmt::Debug> fmt::Debug for Pool<TTx> {
     }
 }
 
-/// See [`AppendBlock::best_block_add_transaction_by_scale_encoding`].
+/// See [`Pool::best_block_add_transaction_by_scale_encoding`].
 #[derive(Debug)]
 pub enum AppendBlockTransaction<'a, 'b, TTx> {
     /// Transaction to add isn't in the list of non-included transactions. It can be added to the
