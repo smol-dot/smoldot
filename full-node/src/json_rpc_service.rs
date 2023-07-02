@@ -176,60 +176,8 @@ impl JsonRpcBackground {
             ).await
                 else { return };
 
-            match accept_result {
-                Ok((tcp_socket, address)) => {
-                    // New incoming TCP connection.
-
-                    // Try to increase `num_json_rpc_clients`. Fails if the maximum is reached.
-                    if self
-                        .num_json_rpc_clients
-                        .fetch_update(Ordering::SeqCst, Ordering::Relaxed, |old_value| {
-                            if old_value < self.max_json_rpc_clients {
-                                // Considering that `old_value < max`, and `max` fits in a `u32` by
-                                // definition, then `old_value + 1` also always fits in a `u32`. QED.
-                                // There's no risk of overflow.
-                                Some(old_value + 1)
-                            } else {
-                                None
-                            }
-                        })
-                        .is_err()
-                    {
-                        // Reject the socket without sending back anything. Sending back a status
-                        // code would require allocating resources for that socket, which we
-                        // specifically don't want to do.
-                        self.log_callback.log(
-                            LogLevel::Debug,
-                            format!("json-rpc-incoming-connection-rejected; address={}", address),
-                        );
-                        smol::Timer::after(Duration::from_millis(50)).await;
-                        continue;
-                    }
-
-                    // Spawn two tasks: one for the socket I/O, and one to process requests.
-                    self.log_callback.log(
-                        LogLevel::Debug,
-                        format!("json-rpc-incoming-connection; address={}", address),
-                    );
-                    let (client_main_task, io) = service::client_main_task(service::Config {
-                        max_active_subscriptions: 128,
-                        max_pending_requests: NonZeroU32::new(64).unwrap(),
-                        serialized_requests_io_channel_size_hint: NonZeroUsize::new(8).unwrap(),
-                    });
-                    spawn_client_io_task(
-                        &self.tasks_executor,
-                        self.log_callback.clone(),
-                        tcp_socket,
-                        address,
-                        io,
-                        self.num_json_rpc_clients.clone(),
-                    );
-                    spawn_client_main_task(
-                        &self.tasks_executor,
-                        self.to_requests_handlers.clone(),
-                        client_main_task,
-                    );
-                }
+            let (tcp_socket, address) = match accept_result {
+                Ok(v) => v,
                 Err(error) => {
                     // Failing to accept an incoming TCP connection generally happens due to
                     // the limit of file descriptors being reached.
@@ -239,8 +187,61 @@ impl JsonRpcBackground {
                         format!("json-rpc-tcp-listener-error; error={error}"),
                     );
                     smol::Timer::after(Duration::from_millis(50)).await;
+                    continue;
                 }
             };
+
+            // New incoming TCP connection.
+
+            // Try to increase `num_json_rpc_clients`. Fails if the maximum is reached.
+            if self
+                .num_json_rpc_clients
+                .fetch_update(Ordering::SeqCst, Ordering::Relaxed, |old_value| {
+                    if old_value < self.max_json_rpc_clients {
+                        // Considering that `old_value < max`, and `max` fits in a `u32` by
+                        // definition, then `old_value + 1` also always fits in a `u32`. QED.
+                        // There's no risk of overflow.
+                        Some(old_value + 1)
+                    } else {
+                        None
+                    }
+                })
+                .is_err()
+            {
+                // Reject the socket without sending back anything. Sending back a status
+                // code would require allocating resources for that socket, which we
+                // specifically don't want to do.
+                self.log_callback.log(
+                    LogLevel::Debug,
+                    format!("json-rpc-incoming-connection-rejected; address={}", address),
+                );
+                smol::Timer::after(Duration::from_millis(50)).await;
+                continue;
+            }
+
+            // Spawn two tasks: one for the socket I/O, and one to process requests.
+            self.log_callback.log(
+                LogLevel::Debug,
+                format!("json-rpc-incoming-connection; address={}", address),
+            );
+            let (client_main_task, io) = service::client_main_task(service::Config {
+                max_active_subscriptions: 128,
+                max_pending_requests: NonZeroU32::new(64).unwrap(),
+                serialized_requests_io_channel_size_hint: NonZeroUsize::new(8).unwrap(),
+            });
+            spawn_client_io_task(
+                &self.tasks_executor,
+                self.log_callback.clone(),
+                tcp_socket,
+                address,
+                io,
+                self.num_json_rpc_clients.clone(),
+            );
+            spawn_client_main_task(
+                &self.tasks_executor,
+                self.to_requests_handlers.clone(),
+                client_main_task,
+            );
         }
     }
 }
