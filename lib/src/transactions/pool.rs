@@ -86,7 +86,7 @@ use alloc::{
     collections::{btree_set, BTreeSet},
     vec::Vec,
 };
-use core::{fmt, iter, mem};
+use core::{fmt, iter, mem, ops};
 use hashbrown::HashSet;
 
 /// Identifier of a transaction stored within the [`Pool`].
@@ -341,20 +341,6 @@ impl<TTx> Pool<TTx> {
             .map(|(id, tx)| (TransactionId(id), &mut tx.user_data))
     }
 
-    /// Returns the user data associated with a given transaction.
-    ///
-    /// Returns `None` if the identifier is invalid.
-    pub fn user_data(&self, id: TransactionId) -> Option<&TTx> {
-        Some(&self.transactions.get(id.0)?.user_data)
-    }
-
-    /// Returns the user data associated with a given transaction.
-    ///
-    /// Returns `None` if the identifier is invalid.
-    pub fn user_data_mut(&mut self, id: TransactionId) -> Option<&mut TTx> {
-        Some(&mut self.transactions.get_mut(id.0)?.user_data)
-    }
-
     /// Returns the block height at which the given transaction has been included.
     ///
     /// A transaction has been included if it has been added to the pool with
@@ -518,6 +504,20 @@ impl<TTx> Pool<TTx> {
         }
 
         tx.validation = Some((block_number_validated_against, result));
+    }
+}
+
+impl<TTx> ops::Index<TransactionId> for Pool<TTx> {
+    type Output = TTx;
+
+    fn index(&self, index: TransactionId) -> &Self::Output {
+        &self.transactions[index.0].user_data
+    }
+}
+
+impl<TTx> ops::IndexMut<TransactionId> for Pool<TTx> {
+    fn index_mut(&mut self, index: TransactionId) -> &mut Self::Output {
+        &mut self.transactions[index.0].user_data
     }
 }
 
