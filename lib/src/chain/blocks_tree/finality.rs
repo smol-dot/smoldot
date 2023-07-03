@@ -375,6 +375,7 @@ impl<T> NonFinalizedTree<T> {
 
         // If the best block isn't a descendant of the block being finalized, then the best
         // block will change to a different block.
+        // TODO: this is `O(n)`, does the user really need to know ahead of time whether the best block is updated?
         let updates_best_block = {
             let current_best: Option<fork_tree::NodeIndex> = self
                 .blocks_by_best_score
