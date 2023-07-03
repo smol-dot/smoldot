@@ -193,8 +193,11 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         self: &Arc<Self>,
         request: service::RequestProcess,
     ) {
-        let methods::MethodCall::chainHead_unstable_finalizedDatabase { max_size_bytes } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::chainHead_unstable_finalizedDatabase { max_size_bytes } =
+            request.request()
+        else {
+            unreachable!()
+        };
 
         let response = crate::database::encode_database(
             &self.network_service.0,

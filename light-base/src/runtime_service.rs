@@ -107,9 +107,6 @@ pub struct PinnedRuntimeId(Arc<Runtime>);
 
 /// See [the module-level documentation](..).
 pub struct RuntimeService<TPlat: PlatformRef> {
-    /// See [`Config::platform`].
-    platform: TPlat,
-
     /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService<TPlat>>,
 
@@ -177,7 +174,6 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         });
 
         RuntimeService {
-            platform: config.platform,
             sync_service: config.sync_service,
             guarded,
             background_task_abort,
@@ -531,12 +527,8 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             existing_runtime
         } else {
             // No identical runtime was found. Try compiling the new runtime.
-            let runtime = SuccessfulRuntime::from_storage::<TPlat>(
-                &self.platform,
-                &storage_code,
-                &storage_heap_pages,
-            )
-            .await;
+            let runtime =
+                SuccessfulRuntime::from_storage::<TPlat>(&storage_code, &storage_heap_pages).await;
             let runtime = Arc::new(Runtime {
                 heap_pages: storage_heap_pages,
                 runtime_code: storage_code,
@@ -1616,12 +1608,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let runtime = if let Some(existing_runtime) = existing_runtime {
             existing_runtime
         } else {
-            let runtime = SuccessfulRuntime::from_storage::<TPlat>(
-                &self.platform,
-                &storage_code,
-                &storage_heap_pages,
-            )
-            .await;
+            let runtime =
+                SuccessfulRuntime::from_storage::<TPlat>(&storage_code, &storage_heap_pages).await;
             match &runtime {
                 Ok(runtime) => {
                     log::info!(
@@ -2124,12 +2112,11 @@ struct SuccessfulRuntime {
 
 impl SuccessfulRuntime {
     async fn from_storage<TPlat: PlatformRef>(
-        platform: &TPlat,
         code: &Option<Vec<u8>>,
         heap_pages: &Option<Vec<u8>>,
     ) -> Result<Self, RuntimeError> {
         // Since compiling the runtime is a CPU-intensive operation, we yield once before.
-        platform.yield_after_cpu_intensive().await;
+        futures_lite::future::yield_now().await;
 
         // Parameters for `HostVmPrototype::new`.
         let module = code.as_ref().ok_or(RuntimeError::CodeNotFound)?;

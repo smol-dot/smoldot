@@ -808,8 +808,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
     /// Handles a call to [`methods::MethodCall::sudo_unstable_p2pDiscover`].
     async fn sudo_unstable_p2p_discover(self: &Arc<Self>, request: service::RequestProcess) {
-        let methods::MethodCall::sudo_unstable_p2pDiscover { multiaddr } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::sudo_unstable_p2pDiscover { multiaddr } = request.request() else {
+            unreachable!()
+        };
 
         match multiaddr.parse::<multiaddr::Multiaddr>() {
             Ok(mut addr) if matches!(addr.iter().last(), Some(multiaddr::ProtocolRef::P2p(_))) => {

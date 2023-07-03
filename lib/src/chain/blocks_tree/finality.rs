@@ -20,10 +20,7 @@
 use super::*;
 use crate::finality::{grandpa, justification};
 
-use core::{
-    cmp::{self, Ordering},
-    iter,
-};
+use core::{cmp, iter};
 
 impl<T> NonFinalizedTree<T> {
     /// Returns a list of blocks (by their height and hash) that need to be finalized before any
@@ -34,15 +31,14 @@ impl<T> NonFinalizedTree<T> {
     /// [`NonFinalizedTree::verify_grandpa_commit_message`], unless they descend from any of the
     /// blocks returned by this function, in which case that block must be finalized beforehand.
     pub fn finality_checkpoints(&self) -> impl Iterator<Item = (u64, &[u8; 32])> {
-        let inner = self.inner.as_ref().unwrap();
-        match &inner.finality {
+        match &self.finality {
             Finality::Outsourced => {
                 // No checkpoint means all blocks allowed.
                 either::Left(iter::empty())
             }
             Finality::Grandpa { .. } => {
                 // TODO: O(n), could add a cache to make it O(1)
-                let iter = inner
+                let iter = self
                     .blocks
                     .iter_unordered()
                     .filter(move |(_, block)| {
@@ -57,7 +53,7 @@ impl<T> NonFinalizedTree<T> {
                     })
                     .map(|(_, block)| {
                         (
-                            header::decode(&block.header, inner.block_number_bytes)
+                            header::decode(&block.header, self.block_number_bytes)
                                 .unwrap()
                                 .number,
                             &block.hash,
@@ -86,11 +82,37 @@ impl<T> NonFinalizedTree<T> {
         scale_encoded_justification: &[u8],
         randomness_seed: [u8; 32],
     ) -> Result<FinalityApply<T>, JustificationVerifyError> {
-        self.inner.as_mut().unwrap().verify_justification(
-            consensus_engine_id,
-            scale_encoded_justification,
-            randomness_seed,
-        )
+        match (&self.finality, &consensus_engine_id) {
+            (Finality::Grandpa { .. }, b"FRNK") => {
+                // Turn justification into a strongly-typed struct.
+                let decoded = justification::decode::decode_grandpa(
+                    scale_encoded_justification,
+                    self.block_number_bytes,
+                )
+                .map_err(JustificationVerifyError::InvalidJustification)?;
+
+                // Delegate the first step to the other function.
+                let (block_index, authorities_set_id, authorities_list) = self
+                    .verify_grandpa_finality_inner(decoded.target_hash, decoded.target_number)
+                    .map_err(JustificationVerifyError::FinalityVerify)?;
+
+                justification::verify::verify(justification::verify::Config {
+                    justification: decoded,
+                    block_number_bytes: self.block_number_bytes,
+                    authorities_set_id,
+                    authorities_list,
+                    randomness_seed,
+                })
+                .map_err(JustificationVerifyError::VerificationFailed)?;
+
+                // Justification has been successfully verified!
+                Ok(FinalityApply {
+                    chain: self,
+                    to_finalize: block_index,
+                })
+            }
+            _ => Err(JustificationVerifyError::JustificationEngineMismatch),
+        }
     }
 
     /// Verifies the given Grandpa commit message.
@@ -109,10 +131,69 @@ impl<T> NonFinalizedTree<T> {
         scale_encoded_commit: &[u8],
         randomness_seed: [u8; 32],
     ) -> Result<FinalityApply<T>, CommitVerifyError> {
-        self.inner
-            .as_mut()
-            .unwrap()
-            .verify_grandpa_commit_message(scale_encoded_commit, randomness_seed)
+        // The code below would panic if the chain doesn't use Grandpa.
+        if !matches!(self.finality, Finality::Grandpa { .. }) {
+            return Err(CommitVerifyError::NotGrandpa);
+        }
+
+        let decoded_commit = grandpa::commit::decode::decode_grandpa_commit(
+            scale_encoded_commit,
+            self.block_number_bytes,
+        )
+        .map_err(|_| CommitVerifyError::InvalidCommit)?;
+
+        // Delegate the first step to the other function.
+        let (block_index, expected_authorities_set_id, authorities_list) = self
+            .verify_grandpa_finality_inner(
+                decoded_commit.message.target_hash,
+                decoded_commit.message.target_number,
+            )
+            .map_err(CommitVerifyError::FinalityVerify)?;
+
+        let mut verification = grandpa::commit::verify::verify(grandpa::commit::verify::Config {
+            commit: scale_encoded_commit,
+            block_number_bytes: self.block_number_bytes,
+            expected_authorities_set_id,
+            num_authorities: u32::try_from(authorities_list.clone().count()).unwrap(),
+            randomness_seed,
+        });
+
+        loop {
+            match verification {
+                grandpa::commit::verify::InProgress::Finished(Ok(())) => {
+                    drop(authorities_list);
+                    return Ok(FinalityApply {
+                        chain: self,
+                        to_finalize: block_index,
+                    });
+                }
+                grandpa::commit::verify::InProgress::FinishedUnknown => {
+                    return Err(CommitVerifyError::NotEnoughKnownBlocks {
+                        target_block_number: decoded_commit.message.target_number,
+                    })
+                }
+                grandpa::commit::verify::InProgress::Finished(Err(error)) => {
+                    return Err(CommitVerifyError::VerificationFailed(error))
+                }
+                grandpa::commit::verify::InProgress::IsAuthority(is_authority) => {
+                    let to_find = is_authority.authority_public_key();
+                    let result = authorities_list.clone().any(|a| a.as_ref() == to_find);
+                    verification = is_authority.resume(result);
+                }
+                grandpa::commit::verify::InProgress::IsParent(is_parent) => {
+                    // Find in the list of non-finalized blocks the target of the check.
+                    match self.blocks_by_hash.get(is_parent.block_hash()) {
+                        Some(idx) => {
+                            let result = self.blocks.is_ancestor(block_index, *idx);
+                            verification = is_parent.resume(Some(result));
+                        }
+                        None => {
+                            verification = is_parent.resume(None);
+                        }
+                    };
+                }
+            }
+        }
     }
 
     /// Sets the latest known finalized block. Trying to verify a block that isn't a descendant of
@@ -138,18 +219,14 @@ impl<T> NonFinalizedTree<T> {
         &mut self,
         block_hash: &[u8; 32],
     ) -> Result<SetFinalizedBlockIter<T>, SetFinalizedError> {
-        let inner = self.inner.as_mut().unwrap();
-
-        let block_index = match inner.blocks_by_hash.get(block_hash) {
+        let block_index = match self.blocks_by_hash.get(block_hash) {
             Some(idx) => *idx,
             None => return Err(SetFinalizedError::UnknownBlock),
         };
 
-        Ok(inner.set_finalized_block(block_index))
+        Ok(self.set_finalized_block_inner(block_index))
     }
-}
 
-impl<T> NonFinalizedTreeInner<T> {
     /// Common function for verifying GrandPa-finality-related messages.
     ///
     /// Returns the index of the possibly finalized block, the expected authorities set id, and
@@ -159,7 +236,7 @@ impl<T> NonFinalizedTreeInner<T> {
     ///
     /// Panics if the finality algorithm of the chain isn't Grandpa.
     ///
-    fn verify_grandpa_finality(
+    fn verify_grandpa_finality_inner(
         &'_ self,
         target_hash: &[u8; 32],
         target_number: u64,
@@ -246,124 +323,13 @@ impl<T> NonFinalizedTreeInner<T> {
         }
     }
 
-    /// See [`NonFinalizedTree::verify_justification`].
-    fn verify_justification(
-        &mut self,
-        consensus_engine_id: [u8; 4],
-        scale_encoded_justification: &[u8],
-        randomness_seed: [u8; 32],
-    ) -> Result<FinalityApply<T>, JustificationVerifyError> {
-        match (&self.finality, &consensus_engine_id) {
-            (Finality::Grandpa { .. }, b"FRNK") => {
-                // Turn justification into a strongly-typed struct.
-                let decoded = justification::decode::decode_grandpa(
-                    scale_encoded_justification,
-                    self.block_number_bytes,
-                )
-                .map_err(JustificationVerifyError::InvalidJustification)?;
-
-                // Delegate the first step to the other function.
-                let (block_index, authorities_set_id, authorities_list) = self
-                    .verify_grandpa_finality(decoded.target_hash, decoded.target_number)
-                    .map_err(JustificationVerifyError::FinalityVerify)?;
-
-                justification::verify::verify(justification::verify::Config {
-                    justification: decoded,
-                    block_number_bytes: self.block_number_bytes,
-                    authorities_set_id,
-                    authorities_list,
-                    randomness_seed,
-                })
-                .map_err(JustificationVerifyError::VerificationFailed)?;
-
-                // Justification has been successfully verified!
-                Ok(FinalityApply {
-                    chain: self,
-                    to_finalize: block_index,
-                })
-            }
-            _ => Err(JustificationVerifyError::JustificationEngineMismatch),
-        }
-    }
-
-    /// See [`NonFinalizedTree::verify_grandpa_commit_message`].
-    fn verify_grandpa_commit_message(
-        &mut self,
-        verify_grandpa_commit_message: &[u8],
-        randomness_seed: [u8; 32],
-    ) -> Result<FinalityApply<T>, CommitVerifyError> {
-        // The code below would panic if the chain doesn't use Grandpa.
-        if !matches!(self.finality, Finality::Grandpa { .. }) {
-            return Err(CommitVerifyError::NotGrandpa);
-        }
-
-        let decoded_commit = grandpa::commit::decode::decode_grandpa_commit(
-            verify_grandpa_commit_message,
-            self.block_number_bytes,
-        )
-        .map_err(|_| CommitVerifyError::InvalidCommit)?;
-
-        // Delegate the first step to the other function.
-        let (block_index, expected_authorities_set_id, authorities_list) = self
-            .verify_grandpa_finality(
-                decoded_commit.message.target_hash,
-                decoded_commit.message.target_number,
-            )
-            .map_err(CommitVerifyError::FinalityVerify)?;
-
-        let mut verification = grandpa::commit::verify::verify(grandpa::commit::verify::Config {
-            commit: verify_grandpa_commit_message,
-            block_number_bytes: self.block_number_bytes,
-            expected_authorities_set_id,
-            num_authorities: u32::try_from(authorities_list.clone().count()).unwrap(),
-            randomness_seed,
-        });
-
-        loop {
-            match verification {
-                grandpa::commit::verify::InProgress::Finished(Ok(())) => {
-                    drop(authorities_list);
-                    return Ok(FinalityApply {
-                        chain: self,
-                        to_finalize: block_index,
-                    });
-                }
-                grandpa::commit::verify::InProgress::FinishedUnknown => {
-                    return Err(CommitVerifyError::NotEnoughKnownBlocks {
-                        target_block_number: decoded_commit.message.target_number,
-                    })
-                }
-                grandpa::commit::verify::InProgress::Finished(Err(error)) => {
-                    return Err(CommitVerifyError::VerificationFailed(error))
-                }
-                grandpa::commit::verify::InProgress::IsAuthority(is_authority) => {
-                    let to_find = is_authority.authority_public_key();
-                    let result = authorities_list.clone().any(|a| a.as_ref() == to_find);
-                    verification = is_authority.resume(result);
-                }
-                grandpa::commit::verify::InProgress::IsParent(is_parent) => {
-                    // Find in the list of non-finalized blocks the target of the check.
-                    match self.blocks_by_hash.get(is_parent.block_hash()) {
-                        Some(idx) => {
-                            let result = self.blocks.is_ancestor(block_index, *idx);
-                            verification = is_parent.resume(Some(result));
-                        }
-                        None => {
-                            verification = is_parent.resume(None);
-                        }
-                    };
-                }
-            }
-        }
-    }
-
     /// Implementation of [`NonFinalizedTree::set_finalized_block`].
     ///
     /// # Panic
     ///
     /// Panics if `block_index_to_finalize` isn't a valid node in the tree.
     ///
-    fn set_finalized_block(
+    fn set_finalized_block_inner(
         &mut self,
         block_index_to_finalize: fork_tree::NodeIndex,
     ) -> SetFinalizedBlockIter<T> {
@@ -408,58 +374,19 @@ impl<T> NonFinalizedTreeInner<T> {
         }
 
         // If the best block isn't a descendant of the block being finalized, then the best
-        // block has to change to a different block.
-        //
-        // The definition of which block is the best can vary between nodes, but because there is
-        // an intentional delay between a block being created and it being finalized, the block
-        // being finalized is, under normal circumstances, always a common ancestor of the current
-        // best block of all nodes.
-        //
-        // The situation where this isn't the case is therefore very uncommon: typically after a
-        // netsplit (where not all nodes are aware of all blocks), or in extremely unlucky
-        // situations.
-        //
-        // Because this is very uncommon, searching for the new best block is implemented in a
-        // naive way, by scanning through each block one by one. This means that, when two blocks
-        // are equal to become the new best, it is not necessarily the earliest received block that
-        // is picked, contrary to the definition of "best block". But again, considering that this
-        // situation is so uncommon, it doesn't really matter.
-        debug_assert!(self.current_best.is_some()); // Can only be `None` if the tree is empty.
-        let updates_best_block = if block_index_to_finalize == self.current_best.unwrap()
-            || !self
-                .blocks
-                .is_ancestor(block_index_to_finalize, self.current_best.unwrap())
-        {
-            let mut new_best_block = None;
-            for (idx, block) in self.blocks.iter_unordered() {
-                if idx == block_index_to_finalize
-                    || !self.blocks.is_ancestor(block_index_to_finalize, idx)
-                {
-                    continue;
-                }
-
-                let replace = if let Some(new_best_block) = new_best_block {
-                    best_block::is_better_block(
-                        &self.blocks,
-                        self.block_number_bytes,
-                        new_best_block,
-                        self.blocks.parent(idx),
-                        header::decode(&block.header, self.block_number_bytes).unwrap(),
-                    ) == Ordering::Greater
-                } else {
-                    true
-                };
-
-                if replace {
-                    new_best_block = Some(idx);
-                }
-            }
-
-            debug_assert_ne!(self.current_best, new_best_block);
-            self.current_best = new_best_block;
-            true
-        } else {
-            false
+        // block will change to a different block.
+        // TODO: this is `O(n)`, does the user really need to know ahead of time whether the best block is updated?
+        let updates_best_block = {
+            let current_best: Option<fork_tree::NodeIndex> = self
+                .blocks_by_best_score
+                .last_key_value()
+                .map(|(_, idx)| *idx);
+            Some(block_index_to_finalize) == current_best
+                || current_best.map_or(true, |current_best| {
+                    !self
+                        .blocks
+                        .is_ancestor(block_index_to_finalize, current_best)
+                })
         };
 
         let new_finalized_block = self.blocks.get_mut(block_index_to_finalize).unwrap();
@@ -498,18 +425,22 @@ impl<T> NonFinalizedTreeInner<T> {
             _ => unreachable!(),
         }
 
-        // Update `self.finalized_block_header` and `self.finalized_block_hash`.
+        // Update `self.finalized_block_header`, `self.finalized_block_hash`, and
+        // `self.finalized_best_score`.
         mem::swap(
             &mut self.finalized_block_header,
             &mut new_finalized_block.header,
         );
         self.finalized_block_hash =
             header::hash_from_scale_encoded_header(&self.finalized_block_header);
+        self.finalized_best_score = new_finalized_block.best_score;
 
         debug_assert_eq!(self.blocks.len(), self.blocks_by_hash.len());
+        debug_assert_eq!(self.blocks.len(), self.blocks_by_best_score.len());
         SetFinalizedBlockIter {
             iter: self.blocks.prune_ancestors(block_index_to_finalize),
             blocks_by_hash: &mut self.blocks_by_hash,
+            blocks_by_best_score: &mut self.blocks_by_best_score,
             updates_best_block,
         }
     }
@@ -522,7 +453,7 @@ impl<T> NonFinalizedTreeInner<T> {
 /// isn't modified.
 #[must_use]
 pub struct FinalityApply<'c, T> {
-    chain: &'c mut NonFinalizedTreeInner<T>,
+    chain: &'c mut NonFinalizedTree<T>,
     to_finalize: fork_tree::NodeIndex,
 }
 
@@ -532,7 +463,7 @@ impl<'c, T> FinalityApply<'c, T> {
     /// This function, including its return type, behaves in the same way as
     /// [`NonFinalizedTree::set_finalized_block`].
     pub fn apply(self) -> SetFinalizedBlockIter<'c, T> {
-        self.chain.set_finalized_block(self.to_finalize)
+        self.chain.set_finalized_block_inner(self.to_finalize)
     }
 
     /// Returns the user data of the block about to be justified.
@@ -547,7 +478,12 @@ impl<'c, T> FinalityApply<'c, T> {
 
     /// Returns true if the block to be finalized is the current best block.
     pub fn is_current_best_block(&self) -> bool {
-        Some(self.to_finalize) == self.chain.current_best
+        Some(self.to_finalize)
+            == self
+                .chain
+                .blocks_by_best_score
+                .last_key_value()
+                .map(|(_, idx)| *idx)
     }
 }
 
@@ -641,6 +577,7 @@ pub enum FinalityVerifyError {
 pub struct SetFinalizedBlockIter<'a, T> {
     iter: fork_tree::PruneAncestorsIter<'a, Block<T>>,
     blocks_by_hash: &'a mut HashMap<[u8; 32], fork_tree::NodeIndex, fnv::FnvBuildHasher>,
+    blocks_by_best_score: &'a mut BTreeMap<BestScore, fork_tree::NodeIndex>,
     updates_best_block: bool,
 }
 
@@ -658,6 +595,10 @@ impl<'a, T> Iterator for SetFinalizedBlockIter<'a, T> {
         loop {
             let pruned = self.iter.next()?;
             let _removed = self.blocks_by_hash.remove(&pruned.user_data.hash);
+            debug_assert_eq!(_removed, Some(pruned.index));
+            let _removed = self
+                .blocks_by_best_score
+                .remove(&pruned.user_data.best_score);
             debug_assert_eq!(_removed, Some(pruned.index));
             if !pruned.is_prune_target_ancestor {
                 continue;
@@ -681,6 +622,6 @@ impl<'a, T> Drop for SetFinalizedBlockIter<'a, T> {
 /// Error that can happen when setting the finalized block.
 #[derive(Debug, derive_more::Display)]
 pub enum SetFinalizedError {
-    /// Block must have been passed to [`NonFinalizedTree::verify_header`] in the past.
+    /// Block must have been passed to [`NonFinalizedTree::insert_verified_header`] in the past.
     UnknownBlock,
 }

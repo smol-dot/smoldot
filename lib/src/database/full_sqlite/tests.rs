@@ -33,7 +33,9 @@ fn empty_database_fill_then_query() {
             cache_size: 2 * 1024 * 1024,
             ty: ConfigTy::Memory,
         })
-        .unwrap() else { panic!() };
+        .unwrap() else {
+            panic!()
+        };
 
         fn uniform_sample(min: u8, max: u8) -> u8 {
             Uniform::new_inclusive(min, max).sample(&mut rand::thread_rng())
@@ -123,8 +125,9 @@ fn empty_database_fill_then_query() {
                     .collect::<Vec<_>>()
                     .into_iter()
                     .map(|node_index| {
-                        let (storage_value, Some(merkle_value)) = &trie[node_index]
-                            else { unreachable!() };
+                        let (storage_value, Some(merkle_value)) = &trie[node_index] else {
+                            unreachable!()
+                        };
                         let storage_value = if let Some(storage_value) = storage_value {
                             InsertTrieNodeStorageValue::Value {
                                 value: Cow::Owned(storage_value.to_vec()),

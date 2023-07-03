@@ -40,23 +40,6 @@ pub struct Config<'a, TBody> {
     /// The hash of this header must be the one referenced in [`Config::block_header`].
     pub parent_block_header: header::HeaderRef<'a>,
 
-    /// Configuration items related to the consensus engine.
-    pub consensus: ConfigConsensus<'a>,
-
-    /// If `false`, digest items with an unknown consensus engine lead to an error.
-    ///
-    /// Note that blocks must always contain digest items that are relevant to the current
-    /// consensus algorithm. This option controls what happens when blocks contain additional
-    /// digest items that aren't recognized by the implementation.
-    ///
-    /// Passing `true` can lead to blocks being considered as valid when they shouldn't, as these
-    /// additional digest items could have some logic attached to them that restricts which blocks
-    /// are valid and which are not.
-    ///
-    /// However, since a recognized consensus engine must always be present, both `true` and
-    /// `false` guarantee that the number of authorable blocks over the network is bounded.
-    pub allow_unknown_consensus_engines: bool,
-
     /// Time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time) (i.e.
     /// 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
     pub now_from_unix_epoch: Duration,
@@ -120,9 +103,6 @@ pub struct Success {
     /// the `:code` or `:heappages` keys, indicating that the runtime has been modified. Contains
     /// the new runtime.
     pub new_runtime: Option<host::HostVmPrototype>,
-
-    /// Extra items in [`Success`] relevant to the consensus engine.
-    pub consensus: SuccessConsensus,
 
     /// List of changes to the storage main trie that the block performs.
     pub storage_changes: StorageChanges,
@@ -217,102 +197,11 @@ pub enum Error {
     ForbiddenHostCall,
 }
 
-/// Verifies whether a block is valid.
+/// Verifies whether a block body is valid.
 pub fn verify(
     config: Config<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone>,
 ) -> Verify {
-    // Fail verification if there is any digest log item with an unrecognized consensus engine.
-    if !config.allow_unknown_consensus_engines {
-        if let Some(engine) = config
-            .block_header
-            .digest
-            .logs()
-            .find_map(|item| match item {
-                header::DigestItemRef::UnknownConsensus { engine, .. }
-                | header::DigestItemRef::UnknownSeal { engine, .. }
-                | header::DigestItemRef::UnknownPreRuntime { engine, .. } => Some(engine),
-                _ => None,
-            })
-        {
-            return Verify::Finished(Err((
-                Error::UnknownConsensusEngine { engine },
-                config.parent_runtime,
-            )));
-        }
-    }
-
-    // Start the consensus engine verification process.
-    let consensus_success = match &config.consensus {
-        ConfigConsensus::Aura {
-            current_authorities,
-            slot_duration,
-        } => {
-            if config.block_header.digest.has_any_babe() {
-                return Verify::Finished(Err((
-                    Error::MultipleConsensusEngines,
-                    config.parent_runtime,
-                )));
-            }
-
-            let result = aura::verify_header(aura::VerifyConfig {
-                header: config.block_header.clone(),
-                block_number_bytes: config.block_number_bytes,
-                parent_block_header: config.parent_block_header,
-                now_from_unix_epoch: config.now_from_unix_epoch,
-                current_authorities: current_authorities.clone(),
-                slot_duration: *slot_duration,
-            });
-
-            match result {
-                Ok(s) => SuccessConsensus::Aura {
-                    authorities_change: s.authorities_change,
-                },
-                Err(err) => {
-                    return Verify::Finished(Err((
-                        Error::AuraVerification(err),
-                        config.parent_runtime,
-                    )))
-                }
-            }
-        }
-        ConfigConsensus::Babe {
-            parent_block_epoch,
-            parent_block_next_epoch,
-            slots_per_epoch,
-        } => {
-            if config.block_header.digest.has_any_aura() {
-                return Verify::Finished(Err((
-                    Error::MultipleConsensusEngines,
-                    config.parent_runtime,
-                )));
-            }
-
-            let result = babe::verify_header(babe::VerifyConfig {
-                header: config.block_header.clone(),
-                block_number_bytes: config.block_number_bytes,
-                parent_block_header: config.parent_block_header,
-                parent_block_next_epoch: parent_block_next_epoch.clone(),
-                parent_block_epoch: parent_block_epoch.clone(),
-                slots_per_epoch: *slots_per_epoch,
-                now_from_unix_epoch: config.now_from_unix_epoch,
-            });
-
-            match result {
-                Ok(s) => SuccessConsensus::Babe {
-                    epoch_transition_target: s.epoch_transition_target,
-                    slot_number: s.slot_number,
-                },
-                Err(err) => {
-                    return Verify::Finished(Err((
-                        Error::BabeVerification(err),
-                        config.parent_runtime,
-                    )))
-                }
-            }
-        }
-    };
-
-    // Now that we have verified the header, we need to call two runtime functions:
+    // We need to call two runtime functions:
     //
     // - `BlockBuilder_check_inherents`, which does some basic verification of the inherents
     //   contained in the block.
@@ -391,7 +280,6 @@ pub fn verify(
         phase: VerifyInnerPhase::CheckInherents {
             execute_block_parameters,
         },
-        consensus_success,
     }
     .run()
 }
@@ -421,7 +309,6 @@ pub enum Verify {
 struct VerifyInner {
     inner: runtime_host::RuntimeHostVm,
     phase: VerifyInnerPhase,
-    consensus_success: SuccessConsensus,
 }
 
 enum VerifyInnerPhase {
@@ -482,7 +369,6 @@ impl VerifyInner {
                     };
 
                     self = VerifyInner {
-                        consensus_success: self.consensus_success,
                         phase: VerifyInnerPhase::ExecuteBlock { parent_code: None },
                         inner: import_process,
                     };
@@ -516,7 +402,6 @@ impl VerifyInner {
                         (None, None, Some(_)) => {
                             break Verify::StorageGet(StorageGet {
                                 inner: StorageGetInner::ParentCode { success },
-                                consensus_success: self.consensus_success,
                             })
                         }
                         (None, Some(None), _) => {
@@ -545,7 +430,6 @@ impl VerifyInner {
                             };
 
                             return Verify::RuntimeCompilation(RuntimeCompilation {
-                                consensus_success: self.consensus_success,
                                 parent_runtime,
                                 heap_pages,
                                 parent_code,
@@ -560,7 +444,6 @@ impl VerifyInner {
                     break Verify::Finished(Ok(Success {
                         parent_runtime: success.virtual_machine.into_prototype(),
                         new_runtime: None,
-                        consensus: self.consensus_success,
                         storage_changes: success.storage_changes,
                         state_trie_version: success.state_trie_version,
                         offchain_storage_changes: success.offchain_storage_changes,
@@ -571,24 +454,15 @@ impl VerifyInner {
                 (runtime_host::RuntimeHostVm::StorageGet(inner), phase) => {
                     break Verify::StorageGet(StorageGet {
                         inner: StorageGetInner::Execution { inner, phase },
-                        consensus_success: self.consensus_success,
                     })
                 }
                 (runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(inner), phase) => {
                     break Verify::StorageClosestDescendantMerkleValue(
-                        StorageClosestDescendantMerkleValue {
-                            inner,
-                            phase,
-                            consensus_success: self.consensus_success,
-                        },
+                        StorageClosestDescendantMerkleValue { inner, phase },
                     )
                 }
                 (runtime_host::RuntimeHostVm::NextKey(inner), phase) => {
-                    break Verify::StorageNextKey(StorageNextKey {
-                        inner,
-                        phase,
-                        consensus_success: self.consensus_success,
-                    })
+                    break Verify::StorageNextKey(StorageNextKey { inner, phase })
                 }
                 (runtime_host::RuntimeHostVm::SignatureVerification(sig), phase) => {
                     self.inner = sig.verify_and_resume();
@@ -606,7 +480,6 @@ impl VerifyInner {
 #[must_use]
 pub struct StorageGet {
     inner: StorageGetInner,
-    consensus_success: SuccessConsensus,
 }
 
 enum StorageGetInner {
@@ -646,7 +519,6 @@ impl StorageGet {
             StorageGetInner::Execution { inner, phase } => VerifyInner {
                 inner: inner.inject_value(value),
                 phase,
-                consensus_success: self.consensus_success,
             }
             .run(),
             StorageGetInner::ParentCode { success } => VerifyInner {
@@ -659,7 +531,6 @@ impl StorageGet {
                         })
                     })),
                 },
-                consensus_success: self.consensus_success,
             }
             .run(),
         }
@@ -673,7 +544,6 @@ pub struct StorageClosestDescendantMerkleValue {
     inner: runtime_host::ClosestDescendantMerkleValue,
     /// See [`VerifyInner::phase`].
     phase: VerifyInnerPhase,
-    consensus_success: SuccessConsensus,
 }
 
 impl StorageClosestDescendantMerkleValue {
@@ -695,7 +565,6 @@ impl StorageClosestDescendantMerkleValue {
         VerifyInner {
             inner: self.inner.resume_unknown(),
             phase: self.phase,
-            consensus_success: self.consensus_success,
         }
         .run()
     }
@@ -708,7 +577,6 @@ impl StorageClosestDescendantMerkleValue {
         VerifyInner {
             inner: self.inner.inject_merkle_value(merkle_value),
             phase: self.phase,
-            consensus_success: self.consensus_success,
         }
         .run()
     }
@@ -720,7 +588,6 @@ pub struct StorageNextKey {
     inner: runtime_host::NextKey,
     /// See [`VerifyInner::phase`].
     phase: VerifyInnerPhase,
-    consensus_success: SuccessConsensus,
 }
 
 impl StorageNextKey {
@@ -762,7 +629,6 @@ impl StorageNextKey {
         VerifyInner {
             inner: self.inner.inject_key(key),
             phase: self.phase,
-            consensus_success: self.consensus_success,
         }
         .run()
     }
@@ -781,7 +647,6 @@ pub struct RuntimeCompilation {
     logs: String,
     heap_pages: vm::HeapPages,
     parent_code: Option<Option<Vec<u8>>>,
-    consensus_success: SuccessConsensus,
 }
 
 impl RuntimeCompilation {
@@ -813,7 +678,6 @@ impl RuntimeCompilation {
         Verify::Finished(Ok(Success {
             parent_runtime: self.parent_runtime,
             new_runtime: Some(new_runtime),
-            consensus: self.consensus_success,
             storage_changes: self.storage_changes,
             state_trie_version: self.state_trie_version,
             offchain_storage_changes: self.offchain_storage_changes,

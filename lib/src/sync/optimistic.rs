@@ -47,7 +47,6 @@
 
 use crate::{
     chain::{blocks_tree, chain_information},
-    executor::host,
     header,
 };
 
@@ -63,10 +62,6 @@ use core::{
     time::Duration,
 };
 use hashbrown::HashMap;
-
-pub use blocks_tree::{
-    Nibble, StorageChanges, TrieChange, TrieChangeStorageValue, TrieEntryVersion,
-};
 
 mod verification_queue;
 
@@ -100,9 +95,8 @@ pub struct Config {
     /// block requests.
     pub download_ahead_blocks: NonZeroU32,
 
-    /// If `true`, the block bodies and storage are also synchronized and the block bodies are
-    /// verified.
-    pub full_mode: bool,
+    /// If `true`, the downloaded block bodies are stored in the state machine.
+    pub download_bodies: bool,
 }
 
 /// Identifier for an ongoing request in the [`OptimisticSync`].
@@ -146,8 +140,8 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
     /// Used if the `chain` field needs to be recreated.
     finalized_chain_information: blocks_tree::Config,
 
-    /// See [`Config::full_mode`].
-    full_mode: bool,
+    /// See [`Config::download_bodies`].
+    download_bodies: bool,
 
     /// See [`Config::download_ahead_blocks`].
     download_ahead_blocks: NonZeroU32,
@@ -268,7 +262,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             chain,
             inner: Box::new(OptimisticSyncInner {
                 finalized_chain_information: blocks_tree_config,
-                full_mode: config.full_mode,
+                download_bodies: config.download_bodies,
                 sources: HashMap::with_capacity_and_hasher(
                     config.sources_capacity,
                     Default::default(),
@@ -573,12 +567,11 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     ///
     /// Returns the user data that was associated to that request.
     ///
-    /// If the state machine only handles light clients, that is if [`Config::full_mode`] was
-    /// `false`, then the values of [`RequestSuccessBlock::scale_encoded_extrinsics`] are
-    /// silently ignored.
+    /// If [`Config::download_bodies`] was `false`, then the values of
+    /// [`RequestSuccessBlock::scale_encoded_extrinsics`] are silently ignored.
     ///
-    /// > **Note**: If [`Config::full_mode`] is `false`, you are encouraged to not request the
-    /// >           block's body from the source altogether, and to fill the
+    /// > **Note**: If [`Config::download_bodies`] is `false`, you are encouraged to not request
+    /// >           the block's body from the source altogether, and to fill the
     /// >           [`RequestSuccessBlock::scale_encoded_extrinsics`] fields with `Vec::new()`.
     ///
     /// # Panic
@@ -768,42 +761,23 @@ pub struct BlockVerify<TRq, TSrc, TBl> {
 }
 
 impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
-    /// Returns the height of the block about to be verified.
-    pub fn height(&self) -> u64 {
-        // TODO: unwrap?
-        header::decode(self.scale_encoded_header(), self.chain.block_number_bytes())
-            .unwrap()
-            .number
-    }
-
     /// Returns the hash of the block about to be verified.
     pub fn hash(&self) -> [u8; 32] {
         header::hash_from_scale_encoded_header(self.scale_encoded_header())
     }
 
-    /// Returns the hash of the parent of the block about to be verified.
-    pub fn parent_hash(&self) -> [u8; 32] {
-        // TODO: unwrap?
-        *header::decode(self.scale_encoded_header(), self.chain.block_number_bytes())
-            .unwrap()
-            .parent_hash
-    }
-
-    /// Returns the user data of the parent of the block to be verified, or `None` if the parent
-    /// is the finalized block.
-    pub fn parent_user_data(&self) -> Option<&TBl> {
-        let parent_hash = self.parent_hash();
-        // TODO: optimize?
-        if self.chain.contains_non_finalized_block(&parent_hash) {
-            Some(&self.chain[&parent_hash].user_data)
+    /// Returns the list of SCALE-encoded extrinsics of the block to verify.
+    ///
+    /// This is `Some` if and only if [`Config::download_bodies`] is `true`
+    pub fn scale_encoded_extrinsics(
+        &'_ self,
+    ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
+        if self.inner.download_bodies {
+            let block = self.inner.verification_queue.first_block().unwrap();
+            Some(block.scale_encoded_extrinsics.iter())
         } else {
             None
         }
-    }
-
-    /// Returns true if [`Config::full_mode`] was `true` at initialization.
-    pub fn is_full_verification(&self) -> bool {
-        self.inner.full_mode
     }
 
     /// Returns the SCALE-encoded header of the block about to be verified.
@@ -816,22 +790,13 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
             .scale_encoded_header
     }
 
-    /// Start the verification of the block.
+    /// Verify the header of the block.
     ///
     /// Must be passed the current UNIX time in order to verify that the block doesn't pretend to
     /// come from the future.
-    ///
-    /// If the syncing is in "full mode", then the rnutime of the parent must also be passed.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `parent_runtime` is `None` while [`Config::full_mode`] was `true`, or
-    /// vice-versa.
-    ///
-    pub fn start(
+    pub fn verify_header(
         mut self,
         now_from_unix_epoch: Duration,
-        parent_runtime: Option<host::HostVmPrototype>,
     ) -> BlockVerification<TRq, TSrc, TBl> {
         // Extract the block to process. We are guaranteed that a block is available because a
         // `Verify` is built only when that is the case.
@@ -851,51 +816,45 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
             .collect::<Vec<_>>()
             .into_iter();
 
-        if self.inner.full_mode {
-            BlockVerification::from(
-                Inner::Step1(
-                    self.chain
-                        .verify_body(block.scale_encoded_header, now_from_unix_epoch),
-                    parent_runtime.unwrap(),
-                ),
-                BlockVerificationShared {
-                    inner: self.inner,
-                    block_body: block.scale_encoded_extrinsics,
-                    block_user_data: Some(block.user_data),
-                    source_id,
+        let outcome = match self
+            .chain
+            .verify_header(block.scale_encoded_header, now_from_unix_epoch)
+        {
+            Ok(blocks_tree::HeaderVerifySuccess::Verified {
+                verified_header,
+                is_new_best: true,
+                ..
+            }) => Ok(verified_header),
+            Ok(
+                blocks_tree::HeaderVerifySuccess::Duplicate
+                | blocks_tree::HeaderVerifySuccess::Verified {
+                    is_new_best: false, ..
                 },
-            )
-        } else {
-            assert!(parent_runtime.is_none());
+            ) => Err(ResetCause::NonCanonical),
+            Err(err) => Err(ResetCause::HeaderError(err)),
+        };
 
-            let error = match self
-                .chain
-                .verify_header(block.scale_encoded_header, now_from_unix_epoch)
-            {
-                Ok(blocks_tree::HeaderVerifySuccess::Insert {
-                    insert,
-                    is_new_best: true,
-                    ..
-                }) => {
-                    let header = insert.header().into();
-                    insert.insert(Block {
-                        header,
-                        justifications: block.scale_encoded_justifications.clone(),
-                        user_data: block.user_data,
-                        full: None,
-                    });
-                    None
-                }
-                Ok(
-                    blocks_tree::HeaderVerifySuccess::Duplicate
-                    | blocks_tree::HeaderVerifySuccess::Insert {
-                        is_new_best: false, ..
+        match outcome {
+            Ok(verified_header) => {
+                let new_best_hash = self.chain.best_block_hash();
+                let new_best_number = self.chain.best_block_header().number;
+
+                BlockVerification::NewBest {
+                    success: BlockVerifySuccess {
+                        parent: OptimisticSync {
+                            inner: self.inner,
+                            chain: self.chain,
+                        },
+                        scale_encoded_extrinsics: block.scale_encoded_extrinsics,
+                        verified_header,
+                        scale_encoded_justifications: block.scale_encoded_justifications.clone(),
+                        source_id,
                     },
-                ) => Some(ResetCause::NonCanonical),
-                Err(err) => Some(ResetCause::HeaderError(err)),
-            };
-
-            if let Some(reason) = error {
+                    new_best_hash,
+                    new_best_number,
+                }
+            }
+            Err(reason) => {
                 if let Some(src) = self.inner.sources.get_mut(&source_id) {
                     src.banned = true;
                 }
@@ -915,22 +874,8 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                         inner: self.inner,
                         chain: self.chain,
                     },
-                    parent_runtime: None,
                     previous_best_height,
                     reason,
-                }
-            } else {
-                let new_best_hash = self.chain.best_block_hash();
-                let new_best_number = self.chain.best_block_header().number;
-
-                BlockVerification::NewBest {
-                    sync: OptimisticSync {
-                        inner: self.inner,
-                        chain: self.chain,
-                    },
-                    new_best_hash,
-                    new_best_number,
-                    full: None,
                 }
             }
         }
@@ -951,11 +896,6 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
         /// Height of the best block before the reset.
         previous_best_height: u64,
 
-        /// Runtime of the parent, as was provided at the beginning of the verification.
-        ///
-        /// `Some` if and only if [`Config::full_mode`] was `true`.
-        parent_runtime: Option<host::HostVmPrototype>,
-
         /// Problem that happened and caused the reset.
         reason: ResetCause,
     },
@@ -967,260 +907,128 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
         /// The state machine.
         /// The [`OptimisticSync::process_one`] method takes ownership of the
         /// [`OptimisticSync`]. This field yields it back.
-        sync: OptimisticSync<TRq, TSrc, TBl>,
+        success: BlockVerifySuccess<TRq, TSrc, TBl>,
 
         new_best_number: u64,
         new_best_hash: [u8; 32],
-
-        /// `Some` if the verification is in full mode.
-        full: Option<BlockVerificationSuccessFull>,
     },
-
-    /// Loading a storage value of the parent block is required in order to continue.
-    ParentStorageGet(StorageGet<TRq, TSrc, TBl>),
-
-    /// Obtaining the Merkle value of a trie node of the parent block storage is required in order
-    /// to continue.
-    ParentStorageMerkleValue(StorageClosestDescendantMerkleValue<TRq, TSrc, TBl>),
-
-    /// Fetching the key of the parent block storage that follows a given one is required in
-    /// order to continue.
-    ParentStorageNextKey(StorageNextKey<TRq, TSrc, TBl>),
-
-    /// Compiling a runtime is required in order to continue.
-    RuntimeCompilation(RuntimeCompilation<TRq, TSrc, TBl>),
 }
 
-pub struct BlockVerificationSuccessFull {
-    /// Changes to the storage made by this block compared to its parent.
-    pub storage_changes: StorageChanges,
-
-    /// State trie version indicated by the runtime. All the storage changes indicated by
-    /// [`BlockVerificationSuccessFull::storage_changes`] should store this version
-    /// alongside with them.
-    pub state_trie_version: TrieEntryVersion,
-
-    /// List of changes to the off-chain storage that this block performs.
-    pub offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
-
-    /// Runtime of the parent, as was provided at the beginning of the verification.
-    pub parent_runtime: host::HostVmPrototype,
-
-    /// If `Some`, the block has modified the runtime compared to its parent. Contains the new
-    /// runtime.
-    pub new_runtime: Option<host::HostVmPrototype>,
-}
-
-enum Inner<TBl> {
-    Step1(
-        blocks_tree::BodyVerifyStep1<Block<TBl>>,
-        host::HostVmPrototype,
-    ),
-    Step2(blocks_tree::BodyVerifyStep2<Block<TBl>>),
-}
-
-struct BlockVerificationShared<TRq, TSrc, TBl> {
-    /// See [`OptimisticSync::inner`].
-    inner: Box<OptimisticSyncInner<TRq, TSrc, TBl>>,
-    /// Body of the block being verified.
-    block_body: Vec<Vec<u8>>,
-    /// User data of the block being verified.
-    block_user_data: Option<TBl>,
-    /// Source the block has been downloaded from. Might be obsolete.
+/// Block verification successful.
+///
+/// Internally holds the [`OptimisticSync`].
+pub struct BlockVerifySuccess<TRq, TSrc, TBl> {
+    parent: OptimisticSync<TRq, TSrc, TBl>,
+    verified_header: blocks_tree::VerifiedHeader,
+    scale_encoded_extrinsics: Vec<Vec<u8>>,
+    scale_encoded_justifications: Vec<([u8; 4], Vec<u8>)>,
     source_id: SourceId,
 }
 
-impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
-    fn from(mut inner: Inner<TBl>, mut shared: BlockVerificationShared<TRq, TSrc, TBl>) -> Self {
-        // This loop drives the process of the verification.
-        // `inner` is updated at each iteration until a state that cannot be resolved internally
-        // is found.
-        loop {
-            match inner {
-                Inner::Step1(
-                    blocks_tree::BodyVerifyStep1::ParentRuntimeRequired(req),
-                    parent_runtime,
-                ) => {
-                    // The verification process is asking for a Wasm virtual machine containing
-                    // the parent block's runtime.
-                    inner = Inner::Step2(req.resume(parent_runtime, shared.block_body.iter()));
-                }
+impl<TRq, TSrc, TBl> BlockVerifySuccess<TRq, TSrc, TBl> {
+    /// Returns the height of the block that was verified.
+    pub fn height(&self) -> u64 {
+        header::decode(
+            self.scale_encoded_header(),
+            self.parent.chain.block_number_bytes(),
+        )
+        .unwrap()
+        .number
+    }
 
-                Inner::Step2(blocks_tree::BodyVerifyStep2::Finished {
-                    storage_changes,
-                    state_trie_version,
-                    offchain_storage_changes,
-                    parent_runtime,
-                    new_runtime,
-                    insert,
-                }) => {
-                    // Successfully verified block!
+    /// Returns the hash of the block that was verified.
+    pub fn hash(&self) -> [u8; 32] {
+        header::hash_from_scale_encoded_header(self.scale_encoded_header())
+    }
 
-                    debug_assert_eq!(
-                        new_runtime.is_some(),
-                        storage_changes.main_trie_diff_get(&b":code"[..]).is_some()
-                            || storage_changes
-                                .main_trie_diff_get(&b":heappages"[..])
-                                .is_some()
-                    );
+    /// Returns the list of SCALE-encoded extrinsics of the block to verify.
+    ///
+    /// This is `Some` if and only if [`Config::download_bodies`] is `true`
+    pub fn scale_encoded_extrinsics(
+        &'_ self,
+    ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
+        if self.parent.inner.download_bodies {
+            Some(self.scale_encoded_extrinsics.iter())
+        } else {
+            None
+        }
+    }
 
-                    let chain = {
-                        let header = insert.header().into();
-                        insert.insert(Block {
-                            header,
-                            justifications: Vec::new(), // TODO: /!\
-                            user_data: shared.block_user_data.take().unwrap(),
-                            full: Some(BlockFull {
-                                body: mem::take(&mut shared.block_body),
-                            }),
-                        })
-                    };
+    /// Returns the hash of the parent of the block that was verified.
+    pub fn parent_hash(&self) -> &[u8; 32] {
+        header::decode(
+            self.scale_encoded_header(),
+            self.parent.chain.block_number_bytes(),
+        )
+        .unwrap()
+        .parent_hash
+    }
 
-                    let new_best_hash = chain.best_block_hash();
-                    let new_best_number = chain.best_block_header().number;
-                    break BlockVerification::NewBest {
-                        sync: OptimisticSync {
-                            chain,
-                            inner: shared.inner,
-                        },
-                        new_best_hash,
-                        new_best_number,
-                        full: Some(BlockVerificationSuccessFull {
-                            storage_changes,
-                            offchain_storage_changes,
-                            state_trie_version,
-                            parent_runtime,
-                            new_runtime,
-                        }),
-                    };
-                }
+    /// Returns the user data of the parent of the block to be verified, or `None` if the parent
+    /// is the finalized block.
+    pub fn parent_user_data(&self) -> Option<&TBl> {
+        let parent_hash = self.parent_hash();
+        // TODO: optimize?
+        if self.parent.chain.contains_non_finalized_block(&parent_hash) {
+            Some(&self.parent.chain[&parent_hash].user_data)
+        } else {
+            None
+        }
+    }
 
-                Inner::Step2(blocks_tree::BodyVerifyStep2::StorageGet(req)) => {
-                    // The underlying verification process is asking for a storage entry in the
-                    // parent block.
-                    break BlockVerification::ParentStorageGet(StorageGet { inner: req, shared });
-                }
+    /// Returns the SCALE-encoded header of the block that was verified.
+    pub fn scale_encoded_header(&self) -> &[u8] {
+        &self.verified_header.scale_encoded_header()
+    }
 
-                Inner::Step2(
-                    blocks_tree::BodyVerifyStep2::StorageClosestDescendantMerkleValue(req),
-                ) => {
-                    // The underlying verification process is asking for the Merkle value of a
-                    // trie node.
-                    break BlockVerification::ParentStorageMerkleValue(
-                        StorageClosestDescendantMerkleValue { inner: req, shared },
-                    );
-                }
+    /// Returns the SCALE-encoded header of the parent of the block.
+    pub fn parent_scale_encoded_header(&self) -> Vec<u8> {
+        // TODO: return &[u8]
+        self.parent
+            .chain
+            .best_block_header()
+            .scale_encoding_vec(self.parent.chain.block_number_bytes())
+    }
 
-                Inner::Step2(blocks_tree::BodyVerifyStep2::StorageNextKey(req)) => {
-                    // The underlying verification process is asking for the key that follows
-                    // the requested one.
-                    break BlockVerification::ParentStorageNextKey(StorageNextKey {
-                        inner: req,
-                        shared,
-                    });
-                }
+    /// Reject the block and mark it as bad.
+    pub fn reject_bad_block(mut self) -> OptimisticSync<TRq, TSrc, TBl> {
+        if let Some(src) = self.parent.inner.sources.get_mut(&self.source_id) {
+            src.banned = true;
+        }
 
-                Inner::Step2(blocks_tree::BodyVerifyStep2::RuntimeCompilation(c)) => {
-                    // The underlying verification process requires compiling a runtime code.
-                    break BlockVerification::RuntimeCompilation(RuntimeCompilation {
-                        inner: c,
-                        shared,
-                    });
-                }
-
-                // The three variants below correspond to problems during the verification.
-                //
-                // When that happens:
-                //
-                // - A `BlockVerification::Reset` event is emitted.
-                // - `cancelling_requests` is set to true in order to cancel all ongoing requests.
-                // - `chain` is recreated using `finalized_chain_information`.
-                //
-                Inner::Step1(
-                    blocks_tree::BodyVerifyStep1::InvalidHeader(old_chain, error),
-                    parent_runtime,
-                ) => {
-                    if let Some(source) = shared.inner.sources.get_mut(&shared.source_id) {
-                        source.banned = true;
-                    }
-
-                    // If all sources are banned, unban them.
-                    if shared.inner.sources.iter().all(|(_, s)| s.banned) {
-                        for src in shared.inner.sources.values_mut() {
-                            src.banned = false;
-                        }
-                    }
-
-                    let chain = blocks_tree::NonFinalizedTree::new(
-                        shared.inner.finalized_chain_information.clone(),
-                    );
-
-                    let inner = shared.inner.with_requests_obsoleted(&chain);
-                    break BlockVerification::Reset {
-                        previous_best_height: old_chain.best_block_header().number,
-                        parent_runtime: Some(parent_runtime),
-                        sync: OptimisticSync { chain, inner },
-                        reason: ResetCause::InvalidHeader(error),
-                    };
-                }
-                Inner::Step1(
-                    blocks_tree::BodyVerifyStep1::Duplicate(old_chain)
-                    | blocks_tree::BodyVerifyStep1::BadParent {
-                        chain: old_chain, ..
-                    },
-                    parent_runtime,
-                ) => {
-                    if let Some(source) = shared.inner.sources.get_mut(&shared.source_id) {
-                        source.banned = true;
-                    }
-                    // If all sources are banned, unban them.
-                    if shared.inner.sources.iter().all(|(_, s)| s.banned) {
-                        for src in shared.inner.sources.values_mut() {
-                            src.banned = false;
-                        }
-                    }
-
-                    let chain = blocks_tree::NonFinalizedTree::new(
-                        shared.inner.finalized_chain_information.clone(),
-                    );
-
-                    let inner = shared.inner.with_requests_obsoleted(&chain);
-                    break BlockVerification::Reset {
-                        previous_best_height: old_chain.best_block_header().number,
-                        parent_runtime: Some(parent_runtime),
-                        sync: OptimisticSync { chain, inner },
-                        reason: ResetCause::NonCanonical,
-                    };
-                }
-                Inner::Step2(blocks_tree::BodyVerifyStep2::Error {
-                    chain: old_chain,
-                    error,
-                    parent_runtime,
-                }) => {
-                    if let Some(source) = shared.inner.sources.get_mut(&shared.source_id) {
-                        source.banned = true;
-                    }
-                    // If all sources are banned, unban them.
-                    if shared.inner.sources.iter().all(|(_, s)| s.banned) {
-                        for src in shared.inner.sources.values_mut() {
-                            src.banned = false;
-                        }
-                    }
-
-                    let chain = blocks_tree::NonFinalizedTree::new(
-                        shared.inner.finalized_chain_information.clone(),
-                    );
-
-                    let inner = shared.inner.with_requests_obsoleted(&chain);
-                    break BlockVerification::Reset {
-                        previous_best_height: old_chain.best_block_header().number,
-                        parent_runtime: Some(parent_runtime),
-                        sync: OptimisticSync { chain, inner },
-                        reason: ResetCause::HeaderBodyError(error),
-                    };
-                }
+        // If all sources are banned, unban them.
+        if self.parent.inner.sources.iter().all(|(_, s)| s.banned) {
+            for src in self.parent.inner.sources.values_mut() {
+                src.banned = false;
             }
         }
+
+        self.parent.inner.make_requests_obsolete(&self.parent.chain);
+
+        self.parent
+    }
+
+    /// Finish inserting the block header.
+    pub fn finish(mut self, user_data: TBl) -> OptimisticSync<TRq, TSrc, TBl> {
+        // TODO: don't copy the header
+        let header = header::decode(
+            self.verified_header.scale_encoded_header(),
+            self.parent.chain.block_number_bytes(),
+        )
+        .unwrap()
+        .into();
+
+        self.parent.chain.insert_verified_header(
+            self.verified_header,
+            Block {
+                header,
+                justifications: self.scale_encoded_justifications,
+                user_data,
+                full: None,
+            },
+        );
+
+        self.parent
     }
 }
 
@@ -1339,142 +1147,6 @@ pub enum JustificationVerification<TBl> {
     },
 }
 
-/// Loading a storage value is required in order to continue.
-#[must_use]
-pub struct StorageGet<TRq, TSrc, TBl> {
-    inner: blocks_tree::StorageGet<Block<TBl>>,
-    shared: BlockVerificationShared<TRq, TSrc, TBl>,
-}
-
-impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
-    /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.inner.key()
-    }
-
-    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
-        self.inner.child_trie()
-    }
-
-    /// Injects the corresponding storage value.
-    pub fn inject_value(
-        self,
-        value: Option<(&[u8], TrieEntryVersion)>,
-    ) -> BlockVerification<TRq, TSrc, TBl> {
-        let inner = self.inner.inject_value(
-            value.map(|(v, storage_trie_node_version)| (iter::once(v), storage_trie_node_version)),
-        );
-        BlockVerification::from(Inner::Step2(inner), self.shared)
-    }
-}
-
-/// Obtaining the Merkle value of the closest descendant of a trie node is required in order to
-/// continue.
-#[must_use]
-pub struct StorageClosestDescendantMerkleValue<TRq, TSrc, TBl> {
-    inner: blocks_tree::StorageClosestDescendantMerkleValue<Block<TBl>>,
-    shared: BlockVerificationShared<TRq, TSrc, TBl>,
-}
-
-impl<TRq, TSrc, TBl> StorageClosestDescendantMerkleValue<TRq, TSrc, TBl> {
-    /// Returns the key whose closest descendant Merkle value must be passed back.
-    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
-        self.inner.key()
-    }
-
-    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
-        self.inner.child_trie()
-    }
-
-    /// Indicate that the value is unknown and resume the calculation.
-    ///
-    /// This function be used if you are unaware of the Merkle value. The algorithm will perform
-    /// the calculation of this Merkle value manually, which takes more time.
-    pub fn resume_unknown(self) -> BlockVerification<TRq, TSrc, TBl> {
-        let inner: blocks_tree::BodyVerifyStep2<Block<TBl>> = self.inner.resume_unknown();
-        BlockVerification::from(Inner::Step2(inner), self.shared)
-    }
-
-    /// Injects the corresponding Merkle value.
-    ///
-    /// `None` can be passed if there is no descendant or, in the case of a child trie read, in
-    /// order to indicate that the child trie does not exist.
-    pub fn inject_merkle_value(
-        self,
-        merkle_value: Option<&[u8]>,
-    ) -> BlockVerification<TRq, TSrc, TBl> {
-        let inner = self.inner.inject_merkle_value(merkle_value);
-        BlockVerification::from(Inner::Step2(inner), self.shared)
-    }
-}
-
-/// Fetching the key that follows a given one is required in order to continue.
-#[must_use]
-pub struct StorageNextKey<TRq, TSrc, TBl> {
-    inner: blocks_tree::StorageNextKey<Block<TBl>>,
-    shared: BlockVerificationShared<TRq, TSrc, TBl>,
-}
-
-impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
-    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
-        self.inner.key()
-    }
-
-    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
-        self.inner.child_trie()
-    }
-
-    /// If `true`, then the provided value must the one superior or equal to the requested key.
-    /// If `false`, then the provided value must be strictly superior to the requested key.
-    pub fn or_equal(&self) -> bool {
-        self.inner.or_equal()
-    }
-
-    /// If `true`, then the search must include both branch nodes and storage nodes. If `false`,
-    /// the search only covers storage nodes.
-    pub fn branch_nodes(&self) -> bool {
-        self.inner.branch_nodes()
-    }
-
-    /// Returns the prefix the next key must start with. If the next key doesn't start with the
-    /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
-        self.inner.prefix()
-    }
-
-    /// Injects the key.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the key passed as parameter isn't strictly superior to the requested key.
-    ///
-    pub fn inject_key(
-        self,
-        key: Option<impl Iterator<Item = Nibble>>,
-    ) -> BlockVerification<TRq, TSrc, TBl> {
-        let inner = self.inner.inject_key(key);
-        BlockVerification::from(Inner::Step2(inner), self.shared)
-    }
-}
-
-/// Compiling a new runtime is necessary as part of the verification.
-#[must_use]
-pub struct RuntimeCompilation<TRq, TSrc, TBl> {
-    inner: blocks_tree::RuntimeCompilation<Block<TBl>>,
-    shared: BlockVerificationShared<TRq, TSrc, TBl>,
-}
-
-impl<TRq, TSrc, TBl> RuntimeCompilation<TRq, TSrc, TBl> {
-    /// Builds the runtime.
-    pub fn build(self) -> BlockVerification<TRq, TSrc, TBl> {
-        let inner = self.inner.build();
-        BlockVerification::from(Inner::Step2(inner), self.shared)
-    }
-}
-
 /// Request that should be emitted towards a certain source.
 #[derive(Debug)]
 pub struct RequestDetail {
@@ -1533,9 +1205,6 @@ pub enum ResetCause {
     /// Error while verifying a header.
     #[display(fmt = "{_0}")]
     HeaderError(blocks_tree::HeaderVerifyError),
-    /// Error while verifying a header and body.
-    #[display(fmt = "{_0}")]
-    HeaderBodyError(blocks_tree::BodyVerifyError),
     /// Received block isn't a child of the current best block.
     NonCanonical,
 }

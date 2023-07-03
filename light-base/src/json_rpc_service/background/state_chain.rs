@@ -42,8 +42,9 @@ mod sub_utils;
 impl<TPlat: PlatformRef> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::system_accountNextIndex`].
     pub(super) async fn account_next_index(self: &Arc<Self>, request: service::RequestProcess) {
-        let methods::MethodCall::system_accountNextIndex { account } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::system_accountNextIndex { account } = request.request() else {
+            unreachable!()
+        };
 
         let block_hash = header::hash_from_scale_encoded_header(
             sub_utils::subscribe_best(&self.runtime_service).await.0,
@@ -87,8 +88,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
     /// Handles a call to [`methods::MethodCall::chain_getBlock`].
     pub(super) async fn chain_get_block(self: &Arc<Self>, request: service::RequestProcess) {
-        let methods::MethodCall::chain_getBlock { hash } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::chain_getBlock { hash } = request.request() else {
+            unreachable!()
+        };
 
         // `hash` equal to `None` means "the current best block".
         let hash = match hash {
@@ -186,8 +188,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
     /// Handles a call to [`methods::MethodCall::chain_getBlockHash`].
     pub(super) async fn chain_get_block_hash(self: &Arc<Self>, request: service::RequestProcess) {
-        let methods::MethodCall::chain_getBlockHash { height } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::chain_getBlockHash { height } = request.request() else {
+            unreachable!()
+        };
 
         // TODO: maybe store values in cache?
         match height {
@@ -214,8 +217,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
     /// Handles a call to [`methods::MethodCall::chain_getHeader`].
     pub(super) async fn chain_get_header(self: &Arc<Self>, request: service::RequestProcess) {
-        let methods::MethodCall::chain_getHeader { hash } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::chain_getHeader { hash } = request.request() else {
+            unreachable!()
+        };
 
         // `hash` equal to `None` means "best block".
         let hash = match hash {
@@ -328,8 +332,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         self: &Arc<Self>,
         request: service::SubscriptionStartProcess,
     ) {
-        let methods::MethodCall::chain_subscribeAllHeads {  } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::chain_subscribeAllHeads {} = request.request() else {
+            unreachable!()
+        };
 
         self.platform
             .spawn_task(format!("{}-subscribe-all-heads", self.log_target).into(), {
@@ -445,8 +450,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         self: &Arc<Self>,
         request: service::SubscriptionStartProcess,
     ) {
-        let methods::MethodCall::chain_subscribeFinalizedHeads {  }= request.request()
-            else { unreachable!() };
+        let methods::MethodCall::chain_subscribeFinalizedHeads {} = request.request() else {
+            unreachable!()
+        };
 
         let mut blocks_list = {
             let (finalized_block_header, finalized_blocks_subscription) =
@@ -522,8 +528,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         self: &Arc<Self>,
         request: service::SubscriptionStartProcess,
     ) {
-        let methods::MethodCall::chain_subscribeNewHeads {  } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::chain_subscribeNewHeads {} = request.request() else {
+            unreachable!()
+        };
 
         let mut blocks_list = {
             let (block_header, blocks_subscription) =
@@ -592,8 +599,13 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
     /// Handles a call to [`methods::MethodCall::payment_queryInfo`].
     pub(super) async fn payment_query_info(self: &Arc<Self>, request: service::RequestProcess) {
-        let methods::MethodCall::payment_queryInfo { extrinsic, hash: block_hash } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::payment_queryInfo {
+            extrinsic,
+            hash: block_hash,
+        } = request.request()
+        else {
+            unreachable!()
+        };
 
         let block_hash = match block_hash {
             Some(h) => h.0,
@@ -643,8 +655,14 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
     /// Handles a call to [`methods::MethodCall::state_call`].
     pub(super) async fn state_call(self: &Arc<Self>, request: service::RequestProcess) {
-        let methods::MethodCall::state_call { name: function_to_call, parameters: call_parameters, hash } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::state_call {
+            name: function_to_call,
+            parameters: call_parameters,
+            hash,
+        } = request.request()
+        else {
+            unreachable!()
+        };
 
         let block_hash = if let Some(hash) = hash {
             hash.0
@@ -678,8 +696,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
     /// Handles a call to [`methods::MethodCall::state_getKeys`].
     pub(super) async fn state_get_keys(self: &Arc<Self>, request: service::RequestProcess) {
-        let methods::MethodCall::state_getKeys { prefix, hash } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::state_getKeys { prefix, hash } = request.request() else {
+            unreachable!()
+        };
 
         // `hash` equal to `None` means "best block".
         let hash = match hash {
@@ -741,8 +760,15 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
     /// Handles a call to [`methods::MethodCall::state_getKeysPaged`].
     pub(super) async fn state_get_keys_paged(self: &Arc<Self>, request: service::RequestProcess) {
-        let methods::MethodCall::state_getKeysPaged { prefix, count, start_key, hash } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::state_getKeysPaged {
+            prefix,
+            count,
+            start_key,
+            hash,
+        } = request.request()
+        else {
+            unreachable!()
+        };
 
         // `hash` equal to `None` means "best block".
         let hash = match hash {
@@ -851,8 +877,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
     /// Handles a call to [`methods::MethodCall::state_getMetadata`].
     pub(super) async fn state_get_metadata(self: &Arc<Self>, request: service::RequestProcess) {
-        let methods::MethodCall::state_getMetadata { hash } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::state_getMetadata { hash } = request.request() else {
+            unreachable!()
+        };
 
         let block_hash = if let Some(hash) = hash {
             hash.0
@@ -906,7 +933,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         request: service::RequestProcess,
     ) {
         let methods::MethodCall::state_getRuntimeVersion { at: block_hash } = request.request()
-            else { unreachable!() };
+        else {
+            unreachable!()
+        };
 
         let block_hash = match block_hash {
             Some(h) => h.0,
@@ -951,8 +980,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
     /// Handles a call to [`methods::MethodCall::state_getStorage`].
     pub(super) async fn state_get_storage(self: &Arc<Self>, request: service::RequestProcess) {
-        let methods::MethodCall::state_getStorage { key, hash } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::state_getStorage { key, hash } = request.request() else {
+            unreachable!()
+        };
 
         let hash = hash
             .as_ref()
@@ -983,8 +1013,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
     /// Handles a call to [`methods::MethodCall::state_queryStorageAt`].
     pub(super) async fn state_query_storage_at(self: &Arc<Self>, request: service::RequestProcess) {
-        let methods::MethodCall::state_queryStorageAt { keys, at } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::state_queryStorageAt { keys, at } = request.request() else {
+            unreachable!()
+        };
 
         let best_block = header::hash_from_scale_encoded_header(
             &sub_utils::subscribe_best(&self.runtime_service).await.0,
@@ -1023,8 +1054,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         self: &Arc<Self>,
         request: service::SubscriptionStartProcess,
     ) {
-        let methods::MethodCall::state_subscribeRuntimeVersion {  } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::state_subscribeRuntimeVersion {} = request.request() else {
+            unreachable!()
+        };
 
         let runtime_service = self.runtime_service.clone();
 
@@ -1115,8 +1147,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         self: &Arc<Self>,
         request: service::SubscriptionStartProcess,
     ) {
-        let methods::MethodCall::state_subscribeStorage { list } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::state_subscribeStorage { list } = request.request() else {
+            unreachable!()
+        };
 
         if list.is_empty() {
             // When the list of keys is empty, that means we want to subscribe to *all*
@@ -1194,8 +1227,13 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                     .await
                                 {
                                     Ok(mut values) => {
-                                        let Some(sync_service::StorageResultItem::Value { value, .. }) = values.pop()
-                                            else { unreachable!() };
+                                        let Some(sync_service::StorageResultItem::Value {
+                                            value,
+                                            ..
+                                        }) = values.pop()
+                                        else {
+                                            unreachable!()
+                                        };
                                         match &mut known_values[key_index] {
                                             Some(v) if *v == value => {}
                                             v => {
