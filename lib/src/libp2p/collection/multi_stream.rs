@@ -263,7 +263,9 @@ where
                         Some(ConnectionToCoordinatorInner::InboundAcceptedCancel { _id: id })
                     }
                     Some(established::Event::RequestIn { id, request, .. }) => {
-                        let either::Right(protocol_index) = established[id] else { panic!() };
+                        let either::Right(protocol_index) = established[id] else {
+                            panic!()
+                        };
                         Some(ConnectionToCoordinatorInner::RequestIn {
                             id,
                             protocol_index,
@@ -275,7 +277,9 @@ where
                         user_data,
                         ..
                     }) => {
-                        let either::Left(outer_substream_id) = user_data else { panic!() };
+                        let either::Left(outer_substream_id) = user_data else {
+                            panic!()
+                        };
                         outbound_substreams_map.remove(&outer_substream_id).unwrap();
                         Some(ConnectionToCoordinatorInner::Response {
                             response,
@@ -283,7 +287,9 @@ where
                         })
                     }
                     Some(established::Event::NotificationsInOpen { id, handshake, .. }) => {
-                        let either::Right(protocol_index) = established[id] else { panic!() };
+                        let either::Right(protocol_index) = established[id] else {
+                            panic!()
+                        };
                         Some(ConnectionToCoordinatorInner::NotificationsInOpen {
                             id,
                             protocol_index,
@@ -303,11 +309,15 @@ where
                     Some(established::Event::NotificationsOutResult { id, result }) => {
                         let (outer_substream_id, result) = match result {
                             Ok(r) => {
-                                let either::Left(outer_substream_id) = established[id] else { panic!() };
+                                let either::Left(outer_substream_id) = established[id] else {
+                                    panic!()
+                                };
                                 (outer_substream_id, Ok(r))
                             }
                             Err((err, ud)) => {
-                                let either::Left(outer_substream_id) = ud else { panic!() };
+                                let either::Left(outer_substream_id) = ud else {
+                                    panic!()
+                                };
                                 outbound_substreams_map.remove(&outer_substream_id);
                                 (outer_substream_id, Err(NotificationsOutErr::Substream(err)))
                             }
@@ -319,7 +329,9 @@ where
                         })
                     }
                     Some(established::Event::NotificationsOutCloseDemanded { id }) => {
-                        let either::Left(outer_substream_id) = established[id] else { panic!() };
+                        let either::Left(outer_substream_id) = established[id] else {
+                            panic!()
+                        };
                         Some(
                             ConnectionToCoordinatorInner::NotificationsOutCloseDemanded {
                                 id: outer_substream_id,
@@ -327,7 +339,9 @@ where
                         )
                     }
                     Some(established::Event::NotificationsOutReset { user_data, .. }) => {
-                        let either::Left(outer_substream_id) = user_data else { panic!() };
+                        let either::Left(outer_substream_id) = user_data else {
+                            panic!()
+                        };
                         outbound_substreams_map.remove(&outer_substream_id);
                         Some(ConnectionToCoordinatorInner::NotificationsOutReset {
                             id: outer_substream_id,

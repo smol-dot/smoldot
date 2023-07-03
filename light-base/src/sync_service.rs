@@ -470,12 +470,12 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 .peers_assumed_know_blocks(block_number, block_hash)
                 .await
                 .choose(&mut rand::thread_rng())
-                    else {
-                        // No peer knows this block. Returning with a failure.
-                        return Err(StorageQueryError {
-                            errors: outcome_errors,
-                        });
-                    };
+            else {
+                // No peer knows this block. Returning with a failure.
+                return Err(StorageQueryError {
+                    errors: outcome_errors,
+                });
+            };
 
             // Build the list of keys to request.
             let keys_to_request = {

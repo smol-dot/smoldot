@@ -766,8 +766,11 @@ impl<TTx> Pool<TTx> {
     ///
     fn unvalidate_transaction(&mut self, tx_id: TransactionId) {
         // No effect if wasn't validated.
-        let Some((block_height_validated_against, validation)) = self.transactions[tx_id.0].validation.take()
-            else { return; };
+        let Some((block_height_validated_against, validation)) =
+            self.transactions[tx_id.0].validation.take()
+        else {
+            return;
+        };
 
         // We don't care in this context whether the transaction was includable or not, and we
         // call `remove` in both cases.

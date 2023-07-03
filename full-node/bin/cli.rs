@@ -236,7 +236,7 @@ pub struct Bootnode {
 fn parse_bootnode(string: &str) -> Result<Bootnode, String> {
     let mut address = string.parse::<Multiaddr>().map_err(|err| err.to_string())?;
     let Some(ProtocolRef::P2p(peer_id)) = address.iter().last() else {
-        return Err("Bootnode address must end with /p2p/...".into())
+        return Err("Bootnode address must end with /p2p/...".into());
     };
     let peer_id = PeerId::from_bytes(peer_id.to_vec())
         .map_err(|(err, _)| format!("Failed to parse PeerId in bootnode: {err}"))?;
@@ -286,8 +286,9 @@ fn parse_max_bytes(string: &str) -> Result<MaxBytes, String> {
         (1, string)
     };
 
-    let Ok(num) = num.parse::<usize>()
-        else { return Err("Failed to parse number of bytes".into()) };
+    let Ok(num) = num.parse::<usize>() else {
+        return Err("Failed to parse number of bytes".into());
+    };
 
     // Because it's a maximum value it's ok to saturate rather than return an error.
     let real_value = num.saturating_mul(multiplier);

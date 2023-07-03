@@ -717,8 +717,9 @@ async fn open_database(
                 .collect::<Vec<_>>()
                 .into_iter()
                 .map(|node_index| {
-                    let (storage_value, Some(merkle_value)) = &trie_structure[node_index]
-                        else { unreachable!() };
+                    let (storage_value, Some(merkle_value)) = &trie_structure[node_index] else {
+                        unreachable!()
+                    };
                     // Cloning to solve borrow checker restriction. // TODO: optimize?
                     let storage_value = if let Some(storage_value) = storage_value {
                         // TODO: child tries support?

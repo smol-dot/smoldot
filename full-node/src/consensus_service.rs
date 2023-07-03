@@ -747,16 +747,18 @@ impl SyncBackground {
         // Actual block production now happening.
         let (new_block_header, new_block_body, authoring_logs) = {
             let parent_hash = self.sync.best_block_hash();
-            let parent_runtime_arc = if self.sync.best_block_number()
-                != self.sync.finalized_block_header().number
-            {
-                let NonFinalizedBlock::Verified {
-                    runtime: parent_runtime_arc,
-                } = &self.sync[(self.sync.best_block_number(), &self.sync.best_block_hash())] else { unreachable!() };
-                parent_runtime_arc.clone()
-            } else {
-                self.finalized_runtime.clone()
-            };
+            let parent_runtime_arc =
+                if self.sync.best_block_number() != self.sync.finalized_block_header().number {
+                    let NonFinalizedBlock::Verified {
+                        runtime: parent_runtime_arc,
+                    } = &self.sync[(self.sync.best_block_number(), &self.sync.best_block_hash())]
+                    else {
+                        unreachable!()
+                    };
+                    parent_runtime_arc.clone()
+                } else {
+                    self.finalized_runtime.clone()
+                };
             let parent_runtime = parent_runtime_arc.try_lock().unwrap().take().unwrap();
 
             // Start the block authoring process.
@@ -1219,9 +1221,9 @@ impl SyncBackground {
 
                 let parent_hash = *header_verification_success.parent_hash();
                 let parent_info = header_verification_success.parent_user_data().map(|b| {
-                    let NonFinalizedBlock::Verified {
-                        runtime,
-                    } = b else { unreachable!() };
+                    let NonFinalizedBlock::Verified { runtime } = b else {
+                        unreachable!()
+                    };
                     runtime.clone()
                 });
                 let parent_runtime_arc = parent_info
@@ -1596,7 +1598,10 @@ impl SyncBackground {
                         }
 
                         let finalized_block = finalized_blocks.pop().unwrap();
-                        let NonFinalizedBlock::Verified { runtime } = finalized_block.user_data else { unreachable!() };
+                        let NonFinalizedBlock::Verified { runtime } = finalized_block.user_data
+                        else {
+                            unreachable!()
+                        };
                         self.finalized_runtime = runtime;
                         let new_finalized_hash =
                             finalized_block.header.hash(self.sync.block_number_bytes());

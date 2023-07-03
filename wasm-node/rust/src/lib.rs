@@ -401,8 +401,11 @@ fn advance_execution() {
             }
             ExecutionState::NotReady => return,
             ExecutionState::Ready(_) => {
-                let ExecutionState::Ready(runnable) = mem::replace(&mut *executor_execute_guard, ExecutionState::NotReady)
-                    else { unreachable!() };
+                let ExecutionState::Ready(runnable) =
+                    mem::replace(&mut *executor_execute_guard, ExecutionState::NotReady)
+                else {
+                    unreachable!()
+                };
                 runnable
             }
         }
