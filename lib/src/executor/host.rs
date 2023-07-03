@@ -1748,7 +1748,6 @@ impl ReadyToRun {
                 let _kind = expect_u32!(0); // TODO: parse and provide the storage kind
                 let (key_ptr, key_size) = expect_pointer_size_raw!(1);
                 let (value_ptr, value_size) = expect_pointer_size_raw!(2);
-                // TODO: the API user should be able to differentiate between the `ext_offchain_index_*` and `ext_offchain_*` functions.
                 HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
                     key_ptr,
                     key_size,
@@ -1762,7 +1761,6 @@ impl ReadyToRun {
                 let (key_ptr, key_size) = expect_pointer_size_raw!(1);
                 let (old_value_ptr, old_value_size) = expect_pointer_size_raw!(2);
                 let (value_ptr, value_size) = expect_pointer_size_raw!(3);
-                // TODO: the API user should be able to differentiate between the `ext_offchain_index_*` and `ext_offchain_*` functions.
                 HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
                     key_ptr,
                     key_size,
@@ -1785,7 +1783,6 @@ impl ReadyToRun {
             HostFunction::ext_offchain_local_storage_clear_version_1 => {
                 let _kind = expect_u32!(0); // TODO: parse and provide the storage kind
                 let (key_ptr, key_size) = expect_pointer_size_raw!(1);
-                // TODO: the API user should be able to differentiate between the `ext_offchain_index_*` and `ext_offchain_*` functions.
                 HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
                     key_ptr,
                     key_size,
