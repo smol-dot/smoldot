@@ -1320,7 +1320,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     self.inner = AllSyncInner::AllForks(sync);
                     ProcessOne::AllSync(self)
                 }
-                all_forks::ProcessOne::HeaderVerify(verify) => {
+                all_forks::ProcessOne::BlockVerify(verify) => {
                     ProcessOne::VerifyBlock(BlockVerify {
                         inner: BlockVerifyInner::AllForks(verify),
                         shared: self.shared,
@@ -2394,7 +2394,7 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
 
     /// Returns the list of SCALE-encoded extrinsics of the block to verify.
     ///
-    /// This is `Some` if and only if [`Config::full`] is `true`
+    /// This is `Some` if and only if [`Config::full_mode`] is `true`
     pub fn scale_encoded_extrinsics(
         &'_ self,
     ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
@@ -2483,7 +2483,7 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
     }
 }
 
-/// Outcome of calling [`HeaderVerify::perform`].
+/// Outcome of calling [`BlockVerify::verify_header`].
 pub enum HeaderVerifyOutcome<TRq, TSrc, TBl> {
     /// Header has been successfully verified.
     Success {
@@ -2555,7 +2555,7 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
 
     /// Returns the list of SCALE-encoded extrinsics of the block to verify.
     ///
-    /// This is `Some` if and only if [`Config::full`] is `true`
+    /// This is `Some` if and only if [`Config::full_mode`] is `true`
     pub fn scale_encoded_extrinsics(
         &'_ self,
     ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {

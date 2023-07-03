@@ -1049,7 +1049,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         });
 
         if let Some(block) = block {
-            ProcessOne::HeaderVerify(BlockVerify {
+            ProcessOne::BlockVerify(BlockVerify {
                 parent: self,
                 block_to_verify: block,
             })
@@ -2274,14 +2274,14 @@ pub enum ProcessOne<TBl, TRq, TSrc> {
         sync: AllForksSync<TBl, TRq, TSrc>,
     },
 
-    /// A header is ready for verification.
-    HeaderVerify(BlockVerify<TBl, TRq, TSrc>),
+    /// A block is ready for verification.
+    BlockVerify(BlockVerify<TBl, TRq, TSrc>),
 
     /// A justification is ready for verification.
     FinalityProofVerify(FinalityProofVerify<TBl, TRq, TSrc>),
 }
 
-/// Outcome of calling [`HeaderVerify::perform`].
+/// Outcome of calling [`BlockVerify::verify_header`].
 pub enum HeaderVerifyOutcome<TBl, TRq, TSrc> {
     /// Header has been successfully verified.
     Success {

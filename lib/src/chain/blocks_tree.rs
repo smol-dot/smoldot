@@ -42,12 +42,12 @@
 //! >           [`NonFinalizedTree`] itself cannot remove, not a block that cannot be removed in
 //! >           the absolute.
 //!
-//! A block can be added to the chain by calling [`NonFinalizedTree::verify_header`] or
-//! [`NonFinalizedTree::verify_body`]. As explained in details in
+//! A block can be added to the chain by calling [`NonFinalizedTree::verify_header`] then
+//! [`NonFinalizedTree::insert_verified_header`]. As explained in details in
 //! [the `verify` module](crate::verify), verifying the header only verifies the authenticity of
-//! a block and not its correctness. Verifying both the header and body provides the strongest
-//! guarantee, but requires knowledge of the storage of the block that is parent of the block to
-//! verify.
+//! a block and not its correctness. Additionally verifying the body of the block provides the
+//! strongest guarantee, but is the responsibility of the API user and is out of the scope of
+//! this module.
 //!
 //! > **Note**: There typically exists two kinds of clients: full and light. Full clients store
 //! >           the state of the storage, while light clients don't. For this reason, light

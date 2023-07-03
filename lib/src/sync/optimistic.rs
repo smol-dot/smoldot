@@ -768,7 +768,7 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
 
     /// Returns the list of SCALE-encoded extrinsics of the block to verify.
     ///
-    /// This is `Some` if and only if [`Config::full`] is `true`
+    /// This is `Some` if and only if [`Config::download_bodies`] is `true`
     pub fn scale_encoded_extrinsics(
         &'_ self,
     ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
@@ -943,7 +943,7 @@ impl<TRq, TSrc, TBl> BlockVerifySuccess<TRq, TSrc, TBl> {
 
     /// Returns the list of SCALE-encoded extrinsics of the block to verify.
     ///
-    /// This is `Some` if and only if [`Config::full`] is `true`
+    /// This is `Some` if and only if [`Config::download_bodies`] is `true`
     pub fn scale_encoded_extrinsics(
         &'_ self,
     ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
