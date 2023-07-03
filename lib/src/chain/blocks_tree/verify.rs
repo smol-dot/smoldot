@@ -122,13 +122,17 @@ impl<T> NonFinalizedTree<T> {
         };
 
         let parent_block_header = if let Some(parent_tree_index) = parent_tree_index {
-            &self.blocks.get(parent_tree_index).unwrap().header
+            &self
+                .blocks
+                .get(parent_tree_index)
+                .unwrap_or_else(|| unreachable!())
+                .header
         } else {
             &self.finalized_block_header
         };
 
-        let header_verify_result = verify::header_only::verify(verify::header_only::Config {
-            consensus: match (&self.finalized_consensus, &parent_consensus) {
+        let header_verify_result = {
+            let consensus_config = match (&self.finalized_consensus, &parent_consensus) {
                 (
                     FinalizedConsensus::Aura { slot_duration, .. },
                     Some(BlockConsensus::Aura { authorities_list }),
@@ -157,17 +161,25 @@ impl<T> NonFinalizedTree<T> {
                 _ => {
                     return Err(HeaderVerifyError::ConsensusMismatch);
                 }
-            },
-            finality: match &parent_finality {
-                BlockFinality::Outsourced => verify::header_only::ConfigFinality::Outsourced,
-                BlockFinality::Grandpa { .. } => verify::header_only::ConfigFinality::Grandpa,
-            },
-            allow_unknown_consensus_engines: self.allow_unknown_consensus_engines,
-            block_header: decoded_header.clone(),
-            block_number_bytes: self.block_number_bytes,
-            parent_block_header: header::decode(parent_block_header, self.block_number_bytes)
-                .unwrap(),
-        })
+            };
+
+            verify::header_only::verify(verify::header_only::Config {
+                consensus: consensus_config,
+                finality: match &parent_finality {
+                    BlockFinality::Outsourced => verify::header_only::ConfigFinality::Outsourced,
+                    BlockFinality::Grandpa { .. } => verify::header_only::ConfigFinality::Grandpa,
+                },
+                allow_unknown_consensus_engines: self.allow_unknown_consensus_engines,
+                block_header: decoded_header.clone(),
+                block_number_bytes: self.block_number_bytes,
+                parent_block_header: {
+                    // All headers inserted in `self` are necessarily valid, and thus this
+                    // `unwrap()` can't panic.
+                    header::decode(parent_block_header, self.block_number_bytes)
+                        .unwrap_or_else(|_| unreachable!())
+                },
+            })
+        }
         .map_err(HeaderVerifyError::VerificationFailed)?;
 
         let is_new_best = if let Some(current_best) = self.current_best {
@@ -182,66 +194,43 @@ impl<T> NonFinalizedTree<T> {
             true
         };
 
-        let consensus = match (
+        // Updated consensus information for the block being verified.
+        let consensus_update = match (
             header_verify_result,
             &parent_consensus,
             self.finalized_consensus.clone(),
             parent_tree_index.map(|idx| self.blocks.get(idx).unwrap().consensus.clone()),
         ) {
+            // No Aura epoch transition. Just a regular block.
             (
-                verify::header_only::Success::Aura { authorities_change },
+                verify::header_only::Success::Aura {
+                    authorities_change: false,
+                },
                 Some(BlockConsensus::Aura {
                     authorities_list: parent_authorities,
                 }),
                 FinalizedConsensus::Aura { .. },
                 _,
+            ) => BlockConsensus::Aura {
+                authorities_list: parent_authorities.clone(),
+            },
+
+            // Aura epoch transition.
+            (
+                verify::header_only::Success::Aura {
+                    authorities_change: true,
+                },
+                Some(BlockConsensus::Aura { .. }),
+                FinalizedConsensus::Aura { .. },
+                _,
             ) => {
-                if authorities_change {
-                    todo!() // TODO: fetch from header
-                            /*BlockConsensus::Aura {
-                                authorities_list:
-                            }*/
-                } else {
-                    BlockConsensus::Aura {
-                        authorities_list: parent_authorities.clone(),
-                    }
-                }
+                todo!() // TODO: fetch from header
+                        /*BlockConsensus::Aura {
+                            authorities_list:
+                        }*/
             }
 
-            (
-                verify::header_only::Success::Babe {
-                    epoch_transition_target: Some(epoch_transition_target),
-                    ..
-                },
-                Some(BlockConsensus::Babe { .. }),
-                FinalizedConsensus::Babe { .. },
-                Some(BlockConsensus::Babe { next_epoch, .. }),
-            ) if next_epoch.start_slot_number.is_some() => BlockConsensus::Babe {
-                current_epoch: Some(next_epoch),
-                next_epoch: Arc::new(epoch_transition_target),
-            },
-
-            (
-                verify::header_only::Success::Babe {
-                    epoch_transition_target: Some(epoch_transition_target),
-                    slot_number,
-                    ..
-                },
-                Some(BlockConsensus::Babe { .. }),
-                FinalizedConsensus::Babe { .. },
-                Some(BlockConsensus::Babe { next_epoch, .. }),
-            ) => BlockConsensus::Babe {
-                current_epoch: Some(Arc::new(chain_information::BabeEpochInformation {
-                    start_slot_number: Some(slot_number),
-                    allowed_slots: next_epoch.allowed_slots,
-                    epoch_index: next_epoch.epoch_index,
-                    authorities: next_epoch.authorities.clone(),
-                    c: next_epoch.c,
-                    randomness: next_epoch.randomness,
-                })),
-                next_epoch: Arc::new(epoch_transition_target),
-            },
-
+            // No Babe epoch transition. Just a regular block.
             (
                 verify::header_only::Success::Babe {
                     epoch_transition_target: None,
@@ -253,12 +242,38 @@ impl<T> NonFinalizedTree<T> {
                     current_epoch,
                     next_epoch,
                 }),
+            )
+            | (
+                verify::header_only::Success::Babe {
+                    epoch_transition_target: None,
+                    ..
+                },
+                Some(BlockConsensus::Babe { .. }),
+                FinalizedConsensus::Babe {
+                    block_epoch_information: current_epoch,
+                    next_epoch_transition: next_epoch,
+                    ..
+                },
+                None,
             ) => BlockConsensus::Babe {
                 current_epoch,
                 next_epoch,
             },
 
+            // Babe epoch transition.
             (
+                verify::header_only::Success::Babe {
+                    epoch_transition_target: Some(epoch_transition_target),
+                    ..
+                },
+                Some(BlockConsensus::Babe { .. }),
+                FinalizedConsensus::Babe { .. },
+                Some(BlockConsensus::Babe {
+                    next_epoch: next_epoch_transition,
+                    ..
+                }),
+            )
+            | (
                 verify::header_only::Success::Babe {
                     epoch_transition_target: Some(epoch_transition_target),
                     ..
@@ -274,6 +289,8 @@ impl<T> NonFinalizedTree<T> {
                 next_epoch: Arc::new(epoch_transition_target),
             },
 
+            // Babe epoch transition to first epoch.
+            // Should only ever happen when the verified block is block 1.
             (
                 verify::header_only::Success::Babe {
                     epoch_transition_target: Some(epoch_transition_target),
@@ -281,46 +298,43 @@ impl<T> NonFinalizedTree<T> {
                     ..
                 },
                 Some(BlockConsensus::Babe { .. }),
-                FinalizedConsensus::Babe {
-                    next_epoch_transition,
-                    ..
-                },
-                None,
-            ) => BlockConsensus::Babe {
-                current_epoch: Some(Arc::new(chain_information::BabeEpochInformation {
-                    start_slot_number: Some(slot_number),
-                    allowed_slots: next_epoch_transition.allowed_slots,
-                    authorities: next_epoch_transition.authorities.clone(),
-                    c: next_epoch_transition.c,
-                    epoch_index: next_epoch_transition.epoch_index,
-                    randomness: next_epoch_transition.randomness,
-                })),
-                next_epoch: Arc::new(epoch_transition_target),
-            },
-
-            (
+                FinalizedConsensus::Babe { .. },
+                Some(BlockConsensus::Babe { next_epoch, .. }),
+            )
+            | (
                 verify::header_only::Success::Babe {
-                    epoch_transition_target: None,
+                    epoch_transition_target: Some(epoch_transition_target),
+                    slot_number,
                     ..
                 },
                 Some(BlockConsensus::Babe { .. }),
                 FinalizedConsensus::Babe {
-                    block_epoch_information,
-                    next_epoch_transition,
+                    next_epoch_transition: next_epoch,
                     ..
                 },
                 None,
-            ) => BlockConsensus::Babe {
-                current_epoch: block_epoch_information,
-                next_epoch: next_epoch_transition,
-            },
+            ) => {
+                debug_assert_eq!(decoded_header.number, 1);
+                BlockConsensus::Babe {
+                    current_epoch: Some(Arc::new(chain_information::BabeEpochInformation {
+                        start_slot_number: Some(slot_number),
+                        allowed_slots: next_epoch.allowed_slots,
+                        epoch_index: next_epoch.epoch_index,
+                        authorities: next_epoch.authorities.clone(),
+                        c: next_epoch.c,
+                        randomness: next_epoch.randomness,
+                    })),
+                    next_epoch: Arc::new(epoch_transition_target),
+                }
+            }
 
             // Any mismatch between consensus algorithms should have been detected by the
             // block verification.
             _ => unreachable!(),
         };
 
-        let finality = match &parent_finality {
+        // Updated finality information for the block being verified.
+        let finality_update = match &parent_finality {
             BlockFinality::Outsourced => BlockFinality::Outsourced,
             BlockFinality::Grandpa {
                 prev_auth_change_trigger_number: parent_prev_auth_change_trigger_number,
@@ -409,8 +423,8 @@ impl<T> NonFinalizedTree<T> {
             verified_header: VerifiedHeader {
                 scale_encoded_header,
                 is_new_best,
-                consensus,
-                finality,
+                consensus_update,
+                finality_update,
                 hash,
             },
             is_new_best,
@@ -448,8 +462,8 @@ impl<T> NonFinalizedTree<T> {
             Block {
                 header: verified_header.scale_encoded_header,
                 hash: verified_header.hash,
-                consensus: verified_header.consensus,
-                finality: verified_header.finality,
+                consensus: verified_header.consensus_update,
+                finality: verified_header.finality_update,
                 user_data,
             },
         );
@@ -470,9 +484,9 @@ impl<T> NonFinalizedTree<T> {
 /// Successfully-verified block header that can be inserted into the chain.
 pub struct VerifiedHeader {
     scale_encoded_header: Vec<u8>,
-    is_new_best: bool,
-    consensus: BlockConsensus,
-    finality: BlockFinality,
+    is_new_best: bool, // TODO: remove this field, as the API user could verify multiple headers without inserting them
+    consensus_update: BlockConsensus,
+    finality_update: BlockFinality,
     hash: [u8; 32],
 }
 
