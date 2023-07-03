@@ -101,7 +101,6 @@ use crate::{
         host::{self, HostVmPrototype},
         vm::ExecHint,
     },
-    finality::grandpa::warp_sync,
     header::{self, Header},
     trie::proof_decode,
 };
@@ -113,7 +112,9 @@ use alloc::{
 };
 use core::{iter, mem, ops};
 
-pub use warp_sync::{Error as FragmentError, WarpSyncFragment};
+pub use verifier::{Error as FragmentError, WarpSyncFragment};
+
+mod verifier;
 
 /// Problem encountered during a call to [`start_warp_sync()`].
 #[derive(Debug, derive_more::Display)]
@@ -304,7 +305,7 @@ enum Phase {
         /// Contains the downloaded fragments.
         /// Always `Some`, but wrapped within an `Option` in order to permit extracting
         /// temporarily.
-        verifier: Option<warp_sync::Verifier>,
+        verifier: Option<verifier::Verifier>,
     },
     /// All warp sync fragments have been verified, and we are now downloading the runtime of the
     /// finalized block of the chain.
@@ -931,13 +932,13 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                 self.sources[rq_source_id.0].already_tried = true;
 
                 let verifier = match &previous_verifier_values {
-                    Some((_, chain_information_finality)) => warp_sync::Verifier::new(
+                    Some((_, chain_information_finality)) => verifier::Verifier::new(
                         chain_information_finality.into(),
                         self.block_number_bytes,
                         fragments,
                         final_set_of_fragments,
                     ),
-                    None => warp_sync::Verifier::new(
+                    None => verifier::Verifier::new(
                         self.start_chain_information.as_ref().finality,
                         self.block_number_bytes,
                         fragments,
@@ -1113,10 +1114,10 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
         } = &mut self.inner.phase
         {
             match verifier.take().unwrap().next(randomness_seed) {
-                Ok(warp_sync::Next::NotFinished(next_verifier)) => {
+                Ok(verifier::Next::NotFinished(next_verifier)) => {
                     *verifier = Some(next_verifier);
                 }
-                Ok(warp_sync::Next::EmptyProof) => {
+                Ok(verifier::Next::EmptyProof) => {
                     self.inner.phase = Phase::RuntimeDownload {
                         header: self
                             .inner
@@ -1134,7 +1135,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                         downloaded_runtime: None,
                     };
                 }
-                Ok(warp_sync::Next::Success {
+                Ok(verifier::Next::Success {
                     scale_encoded_header,
                     chain_information_finality,
                 }) => {
