@@ -761,34 +761,20 @@ pub struct BlockVerify<TRq, TSrc, TBl> {
 }
 
 impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
-    /// Returns the height of the block about to be verified.
-    pub fn height(&self) -> u64 {
-        // TODO: unwrap?
-        header::decode(self.scale_encoded_header(), self.chain.block_number_bytes())
-            .unwrap()
-            .number
-    }
-
     /// Returns the hash of the block about to be verified.
     pub fn hash(&self) -> [u8; 32] {
         header::hash_from_scale_encoded_header(self.scale_encoded_header())
     }
 
-    /// Returns the hash of the parent of the block about to be verified.
-    pub fn parent_hash(&self) -> [u8; 32] {
-        // TODO: unwrap?
-        *header::decode(self.scale_encoded_header(), self.chain.block_number_bytes())
-            .unwrap()
-            .parent_hash
-    }
-
-    /// Returns the user data of the parent of the block to be verified, or `None` if the parent
-    /// is the finalized block.
-    pub fn parent_user_data(&self) -> Option<&TBl> {
-        let parent_hash = self.parent_hash();
-        // TODO: optimize?
-        if self.chain.contains_non_finalized_block(&parent_hash) {
-            Some(&self.chain[&parent_hash].user_data)
+    /// Returns the list of SCALE-encoded extrinsics of the block to verify.
+    ///
+    /// This is `Some` if and only if [`Config::full`] is `true`
+    pub fn scale_encoded_extrinsics(
+        &'_ self,
+    ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
+        if self.inner.download_bodies {
+            let block = self.inner.verification_queue.first_block().unwrap();
+            Some(block.scale_encoded_extrinsics.iter())
         } else {
             None
         }
@@ -802,20 +788,6 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
             .first_block()
             .unwrap()
             .scale_encoded_header
-    }
-
-    /// Returns the list of SCALE-encoded extrinsics of the block to verify.
-    ///
-    /// This is `Some` if and only if [`Config::download_bodies`] is `true`
-    pub fn scale_encoded_extrinsics(
-        &'_ self,
-    ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + '_> + '_> {
-        if self.inner.download_bodies {
-            let block = self.inner.verification_queue.first_block().unwrap();
-            Some(block.scale_encoded_extrinsics.iter())
-        } else {
-            None
-        }
     }
 
     /// Verify the header of the block.
@@ -952,6 +924,68 @@ pub struct BlockVerifySuccess<TRq, TSrc, TBl> {
 }
 
 impl<TRq, TSrc, TBl> BlockVerifySuccess<TRq, TSrc, TBl> {
+    /// Returns the height of the block that was verified.
+    pub fn height(&self) -> u64 {
+        header::decode(
+            self.scale_encoded_header(),
+            self.parent.chain.block_number_bytes(),
+        )
+        .unwrap()
+        .number
+    }
+
+    /// Returns the hash of the block that was verified.
+    pub fn hash(&self) -> [u8; 32] {
+        header::hash_from_scale_encoded_header(self.scale_encoded_header())
+    }
+
+    /// Returns the list of SCALE-encoded extrinsics of the block to verify.
+    ///
+    /// This is `Some` if and only if [`Config::full`] is `true`
+    pub fn scale_encoded_extrinsics(
+        &'_ self,
+    ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
+        if self.parent.inner.download_bodies {
+            let block = self.parent.inner.verification_queue.first_block().unwrap();
+            Some(block.scale_encoded_extrinsics.iter())
+        } else {
+            None
+        }
+    }
+
+    /// Returns the hash of the parent of the block that was verified.
+    pub fn parent_hash(&self) -> &[u8; 32] {
+        header::decode(
+            self.scale_encoded_header(),
+            self.parent.chain.block_number_bytes(),
+        )
+        .unwrap()
+        .parent_hash
+    }
+
+    /// Returns the user data of the parent of the block to be verified, or `None` if the parent
+    /// is the finalized block.
+    pub fn parent_user_data(&self) -> Option<&TBl> {
+        let parent_hash = self.parent_hash();
+        // TODO: optimize?
+        if self.parent.chain.contains_non_finalized_block(&parent_hash) {
+            Some(&self.parent.chain[&parent_hash].user_data)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the SCALE-encoded header of the block that was verified.
+    pub fn scale_encoded_header(&self) -> &[u8] {
+        &self
+            .parent
+            .inner
+            .verification_queue
+            .first_block()
+            .unwrap()
+            .scale_encoded_header
+    }
+
     /// Returns the SCALE-encoded header of the parent of the block.
     pub fn parent_scale_encoded_header(&self) -> Vec<u8> {
         // TODO: return &[u8]

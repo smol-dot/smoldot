@@ -1191,25 +1191,6 @@ impl SyncBackground {
                 let mut database_accesses_duration = Duration::new(0, 0);
                 let mut runtime_build_duration = Duration::new(0, 0);
                 let hash_to_verify = verify.hash();
-                let height_to_verify = verify.height();
-                let parent_hash = verify.parent_hash();
-                let parent_info = verify.parent_user_data().map(|b| {
-                    let NonFinalizedBlock::Verified {
-                        runtime,
-                    } = b else { unreachable!() };
-                    runtime.clone()
-                });
-                let parent_runtime_arc = parent_info
-                    .as_ref()
-                    .map(|i| i.clone())
-                    .unwrap_or_else(|| self.finalized_runtime.clone());
-                let parent_runtime = parent_runtime_arc.try_lock().unwrap().take().unwrap();
-                let scale_encoded_header_to_verify = verify.scale_encoded_header().to_owned(); // TODO: copy :-/
-                let scale_encoded_extrinsics = verify
-                    .scale_encoded_extrinsics()
-                    .unwrap()
-                    .map(|e| e.as_ref().to_owned())
-                    .collect::<Vec<_>>(); // TODO: copy :-/
 
                 let _jaeger_span = self.jaeger_service.block_verify_span(&hash_to_verify);
 
@@ -1226,17 +1207,28 @@ impl SyncBackground {
                             self.log_callback.log(
                                 LogLevel::Warn,
                                 format!(
-                                    "failed-block-verification; hash={}; height={};  error={}",
+                                    "failed-block-verification; hash={}; error={}",
                                     HashDisplay(&hash_to_verify),
-                                    height_to_verify,
                                     error
                                 ),
                             );
-                            *parent_runtime_arc.try_lock().unwrap() = Some(parent_runtime);
                             self.sync = sync;
                             return (self, true);
                         }
                     };
+
+                let parent_hash = *header_verification_success.parent_hash();
+                let parent_info = header_verification_success.parent_user_data().map(|b| {
+                    let NonFinalizedBlock::Verified {
+                        runtime,
+                    } = b else { unreachable!() };
+                    runtime.clone()
+                });
+                let parent_runtime_arc = parent_info
+                    .as_ref()
+                    .map(|i| i.clone())
+                    .unwrap_or_else(|| self.finalized_runtime.clone());
+                let parent_runtime = parent_runtime_arc.try_lock().unwrap().take().unwrap();
 
                 let parent_scale_encoded_header =
                     header_verification_success.parent_scale_encoded_header();
@@ -1248,13 +1240,16 @@ impl SyncBackground {
                     )
                     .unwrap(),
                     now_from_unix_epoch: unix_time,
+                    // TODO: shouldn't have to decode here
                     block_header: header::decode(
-                        &scale_encoded_header_to_verify,
+                        header_verification_success.scale_encoded_header(),
                         block_number_bytes,
                     )
                     .unwrap(),
                     block_number_bytes,
-                    block_body: scale_encoded_extrinsics.into_iter(),
+                    block_body: header_verification_success
+                        .scale_encoded_extrinsics()
+                        .unwrap(),
                     max_log_level: 3,
                 });
 
@@ -1271,7 +1266,7 @@ impl SyncBackground {
                                     "failed-block-verification; hash={}; height={}; \
                                 total_duration={:?}; error={}",
                                     HashDisplay(&hash_to_verify),
-                                    height_to_verify,
+                                    header_verification_success.height(),
                                     when_verification_started.elapsed(),
                                     error
                                 ),
@@ -1291,11 +1286,11 @@ impl SyncBackground {
                             let when_database_access_started = Instant::now();
                             self.database
                                 .with_database_detached({
-                                    let scale_encoded_header_to_verify = scale_encoded_header_to_verify.clone();
+                                    let scale_encoded_header = header_verification_success.scale_encoded_header().to_vec();
                                     move |database| {
                                         // TODO: overhead for building the SCALE encoding of the header
                                         let result = database.insert(
-                                            &scale_encoded_header_to_verify,
+                                            &scale_encoded_header,
                                             is_new_best,
                                             iter::empty::<Vec<u8>>(), // TODO:,no /!\
                                             storage_changes.trie_changes_iter_ordered().filter_map(
@@ -1355,6 +1350,10 @@ impl SyncBackground {
                                 .await;
                             database_accesses_duration += when_database_access_started.elapsed();
 
+                            let height = header_verification_success.height();
+                            let scale_encoded_header =
+                                header_verification_success.scale_encoded_header().to_vec();
+
                             self.log_callback.log(
                                 LogLevel::Debug,
                                 format!(
@@ -1362,7 +1361,7 @@ impl SyncBackground {
                                 total_duration={:?}; database_accesses_duration={:?}; \
                                 runtime_build_duration={:?}; is_new_best={:?}",
                                     HashDisplay(&hash_to_verify),
-                                    height_to_verify,
+                                    height,
                                     when_verification_started.elapsed(),
                                     database_accesses_duration,
                                     runtime_build_duration,
@@ -1378,14 +1377,13 @@ impl SyncBackground {
                                 header_verification_success.finish(NonFinalizedBlock::NotVerified);
 
                             // Store the storage of the children.
-                            self.sync[(height_to_verify, &hash_to_verify)] =
-                                NonFinalizedBlock::Verified {
-                                    runtime: if let Some(new_runtime) = new_runtime {
-                                        Arc::new(Mutex::new(Some(new_runtime)))
-                                    } else {
-                                        parent_runtime_arc
-                                    },
-                                };
+                            self.sync[(height, &hash_to_verify)] = NonFinalizedBlock::Verified {
+                                runtime: if let Some(new_runtime) = new_runtime {
+                                    Arc::new(Mutex::new(Some(new_runtime)))
+                                } else {
+                                    parent_runtime_arc
+                                },
+                            };
 
                             if is_new_best {
                                 // Update the networking.
@@ -1417,9 +1415,8 @@ impl SyncBackground {
                                     self.sync
                                         .sources()
                                         .collect::<HashSet<_, fnv::FnvBuildHasher>>();
-                                for knows in self
-                                    .sync
-                                    .knows_non_finalized_block(height_to_verify, &hash_to_verify)
+                                for knows in
+                                    self.sync.knows_non_finalized_block(height, &hash_to_verify)
                                 {
                                     all_sources.remove(&knows);
                                 }
@@ -1438,7 +1435,7 @@ impl SyncBackground {
                                     .send_block_announce(
                                         peer_id.clone(),
                                         0,
-                                        scale_encoded_header_to_verify.clone(),
+                                        scale_encoded_header.clone(),
                                         is_new_best,
                                     )
                                     .await
@@ -1450,7 +1447,7 @@ impl SyncBackground {
                                     // politeness.
                                     self.sync.try_add_known_block_to_source(
                                         source_id,
-                                        height_to_verify,
+                                        height,
                                         hash_to_verify,
                                     );
                                 }

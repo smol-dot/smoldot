@@ -2384,14 +2384,6 @@ enum BlockVerifyInner<TRq, TSrc, TBl> {
 }
 
 impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
-    /// Returns the height of the block to be verified.
-    pub fn height(&self) -> u64 {
-        match &self.inner {
-            BlockVerifyInner::AllForks(verify) => verify.height(),
-            BlockVerifyInner::Optimistic(verify) => verify.height(),
-        }
-    }
-
     /// Returns the hash of the block to be verified.
     pub fn hash(&self) -> [u8; 32] {
         match &self.inner {
@@ -2405,27 +2397,10 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
     /// This is `Some` if and only if [`Config::full`] is `true`
     pub fn scale_encoded_extrinsics(
         &'_ self,
-    ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + '_> + '_> {
+    ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
         match &self.inner {
-            BlockVerifyInner::AllForks(verify) => todo!(), // TODO: /!\
+            BlockVerifyInner::AllForks(_verify) => todo!(), // TODO: /!\
             BlockVerifyInner::Optimistic(verify) => verify.scale_encoded_extrinsics(),
-        }
-    }
-
-    /// Returns the hash of the parent of the block to be verified.
-    pub fn parent_hash(&self) -> [u8; 32] {
-        match &self.inner {
-            BlockVerifyInner::AllForks(verify) => *verify.parent_hash(),
-            BlockVerifyInner::Optimistic(verify) => verify.parent_hash(),
-        }
-    }
-
-    /// Returns the user data of the parent of the block to be verified, or `None` if the parent
-    /// is the finalized block.
-    pub fn parent_user_data(&self) -> Option<&TBl> {
-        match &self.inner {
-            BlockVerifyInner::AllForks(verify) => todo!(), // TODO: /!\
-            BlockVerifyInner::Optimistic(verify) => verify.parent_user_data(),
         }
     }
 
@@ -2444,7 +2419,6 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
     ) -> HeaderVerifyOutcome<TRq, TSrc, TBl> {
         match self.inner {
             BlockVerifyInner::AllForks(verify) => {
-                let verified_block_height = verify.height();
                 let verified_block_hash = *verify.hash();
 
                 match verify.verify_header(now_from_unix_epoch) {
@@ -2456,7 +2430,6 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                         success: HeaderVerifySuccess {
                             inner: HeaderVerifySuccessInner::AllForks(success),
                             shared: self.shared,
-                            verified_block_height,
                             verified_block_hash,
                         },
                     },
@@ -2482,7 +2455,6 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                 }
             }
             BlockVerifyInner::Optimistic(verify) => {
-                let verified_block_height = verify.height();
                 let verified_block_hash = verify.hash();
 
                 match verify.verify_header(now_from_unix_epoch) {
@@ -2492,7 +2464,6 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                             success: HeaderVerifySuccess {
                                 inner: HeaderVerifySuccessInner::Optimistic(success),
                                 shared: self.shared,
-                                verified_block_height,
                                 verified_block_hash,
                             },
                         }
@@ -2545,7 +2516,6 @@ pub enum HeaderVerifyError {
 pub struct HeaderVerifySuccess<TRq, TSrc, TBl> {
     inner: HeaderVerifySuccessInner<TRq, TSrc, TBl>,
     shared: Shared<TRq>,
-    verified_block_height: u64,
     verified_block_hash: [u8; 32],
 }
 
@@ -2567,10 +2537,63 @@ enum HeaderVerifySuccessInner<TRq, TSrc, TBl> {
 }
 
 impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
+    /// Returns the height of the block that was verified.
+    pub fn height(&self) -> u64 {
+        match &self.inner {
+            HeaderVerifySuccessInner::AllForks(verify) => verify.height(),
+            HeaderVerifySuccessInner::Optimistic(verify) => verify.height(),
+        }
+    }
+
+    /// Returns the hash of the block that was verified.
+    pub fn hash(&self) -> [u8; 32] {
+        match &self.inner {
+            HeaderVerifySuccessInner::AllForks(verify) => *verify.hash(),
+            HeaderVerifySuccessInner::Optimistic(verify) => verify.hash(),
+        }
+    }
+
+    /// Returns the list of SCALE-encoded extrinsics of the block to verify.
+    ///
+    /// This is `Some` if and only if [`Config::full`] is `true`
+    pub fn scale_encoded_extrinsics(
+        &'_ self,
+    ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
+        match &self.inner {
+            HeaderVerifySuccessInner::AllForks(_verify) => todo!(), // TODO: /!\
+            HeaderVerifySuccessInner::Optimistic(verify) => verify.scale_encoded_extrinsics(),
+        }
+    }
+
+    /// Returns the hash of the parent of the block that was verified.
+    pub fn parent_hash(&self) -> &[u8; 32] {
+        match &self.inner {
+            HeaderVerifySuccessInner::AllForks(verify) => verify.parent_hash(),
+            HeaderVerifySuccessInner::Optimistic(verify) => verify.parent_hash(),
+        }
+    }
+
+    /// Returns the user data of the parent of the block to be verified, or `None` if the parent
+    /// is the finalized block.
+    pub fn parent_user_data(&self) -> Option<&TBl> {
+        match &self.inner {
+            HeaderVerifySuccessInner::AllForks(_verify) => todo!(), // TODO: /!\
+            HeaderVerifySuccessInner::Optimistic(verify) => verify.parent_user_data(),
+        }
+    }
+
+    /// Returns the SCALE-encoded header of the block that was verified.
+    pub fn scale_encoded_header(&self) -> &[u8] {
+        match &self.inner {
+            HeaderVerifySuccessInner::AllForks(verify) => verify.scale_encoded_header(),
+            HeaderVerifySuccessInner::Optimistic(verify) => verify.scale_encoded_header(),
+        }
+    }
+
     /// Returns the SCALE-encoded header of the parent of the block.
     pub fn parent_scale_encoded_header(&self) -> Vec<u8> {
         match &self.inner {
-            HeaderVerifySuccessInner::AllForks(inner) => todo!(), // TODO: /!\
+            HeaderVerifySuccessInner::AllForks(_inner) => todo!(), // TODO: /!\
             HeaderVerifySuccessInner::Optimistic(inner) => inner.parent_scale_encoded_header(),
         }
     }
@@ -2597,11 +2620,11 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
 
     /// Finish inserting the block header.
     pub fn finish(self, user_data: TBl) -> AllSync<TRq, TSrc, TBl> {
+        let height = self.height();
         match self.inner {
             HeaderVerifySuccessInner::AllForks(inner) => {
                 let mut sync = inner.finish();
-                *sync.block_user_data_mut(self.verified_block_height, &self.verified_block_hash) =
-                    Some(user_data);
+                *sync.block_user_data_mut(height, &self.verified_block_hash) = Some(user_data);
                 AllSync {
                     inner: AllSyncInner::AllForks(sync),
                     shared: self.shared,

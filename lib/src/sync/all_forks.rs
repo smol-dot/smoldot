@@ -1945,19 +1945,9 @@ pub struct BlockVerify<TBl, TRq, TSrc> {
 }
 
 impl<TBl, TRq, TSrc> BlockVerify<TBl, TRq, TSrc> {
-    /// Returns the height of the block to be verified.
-    pub fn height(&self) -> u64 {
-        self.block_to_verify.block_number
-    }
-
     /// Returns the hash of the block to be verified.
     pub fn hash(&self) -> &[u8; 32] {
         &self.block_to_verify.block_hash
-    }
-
-    /// Returns the hash of the parent of the block to be verified.
-    pub fn parent_hash(&self) -> &[u8; 32] {
-        &self.block_to_verify.parent_block_hash
     }
 
     /// Returns the SCALE-encoded header of the block about to be verified.
@@ -2060,6 +2050,35 @@ pub struct HeaderVerifySuccess<TBl, TRq, TSrc> {
 }
 
 impl<TBl, TRq, TSrc> HeaderVerifySuccess<TBl, TRq, TSrc> {
+    /// Returns the height of the block that was verified.
+    pub fn height(&self) -> u64 {
+        self.block_to_verify.block_number
+    }
+
+    /// Returns the hash of the block that was verified.
+    pub fn hash(&self) -> &[u8; 32] {
+        &self.block_to_verify.block_hash
+    }
+
+    /// Returns the hash of the parent of the block that was verified.
+    pub fn parent_hash(&self) -> &[u8; 32] {
+        &self.block_to_verify.parent_block_hash
+    }
+
+    /// Returns the user data of the parent of the block to be verified, or `None` if the parent
+    /// is the finalized block.
+    pub fn parent_user_data(&self) -> Option<&TBl> {
+        self.parent
+            .chain
+            .non_finalized_block_user_data(&self.block_to_verify.parent_block_hash)
+            .map(|ud| &ud.user_data)
+    }
+
+    /// Returns the SCALE-encoded header of the block that was verified.
+    pub fn scale_encoded_header(&self) -> &[u8] {
+        self.verified_header.scale_encoded_header()
+    }
+
     /// Reject the block and mark it as bad.
     pub fn reject_bad_block(mut self) -> AllForksSync<TBl, TRq, TSrc> {
         // Remove the block from `pending_blocks`.
