@@ -130,12 +130,8 @@ impl JaegerService {
             .with_start_time_override(start_time)
     }
 
-    pub fn block_body_verify_span(&self, block_hash: &[u8; 32]) -> mick_jaeger::Span {
-        self.block_span(block_hash, "body-verify")
-    }
-
-    pub fn block_header_verify_span(&self, block_hash: &[u8; 32]) -> mick_jaeger::Span {
-        self.block_span(block_hash, "header-verify")
+    pub fn block_verify_span(&self, block_hash: &[u8; 32]) -> mick_jaeger::Span {
+        self.block_span(block_hash, "block-verify")
     }
 
     pub fn block_import_queue_span(&self, block_hash: &[u8; 32]) -> mick_jaeger::Span {

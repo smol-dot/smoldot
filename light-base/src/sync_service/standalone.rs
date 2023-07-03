@@ -699,15 +699,17 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 }
             }
 
-            all::ProcessOne::VerifyHeader(verify) => {
+            all::ProcessOne::VerifyBlock(verify) => {
                 // Header to verify.
                 let verified_hash = verify.hash();
-                let verified_height = verify.height();
-                match verify.perform(self.platform.now_from_unix_epoch(), ()) {
+                match verify.verify_header(self.platform.now_from_unix_epoch()) {
                     all::HeaderVerifyOutcome::Success {
-                        sync, is_new_best, ..
+                        success,
+                        is_new_best,
+                        ..
                     } => {
-                        self.sync = sync;
+                        let verified_height = success.height();
+                        self.sync = success.finish(());
 
                         log::debug!(
                             target: &self.log_target,
@@ -927,9 +929,6 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     }
                 }
             }
-
-            // Can't verify header and body in non-full mode.
-            all::ProcessOne::VerifyBodyHeader(_) => unreachable!(),
         }
 
         (self, true)
