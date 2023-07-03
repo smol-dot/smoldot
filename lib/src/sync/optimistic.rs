@@ -845,6 +845,7 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                             inner: self.inner,
                             chain: self.chain,
                         },
+                        scale_encoded_extrinsics: block.scale_encoded_extrinsics,
                         verified_header,
                         scale_encoded_justifications: block.scale_encoded_justifications.clone(),
                         source_id,
@@ -919,6 +920,7 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
 pub struct BlockVerifySuccess<TRq, TSrc, TBl> {
     parent: OptimisticSync<TRq, TSrc, TBl>,
     verified_header: blocks_tree::VerifiedHeader,
+    scale_encoded_extrinsics: Vec<Vec<u8>>,
     scale_encoded_justifications: Vec<([u8; 4], Vec<u8>)>,
     source_id: SourceId,
 }
@@ -946,8 +948,7 @@ impl<TRq, TSrc, TBl> BlockVerifySuccess<TRq, TSrc, TBl> {
         &'_ self,
     ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
         if self.parent.inner.download_bodies {
-            let block = self.parent.inner.verification_queue.first_block().unwrap();
-            Some(block.scale_encoded_extrinsics.iter())
+            Some(self.scale_encoded_extrinsics.iter())
         } else {
             None
         }
@@ -977,13 +978,7 @@ impl<TRq, TSrc, TBl> BlockVerifySuccess<TRq, TSrc, TBl> {
 
     /// Returns the SCALE-encoded header of the block that was verified.
     pub fn scale_encoded_header(&self) -> &[u8] {
-        &self
-            .parent
-            .inner
-            .verification_queue
-            .first_block()
-            .unwrap()
-            .scale_encoded_header
+        &self.verified_header.scale_encoded_header()
     }
 
     /// Returns the SCALE-encoded header of the parent of the block.
