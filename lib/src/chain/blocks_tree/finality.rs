@@ -20,10 +20,7 @@
 use super::*;
 use crate::finality::{grandpa, justification};
 
-use core::{
-    cmp::{self, Ordering},
-    iter,
-};
+use core::{cmp, iter};
 
 impl<T> NonFinalizedTree<T> {
     /// Returns a list of blocks (by their height and hash) that need to be finalized before any
@@ -377,58 +374,19 @@ impl<T> NonFinalizedTree<T> {
         }
 
         // If the best block isn't a descendant of the block being finalized, then the best
-        // block has to change to a different block.
-        //
-        // The definition of which block is the best can vary between nodes, but because there is
-        // an intentional delay between a block being created and it being finalized, the block
-        // being finalized is, under normal circumstances, always a common ancestor of the current
-        // best block of all nodes.
-        //
-        // The situation where this isn't the case is therefore very uncommon: typically after a
-        // netsplit (where not all nodes are aware of all blocks), or in extremely unlucky
-        // situations.
-        //
-        // Because this is very uncommon, searching for the new best block is implemented in a
-        // naive way, by scanning through each block one by one. This means that, when two blocks
-        // are equal to become the new best, it is not necessarily the earliest received block that
-        // is picked, contrary to the definition of "best block". But again, considering that this
-        // situation is so uncommon, it doesn't really matter.
-        debug_assert!(self.current_best.is_some()); // Can only be `None` if the tree is empty.
-        let updates_best_block = if block_index_to_finalize == self.current_best.unwrap()
-            || !self
-                .blocks
-                .is_ancestor(block_index_to_finalize, self.current_best.unwrap())
-        {
-            let mut new_best_block = None;
-            for (idx, block) in self.blocks.iter_unordered() {
-                if idx == block_index_to_finalize
-                    || !self.blocks.is_ancestor(block_index_to_finalize, idx)
-                {
-                    continue;
-                }
-
-                let replace = if let Some(new_best_block) = new_best_block {
-                    best_block::is_better_block(
-                        &self.blocks,
-                        self.block_number_bytes,
-                        new_best_block,
-                        self.blocks.parent(idx),
-                        header::decode(&block.header, self.block_number_bytes).unwrap(),
-                    ) == Ordering::Greater
-                } else {
-                    true
-                };
-
-                if replace {
-                    new_best_block = Some(idx);
-                }
-            }
-
-            debug_assert_ne!(self.current_best, new_best_block);
-            self.current_best = new_best_block;
-            true
-        } else {
-            false
+        // block will change to a different block.
+        // TODO: this is `O(n)`, does the user really need to know ahead of time whether the best block is updated?
+        let updates_best_block = {
+            let current_best: Option<fork_tree::NodeIndex> = self
+                .blocks_by_best_score
+                .last_key_value()
+                .map(|(_, idx)| *idx);
+            Some(block_index_to_finalize) == current_best
+                || current_best.map_or(true, |current_best| {
+                    !self
+                        .blocks
+                        .is_ancestor(block_index_to_finalize, current_best)
+                })
         };
 
         let new_finalized_block = self.blocks.get_mut(block_index_to_finalize).unwrap();
@@ -467,18 +425,22 @@ impl<T> NonFinalizedTree<T> {
             _ => unreachable!(),
         }
 
-        // Update `self.finalized_block_header` and `self.finalized_block_hash`.
+        // Update `self.finalized_block_header`, `self.finalized_block_hash`, and
+        // `self.finalized_best_score`.
         mem::swap(
             &mut self.finalized_block_header,
             &mut new_finalized_block.header,
         );
         self.finalized_block_hash =
             header::hash_from_scale_encoded_header(&self.finalized_block_header);
+        self.finalized_best_score = new_finalized_block.best_score;
 
         debug_assert_eq!(self.blocks.len(), self.blocks_by_hash.len());
+        debug_assert_eq!(self.blocks.len(), self.blocks_by_best_score.len());
         SetFinalizedBlockIter {
             iter: self.blocks.prune_ancestors(block_index_to_finalize),
             blocks_by_hash: &mut self.blocks_by_hash,
+            blocks_by_best_score: &mut self.blocks_by_best_score,
             updates_best_block,
         }
     }
@@ -516,7 +478,12 @@ impl<'c, T> FinalityApply<'c, T> {
 
     /// Returns true if the block to be finalized is the current best block.
     pub fn is_current_best_block(&self) -> bool {
-        Some(self.to_finalize) == self.chain.current_best
+        Some(self.to_finalize)
+            == self
+                .chain
+                .blocks_by_best_score
+                .last_key_value()
+                .map(|(_, idx)| *idx)
     }
 }
 
@@ -610,6 +577,7 @@ pub enum FinalityVerifyError {
 pub struct SetFinalizedBlockIter<'a, T> {
     iter: fork_tree::PruneAncestorsIter<'a, Block<T>>,
     blocks_by_hash: &'a mut HashMap<[u8; 32], fork_tree::NodeIndex, fnv::FnvBuildHasher>,
+    blocks_by_best_score: &'a mut BTreeMap<BestScore, fork_tree::NodeIndex>,
     updates_best_block: bool,
 }
 
@@ -627,6 +595,10 @@ impl<'a, T> Iterator for SetFinalizedBlockIter<'a, T> {
         loop {
             let pruned = self.iter.next()?;
             let _removed = self.blocks_by_hash.remove(&pruned.user_data.hash);
+            debug_assert_eq!(_removed, Some(pruned.index));
+            let _removed = self
+                .blocks_by_best_score
+                .remove(&pruned.user_data.best_score);
             debug_assert_eq!(_removed, Some(pruned.index));
             if !pruned.is_prune_target_ancestor {
                 continue;
@@ -650,6 +622,6 @@ impl<'a, T> Drop for SetFinalizedBlockIter<'a, T> {
 /// Error that can happen when setting the finalized block.
 #[derive(Debug, derive_more::Display)]
 pub enum SetFinalizedError {
-    /// Block must have been passed to [`NonFinalizedTree::verify_header`] in the past.
+    /// Block must have been passed to [`NonFinalizedTree::insert_verified_header`] in the past.
     UnknownBlock,
 }
