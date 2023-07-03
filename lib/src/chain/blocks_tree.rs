@@ -122,10 +122,10 @@ pub struct NonFinalizedTree<T> {
 
     /// Container for non-finalized blocks.
     blocks: fork_tree::ForkTree<Block<T>>,
-    /// For each block hash, the index of this block in [`NonFinalizedTreeInner::blocks`].
-    /// Must always have the same number of entries as [`NonFinalizedTreeInner::blocks`].
+    /// For each block hash, the index of this block in [`NonFinalizedTree::blocks`].
+    /// Must always have the same number of entries as [`NonFinalizedTree::blocks`].
     blocks_by_hash: HashMap<[u8; 32], fork_tree::NodeIndex, fnv::FnvBuildHasher>,
-    /// Index within [`NonFinalizedTreeInner::blocks`] of the current best block. `None` if and
+    /// Index within [`NonFinalizedTree::blocks`] of the current best block. `None` if and
     /// only if the fork tree is empty.
     current_best: Option<fork_tree::NodeIndex>,
     /// See [`Config::block_number_bytes`].
