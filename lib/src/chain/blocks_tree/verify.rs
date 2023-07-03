@@ -198,7 +198,8 @@ impl<T> NonFinalizedTreeInner<T> {
 
         // Some consensus-specific information must be fetched from the tree of ancestry. The
         // information is found either in the parent block, or in the finalized block.
-        let (consensus, finality) = if let Some(parent_tree_index) = parent_tree_index {
+        let (parent_consensus, parent_finality) = if let Some(parent_tree_index) = parent_tree_index
+        {
             let parent = self.blocks.get(parent_tree_index).unwrap();
             (Some(parent.consensus.clone()), parent.finality.clone())
         } else {
@@ -243,12 +244,12 @@ impl<T> NonFinalizedTreeInner<T> {
             (consensus, finality)
         };
 
-        let mut context = Box::new(VerifyContext {
+        let context = Box::new(VerifyContext {
             chain: self,
             header: scale_encoded_header,
             parent_tree_index,
-            consensus,
-            finality,
+            consensus: parent_consensus,
+            finality: parent_finality,
         });
 
         let parent_block_header = if let Some(parent_tree_index) = parent_tree_index {
@@ -257,7 +258,7 @@ impl<T> NonFinalizedTreeInner<T> {
             &context.chain.finalized_block_header
         };
 
-        let result = verify::header_only::verify(verify::header_only::Config {
+        let header_verify_result = verify::header_only::verify(verify::header_only::Config {
             consensus: match (&context.chain.finalized_consensus, &context.consensus) {
                 (
                     FinalizedConsensus::Aura { slot_duration, .. },
@@ -310,52 +311,20 @@ impl<T> NonFinalizedTreeInner<T> {
         })
         .map_err(HeaderVerifyError::VerificationFailed);
 
-        match result {
-            Ok(success) => {
-                let (is_new_best, consensus, finality) = context.apply_success_header(success);
-                VerifyOut::HeaderOk(
-                    context.chain,
-                    VerifiedHeader {
-                        scale_encoded_header: context.header,
-                        is_new_best,
-                        consensus,
-                        finality,
-                        hash,
-                    },
-                )
-            }
-            Err(err) => VerifyOut::HeaderErr(context.chain, err),
-        }
-    }
-}
+        let header_verify_result = match header_verify_result {
+            Ok(success) => success,
+            Err(err) => return VerifyOut::HeaderErr(context.chain, err),
+        };
 
-enum VerifyOut<T> {
-    HeaderOk(Box<NonFinalizedTreeInner<T>>, VerifiedHeader),
-    HeaderErr(Box<NonFinalizedTreeInner<T>>, HeaderVerifyError),
-    HeaderDuplicate(Box<NonFinalizedTreeInner<T>>),
-}
+        let decoded_header =
+            header::decode(&context.header, context.chain.block_number_bytes).unwrap();
 
-struct VerifyContext<T> {
-    chain: Box<NonFinalizedTreeInner<T>>,
-    parent_tree_index: Option<fork_tree::NodeIndex>,
-    header: Vec<u8>,
-    consensus: Option<BlockConsensus>,
-    finality: BlockFinality,
-}
-
-impl<T> VerifyContext<T> {
-    fn apply_success_header(
-        &mut self,
-        success_consensus: verify::header_only::Success,
-    ) -> (bool, BlockConsensus, BlockFinality) {
-        let decoded_header = header::decode(&self.header, self.chain.block_number_bytes).unwrap();
-
-        let is_new_best = if let Some(current_best) = self.chain.current_best {
+        let is_new_best = if let Some(current_best) = context.chain.current_best {
             best_block::is_better_block(
-                &self.chain.blocks,
-                self.chain.block_number_bytes,
+                &context.chain.blocks,
+                context.chain.block_number_bytes,
                 current_best,
-                self.parent_tree_index,
+                context.parent_tree_index,
                 decoded_header.clone(),
             ) == Ordering::Greater
         } else {
@@ -363,11 +332,12 @@ impl<T> VerifyContext<T> {
         };
 
         let consensus = match (
-            success_consensus,
-            &self.consensus,
-            self.chain.finalized_consensus.clone(),
-            self.parent_tree_index
-                .map(|idx| self.chain.blocks.get(idx).unwrap().consensus.clone()),
+            header_verify_result,
+            &context.consensus,
+            context.chain.finalized_consensus.clone(),
+            context
+                .parent_tree_index
+                .map(|idx| context.chain.blocks.get(idx).unwrap().consensus.clone()),
         ) {
             (
                 verify::header_only::Success::Aura { authorities_change },
@@ -501,7 +471,7 @@ impl<T> VerifyContext<T> {
             _ => unreachable!(),
         };
 
-        let finality = match &self.finality {
+        let finality = match &context.finality {
             BlockFinality::Outsourced => BlockFinality::Outsourced,
             BlockFinality::Grandpa {
                 prev_auth_change_trigger_number: parent_prev_auth_change_trigger_number,
@@ -586,8 +556,31 @@ impl<T> VerifyContext<T> {
             }
         };
 
-        (is_new_best, consensus, finality)
+        VerifyOut::HeaderOk(
+            context.chain,
+            VerifiedHeader {
+                scale_encoded_header: context.header,
+                is_new_best,
+                consensus,
+                finality,
+                hash,
+            },
+        )
     }
+}
+
+enum VerifyOut<T> {
+    HeaderOk(Box<NonFinalizedTreeInner<T>>, VerifiedHeader),
+    HeaderErr(Box<NonFinalizedTreeInner<T>>, HeaderVerifyError),
+    HeaderDuplicate(Box<NonFinalizedTreeInner<T>>),
+}
+
+struct VerifyContext<T> {
+    chain: Box<NonFinalizedTreeInner<T>>,
+    parent_tree_index: Option<fork_tree::NodeIndex>,
+    header: Vec<u8>,
+    consensus: Option<BlockConsensus>,
+    finality: BlockFinality,
 }
 
 ///
