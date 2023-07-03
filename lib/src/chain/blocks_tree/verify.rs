@@ -44,96 +44,6 @@ impl<T> NonFinalizedTree<T> {
         scale_encoded_header: Vec<u8>,
         now_from_unix_epoch: Duration,
     ) -> Result<HeaderVerifySuccess, HeaderVerifyError> {
-        self.verify(scale_encoded_header, now_from_unix_epoch)
-    }
-
-    /// Insert a header that has already been verified to be valid.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the parent of the block isn't in the tree. The presence of the parent is verified
-    /// when the block is verified, so this can only happen if you remove the parent after having
-    /// verified the block but before calling this function.
-    ///
-    pub fn insert_verified_header(&mut self, verified_header: VerifiedHeader, user_data: T) {
-        // Try to find the parent block in the tree of known blocks.
-        // `Some` with an index of the parent within the tree of unfinalized blocks.
-        // `None` means that the parent is the finalized block.
-        let parent_tree_index = {
-            let decoded_header = header::decode(
-                &verified_header.scale_encoded_header,
-                self.block_number_bytes,
-            )
-            .unwrap();
-
-            if *decoded_header.parent_hash == self.finalized_block_hash {
-                None
-            } else {
-                Some(*self.blocks_by_hash.get(decoded_header.parent_hash).unwrap())
-            }
-        };
-
-        let new_node_index = self.blocks.insert(
-            parent_tree_index,
-            Block {
-                header: verified_header.scale_encoded_header,
-                hash: verified_header.hash,
-                consensus: verified_header.consensus,
-                finality: verified_header.finality,
-                user_data,
-            },
-        );
-
-        let _prev_value = self
-            .blocks_by_hash
-            .insert(verified_header.hash, new_node_index);
-        // A bug here would be serious enough that it is worth being an `assert!`
-        assert!(_prev_value.is_none());
-
-        // TODO: what if it's no longer the new best because the API user has inserted another block in between? the best block system should be refactored
-        if verified_header.is_new_best {
-            self.current_best = Some(new_node_index);
-        }
-    }
-}
-
-/// Successfully-verified block header that can be inserted into the chain.
-pub struct VerifiedHeader {
-    scale_encoded_header: Vec<u8>,
-    is_new_best: bool,
-    consensus: BlockConsensus,
-    finality: BlockFinality,
-    hash: [u8; 32],
-}
-
-impl VerifiedHeader {
-    /// Returns the block header.
-    pub fn scale_encoded_header(&self) -> &[u8] {
-        &self.scale_encoded_header
-    }
-
-    /// Returns the block header.
-    pub fn into_scale_encoded_header(self) -> Vec<u8> {
-        self.scale_encoded_header
-    }
-}
-
-impl fmt::Debug for VerifiedHeader {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("VerifiedHeader")
-            .field(&hex::encode(&self.scale_encoded_header))
-            .finish()
-    }
-}
-
-impl<T> NonFinalizedTree<T> {
-    /// Common implementation for both [`NonFinalizedTree::verify_header`] and
-    /// [`NonFinalizedTree::verify_body`].
-    fn verify(
-        &self,
-        scale_encoded_header: Vec<u8>,
-        now_from_unix_epoch: Duration,
-    ) -> Result<HeaderVerifySuccess, HeaderVerifyError> {
         let decoded_header = match header::decode(&scale_encoded_header, self.block_number_bytes) {
             Ok(h) => h,
             Err(err) => return Err(HeaderVerifyError::InvalidHeader(err)),
@@ -505,6 +415,84 @@ impl<T> NonFinalizedTree<T> {
             },
             is_new_best,
         })
+    }
+
+    /// Insert a header that has already been verified to be valid.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the parent of the block isn't in the tree. The presence of the parent is verified
+    /// when the block is verified, so this can only happen if you remove the parent after having
+    /// verified the block but before calling this function.
+    ///
+    pub fn insert_verified_header(&mut self, verified_header: VerifiedHeader, user_data: T) {
+        // Try to find the parent block in the tree of known blocks.
+        // `Some` with an index of the parent within the tree of unfinalized blocks.
+        // `None` means that the parent is the finalized block.
+        let parent_tree_index = {
+            let decoded_header = header::decode(
+                &verified_header.scale_encoded_header,
+                self.block_number_bytes,
+            )
+            .unwrap();
+
+            if *decoded_header.parent_hash == self.finalized_block_hash {
+                None
+            } else {
+                Some(*self.blocks_by_hash.get(decoded_header.parent_hash).unwrap())
+            }
+        };
+
+        let new_node_index = self.blocks.insert(
+            parent_tree_index,
+            Block {
+                header: verified_header.scale_encoded_header,
+                hash: verified_header.hash,
+                consensus: verified_header.consensus,
+                finality: verified_header.finality,
+                user_data,
+            },
+        );
+
+        let _prev_value = self
+            .blocks_by_hash
+            .insert(verified_header.hash, new_node_index);
+        // A bug here would be serious enough that it is worth being an `assert!`
+        assert!(_prev_value.is_none());
+
+        // TODO: what if it's no longer the new best because the API user has inserted another block in between? the best block system should be refactored
+        if verified_header.is_new_best {
+            self.current_best = Some(new_node_index);
+        }
+    }
+}
+
+/// Successfully-verified block header that can be inserted into the chain.
+pub struct VerifiedHeader {
+    scale_encoded_header: Vec<u8>,
+    is_new_best: bool,
+    consensus: BlockConsensus,
+    finality: BlockFinality,
+    hash: [u8; 32],
+}
+
+impl VerifiedHeader {
+    /// Returns the block header.
+    pub fn scale_encoded_header(&self) -> &[u8] {
+        &self.scale_encoded_header
+    }
+
+    /// Returns the block header.
+    pub fn into_scale_encoded_header(self) -> Vec<u8> {
+        self.scale_encoded_header
+    }
+}
+
+impl fmt::Debug for VerifiedHeader {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("VerifiedHeader")
+            .field(&hex::encode(&self.scale_encoded_header))
+            .finish()
     }
 }
 
