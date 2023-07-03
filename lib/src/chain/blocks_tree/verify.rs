@@ -28,13 +28,14 @@ use super::{
 use core::cmp::Ordering;
 
 impl<T> NonFinalizedTree<T> {
-    /// Verifies the given block.
+    /// Verifies the given block header.
     ///
     /// The verification is performed in the context of the chain. In particular, the
     /// verification will fail if the parent block isn't already in the chain.
     ///
-    /// If the verification succeeds, an [`HeaderInsert`] object might be returned which can be
-    /// used to then insert the block in the chain.
+    /// If the verification succeeds, an [`VerifiedHeader`] object might be returned which can be
+    /// used to then insert the block in the chain using
+    /// [`NonFinalizedTree::insert_verified_header`].
     ///
     /// Must be passed the current UNIX time in order to verify that the block doesn't pretend to
     /// come from the future.
@@ -517,7 +518,7 @@ impl<T> NonFinalizedTreeInner<T> {
     }
 }
 
-///
+/// See [`NonFinalizedTree::verify_header`].
 #[derive(Debug)]
 pub enum HeaderVerifySuccess {
     /// Block is already known.
