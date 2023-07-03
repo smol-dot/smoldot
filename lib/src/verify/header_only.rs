@@ -126,6 +126,9 @@ pub enum Success {
         /// >           block.
         slot_number: u64,
 
+        /// `true` if the claimed slot is a primary slot. `false` if it is a secondary slot.
+        is_primary_slot: bool,
+
         /// If `Some`, the verified block contains an epoch transition describing the new
         /// "next epoch". When verifying blocks that are children of this one, the value in this
         /// field must be provided as [`ConfigConsensus::Babe::parent_block_next_epoch`], and the
@@ -260,6 +263,7 @@ pub fn verify(config: Config) -> Result<Success, Error> {
             match result {
                 Ok(s) => Ok(Success::Babe {
                     epoch_transition_target: s.epoch_transition_target,
+                    is_primary_slot: s.is_primary_slot,
                     slot_number: s.slot_number,
                 }),
                 Err(err) => Err(Error::BabeVerification(err)),

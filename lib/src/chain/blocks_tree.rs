@@ -66,11 +66,10 @@ use crate::{
     header,
 };
 
-use alloc::{format, sync::Arc, vec::Vec};
-use core::{fmt, mem, num::NonZeroU64, ops, time::Duration};
+use alloc::{collections::BTreeMap, format, sync::Arc, vec::Vec};
+use core::{cmp, fmt, mem, num::NonZeroU64, ops, time::Duration};
 use hashbrown::HashMap;
 
-mod best_block;
 mod finality;
 mod verify;
 
@@ -116,18 +115,27 @@ pub struct NonFinalizedTree<T> {
     finalized_block_hash: [u8; 32],
     /// State of the chain finality engine.
     finality: Finality,
-
     /// State of the consensus of the finalized block.
     finalized_consensus: FinalizedConsensus,
+    /// Best score of the finalized block.
+    finalized_best_score: BestScore,
 
     /// Container for non-finalized blocks.
     blocks: fork_tree::ForkTree<Block<T>>,
+    /// Counter increased by 1 every time a block is inserted in the collection. This value is used
+    /// in order to guarantee that blocks inserted before are always considered as better than
+    /// blocks inserted later.
+    /// We use a `u128` rather than a `u64`. While it is unlikely that `2^64` blocks ever get
+    /// inserted into the collection, the fact that the block number is a `u64`, and that there
+    /// are potentially more than one block per height, means that a `u64` here is technically
+    /// too small.
+    blocks_insertion_counter: u128,
     /// For each block hash, the index of this block in [`NonFinalizedTree::blocks`].
     /// Must always have the same number of entries as [`NonFinalizedTree::blocks`].
     blocks_by_hash: HashMap<[u8; 32], fork_tree::NodeIndex, fnv::FnvBuildHasher>,
-    /// Index within [`NonFinalizedTree::blocks`] of the current best block. `None` if and
-    /// only if the fork tree is empty.
-    current_best: Option<fork_tree::NodeIndex>,
+    /// Blocks indexed by the value in [`Block::best_score`]. The best block is the one with the
+    /// highest score.
+    blocks_by_best_score: BTreeMap<BestScore, fork_tree::NodeIndex>,
     /// See [`Config::block_number_bytes`].
     block_number_bytes: usize,
     /// See [`Config::allow_unknown_consensus_engines`].
@@ -190,12 +198,18 @@ impl<T> NonFinalizedTree<T> {
                     next_epoch_transition: Arc::from(finalized_next_epoch_transition),
                 },
             },
+            finalized_best_score: BestScore {
+                num_primary_slots: 0,
+                num_secondary_slots: 0,
+                insertion_counter: 0,
+            },
             blocks: fork_tree::ForkTree::with_capacity(config.blocks_capacity),
+            blocks_insertion_counter: 1,
             blocks_by_hash: hashbrown::HashMap::with_capacity_and_hasher(
                 config.blocks_capacity,
                 Default::default(),
             ),
-            current_best: None,
+            blocks_by_best_score: BTreeMap::new(),
             block_number_bytes: config.block_number_bytes,
             allow_unknown_consensus_engines: config.allow_unknown_consensus_engines,
         }
@@ -205,7 +219,7 @@ impl<T> NonFinalizedTree<T> {
     pub fn clear(&mut self) {
         self.blocks.clear();
         self.blocks_by_hash.clear();
-        self.current_best = None;
+        self.blocks_by_best_score.clear();
     }
 
     /// Returns true if there isn't any non-finalized block in the chain.
@@ -319,9 +333,9 @@ impl<T> NonFinalizedTree<T> {
 
     /// Returns the header of the best block.
     pub fn best_block_header(&self) -> header::HeaderRef {
-        if let Some(index) = self.current_best {
+        if let Some((_, index)) = self.blocks_by_best_score.last_key_value() {
             header::decode(
-                &self.blocks.get(index).unwrap().header,
+                &self.blocks.get(*index).unwrap().header,
                 self.block_number_bytes,
             )
             .unwrap()
@@ -332,8 +346,8 @@ impl<T> NonFinalizedTree<T> {
 
     /// Returns the hash of the best block.
     pub fn best_block_hash(&self) -> [u8; 32] {
-        if let Some(index) = self.current_best {
-            self.blocks.get(index).unwrap().hash
+        if let Some((_, index)) = self.blocks_by_best_score.last_key_value() {
+            self.blocks.get(*index).unwrap().hash
         } else {
             self.finalized_block_hash
         }
@@ -343,8 +357,9 @@ impl<T> NonFinalizedTree<T> {
     pub fn best_block_consensus(&self) -> chain_information::ChainInformationConsensusRef {
         match (
             &self.finalized_consensus,
-            self.current_best
-                .map(|idx| &self.blocks.get(idx).unwrap().consensus),
+            self.blocks_by_best_score
+                .last_key_value()
+                .map(|(_, idx)| &self.blocks.get(*idx).unwrap().consensus),
         ) {
             (FinalizedConsensus::Unknown, _) => {
                 chain_information::ChainInformationConsensusRef::Unknown
@@ -549,8 +564,40 @@ struct Block<T> {
     consensus: BlockConsensus,
     /// Information about finality attached to each block.
     finality: BlockFinality,
+    /// Score of the block when it comes to determining which block is the best in the chain.
+    best_score: BestScore,
     /// Opaque data decided by the user.
     user_data: T,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+struct BestScore {
+    num_primary_slots: u64,
+    num_secondary_slots: u64,
+    insertion_counter: u128,
+}
+
+impl cmp::PartialOrd for BestScore {
+    fn partial_cmp(&self, other: &BestScore) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl cmp::Ord for BestScore {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        match self.num_primary_slots.cmp(&other.num_primary_slots) {
+            cmp::Ordering::Equal => {
+                match self.num_secondary_slots.cmp(&other.num_secondary_slots) {
+                    cmp::Ordering::Equal => {
+                        // Note the inversion.
+                        other.insertion_counter.cmp(&self.insertion_counter)
+                    }
+                    other => other,
+                }
+            }
+            other => other,
+        }
+    }
 }
 
 /// Changes to the consensus made by a block.
