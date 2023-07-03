@@ -22,7 +22,7 @@ use crate::{chain::chain_information, header, verify};
 
 use super::{
     best_block, fmt, Arc, Block, BlockConsensus, BlockFinality, Duration, Finality,
-    FinalizedConsensus, NonFinalizedTree, NonFinalizedTreeInner, Vec,
+    FinalizedConsensus, NonFinalizedTree, Vec,
 };
 
 use core::cmp::Ordering;
@@ -44,10 +44,7 @@ impl<T> NonFinalizedTree<T> {
         scale_encoded_header: Vec<u8>,
         now_from_unix_epoch: Duration,
     ) -> Result<HeaderVerifySuccess, HeaderVerifyError> {
-        self.inner
-            .as_ref()
-            .unwrap()
-            .verify(scale_encoded_header, now_from_unix_epoch)
+        self.verify(scale_encoded_header, now_from_unix_epoch)
     }
 
     /// Insert a header that has already been verified to be valid.
@@ -59,31 +56,24 @@ impl<T> NonFinalizedTree<T> {
     /// verified the block but before calling this function.
     ///
     pub fn insert_verified_header(&mut self, verified_header: VerifiedHeader, user_data: T) {
-        let inner = self.inner.as_mut().unwrap();
-
         // Try to find the parent block in the tree of known blocks.
         // `Some` with an index of the parent within the tree of unfinalized blocks.
         // `None` means that the parent is the finalized block.
         let parent_tree_index = {
             let decoded_header = header::decode(
                 &verified_header.scale_encoded_header,
-                inner.block_number_bytes,
+                self.block_number_bytes,
             )
             .unwrap();
 
-            if *decoded_header.parent_hash == inner.finalized_block_hash {
+            if *decoded_header.parent_hash == self.finalized_block_hash {
                 None
             } else {
-                Some(
-                    *inner
-                        .blocks_by_hash
-                        .get(decoded_header.parent_hash)
-                        .unwrap(),
-                )
+                Some(*self.blocks_by_hash.get(decoded_header.parent_hash).unwrap())
             }
         };
 
-        let new_node_index = inner.blocks.insert(
+        let new_node_index = self.blocks.insert(
             parent_tree_index,
             Block {
                 header: verified_header.scale_encoded_header,
@@ -94,7 +84,7 @@ impl<T> NonFinalizedTree<T> {
             },
         );
 
-        let _prev_value = inner
+        let _prev_value = self
             .blocks_by_hash
             .insert(verified_header.hash, new_node_index);
         // A bug here would be serious enough that it is worth being an `assert!`
@@ -102,7 +92,7 @@ impl<T> NonFinalizedTree<T> {
 
         // TODO: what if it's no longer the new best because the API user has inserted another block in between? the best block system should be refactored
         if verified_header.is_new_best {
-            inner.current_best = Some(new_node_index);
+            self.current_best = Some(new_node_index);
         }
     }
 }
@@ -136,7 +126,7 @@ impl fmt::Debug for VerifiedHeader {
     }
 }
 
-impl<T> NonFinalizedTreeInner<T> {
+impl<T> NonFinalizedTree<T> {
     /// Common implementation for both [`NonFinalizedTree::verify_header`] and
     /// [`NonFinalizedTree::verify_body`].
     fn verify(

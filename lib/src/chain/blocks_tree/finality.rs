@@ -34,15 +34,14 @@ impl<T> NonFinalizedTree<T> {
     /// [`NonFinalizedTree::verify_grandpa_commit_message`], unless they descend from any of the
     /// blocks returned by this function, in which case that block must be finalized beforehand.
     pub fn finality_checkpoints(&self) -> impl Iterator<Item = (u64, &[u8; 32])> {
-        let inner = self.inner.as_ref().unwrap();
-        match &inner.finality {
+        match &self.finality {
             Finality::Outsourced => {
                 // No checkpoint means all blocks allowed.
                 either::Left(iter::empty())
             }
             Finality::Grandpa { .. } => {
                 // TODO: O(n), could add a cache to make it O(1)
-                let iter = inner
+                let iter = self
                     .blocks
                     .iter_unordered()
                     .filter(move |(_, block)| {
@@ -57,7 +56,7 @@ impl<T> NonFinalizedTree<T> {
                     })
                     .map(|(_, block)| {
                         (
-                            header::decode(&block.header, inner.block_number_bytes)
+                            header::decode(&block.header, self.block_number_bytes)
                                 .unwrap()
                                 .number,
                             &block.hash,
@@ -86,7 +85,7 @@ impl<T> NonFinalizedTree<T> {
         scale_encoded_justification: &[u8],
         randomness_seed: [u8; 32],
     ) -> Result<FinalityApply<T>, JustificationVerifyError> {
-        self.inner.as_mut().unwrap().verify_justification(
+        self.verify_justification_inner(
             consensus_engine_id,
             scale_encoded_justification,
             randomness_seed,
@@ -109,10 +108,7 @@ impl<T> NonFinalizedTree<T> {
         scale_encoded_commit: &[u8],
         randomness_seed: [u8; 32],
     ) -> Result<FinalityApply<T>, CommitVerifyError> {
-        self.inner
-            .as_mut()
-            .unwrap()
-            .verify_grandpa_commit_message(scale_encoded_commit, randomness_seed)
+        self.verify_grandpa_commit_message_inner(scale_encoded_commit, randomness_seed)
     }
 
     /// Sets the latest known finalized block. Trying to verify a block that isn't a descendant of
@@ -138,18 +134,16 @@ impl<T> NonFinalizedTree<T> {
         &mut self,
         block_hash: &[u8; 32],
     ) -> Result<SetFinalizedBlockIter<T>, SetFinalizedError> {
-        let inner = self.inner.as_mut().unwrap();
-
-        let block_index = match inner.blocks_by_hash.get(block_hash) {
+        let block_index = match self.blocks_by_hash.get(block_hash) {
             Some(idx) => *idx,
             None => return Err(SetFinalizedError::UnknownBlock),
         };
 
-        Ok(inner.set_finalized_block(block_index))
+        Ok(self.set_finalized_block_inner(block_index))
     }
 }
 
-impl<T> NonFinalizedTreeInner<T> {
+impl<T> NonFinalizedTree<T> {
     /// Common function for verifying GrandPa-finality-related messages.
     ///
     /// Returns the index of the possibly finalized block, the expected authorities set id, and
@@ -159,7 +153,7 @@ impl<T> NonFinalizedTreeInner<T> {
     ///
     /// Panics if the finality algorithm of the chain isn't Grandpa.
     ///
-    fn verify_grandpa_finality(
+    fn verify_grandpa_finality_inner(
         &'_ self,
         target_hash: &[u8; 32],
         target_number: u64,
@@ -247,7 +241,7 @@ impl<T> NonFinalizedTreeInner<T> {
     }
 
     /// See [`NonFinalizedTree::verify_justification`].
-    fn verify_justification(
+    fn verify_justification_inner(
         &mut self,
         consensus_engine_id: [u8; 4],
         scale_encoded_justification: &[u8],
@@ -264,7 +258,7 @@ impl<T> NonFinalizedTreeInner<T> {
 
                 // Delegate the first step to the other function.
                 let (block_index, authorities_set_id, authorities_list) = self
-                    .verify_grandpa_finality(decoded.target_hash, decoded.target_number)
+                    .verify_grandpa_finality_inner(decoded.target_hash, decoded.target_number)
                     .map_err(JustificationVerifyError::FinalityVerify)?;
 
                 justification::verify::verify(justification::verify::Config {
@@ -287,7 +281,7 @@ impl<T> NonFinalizedTreeInner<T> {
     }
 
     /// See [`NonFinalizedTree::verify_grandpa_commit_message`].
-    fn verify_grandpa_commit_message(
+    fn verify_grandpa_commit_message_inner(
         &mut self,
         verify_grandpa_commit_message: &[u8],
         randomness_seed: [u8; 32],
@@ -305,7 +299,7 @@ impl<T> NonFinalizedTreeInner<T> {
 
         // Delegate the first step to the other function.
         let (block_index, expected_authorities_set_id, authorities_list) = self
-            .verify_grandpa_finality(
+            .verify_grandpa_finality_inner(
                 decoded_commit.message.target_hash,
                 decoded_commit.message.target_number,
             )
@@ -363,7 +357,7 @@ impl<T> NonFinalizedTreeInner<T> {
     ///
     /// Panics if `block_index_to_finalize` isn't a valid node in the tree.
     ///
-    fn set_finalized_block(
+    fn set_finalized_block_inner(
         &mut self,
         block_index_to_finalize: fork_tree::NodeIndex,
     ) -> SetFinalizedBlockIter<T> {
@@ -522,7 +516,7 @@ impl<T> NonFinalizedTreeInner<T> {
 /// isn't modified.
 #[must_use]
 pub struct FinalityApply<'c, T> {
-    chain: &'c mut NonFinalizedTreeInner<T>,
+    chain: &'c mut NonFinalizedTree<T>,
     to_finalize: fork_tree::NodeIndex,
 }
 
@@ -532,7 +526,7 @@ impl<'c, T> FinalityApply<'c, T> {
     /// This function, including its return type, behaves in the same way as
     /// [`NonFinalizedTree::set_finalized_block`].
     pub fn apply(self) -> SetFinalizedBlockIter<'c, T> {
-        self.chain.set_finalized_block(self.to_finalize)
+        self.chain.set_finalized_block_inner(self.to_finalize)
     }
 
     /// Returns the user data of the block about to be justified.
