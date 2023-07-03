@@ -219,12 +219,14 @@ async fn run(cli_options: cli::CliOptionsRun) {
         None
     };
 
+    // Create the directory if necessary.
+    if let Some(base_storage_directory) = base_storage_directory.as_ref() {
+        fs::create_dir_all(base_storage_directory.join(parsed_chain_spec.id())).unwrap();
+    }
     // Directory supposed to contain the database.
-    let sqlite_database_path = base_storage_directory.as_ref().map(|d| {
-        d.join(parsed_chain_spec.id())
-            .join("database")
-            .join("database.sqlite")
-    });
+    let sqlite_database_path = base_storage_directory
+        .as_ref()
+        .map(|d| d.join(parsed_chain_spec.id()).join("database"));
     // Directory supposed to contain the keystore.
     let keystore_path = base_storage_directory
         .as_ref()
@@ -253,6 +255,11 @@ async fn run(cli_options: cli::CliOptionsRun) {
             // Make sure we're not accidentally opening the same chain twice, otherwise weird
             // interactions will happen.
             assert_ne!(parsed_relay_spec.id(), parsed_chain_spec.id());
+
+            // Create the directory if necessary.
+            if let Some(base_storage_directory) = base_storage_directory.as_ref() {
+                fs::create_dir_all(base_storage_directory.join(parsed_relay_spec.id())).unwrap();
+            }
 
             let cfg = smoldot_full_node::ChainConfig {
                 chain_spec: spec_json,
