@@ -751,7 +751,9 @@ impl ClosestDescendantMerkleValue {
     pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         let (_, trie_root_calculator::InProgress::ClosestDescendantMerkleValue(request)) =
             self.inner.root_calculation.as_ref().unwrap()
-            else { unreachable!() };
+        else {
+            unreachable!()
+        };
         request.key().flat_map(util::as_ref_iter)
     }
 
@@ -759,7 +761,9 @@ impl ClosestDescendantMerkleValue {
     pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         let (trie, trie_root_calculator::InProgress::ClosestDescendantMerkleValue(_)) =
             self.inner.root_calculation.as_ref().unwrap()
-            else { unreachable!() };
+        else {
+            unreachable!()
+        };
         trie.as_ref()
     }
 
@@ -770,7 +774,9 @@ impl ClosestDescendantMerkleValue {
     pub fn resume_unknown(mut self) -> RuntimeHostVm {
         let (trie, trie_root_calculator::InProgress::ClosestDescendantMerkleValue(request)) =
             self.inner.root_calculation.take().unwrap()
-            else { unreachable!() };
+        else {
+            unreachable!()
+        };
 
         self.inner.root_calculation = Some((trie, request.resume_unknown()));
         self.inner.run()
@@ -783,7 +789,9 @@ impl ClosestDescendantMerkleValue {
     pub fn inject_merkle_value(mut self, merkle_value: Option<&[u8]>) -> RuntimeHostVm {
         let (trie, trie_root_calculator::InProgress::ClosestDescendantMerkleValue(request)) =
             self.inner.root_calculation.take().unwrap()
-            else { unreachable!() };
+        else {
+            unreachable!()
+        };
 
         self.inner.root_calculation = Some((
             trie,

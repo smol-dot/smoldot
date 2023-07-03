@@ -144,11 +144,10 @@ where
             .collect::<hashbrown::HashSet<_, fnv::FnvBuildHasher>>();
         for (hash, (_, proof_entry_range)) in merkle_values.iter() {
             let node_value = &config.proof.as_ref()[proof_entry_range.clone()];
-            let Ok(decoded) = trie_node::decode(node_value)
-                else {
-                    maybe_trie_roots.remove(hash);
-                    continue
-                };
+            let Ok(decoded) = trie_node::decode(node_value) else {
+                maybe_trie_roots.remove(hash);
+                continue;
+            };
             for child in decoded.children.into_iter().flatten() {
                 if let Ok(child) = &<[u8; 32]>::try_from(child) {
                     maybe_trie_roots.remove(child);
@@ -917,12 +916,11 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                         // `ancestor_key`.
                         key_before.truncate(ancestor_key.len());
                         loop {
-                            let Some(nibble) = key_before.pop()
-                                else {
-                                    // `key_before` is equal to `0xffff...` and thus can't
-                                    // have any next sibling.
-                                    return Ok(None)
-                                };
+                            let Some(nibble) = key_before.pop() else {
+                                // `key_before` is equal to `0xffff...` and thus can't
+                                // have any next sibling.
+                                return Ok(None);
+                            };
                             if let Some(new_nibble) = nibble.checked_add(1) {
                                 key_before.push(new_nibble);
                                 break;

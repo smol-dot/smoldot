@@ -85,7 +85,9 @@ impl JaegerService {
                         async { Some(traces_out.next().await) },
                     )
                     .await
-                    else { break };
+                    else {
+                        break;
+                    };
 
                     // UDP sending errors happen only either if the API is misused (in which case
                     // panicking is desirable) or in case of missing priviledge, in which case a

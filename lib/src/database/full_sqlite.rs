@@ -735,8 +735,7 @@ impl SqliteFullDatabase {
             return Err(StorageAccessError::Pruned);
         }
 
-        let Some(value) = value
-            else { return Ok(None) };
+        let Some(value) = value else { return Ok(None) };
 
         let trie_entry_version = u8::try_from(trie_entry_version.unwrap())
             .map_err(|_| CorruptedError::InvalidTrieEntryVersion)

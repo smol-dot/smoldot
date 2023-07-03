@@ -726,7 +726,9 @@ fn wrong_type_returned_by_host_function_call() {
 
         let mut vm = prototype.prepare().start("hello", &[]).unwrap();
 
-        let Ok(super::ExecOutcome::Interrupted { id: 0, .. }) = vm.run(None) else { panic!() };
+        let Ok(super::ExecOutcome::Interrupted { id: 0, .. }) = vm.run(None) else {
+            panic!()
+        };
         assert!(matches!(
             vm.run(Some(super::WasmValue::I64(3))),
             Err(super::RunErr::BadValueTy { .. })

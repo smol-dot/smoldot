@@ -171,10 +171,16 @@ impl JsonRpcBackground {
     async fn run(mut self) {
         loop {
             let Some(accept_result) = future::or(
-                async { (&mut self.on_service_dropped).await; None },
-                async { Some(self.tcp_listener.accept().await) }
-            ).await
-                else { return };
+                async {
+                    (&mut self.on_service_dropped).await;
+                    None
+                },
+                async { Some(self.tcp_listener.accept().await) },
+            )
+            .await
+            else {
+                return;
+            };
 
             let (tcp_socket, address) = match accept_result {
                 Ok(v) => v,

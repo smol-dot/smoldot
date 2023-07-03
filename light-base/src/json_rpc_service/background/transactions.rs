@@ -47,8 +47,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         self: &Arc<Self>,
         request: service::RequestProcess,
     ) {
-        let methods::MethodCall::author_submitExtrinsic { transaction } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::author_submitExtrinsic { transaction } = request.request() else {
+            unreachable!()
+        };
 
         // Note that this function is misnamed. It should really be called
         // "author_submitTransaction".

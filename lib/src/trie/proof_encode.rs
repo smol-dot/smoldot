@@ -391,7 +391,9 @@ impl ProofBuilder {
                     .user_data()
                     .take()
                 // Ignore nodes whose value is missing.
-                else { return either::Right(iter::empty()); };
+                else {
+                    return either::Right(iter::empty());
+                };
 
                 // Nodes of length < 32 should have been inlined within their parent or ancestor.
                 // We thus skip them, unless they're the root node.

@@ -797,13 +797,12 @@ impl SerializedRequestsIo {
             });
         }
 
-        let Some(queue) = self.serialized_requests_queue.upgrade()
-            else {
-                return Err(SendRequestError {
-                    request,
-                    cause: SendRequestErrorCause::ClientMainTaskDestroyed,
-                });
-            };
+        let Some(queue) = self.serialized_requests_queue.upgrade() else {
+            return Err(SendRequestError {
+                request,
+                cause: SendRequestErrorCause::ClientMainTaskDestroyed,
+            });
+        };
 
         // Wait until it is possible to increment `num_requests_in_fly`.
         let mut wait = None;
@@ -853,13 +852,12 @@ impl SerializedRequestsIo {
             });
         }
 
-        let Some(queue) = self.serialized_requests_queue.upgrade()
-            else {
-                return Err(TrySendRequestError {
-                    request,
-                    cause: TrySendRequestErrorCause::ClientMainTaskDestroyed,
-                });
-            };
+        let Some(queue) = self.serialized_requests_queue.upgrade() else {
+            return Err(TrySendRequestError {
+                request,
+                cause: TrySendRequestErrorCause::ClientMainTaskDestroyed,
+            });
+        };
 
         // Try to increment `num_requests_in_fly`. Return an error if it is past the maximum.
         if queue
