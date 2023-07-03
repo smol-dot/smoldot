@@ -1186,7 +1186,7 @@ impl SyncBackground {
             | all::ProcessOne::WarpSyncBuildRuntime(_)
             | all::ProcessOne::WarpSyncBuildChainInformation(_)
             | all::ProcessOne::WarpSyncFinished { .. } => unreachable!(),
-            all::ProcessOne::VerifyHeader(verify) => {
+            all::ProcessOne::VerifyBlock(verify) => {
                 let when_verification_started = Instant::now();
                 let mut database_accesses_duration = Duration::new(0, 0);
                 let mut runtime_build_duration = Duration::new(0, 0);

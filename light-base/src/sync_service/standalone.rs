@@ -699,7 +699,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 }
             }
 
-            all::ProcessOne::VerifyHeader(verify) => {
+            all::ProcessOne::VerifyBlock(verify) => {
                 // Header to verify.
                 let verified_hash = verify.hash();
                 match verify.verify_header(self.platform.now_from_unix_epoch()) {

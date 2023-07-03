@@ -1321,7 +1321,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     ProcessOne::AllSync(self)
                 }
                 all_forks::ProcessOne::HeaderVerify(verify) => {
-                    ProcessOne::VerifyHeader(BlockVerify {
+                    ProcessOne::VerifyBlock(BlockVerify {
                         inner: BlockVerifyInner::AllForks(verify),
                         shared: self.shared,
                     })
@@ -1339,7 +1339,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     ProcessOne::AllSync(self)
                 }
                 optimistic::ProcessOne::VerifyBlock(inner) => {
-                    ProcessOne::VerifyHeader(BlockVerify {
+                    ProcessOne::VerifyBlock(BlockVerify {
                         inner: BlockVerifyInner::Optimistic(inner),
                         shared: self.shared,
                     })
@@ -2301,8 +2301,8 @@ pub enum ProcessOne<TRq, TSrc, TBl> {
         finalized_storage_heap_pages: Option<Vec<u8>>,
     },
 
-    /// Ready to start verifying a header.
-    VerifyHeader(BlockVerify<TRq, TSrc, TBl>),
+    /// Ready to start verifying a block.
+    VerifyBlock(BlockVerify<TRq, TSrc, TBl>),
 
     /// Ready to start verifying a proof of finality.
     VerifyFinalityProof(FinalityProofVerify<TRq, TSrc, TBl>),
