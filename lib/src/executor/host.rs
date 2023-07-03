@@ -1703,24 +1703,17 @@ impl ReadyToRun {
                 )
             }
             HostFunction::ext_offchain_index_set_version_1 => {
-                let (key_ptr, key_size) = expect_pointer_size_raw!(0);
-                let (value_ptr, value_size) = expect_pointer_size_raw!(1);
-                HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
-                    key_ptr,
-                    key_size,
-                    value: Some((value_ptr, value_size)),
-                    old_value: None,
+                // TODO: offchain overlay storage
+                HostVm::ReadyToRun(ReadyToRun {
                     inner: self.inner,
+                    resume_value: None,
                 })
             }
             HostFunction::ext_offchain_index_clear_version_1 => {
-                let (key_ptr, key_size) = expect_pointer_size_raw!(0);
-                HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
-                    key_ptr,
-                    key_size,
-                    value: None,
-                    old_value: None,
+                // TODO: offchain overlay storage
+                HostVm::ReadyToRun(ReadyToRun {
                     inner: self.inner,
+                    resume_value: None,
                 })
             }
             HostFunction::ext_offchain_is_validator_version_1 => HostVm::ReadyToRun(ReadyToRun {
