@@ -754,10 +754,11 @@ pub struct ChainHeadStorageResponseItem {
     pub value: Option<HexString>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hash: Option<HexString>,
-    #[serde(rename = "merkle-value-key", skip_serializing_if = "Option::is_none")]
-    pub merkle_value_key: Option<String>, // TODO: `String` because the number of hex digits can be uneven
-    #[serde(rename = "merkle-value", skip_serializing_if = "Option::is_none")]
-    pub merkle_value: Option<HexString>,
+    #[serde(
+        rename = "closest-descendant-merkle-value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub closest_descendant_merkle_value: Option<HexString>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -766,8 +767,8 @@ pub enum ChainHeadStorageType {
     Value,
     #[serde(rename = "hash")]
     Hash,
-    #[serde(rename = "closest-ancestor-merkle-value")]
-    ClosestAncestorMerkleValue,
+    #[serde(rename = "closest-descendant-merkle-value")]
+    ClosestDescendantMerkleValue,
     #[serde(rename = "descendants-values")]
     DescendantsValues,
     #[serde(rename = "descendants-hashes")]

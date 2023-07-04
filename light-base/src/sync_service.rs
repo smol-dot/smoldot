@@ -28,7 +28,7 @@
 
 use crate::{network_service, platform::PlatformRef, runtime_service};
 
-use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
+use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use async_lock::Mutex;
 use core::{fmt, mem, num::NonZeroU32, time::Duration};
 use futures_channel::{mpsc, oneshot};
@@ -413,7 +413,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 key: Vec<u8>,
                 hash: bool,
             },
-            ClosestAncestorMerkleValue {
+            ClosestDescendantMerkleValue {
                 key: Vec<u8>,
             },
         }
@@ -440,8 +440,8 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     key: request.key,
                     hash: true,
                 },
-                StorageRequestItemTy::ClosestAncestorMerkleValue => {
-                    RequestImpl::ClosestAncestorMerkleValue { key: request.key }
+                StorageRequestItemTy::ClosestDescendantMerkleValue => {
+                    RequestImpl::ClosestDescendantMerkleValue { key: request.key }
                 }
             })
             .collect::<Vec<_>>();
@@ -494,8 +494,13 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         RequestImpl::ValueOrHash { key, .. } => {
                             keys.insert(key.clone());
                         }
-                        RequestImpl::ClosestAncestorMerkleValue { key } => {
-                            keys.insert(key.clone());
+                        RequestImpl::ClosestDescendantMerkleValue { key } => {
+                            // We query the parent of `key`.
+                            if key.is_empty() {
+                                keys.insert(Vec::new());
+                            } else {
+                                keys.insert(key[..key.len() - 1].to_owned());
+                            }
                         }
                     }
                 }
@@ -651,26 +656,25 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                             }
                         }
                     }
-                    RequestImpl::ClosestAncestorMerkleValue { key } => {
-                        match decoded_proof.closest_ancestor_merkle_value(
+                    RequestImpl::ClosestDescendantMerkleValue { key } => {
+                        match decoded_proof.closest_descendant_merkle_value(
                             main_trie_root_hash,
                             &trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>(),
                         ) {
-                            Ok(Some((ancestor_key, merkle_value))) => {
-                                final_results.push(StorageResultItem::ClosestAncestorMerkleValue {
+                            Ok(Some(merkle_value)) => final_results.push(
+                                StorageResultItem::ClosestDescendantMerkleValue {
                                     requested_key: key,
-                                    merkle_value: Some((
-                                        ancestor_key.to_vec(),
+                                    closest_descendant_merkle_value: Some(
                                         merkle_value.as_ref().to_vec(),
-                                    )),
-                                })
-                            }
-                            Ok(None) => {
-                                final_results.push(StorageResultItem::ClosestAncestorMerkleValue {
+                                    ),
+                                },
+                            ),
+                            Ok(None) => final_results.push(
+                                StorageResultItem::ClosestDescendantMerkleValue {
                                     requested_key: key,
-                                    merkle_value: None,
-                                })
-                            }
+                                    closest_descendant_merkle_value: None,
+                                },
+                            ),
                             Err(proof_decode::IncompleteProofError { .. }) => {
                                 outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
                             }
@@ -775,10 +779,10 @@ pub enum StorageRequestItemTy {
 
     /// The Merkle value of the trie node that is the closest ancestor to
     /// [`StorageRequestItem::key`] is requested.
-    /// A [`StorageResultItem::ClosestAncestorMerkleValue`] will be returned where
-    /// [`StorageResultItem::ClosestAncestorMerkleValue::requested_key`] is equal to
+    /// A [`StorageResultItem::ClosestDescendantMerkleValue`] will be returned where
+    /// [`StorageResultItem::ClosestDescendantMerkleValue::requested_key`] is equal to
     /// [`StorageRequestItem::key`].
-    ClosestAncestorMerkleValue,
+    ClosestDescendantMerkleValue,
 }
 
 /// An item returned by [`SyncService::storage_query`].
@@ -818,11 +822,14 @@ pub enum StorageResultItem {
         /// Hash of the storage value associated with [`StorageResultItem::DescendantHash::key`].
         hash: [u8; 32],
     },
-    /// Corresponds to a [`StorageRequestItemTy::ClosestAncestorMerkleValue`].
-    ClosestAncestorMerkleValue {
+    /// Corresponds to a [`StorageRequestItemTy::ClosestDescendantMerkleValue`].
+    ClosestDescendantMerkleValue {
         /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
         requested_key: Vec<u8>,
-        merkle_value: Option<(Vec<trie::Nibble>, Vec<u8>)>,
+        /// Merkle value of the closest descendant of
+        /// [`StorageResultItem::DescendantValue::requested_key`]. The key that corresponds
+        /// to this Merkle value is not included. `None` if the key has no descendant.
+        closest_descendant_merkle_value: Option<Vec<u8>>,
     },
 }
 

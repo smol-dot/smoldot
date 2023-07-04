@@ -972,7 +972,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                 if parent_key.len() == key.len() - 1 =>
             {
                 // Exact match, meaning that `parent_key` is precisely one less nibble than `key`.
-                // This means that there's no need between `parent_key` and `key`. Consequently,
+                // This means that there's no node between `parent_key` and `key`. Consequently,
                 // the closest-descendant-or-equal of `key` is also the strict-closest-descendant
                 // of `parent_key`, and its Merkle value can be found in `parent_key`'s node
                 // value.
@@ -1007,35 +1007,6 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                         .unwrap();
                 Ok(parent_node_value.children[usize::from(u8::from(nibble))])
             }
-        }
-    }
-
-    /// Returns the key and Merkle value of the closest ancestor to the given key.
-    ///
-    /// Returns `None` if the key has no ancestor within the trie.
-    pub fn closest_ancestor_merkle_value<'a>(
-        &'a self,
-        trie_root_merkle_value: &[u8; 32],
-        key: &[nibble::Nibble],
-    ) -> Result<Option<(&'a [nibble::Nibble], trie_node::MerkleValueOutput)>, IncompleteProofError>
-    {
-        let (full_key, (_, node_value_range, _)) =
-            match self.closest_ancestor(trie_root_merkle_value, key) {
-                Ok(Some(v)) => v,
-                Ok(None) => return Ok(None),
-                Err(err) => return Err(err),
-            };
-
-        let node_value = &self.proof.as_ref()[node_value_range.clone()];
-        if node_value.len() < 32 {
-            Ok(Some((
-                full_key,
-                trie_node::MerkleValueOutput::from_bytes(node_value),
-            )))
-        } else {
-            let hash = blake2_rfc::blake2b::blake2b(32, &[], node_value);
-            let merkle_value = trie_node::MerkleValueOutput::from_bytes(hash.as_bytes());
-            Ok(Some((full_key, merkle_value)))
         }
     }
 }
