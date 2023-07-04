@@ -85,34 +85,10 @@ pub(super) fn start_task<TPlat: PlatformRef>(
 
                         drop(cache);
 
-                        loop {
-                            let notification = subscribe_all.new_blocks.next().await;
-                            match notification {
-                                Some(runtime_service::Notification::Block(block)) => {
-                                    let mut cache = me.cache.lock().await;
-
-                                    if cache.recent_pinned_blocks.len()
-                                        == cache.recent_pinned_blocks.cap().get()
-                                    {
-                                        let (hash, _) =
-                                            cache.recent_pinned_blocks.pop_lru().unwrap();
-                                        subscribe_all.new_blocks.unpin_block(&hash).await;
-                                    }
-
-                                    let hash = header::hash_from_scale_encoded_header(
-                                        &block.scale_encoded_header,
-                                    );
-                                    cache
-                                        .recent_pinned_blocks
-                                        .put(hash, block.scale_encoded_header);
-                                }
-                                Some(runtime_service::Notification::Finalized { .. })
-                                | Some(runtime_service::Notification::BestBlockChanged {
-                                    ..
-                                }) => {}
-                                None => break,
-                            }
-                        }
+                        run(Task {
+                            background: me,
+                            new_blocks: subscribe_all.new_blocks,
+                        });
                     }
                 },
                 abort_registration,
@@ -120,4 +96,33 @@ pub(super) fn start_task<TPlat: PlatformRef>(
             .map(|_: Result<(), _>| ())
             .boxed()
         });
+}
+
+struct Task<TPlat: PlatformRef> {
+    background: Arc<Background<TPlat>>,
+    new_blocks: runtime_service::Subscription<TPlat>,
+}
+
+async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
+    loop {
+        let notification = task.new_blocks.next().await;
+        match notification {
+            Some(runtime_service::Notification::Block(block)) => {
+                let mut cache = task.background.cache.lock().await;
+
+                if cache.recent_pinned_blocks.len() == cache.recent_pinned_blocks.cap().get() {
+                    let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
+                    task.new_blocks.unpin_block(&hash).await;
+                }
+
+                let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+                cache
+                    .recent_pinned_blocks
+                    .put(hash, block.scale_encoded_header);
+            }
+            Some(runtime_service::Notification::Finalized { .. })
+            | Some(runtime_service::Notification::BestBlockChanged { .. }) => {}
+            None => break,
+        }
+    }
 }
