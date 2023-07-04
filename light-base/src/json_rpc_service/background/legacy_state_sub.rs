@@ -33,6 +33,7 @@ use super::Cache;
 
 pub(super) enum Message {
     SubscriptionStart(service::SubscriptionStartProcess),
+    SubscriptionDestroyed { subscription_id: String },
 }
 
 // Spawn one task dedicated to filling the `Cache` with new blocks from the runtime service.
@@ -224,6 +225,12 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 }
                 _ => unreachable!(), // TODO: stronger typing to avoid this?
             },
+
+            either::Right(Some(Message::SubscriptionDestroyed { subscription_id })) => {
+                task.all_heads_subscriptions.remove(&subscription_id);
+                task.new_heads_subscriptions.remove(&subscription_id);
+                // TODO: shrink_to_fit?
+            }
 
             either::Left(None) | either::Right(None) => {
                 break;

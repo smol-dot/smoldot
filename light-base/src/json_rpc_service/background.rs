@@ -269,6 +269,14 @@ pub(super) fn start<TPlat: PlatformRef>(
                                 .lock()
                                 .await
                                 .remove(&subscription_id);
+                            me.to_legacy
+                                .lock()
+                                .await
+                                .send(legacy_state_sub::Message::SubscriptionDestroyed {
+                                    subscription_id,
+                                })
+                                .await
+                                .unwrap();
                         }
                         service::Event::SerializedRequestsIoClosed => {
                             break;
