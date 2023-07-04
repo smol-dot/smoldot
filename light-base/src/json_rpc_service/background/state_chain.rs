@@ -605,10 +605,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         // same parameters, we store the untruncated responses in a cache. Check if we hit the
         // cache.
         if let Some(keys) =
-            self.cache
+            self.state_get_keys_paged_cache
                 .lock()
                 .await
-                .state_get_keys_paged
                 .get(&GetKeysPagedCacheKey {
                     hash,
                     prefix: prefix.clone(),
@@ -692,10 +691,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 // JSON-RPC client will call the function again with the exact same parameters.
                 // Thus, store the results in a cache.
                 if out.len() != keys.len() {
-                    self.cache
+                    self.state_get_keys_paged_cache
                         .lock()
                         .await
-                        .state_get_keys_paged
                         .push(GetKeysPagedCacheKey { hash, prefix }, keys);
                 }
 

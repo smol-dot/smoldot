@@ -94,6 +94,13 @@ struct Background<TPlat: PlatformRef> {
     /// requests to perform.
     cache: Arc<Mutex<Cache>>,
 
+    /// When `state_getKeysPaged` is called and the response is truncated, the response is
+    /// inserted in this cache. The API user is likely to call `state_getKeysPaged` again with
+    /// the same parameters, in which case we hit the cache and avoid the networking requests.
+    /// The values are list of keys.
+    state_get_keys_paged_cache:
+        Mutex<lru::LruCache<GetKeysPagedCacheKey, Vec<Vec<u8>>, util::SipHasherBuild>>,
+
     /// Hash of the genesis block.
     /// Keeping the genesis block is important, as the genesis block hash is included in
     /// transaction signatures, and must therefore be queried by upper-level UIs.
@@ -157,12 +164,6 @@ struct Cache {
         >,
         fnv::FnvBuildHasher,
     >,
-
-    /// When `state_getKeysPaged` is called and the response is truncated, the response is
-    /// inserted in this cache. The API user is likely to call `state_getKeysPaged` again with
-    /// the same parameters, in which case we hit the cache and avoid the networking requests.
-    /// The values are list of keys.
-    state_get_keys_paged: lru::LruCache<GetKeysPagedCacheKey, Vec<Vec<u8>>, util::SipHasherBuild>,
 }
 
 /// See [`Cache::state_get_keys_paged`].
@@ -208,11 +209,11 @@ pub(super) fn start<TPlat: PlatformRef>(
                 NonZeroUsize::new(32).unwrap(),
                 Default::default(),
             ),
-            state_get_keys_paged: lru::LruCache::with_hasher(
-                NonZeroUsize::new(2).unwrap(),
-                util::SipHasherBuild::new(rand::random()),
-            ),
         })),
+        state_get_keys_paged_cache: Mutex::new(lru::LruCache::with_hasher(
+            NonZeroUsize::new(2).unwrap(),
+            util::SipHasherBuild::new(rand::random()),
+        )),
         genesis_block_hash: config.genesis_block_hash,
         printed_legacy_json_rpc_warning: atomic::AtomicBool::new(false),
         chain_head_follow_tasks: Mutex::new(hashbrown::HashMap::with_hasher(Default::default())),
