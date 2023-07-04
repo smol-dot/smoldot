@@ -85,6 +85,10 @@ struct Background<TPlat: PlatformRef> {
     /// See [`StartConfig::transactions_service`].
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
 
+    /// Channel where to send requests that concern the legacy JSON-RPC API that are handled by
+    /// a dedicated task.
+    to_legacy: Mutex<async_channel::Sender<service::SubscriptionStartProcess>>,
+
     /// Various information caches about blocks, to potentially reduce the number of network
     /// requests to perform.
     cache: Arc<Mutex<Cache>>,
@@ -176,6 +180,8 @@ pub(super) fn start<TPlat: PlatformRef>(
     max_parallel_requests: NonZeroU32,
     background_abort_registrations: Vec<future::AbortRegistration>,
 ) {
+    let (to_legacy_tx, to_legacy_rx) = async_channel::bounded(8);
+
     let me = Arc::new(Background {
         log_target,
         platform: config.platform,
@@ -190,6 +196,7 @@ pub(super) fn start<TPlat: PlatformRef>(
         sync_service: config.sync_service.clone(),
         runtime_service: config.runtime_service.clone(),
         transactions_service: config.transactions_service.clone(),
+        to_legacy: Mutex::new(to_legacy_tx),
         cache: Arc::new(Mutex::new(Cache {
             recent_pinned_blocks: lru::LruCache::with_hasher(
                 NonZeroUsize::new(32).unwrap(),
@@ -237,7 +244,17 @@ pub(super) fn start<TPlat: PlatformRef>(
                             subscription_start,
                         } => {
                             requests_processing_task = task;
-                            tx.send(either::Right(subscription_start)).await.unwrap();
+                            match subscription_start.request() {
+                                methods::MethodCall::chain_subscribeAllHeads {} => {
+                                    me.to_legacy
+                                        .lock()
+                                        .await
+                                        .send(subscription_start)
+                                        .await
+                                        .unwrap();
+                                }
+                                _ => tx.send(either::Right(subscription_start)).await.unwrap(),
+                            }
                         }
                         service::Event::SubscriptionDestroyed {
                             task,
@@ -287,6 +304,7 @@ pub(super) fn start<TPlat: PlatformRef>(
         me.platform.clone(),
         me.log_target.clone(),
         me.runtime_service.clone(),
+        to_legacy_rx,
         background_abort_registrations.next().unwrap(),
     );
 
@@ -678,7 +696,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 self.submit_and_watch_transaction(request).await
             }
             methods::MethodCall::chain_subscribeAllHeads {} => {
-                self.chain_subscribe_all_heads(request).await;
+                unreachable!()
             }
             methods::MethodCall::chain_subscribeFinalizedHeads {} => {
                 self.chain_subscribe_finalized_heads(request).await;

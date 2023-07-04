@@ -17,10 +17,15 @@
 
 use core::num::NonZeroUsize;
 
-use alloc::{format, string::String, sync::Arc};
+use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc};
 use async_lock::Mutex;
-use futures_util::{future, stream::AbortRegistration, FutureExt};
-use smoldot::header;
+use futures_lite::{FutureExt as _, StreamExt as _};
+use futures_util::{future, stream::AbortRegistration, FutureExt as _};
+use smoldot::{
+    header,
+    informant::HashDisplay,
+    json_rpc::{methods, service},
+};
 
 use crate::{platform::PlatformRef, runtime_service};
 
@@ -32,13 +37,14 @@ pub(super) fn start_task<TPlat: PlatformRef>(
     platform: TPlat,
     log_target: String,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
+    requests_rx: async_channel::Receiver<service::SubscriptionStartProcess>,
     abort_registration: AbortRegistration,
 ) {
     // TODO: this is actually racy, as a block subscription task could report a new block to a client, and then client can query it, before this block has been been added to the cache
     // TODO: extract to separate function
-    platform
-        .clone()
-        .spawn_task(format!("{}-cache-populate", log_target).into(), {
+    platform.clone().spawn_task(
+        format!("{}-cache-populate", log_target).into(),
+        Box::pin({
             future::Abortable::new(
                 async move {
                     loop {
@@ -90,27 +96,48 @@ pub(super) fn start_task<TPlat: PlatformRef>(
 
                         run(Task {
                             cache: cache.clone(),
+                            log_target: log_target.clone(),
+                            block_number_bytes: runtime_service.block_number_bytes(),
                             new_blocks: subscribe_all.new_blocks,
-                        }).await;
+                            requests_rx,
+                            // TODO: all the subscriptions are dropped if the task returns
+                            all_heads_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+                                8,
+                                Default::default(),
+                            ),
+                        })
+                        .await;
+
+                        panic!() // TODO: not implemented correctly
                     }
                 },
                 abort_registration,
             )
             .map(|_: Result<(), _>| ())
-            .boxed()
-        });
+        }),
+    );
 }
 
 struct Task<TPlat: PlatformRef> {
     cache: Arc<Mutex<Cache>>,
+    log_target: String,
+    block_number_bytes: usize,
     new_blocks: runtime_service::Subscription<TPlat>,
+    requests_rx: async_channel::Receiver<service::SubscriptionStartProcess>,
+    // TODO: shrink_to_fit?
+    all_heads_subscriptions: hashbrown::HashMap<String, service::Subscription, fnv::FnvBuildHasher>,
 }
 
 async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
     loop {
-        let notification = task.new_blocks.next().await;
-        match notification {
-            Some(runtime_service::Notification::Block(block)) => {
+        match task
+            .new_blocks
+            .next()
+            .map(either::Left)
+            .or(task.requests_rx.next().map(either::Right))
+            .await
+        {
+            either::Left(Some(runtime_service::Notification::Block(block))) => {
                 let mut cache = task.cache.lock().await;
 
                 if cache.recent_pinned_blocks.len() == cache.recent_pinned_blocks.cap().get() {
@@ -118,14 +145,57 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     task.new_blocks.unpin_block(&hash).await;
                 }
 
+                let json_rpc_header = match methods::Header::from_scale_encoded_header(
+                    &block.scale_encoded_header,
+                    task.block_number_bytes,
+                ) {
+                    Ok(h) => h,
+                    Err(error) => {
+                        log::warn!(
+                            target: &task.log_target,
+                            "`chain_subscribeAllHeads` subscription has skipped \
+                            block due to undecodable header. Hash: {}. Error: {}",
+                            HashDisplay(&header::hash_from_scale_encoded_header(
+                                &block.scale_encoded_header
+                            )),
+                            error,
+                        );
+                        continue;
+                    }
+                };
+
                 let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
                 cache
                     .recent_pinned_blocks
                     .put(hash, block.scale_encoded_header);
+
+                drop(cache);
+
+                for (subscription_id, subscription) in &mut task.all_heads_subscriptions {
+                    subscription
+                        .send_notification(methods::ServerToClient::chain_allHead {
+                            subscription: subscription_id.as_str().into(),
+                            result: json_rpc_header.clone(),
+                        })
+                        .await;
+                }
             }
-            Some(runtime_service::Notification::Finalized { .. })
-            | Some(runtime_service::Notification::BestBlockChanged { .. }) => {}
-            None => break,
+            either::Left(Some(runtime_service::Notification::Finalized { .. }))
+            | either::Left(Some(runtime_service::Notification::BestBlockChanged { .. })) => {}
+
+            either::Right(Some(request)) => match request.request() {
+                methods::MethodCall::chain_subscribeNewHeads {} => {
+                    let subscription = request.accept();
+                    let subscription_id = subscription.subscription_id().to_owned();
+                    task.all_heads_subscriptions
+                        .insert(subscription_id, subscription);
+                }
+                _ => unreachable!(), // TODO: stronger typing to avoid this?
+            },
+
+            either::Left(None) | either::Right(None) => {
+                break;
+            }
         }
     }
 }
