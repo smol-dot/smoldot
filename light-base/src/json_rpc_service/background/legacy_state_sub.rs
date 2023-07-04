@@ -15,7 +15,12 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use core::num::NonZeroUsize;
+use core::{
+    future::Future,
+    num::{NonZeroU32, NonZeroUsize},
+    pin::Pin,
+    time::Duration,
+};
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use async_lock::Mutex;
@@ -26,11 +31,12 @@ use smoldot::{
     header,
     informant::HashDisplay,
     json_rpc::{methods, service},
+    network::protocol,
 };
 
-use crate::{platform::PlatformRef, runtime_service};
+use crate::{platform::PlatformRef, runtime_service, sync_service};
 
-use super::Cache;
+use super::{Cache, StateTrieRootHashError};
 
 pub(super) enum Message<TPlat: PlatformRef> {
     SubscriptionStart(service::SubscriptionStartProcess),
@@ -40,6 +46,10 @@ pub(super) enum Message<TPlat: PlatformRef> {
     RecentBlockRuntimeAccess {
         block_hash: [u8; 32],
         result_tx: oneshot::Sender<Option<runtime_service::RuntimeAccess<TPlat>>>,
+    },
+    BlockStateRootAndNumber {
+        block_hash: [u8; 32],
+        result_tx: oneshot::Sender<Result<([u8; 32], u64), StateTrieRootHashError>>,
     },
     BlockNumber {
         block_hash: [u8; 32],
@@ -56,6 +66,7 @@ pub(super) fn start_task<TPlat: PlatformRef>(
     cache: Arc<Mutex<Cache>>,
     platform: TPlat,
     log_target: String,
+    sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     requests_rx: async_channel::Receiver<Message<TPlat>>,
     abort_registration: AbortRegistration,
@@ -117,6 +128,8 @@ pub(super) fn start_task<TPlat: PlatformRef>(
                         run(Task {
                             cache: cache.clone(),
                             log_target: log_target.clone(),
+                            platform: platform.clone(),
+                            sync_service,
                             runtime_service,
                             new_blocks: subscribe_all.new_blocks,
                             requests_rx,
@@ -145,6 +158,8 @@ pub(super) fn start_task<TPlat: PlatformRef>(
 struct Task<TPlat: PlatformRef> {
     cache: Arc<Mutex<Cache>>,
     log_target: String,
+    platform: TPlat,
+    sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     new_blocks: runtime_service::Subscription<TPlat>,
     requests_rx: async_channel::Receiver<Message<TPlat>>,
@@ -311,6 +326,116 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 };
 
                 let _ = result_tx.send(header);
+            }
+
+            either::Right(Some(Message::BlockStateRootAndNumber {
+                block_hash,
+                result_tx,
+            })) => {
+                let fetch = {
+                    // Try to find an existing entry in cache, and if not create one.
+                    let mut cache_lock = task.cache.lock().await;
+
+                    // Look in `recent_pinned_blocks`.
+                    match cache_lock
+                        .recent_pinned_blocks
+                        .get(&block_hash)
+                        .map(|h| header::decode(h, task.runtime_service.block_number_bytes()))
+                    {
+                        Some(Ok(header)) => {
+                            let _ = result_tx.send(Ok((*header.state_root, header.number)));
+                            continue;
+                        }
+                        Some(Err(err)) => {
+                            let _ =
+                                result_tx.send(Err(StateTrieRootHashError::HeaderDecodeError(err)));
+                            continue;
+                        } // TODO: can this actually happen? unclear
+                        None => {}
+                    }
+
+                    // Look in `block_state_root_hashes`.
+                    match cache_lock.block_state_root_hashes_numbers.get(&block_hash) {
+                        Some(future::MaybeDone::Done(Ok(val))) => {
+                            let _ = result_tx.send(Ok(*val));
+                            continue;
+                        }
+                        Some(future::MaybeDone::Future(f)) => f.clone(),
+                        Some(future::MaybeDone::Gone) => unreachable!(), // We never use `Gone`.
+                        Some(future::MaybeDone::Done(Err(
+                            err @ StateTrieRootHashError::HeaderDecodeError(_),
+                        ))) => {
+                            // In case of a fatal error, return immediately.
+                            let _ = result_tx.send(Err(err.clone()));
+                            continue;
+                        }
+                        Some(future::MaybeDone::Done(Err(
+                            StateTrieRootHashError::NetworkQueryError,
+                        )))
+                        | None => {
+                            // No existing cache entry. Create the future that will perform the fetch
+                            // but do not actually start doing anything now.
+                            let fetch = {
+                                let sync_service = task.sync_service.clone();
+                                async move {
+                                    // The sync service knows which peers are potentially aware of
+                                    // this block.
+                                    let result = sync_service
+                                        .clone()
+                                        .block_query_unknown_number(
+                                            block_hash,
+                                            protocol::BlocksRequestFields {
+                                                header: true,
+                                                body: false,
+                                                justifications: false,
+                                            },
+                                            4,
+                                            Duration::from_secs(8),
+                                            NonZeroU32::new(2).unwrap(),
+                                        )
+                                        .await;
+
+                                    if let Ok(block) = result {
+                                        // If successful, the `block_query` function guarantees that the
+                                        // header is present and valid.
+                                        let header = block.header.unwrap();
+                                        debug_assert_eq!(
+                                            header::hash_from_scale_encoded_header(&header),
+                                            block_hash
+                                        );
+                                        let decoded = header::decode(
+                                            &header,
+                                            sync_service.block_number_bytes(),
+                                        )
+                                        .unwrap();
+                                        Ok((*decoded.state_root, decoded.number))
+                                    } else {
+                                        // TODO: better error details?
+                                        Err(StateTrieRootHashError::NetworkQueryError)
+                                    }
+                                }
+                            };
+
+                            // Insert the future in the cache, so that any other call will use the same
+                            // future.
+                            let wrapped = (Box::pin(fetch)
+                                as Pin<Box<dyn Future<Output = _> + Send>>)
+                                .shared();
+                            cache_lock
+                                .block_state_root_hashes_numbers
+                                .put(block_hash, future::maybe_done(wrapped.clone()));
+                            wrapped
+                        }
+                    }
+                };
+
+                // We await separately to be certain that the lock isn't held anymore.
+                // TODO: crappy design
+                task.platform
+                    .spawn_task("dummy-adapter".into(), async move {
+                        let outcome = fetch.await;
+                        let _ = result_tx.send(outcome);
+                    });
             }
 
             either::Left(None) | either::Right(None) => {

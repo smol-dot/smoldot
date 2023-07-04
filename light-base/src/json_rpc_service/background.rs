@@ -315,6 +315,7 @@ pub(super) fn start<TPlat: PlatformRef>(
         me.cache.clone(),
         me.platform.clone(),
         me.log_target.clone(),
+        me.sync_service.clone(),
         me.runtime_service.clone(),
         to_legacy_rx,
         background_abort_registrations.next().unwrap(),
@@ -796,97 +797,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         }
     }
 
-    /// Obtain the state trie root hash and number of the given block, and make sure to put it
-    /// in cache.
-    async fn state_trie_root_hash(
-        &self,
-        hash: &[u8; 32],
-    ) -> Result<([u8; 32], u64), StateTrieRootHashError> {
-        let fetch = {
-            // Try to find an existing entry in cache, and if not create one.
-            let mut cache_lock = self.cache.lock().await;
-
-            // Look in `recent_pinned_blocks`.
-            match cache_lock
-                .recent_pinned_blocks
-                .get(hash)
-                .map(|h| header::decode(h, self.sync_service.block_number_bytes()))
-            {
-                Some(Ok(header)) => return Ok((*header.state_root, header.number)),
-                Some(Err(err)) => return Err(StateTrieRootHashError::HeaderDecodeError(err)), // TODO: can this actually happen? unclear
-                None => {}
-            }
-
-            // Look in `block_state_root_hashes`.
-            match cache_lock.block_state_root_hashes_numbers.get(hash) {
-                Some(future::MaybeDone::Done(Ok(val))) => return Ok(*val),
-                Some(future::MaybeDone::Future(f)) => f.clone(),
-                Some(future::MaybeDone::Gone) => unreachable!(), // We never use `Gone`.
-                Some(future::MaybeDone::Done(Err(
-                    err @ StateTrieRootHashError::HeaderDecodeError(_),
-                ))) => {
-                    // In case of a fatal error, return immediately.
-                    return Err(err.clone());
-                }
-                Some(future::MaybeDone::Done(Err(StateTrieRootHashError::NetworkQueryError)))
-                | None => {
-                    // No existing cache entry. Create the future that will perform the fetch
-                    // but do not actually start doing anything now.
-                    let fetch = {
-                        let sync_service = self.sync_service.clone();
-                        let hash = *hash;
-                        async move {
-                            // The sync service knows which peers are potentially aware of
-                            // this block.
-                            let result = sync_service
-                                .clone()
-                                .block_query_unknown_number(
-                                    hash,
-                                    protocol::BlocksRequestFields {
-                                        header: true,
-                                        body: false,
-                                        justifications: false,
-                                    },
-                                    4,
-                                    Duration::from_secs(8),
-                                    NonZeroU32::new(2).unwrap(),
-                                )
-                                .await;
-
-                            if let Ok(block) = result {
-                                // If successful, the `block_query` function guarantees that the
-                                // header is present and valid.
-                                let header = block.header.unwrap();
-                                debug_assert_eq!(
-                                    header::hash_from_scale_encoded_header(&header),
-                                    hash
-                                );
-                                let decoded =
-                                    header::decode(&header, sync_service.block_number_bytes())
-                                        .unwrap();
-                                Ok((*decoded.state_root, decoded.number))
-                            } else {
-                                // TODO: better error details?
-                                Err(StateTrieRootHashError::NetworkQueryError)
-                            }
-                        }
-                    };
-
-                    // Insert the future in the cache, so that any other call will use the same
-                    // future.
-                    let wrapped = fetch.boxed().shared();
-                    cache_lock
-                        .block_state_root_hashes_numbers
-                        .put(*hash, future::maybe_done(wrapped.clone()));
-                    wrapped
-                }
-            }
-        };
-
-        // We await separately to be certain that the lock isn't held anymore.
-        fetch.await
-    }
-
     async fn storage_query(
         &self,
         keys: impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone,
@@ -895,10 +805,25 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         timeout_per_request: Duration,
         max_parallel: NonZeroU32,
     ) -> Result<Vec<Option<Vec<u8>>>, StorageQueryError> {
-        let (state_trie_root_hash, block_number) = self
-            .state_trie_root_hash(hash)
-            .await
-            .map_err(StorageQueryError::FindStorageRootHashError)?;
+        let (state_trie_root_hash, block_number) = {
+            let (tx, rx) = oneshot::channel();
+            self.to_legacy
+                .lock()
+                .await
+                .send(legacy_state_sub::Message::BlockStateRootAndNumber {
+                    block_hash: *hash,
+                    result_tx: tx,
+                })
+                .await
+                .unwrap();
+
+            match rx.await.unwrap() {
+                Ok(v) => v,
+                Err(err) => {
+                    return Err(StorageQueryError::FindStorageRootHashError(err));
+                }
+            }
+        };
 
         let result = self
             .sync_service
@@ -968,10 +893,25 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
         // In order to grab the runtime code and perform the call network request, we need
         // to know the state trie root hash and the height of the block.
-        let (state_trie_root_hash, block_number) = self
-            .state_trie_root_hash(block_hash)
-            .await
-            .map_err(RuntimeCallError::FindStorageRootHashError)?;
+        let (state_trie_root_hash, block_number) = {
+            let (tx, rx) = oneshot::channel();
+            self.to_legacy
+                .lock()
+                .await
+                .send(legacy_state_sub::Message::BlockStateRootAndNumber {
+                    block_hash: *block_hash,
+                    result_tx: tx,
+                })
+                .await
+                .unwrap();
+
+            match rx.await.unwrap() {
+                Ok(v) => v,
+                Err(err) => {
+                    return Err(RuntimeCallError::FindStorageRootHashError(err));
+                }
+            }
+        };
 
         // Download the runtime of this block. This takes a long time as the runtime is rather
         // big (around 1MiB in general).

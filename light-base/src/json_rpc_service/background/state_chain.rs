@@ -517,14 +517,27 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
         // Obtain the state trie root and height of the requested block.
         // This is necessary to perform network storage queries.
-        let (state_root, block_number) = match self.state_trie_root_hash(&hash).await {
-            Ok(v) => v,
-            Err(err) => {
-                request.fail(json_rpc::parse::ErrorResponse::ServerError(
-                    -32000,
-                    &format!("Failed to fetch block information: {err}"),
-                ));
-                return;
+        let (state_root, block_number) = {
+            let (tx, rx) = oneshot::channel();
+            self.to_legacy
+                .lock()
+                .await
+                .send(legacy_state_sub::Message::BlockStateRootAndNumber {
+                    block_hash: hash,
+                    result_tx: tx,
+                })
+                .await
+                .unwrap();
+
+            match rx.await.unwrap() {
+                Ok(v) => v,
+                Err(err) => {
+                    request.fail(json_rpc::parse::ErrorResponse::ServerError(
+                        -32000,
+                        &format!("Failed to fetch block information: {err}"),
+                    ));
+                    return;
+                }
             }
         };
 
@@ -615,14 +628,27 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
         // Obtain the state trie root and height of the requested block.
         // This is necessary to perform network storage queries.
-        let (state_root, block_number) = match self.state_trie_root_hash(&hash).await {
-            Ok(v) => v,
-            Err(err) => {
-                request.fail(json_rpc::parse::ErrorResponse::ServerError(
-                    -32000,
-                    &format!("Failed to fetch block information: {err}"),
-                ));
-                return;
+        let (state_root, block_number) = {
+            let (tx, rx) = oneshot::channel();
+            self.to_legacy
+                .lock()
+                .await
+                .send(legacy_state_sub::Message::BlockStateRootAndNumber {
+                    block_hash: hash,
+                    result_tx: tx,
+                })
+                .await
+                .unwrap();
+
+            match rx.await.unwrap() {
+                Ok(v) => v,
+                Err(err) => {
+                    request.fail(json_rpc::parse::ErrorResponse::ServerError(
+                        -32000,
+                        &format!("Failed to fetch block information: {err}"),
+                    ));
+                    return;
+                }
             }
         };
 
