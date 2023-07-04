@@ -22,10 +22,9 @@ use super::{legacy_state_sub, Background, GetKeysPagedCacheKey, PlatformRef};
 use crate::sync_service;
 
 use alloc::{borrow::ToOwned as _, format, string::ToString as _, sync::Arc, vec, vec::Vec};
-use async_lock::MutexGuard;
 use core::{iter, num::NonZeroU32, pin, time::Duration};
 use futures_channel::oneshot;
-use futures_util::{future, stream, FutureExt as _, StreamExt as _};
+use futures_util::{future, stream, StreamExt as _};
 use smoldot::{
     header,
     informant::HashDisplay,
@@ -221,30 +220,41 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         // Try to look in the cache of recent blocks. If not found, ask the peer-to-peer network.
         // `header` is `Err` if and only if the network request failed.
         let scale_encoded_header = {
-            let mut cache_lock = self.cache.lock().await;
-            if let Some(header) = cache_lock.recent_pinned_blocks.get(&hash) {
-                Ok(header.clone())
+            let from_cache = {
+                let (tx, rx) = oneshot::channel();
+                self.to_legacy
+                    .lock()
+                    .await
+                    .send(legacy_state_sub::Message::BlockHeader {
+                        block_hash: hash,
+                        result_tx: tx,
+                    })
+                    .await
+                    .unwrap();
+                rx.await.unwrap()
+            };
+
+            if let Some(header) = from_cache {
+                Ok(header)
             } else {
                 // Header isn't known locally. We need to ask the network.
                 // First, try to determine the block number by looking into the cache.
                 // The request can be fulfilled no matter whether it is found, but knowing it will
                 // lead to a better selection of peers, and thus increase the chances of the
                 // requests succeeding.
-                let block_number = if let Some(future) =
-                    cache_lock.block_state_root_hashes_numbers.get_mut(&hash)
-                {
-                    let _ = future.now_or_never();
-
-                    match future {
-                        future::MaybeDone::Done(Ok((_, num))) => Some(*num),
-                        _ => None,
-                    }
-                } else {
-                    None
+                let block_number = {
+                    let (tx, rx) = oneshot::channel();
+                    self.to_legacy
+                        .lock()
+                        .await
+                        .send(legacy_state_sub::Message::BlockNumber {
+                            block_hash: hash,
+                            result_tx: tx,
+                        })
+                        .await
+                        .unwrap();
+                    rx.await.unwrap()
                 };
-
-                // Release the lock as we're going to start a long asynchronous operation.
-                drop::<MutexGuard<_>>(cache_lock);
 
                 // Actual network query.
                 let result = if let Some(block_number) = block_number {

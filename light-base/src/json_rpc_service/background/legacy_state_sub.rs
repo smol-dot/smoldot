@@ -17,7 +17,7 @@
 
 use core::num::NonZeroUsize;
 
-use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc};
+use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use async_lock::Mutex;
 use futures_channel::oneshot;
 use futures_lite::{FutureExt as _, StreamExt as _};
@@ -44,6 +44,10 @@ pub(super) enum Message<TPlat: PlatformRef> {
     BlockNumber {
         block_hash: [u8; 32],
         result_tx: oneshot::Sender<Option<u64>>,
+    },
+    BlockHeader {
+        block_hash: [u8; 32],
+        result_tx: oneshot::Sender<Option<Vec<u8>>>,
     },
 }
 
@@ -292,6 +296,21 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 };
 
                 let _ = result_tx.send(block_number);
+            }
+
+            either::Right(Some(Message::BlockHeader {
+                block_hash,
+                result_tx,
+            })) => {
+                let mut cache_lock = task.cache.lock().await;
+                let header = if let Some(header) = cache_lock.recent_pinned_blocks.get(&block_hash)
+                {
+                    Some(header.clone())
+                } else {
+                    None
+                };
+
+                let _ = result_tx.send(header);
             }
 
             either::Left(None) | either::Right(None) => {
