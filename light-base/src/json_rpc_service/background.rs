@@ -37,6 +37,7 @@ use core::{
     sync::atomic,
     time::Duration,
 };
+use futures_channel::oneshot;
 use futures_util::{future, FutureExt as _};
 use smoldot::{
     executor::{host, runtime_host},
@@ -87,7 +88,7 @@ struct Background<TPlat: PlatformRef> {
 
     /// Channel where to send requests that concern the legacy JSON-RPC API that are handled by
     /// a dedicated task.
-    to_legacy: Mutex<async_channel::Sender<legacy_state_sub::Message>>,
+    to_legacy: Mutex<async_channel::Sender<legacy_state_sub::Message<TPlat>>>,
 
     /// Various information caches about blocks, to potentially reduce the number of network
     /// requests to perform.
@@ -942,114 +943,109 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         self: &Arc<Self>,
         block_hash: &[u8; 32],
     ) -> Result<runtime_service::RuntimeAccess<TPlat>, RuntimeCallError> {
-        let cache_lock = self.cache.lock().await;
-
         // Try to find the block in the cache of recent blocks. Most of the time, the call target
         // should be in there.
-        let lock = if cache_lock.recent_pinned_blocks.contains(block_hash) {
-            // The runtime service has the block pinned, meaning that we can ask the runtime
-            // service to perform the call.
-            self.runtime_service
-                .pinned_block_runtime_access(cache_lock.subscription_id.unwrap(), block_hash)
+        if let Some(runtime_access) = {
+            let (tx, rx) = oneshot::channel();
+            self.to_legacy
+                .lock()
                 .await
-                .ok()
-        } else {
-            None
+                .send(legacy_state_sub::Message::RecentBlockRuntimeAccess {
+                    block_hash: *block_hash,
+                    result_tx: tx,
+                })
+                .await
+                .unwrap();
+            rx.await.unwrap()
+        } {
+            return Ok(runtime_access);
         };
 
-        Ok(if let Some(lock) = lock {
-            lock
-        } else {
-            // Second situation: the block is not in the cache of recent blocks. This isn't great.
-            drop::<async_lock::MutexGuard<_>>(cache_lock);
+        // Second situation: the block is not in the cache of recent blocks. This isn't great.
+        // The only solution is to download the runtime of the block in question from the network.
 
-            // The only solution is to download the runtime of the block in question from the network.
+        // TODO: considering caching the runtime code the same way as the state trie root hash
 
-            // TODO: considering caching the runtime code the same way as the state trie root hash
+        // In order to grab the runtime code and perform the call network request, we need
+        // to know the state trie root hash and the height of the block.
+        let (state_trie_root_hash, block_number) = self
+            .state_trie_root_hash(block_hash)
+            .await
+            .map_err(RuntimeCallError::FindStorageRootHashError)?;
 
-            // In order to grab the runtime code and perform the call network request, we need
-            // to know the state trie root hash and the height of the block.
-            let (state_trie_root_hash, block_number) = self
-                .state_trie_root_hash(block_hash)
-                .await
-                .map_err(RuntimeCallError::FindStorageRootHashError)?;
-
-            // Download the runtime of this block. This takes a long time as the runtime is rather
-            // big (around 1MiB in general).
-            let (storage_code, storage_heap_pages) = {
-                let entries = self
-                    .sync_service
-                    .clone()
-                    .storage_query(
-                        block_number,
-                        block_hash,
-                        &state_trie_root_hash,
-                        [
-                            sync_service::StorageRequestItem {
-                                key: b":code".to_vec(),
-                                ty: sync_service::StorageRequestItemTy::Value,
-                            },
-                            sync_service::StorageRequestItem {
-                                key: b":heappages".to_vec(),
-                                ty: sync_service::StorageRequestItemTy::Value,
-                            },
-                        ]
-                        .into_iter(),
-                        3,
-                        Duration::from_secs(20),
-                        NonZeroU32::new(1).unwrap(),
-                    )
-                    .await
-                    .map_err(runtime_service::RuntimeCallError::StorageQuery)
-                    .map_err(RuntimeCallError::Call)?;
-                // TODO: not elegant
-                let heap_pages = entries
-                    .iter()
-                    .find_map(|entry| match entry {
-                        sync_service::StorageResultItem::Value { key, value }
-                            if key == b":heappages" =>
-                        {
-                            Some(value.clone()) // TODO: overhead
-                        }
-                        _ => None,
-                    })
-                    .unwrap();
-                let code = entries
-                    .iter()
-                    .find_map(|entry| match entry {
-                        sync_service::StorageResultItem::Value { key, value }
-                            if key == b":code" =>
-                        {
-                            Some(value.clone()) // TODO: overhead
-                        }
-                        _ => None,
-                    })
-                    .unwrap();
-                (code, heap_pages)
-            };
-
-            // Give the code and heap pages to the runtime service. The runtime service will
-            // try to find any similar runtime it might have, and if not will compile it.
-            let pinned_runtime_id = self
-                .runtime_service
-                .compile_and_pin_runtime(storage_code, storage_heap_pages)
-                .await;
-
-            let precall = self
-                .runtime_service
-                .pinned_runtime_access(
-                    pinned_runtime_id.clone(),
-                    *block_hash,
+        // Download the runtime of this block. This takes a long time as the runtime is rather
+        // big (around 1MiB in general).
+        let (storage_code, storage_heap_pages) = {
+            let entries = self
+                .sync_service
+                .clone()
+                .storage_query(
                     block_number,
-                    state_trie_root_hash,
+                    block_hash,
+                    &state_trie_root_hash,
+                    [
+                        sync_service::StorageRequestItem {
+                            key: b":code".to_vec(),
+                            ty: sync_service::StorageRequestItemTy::Value,
+                        },
+                        sync_service::StorageRequestItem {
+                            key: b":heappages".to_vec(),
+                            ty: sync_service::StorageRequestItemTy::Value,
+                        },
+                    ]
+                    .into_iter(),
+                    3,
+                    Duration::from_secs(20),
+                    NonZeroU32::new(1).unwrap(),
                 )
-                .await;
+                .await
+                .map_err(runtime_service::RuntimeCallError::StorageQuery)
+                .map_err(RuntimeCallError::Call)?;
+            // TODO: not elegant
+            let heap_pages = entries
+                .iter()
+                .find_map(|entry| match entry {
+                    sync_service::StorageResultItem::Value { key, value }
+                        if key == b":heappages" =>
+                    {
+                        Some(value.clone()) // TODO: overhead
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let code = entries
+                .iter()
+                .find_map(|entry| match entry {
+                    sync_service::StorageResultItem::Value { key, value } if key == b":code" => {
+                        Some(value.clone()) // TODO: overhead
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            (code, heap_pages)
+        };
 
-            // TODO: consider keeping pinned runtimes in a cache instead
-            self.runtime_service.unpin_runtime(pinned_runtime_id).await;
+        // Give the code and heap pages to the runtime service. The runtime service will
+        // try to find any similar runtime it might have, and if not will compile it.
+        let pinned_runtime_id = self
+            .runtime_service
+            .compile_and_pin_runtime(storage_code, storage_heap_pages)
+            .await;
 
-            precall
-        })
+        let precall = self
+            .runtime_service
+            .pinned_runtime_access(
+                pinned_runtime_id.clone(),
+                *block_hash,
+                block_number,
+                state_trie_root_hash,
+            )
+            .await;
+
+        // TODO: consider keeping pinned runtimes in a cache instead
+        self.runtime_service.unpin_runtime(pinned_runtime_id).await;
+
+        Ok(precall)
     }
 
     /// Performs a runtime call to a random block.

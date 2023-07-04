@@ -19,6 +19,7 @@ use core::num::NonZeroUsize;
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc};
 use async_lock::Mutex;
+use futures_channel::oneshot;
 use futures_lite::{FutureExt as _, StreamExt as _};
 use futures_util::{future, stream::AbortRegistration, FutureExt as _};
 use smoldot::{
@@ -31,9 +32,15 @@ use crate::{platform::PlatformRef, runtime_service};
 
 use super::Cache;
 
-pub(super) enum Message {
+pub(super) enum Message<TPlat: PlatformRef> {
     SubscriptionStart(service::SubscriptionStartProcess),
-    SubscriptionDestroyed { subscription_id: String },
+    SubscriptionDestroyed {
+        subscription_id: String,
+    },
+    RecentBlockRuntimeAccess {
+        block_hash: [u8; 32],
+        result_tx: oneshot::Sender<Option<runtime_service::RuntimeAccess<TPlat>>>,
+    },
 }
 
 // Spawn one task dedicated to filling the `Cache` with new blocks from the runtime service.
@@ -42,7 +49,7 @@ pub(super) fn start_task<TPlat: PlatformRef>(
     platform: TPlat,
     log_target: String,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
-    requests_rx: async_channel::Receiver<Message>,
+    requests_rx: async_channel::Receiver<Message<TPlat>>,
     abort_registration: AbortRegistration,
 ) {
     // TODO: this is actually racy, as a block subscription task could report a new block to a client, and then client can query it, before this block has been been added to the cache
@@ -102,7 +109,7 @@ pub(super) fn start_task<TPlat: PlatformRef>(
                         run(Task {
                             cache: cache.clone(),
                             log_target: log_target.clone(),
-                            block_number_bytes: runtime_service.block_number_bytes(),
+                            runtime_service,
                             new_blocks: subscribe_all.new_blocks,
                             requests_rx,
                             // TODO: all the subscriptions are dropped if the task returns
@@ -130,9 +137,9 @@ pub(super) fn start_task<TPlat: PlatformRef>(
 struct Task<TPlat: PlatformRef> {
     cache: Arc<Mutex<Cache>>,
     log_target: String,
-    block_number_bytes: usize,
+    runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     new_blocks: runtime_service::Subscription<TPlat>,
-    requests_rx: async_channel::Receiver<Message>,
+    requests_rx: async_channel::Receiver<Message<TPlat>>,
     // TODO: shrink_to_fit?
     all_heads_subscriptions: hashbrown::HashMap<String, service::Subscription, fnv::FnvBuildHasher>,
     // TODO: shrink_to_fit?
@@ -158,7 +165,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
 
                 let json_rpc_header = match methods::Header::from_scale_encoded_header(
                     &block.scale_encoded_header,
-                    task.block_number_bytes,
+                    task.runtime_service.block_number_bytes(),
                 ) {
                     Ok(h) => h,
                     Err(error) => {
@@ -230,6 +237,28 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 task.all_heads_subscriptions.remove(&subscription_id);
                 task.new_heads_subscriptions.remove(&subscription_id);
                 // TODO: shrink_to_fit?
+            }
+
+            either::Right(Some(Message::RecentBlockRuntimeAccess {
+                block_hash,
+                result_tx,
+            })) => {
+                let cache_lock = task.cache.lock().await;
+                let access = if cache_lock.recent_pinned_blocks.contains(&block_hash) {
+                    // The runtime service has the block pinned, meaning that we can ask the runtime
+                    // service to perform the call.
+                    task.runtime_service
+                        .pinned_block_runtime_access(
+                            cache_lock.subscription_id.unwrap(),
+                            &block_hash,
+                        )
+                        .await
+                        .ok()
+                } else {
+                    None
+                };
+
+                let _ = result_tx.send(access);
             }
 
             either::Left(None) | either::Right(None) => {

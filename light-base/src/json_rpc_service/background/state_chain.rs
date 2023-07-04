@@ -824,16 +824,12 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             &sub_utils::subscribe_best(&self.runtime_service).await.0,
         );
 
-        let cache = self.cache.lock().await;
-
         let at = at.as_ref().map(|h| h.0).unwrap_or(best_block);
 
         let mut out = methods::StorageChangeSet {
             block: methods::HashHexString(best_block),
             changes: Vec::new(),
         };
-
-        drop(cache);
 
         let fut = self.storage_query(
             keys.iter(),
