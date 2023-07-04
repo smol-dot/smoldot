@@ -43,9 +43,8 @@ use crate::{
     network_service, platform::PlatformRef, runtime_service, sync_service, transactions_service,
 };
 
-use alloc::{format, string::String, sync::Arc, vec::Vec};
+use alloc::{format, string::String, sync::Arc};
 use core::num::{NonZeroU32, NonZeroUsize};
-use futures_util::future;
 use smoldot::{
     chain_spec,
     json_rpc::{self, service},
@@ -90,21 +89,6 @@ pub struct Config {
 pub fn service(config: Config) -> (Frontend, ServicePrototype) {
     let log_target = format!("json-rpc-{}", config.log_name);
 
-    // We are later going to spawn a bunch of tasks. Each task is associated with an "abort
-    // handle" that makes it possible to later abort it. We calculate here the number of handles
-    // that are necessary.
-    // This calculation must be in sync with the part of the code that spawns the tasks. Assertions
-    // are there in order to make sure that this is the case.
-    let num_handles = 1; // TODO: a bit ridiculous for this to be 1
-
-    let mut background_aborts = Vec::with_capacity(usize::try_from(num_handles).unwrap());
-    let mut background_abort_registrations = Vec::with_capacity(background_aborts.capacity());
-    for _ in 0..num_handles {
-        let (abort, reg) = future::AbortHandle::new_pair();
-        background_aborts.push(abort);
-        background_abort_registrations.push(reg);
-    }
-
     let (requests_processing_task, requests_responses_io) =
         service::client_main_task(service::Config {
             max_active_subscriptions: config.max_subscriptions,
@@ -115,11 +99,9 @@ pub fn service(config: Config) -> (Frontend, ServicePrototype) {
     let frontend = Frontend {
         log_target: log_target.clone(),
         requests_responses_io: Arc::new(requests_responses_io),
-        background_aborts: Arc::from(background_aborts),
     };
 
     let prototype = ServicePrototype {
-        background_abort_registrations,
         log_target,
         requests_processing_task,
         max_parallel_requests: config.max_parallel_requests,
@@ -143,9 +125,6 @@ pub struct Frontend {
 
     /// Target to use when emitting logs.
     log_target: String,
-
-    /// Handles to abort the background tasks.
-    background_aborts: Arc<[future::AbortHandle]>,
 }
 
 impl Frontend {
@@ -221,18 +200,6 @@ impl Frontend {
     }
 }
 
-impl Drop for Frontend {
-    fn drop(&mut self) {
-        // Call `abort()` if this was the last instance of the `Arc<AbortHandle>` (and thus the
-        // last instance of `Frontend`).
-        if let Some(background_aborts) = Arc::get_mut(&mut self.background_aborts) {
-            for background_abort in background_aborts {
-                background_abort.abort();
-            }
-        }
-    }
-}
-
 /// Prototype for a JSON-RPC service. Must be initialized using [`ServicePrototype::start`].
 pub struct ServicePrototype {
     /// Task processing the requests.
@@ -245,10 +212,6 @@ pub struct ServicePrototype {
 
     /// Value obtained through [`Config::max_parallel_requests`].
     max_parallel_requests: NonZeroU32,
-
-    /// List of abort handles. When tasks are spawned, each handle is associated with a task, so
-    /// that they can all be aborted. See [`Frontend::background_aborts`].
-    background_abort_registrations: Vec<future::AbortRegistration>,
 }
 
 /// Configuration for a JSON-RPC service.
@@ -310,7 +273,6 @@ impl ServicePrototype {
             config,
             self.requests_processing_task,
             self.max_parallel_requests,
-            self.background_abort_registrations,
         )
     }
 }

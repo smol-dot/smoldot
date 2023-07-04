@@ -68,96 +68,86 @@ pub(super) fn start_task<TPlat: PlatformRef>(
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     requests_rx: async_channel::Receiver<Message<TPlat>>,
-    abort_registration: AbortRegistration,
 ) {
     // TODO: this is actually racy, as a block subscription task could report a new block to a client, and then client can query it, before this block has been been added to the cache
     // TODO: extract to separate function
     platform.clone().spawn_task(
         format!("{}-cache-populate", log_target).into(),
-        Box::pin({
-            future::Abortable::new(
-                async move {
-                    loop {
-                        let mut cache = Cache {
-                            recent_pinned_blocks: lru::LruCache::with_hasher(
-                                NonZeroUsize::new(32).unwrap(),
-                                Default::default(),
-                            ),
-                            subscription_id: None,
-                            block_state_root_hashes_numbers: lru::LruCache::with_hasher(
-                                NonZeroUsize::new(32).unwrap(),
-                                Default::default(),
-                            ),
-                        };
+        Box::pin(async move {
+            loop {
+                let mut cache = Cache {
+                    recent_pinned_blocks: lru::LruCache::with_hasher(
+                        NonZeroUsize::new(32).unwrap(),
+                        Default::default(),
+                    ),
+                    subscription_id: None,
+                    block_state_root_hashes_numbers: lru::LruCache::with_hasher(
+                        NonZeroUsize::new(32).unwrap(),
+                        Default::default(),
+                    ),
+                };
 
-                        // Subscribe to new runtime service blocks in order to push them in the
-                        // cache as soon as they are available.
-                        // The buffer size should be large enough so that, if the CPU is busy, it
-                        // doesn't become full before the execution of this task resumes.
-                        // The maximum number of pinned block is ignored, as this maximum is a way to
-                        // avoid malicious behaviors. This code is by definition not considered
-                        // malicious.
-                        let subscribe_all = runtime_service
-                            .subscribe_all(
-                                "json-rpc-blocks-cache",
-                                32,
-                                NonZeroUsize::new(usize::max_value()).unwrap(),
-                            )
-                            .await;
+                // Subscribe to new runtime service blocks in order to push them in the
+                // cache as soon as they are available.
+                // The buffer size should be large enough so that, if the CPU is busy, it
+                // doesn't become full before the execution of this task resumes.
+                // The maximum number of pinned block is ignored, as this maximum is a way to
+                // avoid malicious behaviors. This code is by definition not considered
+                // malicious.
+                let subscribe_all = runtime_service
+                    .subscribe_all(
+                        "json-rpc-blocks-cache",
+                        32,
+                        NonZeroUsize::new(usize::max_value()).unwrap(),
+                    )
+                    .await;
 
-                        cache.subscription_id = Some(subscribe_all.new_blocks.id());
-                        cache.recent_pinned_blocks.clear();
-                        debug_assert!(cache.recent_pinned_blocks.cap().get() >= 1);
+                cache.subscription_id = Some(subscribe_all.new_blocks.id());
+                cache.recent_pinned_blocks.clear();
+                debug_assert!(cache.recent_pinned_blocks.cap().get() >= 1);
 
-                        let finalized_block_hash = header::hash_from_scale_encoded_header(
-                            &subscribe_all.finalized_block_scale_encoded_header,
-                        );
-                        cache.recent_pinned_blocks.put(
-                            finalized_block_hash,
-                            subscribe_all.finalized_block_scale_encoded_header,
-                        );
+                let finalized_block_hash = header::hash_from_scale_encoded_header(
+                    &subscribe_all.finalized_block_scale_encoded_header,
+                );
+                cache.recent_pinned_blocks.put(
+                    finalized_block_hash,
+                    subscribe_all.finalized_block_scale_encoded_header,
+                );
 
-                        for block in subscribe_all.non_finalized_blocks_ancestry_order {
-                            if cache.recent_pinned_blocks.len()
-                                == cache.recent_pinned_blocks.cap().get()
-                            {
-                                let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
-                                subscribe_all.new_blocks.unpin_block(&hash).await;
-                            }
-
-                            let hash =
-                                header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                            cache
-                                .recent_pinned_blocks
-                                .put(hash, block.scale_encoded_header);
-                        }
-
-                        run(Task {
-                            cache,
-                            log_target: log_target.clone(),
-                            platform: platform.clone(),
-                            sync_service,
-                            runtime_service,
-                            new_blocks: subscribe_all.new_blocks,
-                            requests_rx,
-                            // TODO: all the subscriptions are dropped if the task returns
-                            all_heads_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
-                                8,
-                                Default::default(),
-                            ),
-                            new_heads_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
-                                8,
-                                Default::default(),
-                            ),
-                        })
-                        .await;
-
-                        panic!() // TODO: not implemented correctly
+                for block in subscribe_all.non_finalized_blocks_ancestry_order {
+                    if cache.recent_pinned_blocks.len() == cache.recent_pinned_blocks.cap().get() {
+                        let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
+                        subscribe_all.new_blocks.unpin_block(&hash).await;
                     }
-                },
-                abort_registration,
-            )
-            .map(|_: Result<(), _>| ())
+
+                    let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+                    cache
+                        .recent_pinned_blocks
+                        .put(hash, block.scale_encoded_header);
+                }
+
+                run(Task {
+                    cache,
+                    log_target: log_target.clone(),
+                    platform: platform.clone(),
+                    sync_service,
+                    runtime_service,
+                    new_blocks: subscribe_all.new_blocks,
+                    requests_rx,
+                    // TODO: all the subscriptions are dropped if the task returns
+                    all_heads_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+                        8,
+                        Default::default(),
+                    ),
+                    new_heads_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+                        8,
+                        Default::default(),
+                    ),
+                })
+                .await;
+
+                panic!() // TODO: not implemented correctly
+            }
         }),
     );
 }

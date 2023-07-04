@@ -133,7 +133,6 @@ pub(super) fn start<TPlat: PlatformRef>(
     config: StartConfig<'_, TPlat>,
     mut requests_processing_task: service::ClientMainTask,
     max_parallel_requests: NonZeroU32,
-    background_abort_registrations: Vec<future::AbortRegistration>,
 ) {
     let (to_legacy_tx, to_legacy_rx) = async_channel::bounded(8);
 
@@ -160,8 +159,6 @@ pub(super) fn start<TPlat: PlatformRef>(
         printed_legacy_json_rpc_warning: atomic::AtomicBool::new(false),
         chain_head_follow_tasks: Mutex::new(hashbrown::HashMap::with_hasher(Default::default())),
     });
-
-    let mut background_abort_registrations = background_abort_registrations.into_iter();
 
     let (tx, rx) = async_channel::bounded(
         usize::try_from(max_parallel_requests.get()).unwrap_or(usize::max_value()),
@@ -260,10 +257,7 @@ pub(super) fn start<TPlat: PlatformRef>(
         me.sync_service.clone(),
         me.runtime_service.clone(),
         to_legacy_rx,
-        background_abort_registrations.next().unwrap(),
     );
-
-    debug_assert!(background_abort_registrations.next().is_none());
 }
 
 impl<TPlat: PlatformRef> Background<TPlat> {
