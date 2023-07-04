@@ -74,11 +74,6 @@ pub(super) fn start_task<TPlat: PlatformRef>(
         Box::pin(async move {
             loop {
                 run(Task {
-                    recent_pinned_blocks: lru::LruCache::with_hasher(
-                        NonZeroUsize::new(32).unwrap(),
-                        Default::default(),
-                    ),
-                    subscription_id: None,
                     block_state_root_hashes_numbers: lru::LruCache::with_hasher(
                         NonZeroUsize::new(32).unwrap(),
                         Default::default(),
@@ -108,21 +103,6 @@ pub(super) fn start_task<TPlat: PlatformRef>(
 }
 
 struct Task<TPlat: PlatformRef> {
-    /// When the runtime service reports a new block, it is kept pinned and inserted in this LRU
-    /// cache. When an entry in removed from the cache, it is unpinned.
-    ///
-    /// JSON-RPC clients are more likely to ask for information about recent blocks and perform
-    /// calls on them, hence a cache of recent blocks.
-    recent_pinned_blocks: lru::LruCache<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
-
-    /// Subscription on the runtime service under which the blocks of
-    /// [`Cache::recent_pinned_blocks`] are pinned.
-    ///
-    /// Contains `None` only at initialization, in which case [`Cache::recent_pinned_blocks`]
-    /// is guaranteed to be empty. In other words, if a block is found in
-    /// [`Cache::recent_pinned_blocks`] then this field is guaranteed to be `Some`.
-    subscription_id: Option<runtime_service::SubscriptionId>,
-
     /// State trie root hashes and numbers of blocks that were not in
     /// [`Cache::recent_pinned_blocks`].
     ///
@@ -162,7 +142,17 @@ struct Task<TPlat: PlatformRef> {
 }
 
 enum Subscription<TPlat: PlatformRef> {
-    Active(runtime_service::Subscription<TPlat>),
+    Active {
+        /// Object representing the subscription.
+        subscription: runtime_service::Subscription<TPlat>,
+
+        /// When the runtime service reports a new block, it is kept pinned and inserted in this
+        /// LRU cache. When an entry in removed from the cache, it is unpinned.
+        ///
+        /// JSON-RPC clients are more likely to ask for information about recent blocks and
+        /// perform calls on them, hence a cache of recent blocks.
+        recent_pinned_blocks: lru::LruCache<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
+    },
     Pending(Pin<Box<dyn Future<Output = runtime_service::SubscribeAll<TPlat>> + Send>>),
     NotCreated,
 }
@@ -170,10 +160,11 @@ enum Subscription<TPlat: PlatformRef> {
 async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
     loop {
         enum WhatHappened<'a, TPlat: PlatformRef> {
-            SubscriptionNotification(
-                runtime_service::Notification,
-                &'a mut runtime_service::Subscription<TPlat>,
-            ),
+            SubscriptionNotification {
+                notification: runtime_service::Notification,
+                subscription: &'a mut runtime_service::Subscription<TPlat>,
+                recent_pinned_blocks: &'a mut lru::LruCache<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
+            },
             SubscriptionDead,
             SubscriptionReady(runtime_service::SubscribeAll<TPlat>),
             Message(Message<TPlat>),
@@ -184,8 +175,15 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             let subscription_event = async {
                 match &mut task.subscription {
                     Subscription::NotCreated => WhatHappened::SubscriptionDead,
-                    Subscription::Active(sub) => match sub.next().await {
-                        Some(n) => WhatHappened::SubscriptionNotification(n, sub),
+                    Subscription::Active {
+                        subscription,
+                        recent_pinned_blocks,
+                    } => match subscription.next().await {
+                        Some(notification) => WhatHappened::SubscriptionNotification {
+                            notification,
+                            subscription,
+                            recent_pinned_blocks,
+                        },
                         None => WhatHappened::SubscriptionDead,
                     },
                     Subscription::Pending(pending) => {
@@ -206,38 +204,40 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
 
         match event {
             WhatHappened::SubscriptionReady(subscribe_all) => {
-                task.subscription_id = Some(subscribe_all.new_blocks.id());
-                task.recent_pinned_blocks.clear();
-                debug_assert!(task.recent_pinned_blocks.cap().get() >= 1);
+                let mut recent_pinned_blocks =
+                    lru::LruCache::with_hasher(NonZeroUsize::new(32).unwrap(), Default::default());
 
                 let finalized_block_hash = header::hash_from_scale_encoded_header(
                     &subscribe_all.finalized_block_scale_encoded_header,
                 );
-                task.recent_pinned_blocks.put(
+                recent_pinned_blocks.put(
                     finalized_block_hash,
                     subscribe_all.finalized_block_scale_encoded_header,
                 );
 
                 for block in subscribe_all.non_finalized_blocks_ancestry_order {
-                    if task.recent_pinned_blocks.len() == task.recent_pinned_blocks.cap().get() {
-                        let (hash, _) = task.recent_pinned_blocks.pop_lru().unwrap();
+                    if recent_pinned_blocks.len() == recent_pinned_blocks.cap().get() {
+                        let (hash, _) = recent_pinned_blocks.pop_lru().unwrap();
                         subscribe_all.new_blocks.unpin_block(&hash).await;
                     }
 
                     let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                    task.recent_pinned_blocks
-                        .put(hash, block.scale_encoded_header);
+                    recent_pinned_blocks.put(hash, block.scale_encoded_header);
                 }
 
-                task.subscription = Subscription::Active(subscribe_all.new_blocks);
+                task.subscription = Subscription::Active {
+                    subscription: subscribe_all.new_blocks,
+                    recent_pinned_blocks,
+                };
             }
 
-            WhatHappened::SubscriptionNotification(
-                runtime_service::Notification::Block(block),
+            WhatHappened::SubscriptionNotification {
+                notification: runtime_service::Notification::Block(block),
                 subscription,
-            ) => {
-                if task.recent_pinned_blocks.len() == task.recent_pinned_blocks.cap().get() {
-                    let (hash, _) = task.recent_pinned_blocks.pop_lru().unwrap();
+                recent_pinned_blocks,
+            } => {
+                if recent_pinned_blocks.len() == recent_pinned_blocks.cap().get() {
+                    let (hash, _) = recent_pinned_blocks.pop_lru().unwrap();
                     subscription.unpin_block(&hash).await;
                 }
 
@@ -261,8 +261,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 };
 
                 let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                task.recent_pinned_blocks
-                    .put(hash, block.scale_encoded_header);
+                recent_pinned_blocks.put(hash, block.scale_encoded_header);
 
                 for (subscription_id, subscription) in &mut task.all_heads_subscriptions {
                     subscription
@@ -284,14 +283,14 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     }
                 }
             }
-            WhatHappened::SubscriptionNotification(
-                runtime_service::Notification::Finalized { .. },
-                _,
-            ) => {}
-            WhatHappened::SubscriptionNotification(
-                runtime_service::Notification::BestBlockChanged { hash, .. },
-                _,
-            ) => {
+            WhatHappened::SubscriptionNotification {
+                notification: runtime_service::Notification::Finalized { .. },
+                ..
+            } => {}
+            WhatHappened::SubscriptionNotification {
+                notification: runtime_service::Notification::BestBlockChanged { hash, .. },
+                ..
+            } => {
                 // TODO: report a chain_newHead subscription
             }
 
@@ -322,11 +321,26 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 block_hash,
                 result_tx,
             }) => {
-                let access = if task.recent_pinned_blocks.contains(&block_hash) {
-                    // The runtime service has the block pinned, meaning that we can ask the runtime
-                    // service to perform the call.
+                let subscription_id_with_block = if let Subscription::Active {
+                    recent_pinned_blocks,
+                    subscription,
+                    ..
+                } = &task.subscription
+                {
+                    if recent_pinned_blocks.contains(&block_hash) {
+                        // The runtime service has the block pinned, meaning that we can ask the runtime
+                        // service to perform the call.
+                        Some(subscription.id())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                let access = if let Some(subscription_id) = subscription_id_with_block {
                     task.runtime_service
-                        .pinned_block_runtime_access(task.subscription_id.unwrap(), &block_hash)
+                        .pinned_block_runtime_access(subscription_id, &block_hash)
                         .await
                         .ok()
                 } else {
@@ -344,15 +358,23 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     let _ = future.now_or_never();
                 }
 
-                let block_number = match (
-                    task.recent_pinned_blocks
-                        .get(&block_hash)
-                        .map(|h| header::decode(h, task.runtime_service.block_number_bytes())),
-                    task.block_state_root_hashes_numbers.get(&block_hash),
-                ) {
-                    (Some(Ok(header)), _) => Some(header.number),
-                    (_, Some(future::MaybeDone::Done(Ok((_, num))))) => Some(*num),
-                    _ => None,
+                let block_number = if let Subscription::Active {
+                    recent_pinned_blocks,
+                    ..
+                } = &mut task.subscription
+                {
+                    match (
+                        recent_pinned_blocks
+                            .get(&block_hash)
+                            .map(|h| header::decode(h, task.runtime_service.block_number_bytes())),
+                        task.block_state_root_hashes_numbers.get(&block_hash),
+                    ) {
+                        (Some(Ok(header)), _) => Some(header.number),
+                        (_, Some(future::MaybeDone::Done(Ok((_, num))))) => Some(*num),
+                        _ => None,
+                    }
+                } else {
+                    None
                 };
 
                 let _ = result_tx.send(block_number);
@@ -362,8 +384,16 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 block_hash,
                 result_tx,
             }) => {
-                let header = if let Some(header) = task.recent_pinned_blocks.get(&block_hash) {
-                    Some(header.clone())
+                let header = if let Subscription::Active {
+                    recent_pinned_blocks,
+                    ..
+                } = &mut task.subscription
+                {
+                    if let Some(header) = recent_pinned_blocks.get(&block_hash) {
+                        Some(header.clone())
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 };
@@ -379,21 +409,26 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     // Try to find an existing entry in cache, and if not create one.
 
                     // Look in `recent_pinned_blocks`.
-                    match task
-                        .recent_pinned_blocks
-                        .get(&block_hash)
-                        .map(|h| header::decode(h, task.runtime_service.block_number_bytes()))
+                    if let Subscription::Active {
+                        recent_pinned_blocks,
+                        ..
+                    } = &mut task.subscription
                     {
-                        Some(Ok(header)) => {
-                            let _ = result_tx.send(Ok((*header.state_root, header.number)));
-                            continue;
+                        match recent_pinned_blocks
+                            .get(&block_hash)
+                            .map(|h| header::decode(h, task.runtime_service.block_number_bytes()))
+                        {
+                            Some(Ok(header)) => {
+                                let _ = result_tx.send(Ok((*header.state_root, header.number)));
+                                continue;
+                            }
+                            Some(Err(err)) => {
+                                let _ = result_tx
+                                    .send(Err(StateTrieRootHashError::HeaderDecodeError(err)));
+                                continue;
+                            } // TODO: can this actually happen? unclear
+                            None => {}
                         }
-                        Some(Err(err)) => {
-                            let _ =
-                                result_tx.send(Err(StateTrieRootHashError::HeaderDecodeError(err)));
-                            continue;
-                        } // TODO: can this actually happen? unclear
-                        None => {}
                     }
 
                     // Look in `block_state_root_hashes`.
