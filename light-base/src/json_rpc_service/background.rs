@@ -90,10 +90,6 @@ struct Background<TPlat: PlatformRef> {
     /// a dedicated task.
     to_legacy: Mutex<async_channel::Sender<legacy_state_sub::Message<TPlat>>>,
 
-    /// Various information caches about blocks, to potentially reduce the number of network
-    /// requests to perform.
-    cache: Arc<Mutex<Cache>>,
-
     /// When `state_getKeysPaged` is called and the response is truncated, the response is
     /// inserted in this cache. The API user is likely to call `state_getKeysPaged` again with
     /// the same parameters, in which case we hit the cache and avoid the networking requests.
@@ -120,49 +116,6 @@ struct Background<TPlat: PlatformRef> {
             >,
             fnv::FnvBuildHasher,
         >,
-    >,
-}
-
-struct Cache {
-    /// When the runtime service reports a new block, it is kept pinned and inserted in this LRU
-    /// cache. When an entry in removed from the cache, it is unpinned.
-    ///
-    /// JSON-RPC clients are more likely to ask for information about recent blocks and perform
-    /// calls on them, hence a cache of recent blocks.
-    recent_pinned_blocks: lru::LruCache<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
-
-    /// Subscription on the runtime service under which the blocks of
-    /// [`Cache::recent_pinned_blocks`] are pinned.
-    ///
-    /// Contains `None` only at initialization, in which case [`Cache::recent_pinned_blocks`]
-    /// is guaranteed to be empty. In other words, if a block is found in
-    /// [`Cache::recent_pinned_blocks`] then this field is guaranteed to be `Some`.
-    subscription_id: Option<runtime_service::SubscriptionId>,
-
-    /// State trie root hashes and numbers of blocks that were not in
-    /// [`Cache::recent_pinned_blocks`].
-    ///
-    /// The state trie root hash can also be an `Err` if the network request failed or if the
-    /// header is of an invalid format.
-    ///
-    /// The state trie root hash and number are wrapped in a `Shared` future. When multiple
-    /// requests need the state trie root hash and number of the same block, they are only queried
-    /// once and the query is inserted in the cache while in progress. This way, the multiple
-    /// requests can all wait on that single future.
-    ///
-    /// Most of the time, the JSON-RPC client will query blocks that are found in
-    /// [`Cache::recent_pinned_blocks`], but occasionally it will query older blocks. When the
-    /// storage of an older block is queried, it is common for the JSON-RPC client to make several
-    /// storage requests to that same old block. In order to avoid having to retrieve the state
-    /// trie root hash multiple, we store these hashes in this LRU cache.
-    block_state_root_hashes_numbers: lru::LruCache<
-        [u8; 32],
-        future::MaybeDone<
-            future::Shared<
-                future::BoxFuture<'static, Result<([u8; 32], u64), StateTrieRootHashError>>,
-            >,
-        >,
-        fnv::FnvBuildHasher,
     >,
 }
 
@@ -199,17 +152,6 @@ pub(super) fn start<TPlat: PlatformRef>(
         runtime_service: config.runtime_service.clone(),
         transactions_service: config.transactions_service.clone(),
         to_legacy: Mutex::new(to_legacy_tx),
-        cache: Arc::new(Mutex::new(Cache {
-            recent_pinned_blocks: lru::LruCache::with_hasher(
-                NonZeroUsize::new(32).unwrap(),
-                Default::default(),
-            ),
-            subscription_id: None,
-            block_state_root_hashes_numbers: lru::LruCache::with_hasher(
-                NonZeroUsize::new(32).unwrap(),
-                Default::default(),
-            ),
-        })),
         state_get_keys_paged_cache: Mutex::new(lru::LruCache::with_hasher(
             NonZeroUsize::new(2).unwrap(),
             util::SipHasherBuild::new(rand::random()),
@@ -313,7 +255,6 @@ pub(super) fn start<TPlat: PlatformRef>(
     }
 
     legacy_state_sub::start_task(
-        me.cache.clone(),
         me.platform.clone(),
         me.log_target.clone(),
         me.sync_service.clone(),

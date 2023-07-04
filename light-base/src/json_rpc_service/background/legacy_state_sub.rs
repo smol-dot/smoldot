@@ -36,7 +36,7 @@ use smoldot::{
 
 use crate::{platform::PlatformRef, runtime_service, sync_service};
 
-use super::{Cache, StateTrieRootHashError};
+use super::StateTrieRootHashError;
 
 pub(super) enum Message<TPlat: PlatformRef> {
     SubscriptionStart(service::SubscriptionStartProcess),
@@ -63,7 +63,6 @@ pub(super) enum Message<TPlat: PlatformRef> {
 
 // Spawn one task dedicated to filling the `Cache` with new blocks from the runtime service.
 pub(super) fn start_task<TPlat: PlatformRef>(
-    cache: Arc<Mutex<Cache>>,
     platform: TPlat,
     log_target: String,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
@@ -79,7 +78,17 @@ pub(super) fn start_task<TPlat: PlatformRef>(
             future::Abortable::new(
                 async move {
                     loop {
-                        let mut cache_lock = cache.lock().await;
+                        let mut cache = Cache {
+                            recent_pinned_blocks: lru::LruCache::with_hasher(
+                                NonZeroUsize::new(32).unwrap(),
+                                Default::default(),
+                            ),
+                            subscription_id: None,
+                            block_state_root_hashes_numbers: lru::LruCache::with_hasher(
+                                NonZeroUsize::new(32).unwrap(),
+                                Default::default(),
+                            ),
+                        };
 
                         // Subscribe to new runtime service blocks in order to push them in the
                         // cache as soon as they are available.
@@ -96,37 +105,35 @@ pub(super) fn start_task<TPlat: PlatformRef>(
                             )
                             .await;
 
-                        cache_lock.subscription_id = Some(subscribe_all.new_blocks.id());
-                        cache_lock.recent_pinned_blocks.clear();
-                        debug_assert!(cache_lock.recent_pinned_blocks.cap().get() >= 1);
+                        cache.subscription_id = Some(subscribe_all.new_blocks.id());
+                        cache.recent_pinned_blocks.clear();
+                        debug_assert!(cache.recent_pinned_blocks.cap().get() >= 1);
 
                         let finalized_block_hash = header::hash_from_scale_encoded_header(
                             &subscribe_all.finalized_block_scale_encoded_header,
                         );
-                        cache_lock.recent_pinned_blocks.put(
+                        cache.recent_pinned_blocks.put(
                             finalized_block_hash,
                             subscribe_all.finalized_block_scale_encoded_header,
                         );
 
                         for block in subscribe_all.non_finalized_blocks_ancestry_order {
-                            if cache_lock.recent_pinned_blocks.len()
-                                == cache_lock.recent_pinned_blocks.cap().get()
+                            if cache.recent_pinned_blocks.len()
+                                == cache.recent_pinned_blocks.cap().get()
                             {
-                                let (hash, _) = cache_lock.recent_pinned_blocks.pop_lru().unwrap();
+                                let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
                                 subscribe_all.new_blocks.unpin_block(&hash).await;
                             }
 
                             let hash =
                                 header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                            cache_lock
+                            cache
                                 .recent_pinned_blocks
                                 .put(hash, block.scale_encoded_header);
                         }
 
-                        drop(cache_lock);
-
                         run(Task {
-                            cache: cache.clone(),
+                            cache,
                             log_target: log_target.clone(),
                             platform: platform.clone(),
                             sync_service,
@@ -155,8 +162,51 @@ pub(super) fn start_task<TPlat: PlatformRef>(
     );
 }
 
+struct Cache {
+    /// When the runtime service reports a new block, it is kept pinned and inserted in this LRU
+    /// cache. When an entry in removed from the cache, it is unpinned.
+    ///
+    /// JSON-RPC clients are more likely to ask for information about recent blocks and perform
+    /// calls on them, hence a cache of recent blocks.
+    recent_pinned_blocks: lru::LruCache<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
+
+    /// Subscription on the runtime service under which the blocks of
+    /// [`Cache::recent_pinned_blocks`] are pinned.
+    ///
+    /// Contains `None` only at initialization, in which case [`Cache::recent_pinned_blocks`]
+    /// is guaranteed to be empty. In other words, if a block is found in
+    /// [`Cache::recent_pinned_blocks`] then this field is guaranteed to be `Some`.
+    subscription_id: Option<runtime_service::SubscriptionId>,
+
+    /// State trie root hashes and numbers of blocks that were not in
+    /// [`Cache::recent_pinned_blocks`].
+    ///
+    /// The state trie root hash can also be an `Err` if the network request failed or if the
+    /// header is of an invalid format.
+    ///
+    /// The state trie root hash and number are wrapped in a `Shared` future. When multiple
+    /// requests need the state trie root hash and number of the same block, they are only queried
+    /// once and the query is inserted in the cache while in progress. This way, the multiple
+    /// requests can all wait on that single future.
+    ///
+    /// Most of the time, the JSON-RPC client will query blocks that are found in
+    /// [`Cache::recent_pinned_blocks`], but occasionally it will query older blocks. When the
+    /// storage of an older block is queried, it is common for the JSON-RPC client to make several
+    /// storage requests to that same old block. In order to avoid having to retrieve the state
+    /// trie root hash multiple, we store these hashes in this LRU cache.
+    block_state_root_hashes_numbers: lru::LruCache<
+        [u8; 32],
+        future::MaybeDone<
+            future::Shared<
+                future::BoxFuture<'static, Result<([u8; 32], u64), StateTrieRootHashError>>,
+            >,
+        >,
+        fnv::FnvBuildHasher,
+    >,
+}
+
 struct Task<TPlat: PlatformRef> {
-    cache: Arc<Mutex<Cache>>,
+    cache: Cache,
     log_target: String,
     platform: TPlat,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
@@ -179,10 +229,10 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             .await
         {
             either::Left(Some(runtime_service::Notification::Block(block))) => {
-                let mut cache = task.cache.lock().await;
-
-                if cache.recent_pinned_blocks.len() == cache.recent_pinned_blocks.cap().get() {
-                    let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
+                if task.cache.recent_pinned_blocks.len()
+                    == task.cache.recent_pinned_blocks.cap().get()
+                {
+                    let (hash, _) = task.cache.recent_pinned_blocks.pop_lru().unwrap();
                     task.new_blocks.unpin_block(&hash).await;
                 }
 
@@ -206,11 +256,9 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 };
 
                 let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                cache
+                task.cache
                     .recent_pinned_blocks
                     .put(hash, block.scale_encoded_header);
-
-                drop(cache);
 
                 for (subscription_id, subscription) in &mut task.all_heads_subscriptions {
                     subscription
@@ -266,13 +314,12 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 block_hash,
                 result_tx,
             })) => {
-                let cache_lock = task.cache.lock().await;
-                let access = if cache_lock.recent_pinned_blocks.contains(&block_hash) {
+                let access = if task.cache.recent_pinned_blocks.contains(&block_hash) {
                     // The runtime service has the block pinned, meaning that we can ask the runtime
                     // service to perform the call.
                     task.runtime_service
                         .pinned_block_runtime_access(
-                            cache_lock.subscription_id.unwrap(),
+                            task.cache.subscription_id.unwrap(),
                             &block_hash,
                         )
                         .await
@@ -288,10 +335,8 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 block_hash,
                 result_tx,
             })) => {
-                let mut cache_lock = task.cache.lock().await;
-                let cache_lock = &mut *cache_lock;
-
-                if let Some(future) = cache_lock
+                if let Some(future) = task
+                    .cache
                     .block_state_root_hashes_numbers
                     .get_mut(&block_hash)
                 {
@@ -299,11 +344,11 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 }
 
                 let block_number = match (
-                    cache_lock
+                    task.cache
                         .recent_pinned_blocks
                         .get(&block_hash)
                         .map(|h| header::decode(h, task.runtime_service.block_number_bytes())),
-                    cache_lock.block_state_root_hashes_numbers.get(&block_hash),
+                    task.cache.block_state_root_hashes_numbers.get(&block_hash),
                 ) {
                     (Some(Ok(header)), _) => Some(header.number),
                     (_, Some(future::MaybeDone::Done(Ok((_, num))))) => Some(*num),
@@ -317,8 +362,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 block_hash,
                 result_tx,
             })) => {
-                let mut cache_lock = task.cache.lock().await;
-                let header = if let Some(header) = cache_lock.recent_pinned_blocks.get(&block_hash)
+                let header = if let Some(header) = task.cache.recent_pinned_blocks.get(&block_hash)
                 {
                     Some(header.clone())
                 } else {
@@ -334,10 +378,10 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             })) => {
                 let fetch = {
                     // Try to find an existing entry in cache, and if not create one.
-                    let mut cache_lock = task.cache.lock().await;
 
                     // Look in `recent_pinned_blocks`.
-                    match cache_lock
+                    match task
+                        .cache
                         .recent_pinned_blocks
                         .get(&block_hash)
                         .map(|h| header::decode(h, task.runtime_service.block_number_bytes()))
@@ -355,7 +399,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     }
 
                     // Look in `block_state_root_hashes`.
-                    match cache_lock.block_state_root_hashes_numbers.get(&block_hash) {
+                    match task.cache.block_state_root_hashes_numbers.get(&block_hash) {
                         Some(future::MaybeDone::Done(Ok(val))) => {
                             let _ = result_tx.send(Ok(*val));
                             continue;
@@ -421,7 +465,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                             let wrapped = (Box::pin(fetch)
                                 as Pin<Box<dyn Future<Output = _> + Send>>)
                                 .shared();
-                            cache_lock
+                            task.cache
                                 .block_state_root_hashes_numbers
                                 .put(block_hash, future::maybe_done(wrapped.clone()));
                             wrapped
