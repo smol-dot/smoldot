@@ -70,35 +70,28 @@ pub(super) fn start_task<TPlat: PlatformRef>(
     requests_rx: async_channel::Receiver<Message<TPlat>>,
 ) {
     platform.clone().spawn_task(
-        format!("{}-cache-populate", log_target).into(),
-        Box::pin(async move {
-            loop {
-                run(Task {
-                    block_state_root_hashes_numbers: lru::LruCache::with_hasher(
-                        NonZeroUsize::new(32).unwrap(),
-                        Default::default(),
-                    ),
-                    log_target: log_target.clone(),
-                    platform: platform.clone(),
-                    sync_service,
-                    runtime_service,
-                    subscription: Subscription::NotCreated,
-                    requests_rx,
-                    // TODO: all the subscriptions are dropped if the task returns
-                    all_heads_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
-                        8,
-                        Default::default(),
-                    ),
-                    new_heads_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
-                        8,
-                        Default::default(),
-                    ),
-                })
-                .await;
-
-                panic!() // TODO: not implemented correctly
-            }
-        }),
+        format!("{}-cache", log_target).into(),
+        Box::pin(run(Task {
+            block_state_root_hashes_numbers: lru::LruCache::with_hasher(
+                NonZeroUsize::new(32).unwrap(),
+                Default::default(),
+            ),
+            log_target: log_target.clone(),
+            platform: platform.clone(),
+            sync_service,
+            runtime_service,
+            subscription: Subscription::NotCreated,
+            requests_rx,
+            // TODO: all the subscriptions are dropped if the task returns
+            all_heads_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+                8,
+                Default::default(),
+            ),
+            new_heads_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+                8,
+                Default::default(),
+            ),
+        })),
     );
 }
 
