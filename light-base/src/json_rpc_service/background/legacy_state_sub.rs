@@ -144,10 +144,14 @@ enum Subscription<TPlat: PlatformRef> {
         ///
         /// JSON-RPC clients are more likely to ask for information about recent blocks and
         /// perform calls on them, hence a cache of recent blocks.
-        recent_pinned_blocks: lru::LruCache<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
+        recent_pinned_blocks: lru::LruCache<[u8; 32], RecentBlock, fnv::FnvBuildHasher>,
     },
     Pending(Pin<Box<dyn Future<Output = runtime_service::SubscribeAll<TPlat>> + Send>>),
     NotCreated,
+}
+
+struct RecentBlock {
+    scale_encoded_header: Vec<u8>,
 }
 
 async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
@@ -156,7 +160,8 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             SubscriptionNotification {
                 notification: runtime_service::Notification,
                 subscription: &'a mut runtime_service::Subscription<TPlat>,
-                recent_pinned_blocks: &'a mut lru::LruCache<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
+                recent_pinned_blocks:
+                    &'a mut lru::LruCache<[u8; 32], RecentBlock, fnv::FnvBuildHasher>,
             },
             SubscriptionDead,
             SubscriptionReady(runtime_service::SubscribeAll<TPlat>),
@@ -205,7 +210,9 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 );
                 recent_pinned_blocks.put(
                     finalized_block_hash,
-                    subscribe_all.finalized_block_scale_encoded_header,
+                    RecentBlock {
+                        scale_encoded_header: subscribe_all.finalized_block_scale_encoded_header,
+                    },
                 );
 
                 for block in subscribe_all.non_finalized_blocks_ancestry_order {
@@ -215,7 +222,12 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     }
 
                     let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                    recent_pinned_blocks.put(hash, block.scale_encoded_header);
+                    recent_pinned_blocks.put(
+                        hash,
+                        RecentBlock {
+                            scale_encoded_header: block.scale_encoded_header,
+                        },
+                    );
                 }
 
                 task.subscription = Subscription::Active {
@@ -254,7 +266,12 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 };
 
                 let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                recent_pinned_blocks.put(hash, block.scale_encoded_header);
+                recent_pinned_blocks.put(
+                    hash,
+                    RecentBlock {
+                        scale_encoded_header: block.scale_encoded_header,
+                    },
+                );
 
                 for (subscription_id, subscription) in &mut task.all_heads_subscriptions {
                     subscription
@@ -357,9 +374,12 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 } = &mut task.subscription
                 {
                     match (
-                        recent_pinned_blocks
-                            .get(&block_hash)
-                            .map(|h| header::decode(h, task.runtime_service.block_number_bytes())),
+                        recent_pinned_blocks.get(&block_hash).map(|b| {
+                            header::decode(
+                                &b.scale_encoded_header,
+                                task.runtime_service.block_number_bytes(),
+                            )
+                        }),
                         task.block_state_root_hashes_numbers.get(&block_hash),
                     ) {
                         (Some(Ok(header)), _) => Some(header.number),
@@ -382,8 +402,8 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     ..
                 } = &mut task.subscription
                 {
-                    if let Some(header) = recent_pinned_blocks.get(&block_hash) {
-                        Some(header.clone())
+                    if let Some(block) = recent_pinned_blocks.get(&block_hash) {
+                        Some(block.scale_encoded_header.clone())
                     } else {
                         None
                     }
@@ -407,10 +427,12 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                         ..
                     } = &mut task.subscription
                     {
-                        match recent_pinned_blocks
-                            .get(&block_hash)
-                            .map(|h| header::decode(h, task.runtime_service.block_number_bytes()))
-                        {
+                        match recent_pinned_blocks.get(&block_hash).map(|b| {
+                            header::decode(
+                                &b.scale_encoded_header,
+                                task.runtime_service.block_number_bytes(),
+                            )
+                        }) {
                             Some(Ok(header)) => {
                                 let _ = result_tx.send(Ok((*header.state_root, header.number)));
                                 continue;
