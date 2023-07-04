@@ -87,7 +87,7 @@ struct Background<TPlat: PlatformRef> {
 
     /// Channel where to send requests that concern the legacy JSON-RPC API that are handled by
     /// a dedicated task.
-    to_legacy: Mutex<async_channel::Sender<service::SubscriptionStartProcess>>,
+    to_legacy: Mutex<async_channel::Sender<legacy_state_sub::Message>>,
 
     /// Various information caches about blocks, to potentially reduce the number of network
     /// requests to perform.
@@ -250,7 +250,9 @@ pub(super) fn start<TPlat: PlatformRef>(
                                     me.to_legacy
                                         .lock()
                                         .await
-                                        .send(subscription_start)
+                                        .send(legacy_state_sub::Message::SubscriptionStart(
+                                            subscription_start,
+                                        ))
                                         .await
                                         .unwrap();
                                 }

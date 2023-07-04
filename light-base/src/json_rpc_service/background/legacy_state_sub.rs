@@ -31,13 +31,17 @@ use crate::{platform::PlatformRef, runtime_service};
 
 use super::Cache;
 
+pub(super) enum Message {
+    SubscriptionStart(service::SubscriptionStartProcess),
+}
+
 // Spawn one task dedicated to filling the `Cache` with new blocks from the runtime service.
 pub(super) fn start_task<TPlat: PlatformRef>(
     cache: Arc<Mutex<Cache>>,
     platform: TPlat,
     log_target: String,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
-    requests_rx: async_channel::Receiver<service::SubscriptionStartProcess>,
+    requests_rx: async_channel::Receiver<Message>,
     abort_registration: AbortRegistration,
 ) {
     // TODO: this is actually racy, as a block subscription task could report a new block to a client, and then client can query it, before this block has been been added to the cache
@@ -127,7 +131,7 @@ struct Task<TPlat: PlatformRef> {
     log_target: String,
     block_number_bytes: usize,
     new_blocks: runtime_service::Subscription<TPlat>,
-    requests_rx: async_channel::Receiver<service::SubscriptionStartProcess>,
+    requests_rx: async_channel::Receiver<Message>,
     // TODO: shrink_to_fit?
     all_heads_subscriptions: hashbrown::HashMap<String, service::Subscription, fnv::FnvBuildHasher>,
     // TODO: shrink_to_fit?
@@ -204,7 +208,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 // TODO: report a chain_newHead subscription
             }
 
-            either::Right(Some(request)) => match request.request() {
+            either::Right(Some(Message::SubscriptionStart(request))) => match request.request() {
                 methods::MethodCall::chain_subscribeAllHeads {} => {
                     let subscription = request.accept();
                     let subscription_id = subscription.subscription_id().to_owned();
