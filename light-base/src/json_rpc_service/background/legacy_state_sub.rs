@@ -85,52 +85,13 @@ pub(super) fn start_task<TPlat: PlatformRef>(
                     ),
                 };
 
-                // Subscribe to new runtime service blocks in order to push them in the
-                // cache as soon as they are available.
-                // The buffer size should be large enough so that, if the CPU is busy, it
-                // doesn't become full before the execution of this task resumes.
-                // The maximum number of pinned block is ignored, as this maximum is a way to
-                // avoid malicious behaviors. This code is by definition not considered
-                // malicious.
-                let subscribe_all = runtime_service
-                    .subscribe_all(
-                        "json-rpc-blocks-cache",
-                        32,
-                        NonZeroUsize::new(usize::max_value()).unwrap(),
-                    )
-                    .await;
-
-                cache.subscription_id = Some(subscribe_all.new_blocks.id());
-                cache.recent_pinned_blocks.clear();
-                debug_assert!(cache.recent_pinned_blocks.cap().get() >= 1);
-
-                let finalized_block_hash = header::hash_from_scale_encoded_header(
-                    &subscribe_all.finalized_block_scale_encoded_header,
-                );
-                cache.recent_pinned_blocks.put(
-                    finalized_block_hash,
-                    subscribe_all.finalized_block_scale_encoded_header,
-                );
-
-                for block in subscribe_all.non_finalized_blocks_ancestry_order {
-                    if cache.recent_pinned_blocks.len() == cache.recent_pinned_blocks.cap().get() {
-                        let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
-                        subscribe_all.new_blocks.unpin_block(&hash).await;
-                    }
-
-                    let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                    cache
-                        .recent_pinned_blocks
-                        .put(hash, block.scale_encoded_header);
-                }
-
                 run(Task {
                     cache,
                     log_target: log_target.clone(),
                     platform: platform.clone(),
                     sync_service,
                     runtime_service,
-                    new_blocks: subscribe_all.new_blocks,
+                    subscription: Subscription::NotCreated,
                     requests_rx,
                     // TODO: all the subscriptions are dropped if the task returns
                     all_heads_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
@@ -199,7 +160,7 @@ struct Task<TPlat: PlatformRef> {
     platform: TPlat,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
-    new_blocks: runtime_service::Subscription<TPlat>,
+    subscription: Subscription<TPlat>,
     requests_rx: async_channel::Receiver<Message<TPlat>>,
     // TODO: shrink_to_fit?
     all_heads_subscriptions: hashbrown::HashMap<String, service::Subscription, fnv::FnvBuildHasher>,
@@ -207,21 +168,89 @@ struct Task<TPlat: PlatformRef> {
     new_heads_subscriptions: hashbrown::HashMap<String, service::Subscription, fnv::FnvBuildHasher>,
 }
 
+enum Subscription<TPlat: PlatformRef> {
+    Active(runtime_service::Subscription<TPlat>),
+    Pending(Pin<Box<dyn Future<Output = runtime_service::SubscribeAll<TPlat>> + Send>>),
+    NotCreated,
+}
+
 async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
     loop {
-        match task
-            .new_blocks
-            .next()
-            .map(either::Left)
-            .or(task.requests_rx.next().map(either::Right))
-            .await
-        {
-            either::Left(Some(runtime_service::Notification::Block(block))) => {
+        enum WhatHappened<'a, TPlat: PlatformRef> {
+            SubscriptionNotification(
+                runtime_service::Notification,
+                &'a mut runtime_service::Subscription<TPlat>,
+            ),
+            SubscriptionDead,
+            SubscriptionReady(runtime_service::SubscribeAll<TPlat>),
+            Message(Message<TPlat>),
+            ForegroundDead,
+        }
+
+        let event = {
+            let subscription_event = async {
+                match &mut task.subscription {
+                    Subscription::NotCreated => WhatHappened::SubscriptionDead,
+                    Subscription::Active(sub) => match sub.next().await {
+                        Some(n) => WhatHappened::SubscriptionNotification(n, sub),
+                        None => WhatHappened::SubscriptionDead,
+                    },
+                    Subscription::Pending(pending) => {
+                        WhatHappened::SubscriptionReady(pending.await)
+                    }
+                }
+            };
+
+            let message = async {
+                match task.requests_rx.next().await {
+                    Some(msg) => WhatHappened::Message(msg),
+                    None => WhatHappened::ForegroundDead,
+                }
+            };
+
+            subscription_event.or(message).await
+        };
+
+        match event {
+            WhatHappened::SubscriptionReady(subscribe_all) => {
+                task.cache.subscription_id = Some(subscribe_all.new_blocks.id());
+                task.cache.recent_pinned_blocks.clear();
+                debug_assert!(task.cache.recent_pinned_blocks.cap().get() >= 1);
+
+                let finalized_block_hash = header::hash_from_scale_encoded_header(
+                    &subscribe_all.finalized_block_scale_encoded_header,
+                );
+                task.cache.recent_pinned_blocks.put(
+                    finalized_block_hash,
+                    subscribe_all.finalized_block_scale_encoded_header,
+                );
+
+                for block in subscribe_all.non_finalized_blocks_ancestry_order {
+                    if task.cache.recent_pinned_blocks.len()
+                        == task.cache.recent_pinned_blocks.cap().get()
+                    {
+                        let (hash, _) = task.cache.recent_pinned_blocks.pop_lru().unwrap();
+                        subscribe_all.new_blocks.unpin_block(&hash).await;
+                    }
+
+                    let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+                    task.cache
+                        .recent_pinned_blocks
+                        .put(hash, block.scale_encoded_header);
+                }
+
+                task.subscription = Subscription::Active(subscribe_all.new_blocks);
+            }
+
+            WhatHappened::SubscriptionNotification(
+                runtime_service::Notification::Block(block),
+                subscription,
+            ) => {
                 if task.cache.recent_pinned_blocks.len()
                     == task.cache.recent_pinned_blocks.cap().get()
                 {
                     let (hash, _) = task.cache.recent_pinned_blocks.pop_lru().unwrap();
-                    task.new_blocks.unpin_block(&hash).await;
+                    subscription.unpin_block(&hash).await;
                 }
 
                 let json_rpc_header = match methods::Header::from_scale_encoded_header(
@@ -268,14 +297,18 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     }
                 }
             }
-            either::Left(Some(runtime_service::Notification::Finalized { .. })) => {}
-            either::Left(Some(runtime_service::Notification::BestBlockChanged {
-                hash, ..
-            })) => {
+            WhatHappened::SubscriptionNotification(
+                runtime_service::Notification::Finalized { .. },
+                _,
+            ) => {}
+            WhatHappened::SubscriptionNotification(
+                runtime_service::Notification::BestBlockChanged { hash, .. },
+                _,
+            ) => {
                 // TODO: report a chain_newHead subscription
             }
 
-            either::Right(Some(Message::SubscriptionStart(request))) => match request.request() {
+            WhatHappened::Message(Message::SubscriptionStart(request)) => match request.request() {
                 methods::MethodCall::chain_subscribeAllHeads {} => {
                     let subscription = request.accept();
                     let subscription_id = subscription.subscription_id().to_owned();
@@ -292,16 +325,16 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 _ => unreachable!(), // TODO: stronger typing to avoid this?
             },
 
-            either::Right(Some(Message::SubscriptionDestroyed { subscription_id })) => {
+            WhatHappened::Message(Message::SubscriptionDestroyed { subscription_id }) => {
                 task.all_heads_subscriptions.remove(&subscription_id);
                 task.new_heads_subscriptions.remove(&subscription_id);
                 // TODO: shrink_to_fit?
             }
 
-            either::Right(Some(Message::RecentBlockRuntimeAccess {
+            WhatHappened::Message(Message::RecentBlockRuntimeAccess {
                 block_hash,
                 result_tx,
-            })) => {
+            }) => {
                 let access = if task.cache.recent_pinned_blocks.contains(&block_hash) {
                     // The runtime service has the block pinned, meaning that we can ask the runtime
                     // service to perform the call.
@@ -319,10 +352,10 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 let _ = result_tx.send(access);
             }
 
-            either::Right(Some(Message::BlockNumber {
+            WhatHappened::Message(Message::BlockNumber {
                 block_hash,
                 result_tx,
-            })) => {
+            }) => {
                 if let Some(future) = task
                     .cache
                     .block_state_root_hashes_numbers
@@ -346,10 +379,10 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 let _ = result_tx.send(block_number);
             }
 
-            either::Right(Some(Message::BlockHeader {
+            WhatHappened::Message(Message::BlockHeader {
                 block_hash,
                 result_tx,
-            })) => {
+            }) => {
                 let header = if let Some(header) = task.cache.recent_pinned_blocks.get(&block_hash)
                 {
                     Some(header.clone())
@@ -360,10 +393,10 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 let _ = result_tx.send(header);
             }
 
-            either::Right(Some(Message::BlockStateRootAndNumber {
+            WhatHappened::Message(Message::BlockStateRootAndNumber {
                 block_hash,
                 result_tx,
-            })) => {
+            }) => {
                 let fetch = {
                     // Try to find an existing entry in cache, and if not create one.
 
@@ -470,8 +503,28 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     });
             }
 
-            either::Left(None) | either::Right(None) => {
+            WhatHappened::ForegroundDead => {
                 break;
+            }
+
+            WhatHappened::SubscriptionDead => {
+                // Subscribe to new runtime service blocks in order to push them in the
+                // cache as soon as they are available.
+                // The buffer size should be large enough so that, if the CPU is busy, it
+                // doesn't become full before the execution of this task resumes.
+                // The maximum number of pinned block is ignored, as this maximum is a way to
+                // avoid malicious behaviors. This code is by definition not considered
+                // malicious.
+                let runtime_service = task.runtime_service.clone();
+                task.subscription = Subscription::Pending(Box::pin(async move {
+                    runtime_service
+                        .subscribe_all(
+                            "json-rpc-blocks-cache",
+                            32,
+                            NonZeroUsize::new(usize::max_value()).unwrap(),
+                        )
+                        .await
+                }));
             }
         }
     }
