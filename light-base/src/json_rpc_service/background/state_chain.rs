@@ -17,13 +17,14 @@
 
 //! All legacy JSON-RPC method handlers that relate to the chain or the storage.
 
-use super::{Background, GetKeysPagedCacheKey, PlatformRef};
+use super::{legacy_state_sub, Background, GetKeysPagedCacheKey, PlatformRef};
 
 use crate::sync_service;
 
 use alloc::{borrow::ToOwned as _, format, string::ToString as _, sync::Arc, vec, vec::Vec};
 use async_lock::MutexGuard;
 use core::{iter, num::NonZeroU32, pin, time::Duration};
+use futures_channel::oneshot;
 use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use smoldot::{
     header,
@@ -100,24 +101,17 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         // knowing it will lead to a better selection of peers, and thus increase the chances of
         // the requests succeeding.
         let block_number = {
-            let mut cache_lock = self.cache.lock().await;
-            let cache_lock = &mut *cache_lock;
-
-            if let Some(future) = cache_lock.block_state_root_hashes_numbers.get_mut(&hash) {
-                let _ = future.now_or_never();
-            }
-
-            match (
-                cache_lock
-                    .recent_pinned_blocks
-                    .get(&hash)
-                    .map(|h| header::decode(h, self.sync_service.block_number_bytes())),
-                cache_lock.block_state_root_hashes_numbers.get(&hash),
-            ) {
-                (Some(Ok(header)), _) => Some(header.number),
-                (_, Some(future::MaybeDone::Done(Ok((_, num))))) => Some(*num),
-                _ => None,
-            }
+            let (tx, rx) = oneshot::channel();
+            self.to_legacy
+                .lock()
+                .await
+                .send(legacy_state_sub::Message::BlockNumber {
+                    block_hash: hash,
+                    result_tx: tx,
+                })
+                .await
+                .unwrap();
+            rx.await.unwrap()
         };
 
         // Block bodies and justifications aren't stored locally. Ask the network.

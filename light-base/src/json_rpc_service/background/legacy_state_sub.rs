@@ -41,6 +41,10 @@ pub(super) enum Message<TPlat: PlatformRef> {
         block_hash: [u8; 32],
         result_tx: oneshot::Sender<Option<runtime_service::RuntimeAccess<TPlat>>>,
     },
+    BlockNumber {
+        block_hash: [u8; 32],
+        result_tx: oneshot::Sender<Option<u64>>,
+    },
 }
 
 // Spawn one task dedicated to filling the `Cache` with new blocks from the runtime service.
@@ -259,6 +263,35 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 };
 
                 let _ = result_tx.send(access);
+            }
+
+            either::Right(Some(Message::BlockNumber {
+                block_hash,
+                result_tx,
+            })) => {
+                let mut cache_lock = task.cache.lock().await;
+                let cache_lock = &mut *cache_lock;
+
+                if let Some(future) = cache_lock
+                    .block_state_root_hashes_numbers
+                    .get_mut(&block_hash)
+                {
+                    let _ = future.now_or_never();
+                }
+
+                let block_number = match (
+                    cache_lock
+                        .recent_pinned_blocks
+                        .get(&block_hash)
+                        .map(|h| header::decode(h, task.runtime_service.block_number_bytes())),
+                    cache_lock.block_state_root_hashes_numbers.get(&block_hash),
+                ) {
+                    (Some(Ok(header)), _) => Some(header.number),
+                    (_, Some(future::MaybeDone::Done(Ok((_, num))))) => Some(*num),
+                    _ => None,
+                };
+
+                let _ = result_tx.send(block_number);
             }
 
             either::Left(None) | either::Right(None) => {
