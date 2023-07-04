@@ -47,9 +47,6 @@ use core::{
 };
 
 pub use crate::executor::vm::ExecHint;
-pub use optimistic::{
-    Nibble, StorageChanges, TrieChange, TrieChangeStorageValue, TrieEntryVersion,
-};
 pub use warp_sync::{FragmentError as WarpSyncFragmentError, WarpSyncFragment};
 
 /// Configuration for the [`AllSync`].
@@ -110,6 +107,7 @@ pub struct Config {
 
     /// If `true`, the block bodies and storage are also synchronized and the block bodies are
     /// verified.
+    // TODO: change this now that we don't verify block bodies here
     pub full_mode: bool,
 }
 
@@ -178,7 +176,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         sources_capacity: config.sources_capacity,
                         blocks_capacity: config.blocks_capacity,
                         download_ahead_blocks: config.download_ahead_blocks,
-                        full_mode: config.full_mode,
+                        download_bodies: config.full_mode,
                     }),
                 }
             } else {
@@ -205,7 +203,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                                 sources_capacity: config.sources_capacity,
                                 blocks_capacity: config.blocks_capacity,
                                 download_ahead_blocks: config.download_ahead_blocks,
-                                full_mode: false,
+                                download_bodies: false,
                             }),
                         }
                     }
@@ -1322,9 +1320,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     self.inner = AllSyncInner::AllForks(sync);
                     ProcessOne::AllSync(self)
                 }
-                all_forks::ProcessOne::HeaderVerify(verify) => {
-                    ProcessOne::VerifyHeader(HeaderVerify {
-                        inner: HeaderVerifyInner::AllForks(verify),
+                all_forks::ProcessOne::BlockVerify(verify) => {
+                    ProcessOne::VerifyBlock(BlockVerify {
+                        inner: BlockVerifyInner::AllForks(verify),
                         shared: self.shared,
                     })
                 }
@@ -1341,8 +1339,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     ProcessOne::AllSync(self)
                 }
                 optimistic::ProcessOne::VerifyBlock(inner) => {
-                    ProcessOne::VerifyBodyHeader(HeaderBodyVerify {
-                        inner: HeaderBodyVerifyInner::Optimistic(inner),
+                    ProcessOne::VerifyBlock(BlockVerify {
+                        inner: BlockVerifyInner::Optimistic(inner),
                         shared: self.shared,
                     })
                 }
@@ -2303,14 +2301,11 @@ pub enum ProcessOne<TRq, TSrc, TBl> {
         finalized_storage_heap_pages: Option<Vec<u8>>,
     },
 
-    /// Ready to start verifying a header.
-    VerifyHeader(HeaderVerify<TRq, TSrc, TBl>),
+    /// Ready to start verifying a block.
+    VerifyBlock(BlockVerify<TRq, TSrc, TBl>),
 
     /// Ready to start verifying a proof of finality.
     VerifyFinalityProof(FinalityProofVerify<TRq, TSrc, TBl>),
-
-    /// Ready to start verifying a header and a body.
-    VerifyBodyHeader(HeaderBodyVerify<TRq, TSrc, TBl>),
 
     /// Ready to start verifying a warp sync fragment.
     VerifyWarpSyncFragment(WarpSyncFragmentVerify<TRq, TSrc, TBl>),
@@ -2374,59 +2369,70 @@ pub struct BlockFull {
     pub body: Vec<Vec<u8>>,
 }
 
-pub struct HeaderVerify<TRq, TSrc, TBl> {
-    inner: HeaderVerifyInner<TRq, TSrc, TBl>,
+pub struct BlockVerify<TRq, TSrc, TBl> {
+    inner: BlockVerifyInner<TRq, TSrc, TBl>,
     shared: Shared<TRq>,
 }
 
-enum HeaderVerifyInner<TRq, TSrc, TBl> {
+enum BlockVerifyInner<TRq, TSrc, TBl> {
     AllForks(
-        all_forks::HeaderVerify<Option<TBl>, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>,
+        all_forks::BlockVerify<Option<TBl>, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>,
+    ),
+    Optimistic(
+        optimistic::BlockVerify<OptimisticRequestExtra<TRq>, OptimisticSourceExtra<TSrc>, TBl>,
     ),
 }
 
-impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
-    /// Returns the height of the block to be verified.
-    pub fn height(&self) -> u64 {
-        match &self.inner {
-            HeaderVerifyInner::AllForks(verify) => verify.height(),
-        }
-    }
-
+impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
     /// Returns the hash of the block to be verified.
     pub fn hash(&self) -> [u8; 32] {
         match &self.inner {
-            HeaderVerifyInner::AllForks(verify) => *verify.hash(),
+            BlockVerifyInner::AllForks(verify) => *verify.hash(),
+            BlockVerifyInner::Optimistic(verify) => verify.hash(),
         }
     }
 
-    /// Perform the verification.
-    pub fn perform(
+    /// Returns the list of SCALE-encoded extrinsics of the block to verify.
+    ///
+    /// This is `Some` if and only if [`Config::full_mode`] is `true`
+    pub fn scale_encoded_extrinsics(
+        &'_ self,
+    ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
+        match &self.inner {
+            BlockVerifyInner::AllForks(_verify) => todo!(), // TODO: /!\
+            BlockVerifyInner::Optimistic(verify) => verify.scale_encoded_extrinsics(),
+        }
+    }
+
+    /// Returns the SCALE-encoded header of the block about to be verified.
+    pub fn scale_encoded_header(&self) -> Vec<u8> {
+        match &self.inner {
+            BlockVerifyInner::AllForks(verify) => verify.scale_encoded_header(),
+            BlockVerifyInner::Optimistic(verify) => verify.scale_encoded_header().to_vec(),
+        }
+    }
+
+    /// Verify the header of the block.
+    pub fn verify_header(
         self,
         now_from_unix_epoch: Duration,
-        user_data: TBl,
     ) -> HeaderVerifyOutcome<TRq, TSrc, TBl> {
         match self.inner {
-            HeaderVerifyInner::AllForks(verify) => {
-                let verified_block_height = verify.height();
+            BlockVerifyInner::AllForks(verify) => {
                 let verified_block_hash = *verify.hash();
 
-                match verify.perform(now_from_unix_epoch) {
+                match verify.verify_header(now_from_unix_epoch) {
                     all_forks::HeaderVerifyOutcome::Success {
                         is_new_best,
-                        mut sync,
-                    } => {
-                        *sync.block_user_data_mut(verified_block_height, &verified_block_hash) =
-                            Some(user_data);
-
-                        HeaderVerifyOutcome::Success {
-                            is_new_best,
-                            sync: AllSync {
-                                inner: AllSyncInner::AllForks(sync),
-                                shared: self.shared,
-                            },
-                        }
-                    }
+                        success,
+                    } => HeaderVerifyOutcome::Success {
+                        is_new_best,
+                        success: HeaderVerifySuccess {
+                            inner: HeaderVerifySuccessInner::AllForks(success),
+                            shared: self.shared,
+                            verified_block_hash,
+                        },
+                    },
                     all_forks::HeaderVerifyOutcome::Error { sync, error } => {
                         HeaderVerifyOutcome::Error {
                             sync: AllSync {
@@ -2444,7 +2450,31 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                                     HeaderVerifyError::ConsensusMismatch
                                 }
                             },
-                            user_data,
+                        }
+                    }
+                }
+            }
+            BlockVerifyInner::Optimistic(verify) => {
+                let verified_block_hash = verify.hash();
+
+                match verify.verify_header(now_from_unix_epoch) {
+                    optimistic::BlockVerification::NewBest { success, .. } => {
+                        HeaderVerifyOutcome::Success {
+                            is_new_best: true,
+                            success: HeaderVerifySuccess {
+                                inner: HeaderVerifySuccessInner::Optimistic(success),
+                                shared: self.shared,
+                                verified_block_hash,
+                            },
+                        }
+                    }
+                    optimistic::BlockVerification::Reset { sync, .. } => {
+                        HeaderVerifyOutcome::Error {
+                            sync: AllSync {
+                                inner: AllSyncInner::Optimistic { inner: sync },
+                                shared: self.shared,
+                            },
+                            error: HeaderVerifyError::ConsensusMismatch, // TODO: dummy error cause /!\
                         }
                     }
                 }
@@ -2453,14 +2483,13 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
     }
 }
 
-/// Outcome of calling [`HeaderVerify::perform`].
+/// Outcome of calling [`BlockVerify::verify_header`].
 pub enum HeaderVerifyOutcome<TRq, TSrc, TBl> {
     /// Header has been successfully verified.
     Success {
         /// True if the newly-verified block is considered the new best block.
         is_new_best: bool,
-        /// State machine yielded back. Use to continue the processing.
-        sync: AllSync<TRq, TSrc, TBl>,
+        success: HeaderVerifySuccess<TRq, TSrc, TBl>,
     },
 
     /// Header verification failed.
@@ -2469,8 +2498,6 @@ pub enum HeaderVerifyOutcome<TRq, TSrc, TBl> {
         sync: AllSync<TRq, TSrc, TBl>,
         /// Error that happened.
         error: HeaderVerifyError,
-        /// User data that was passed to [`HeaderVerify::perform`] and is unused.
-        user_data: TBl,
     },
 }
 
@@ -2484,6 +2511,134 @@ pub enum HeaderVerifyError {
     /// The block verification has failed. The block is invalid and should be thrown away.
     #[display(fmt = "{_0}")]
     VerificationFailed(verify::header_only::Error),
+}
+
+pub struct HeaderVerifySuccess<TRq, TSrc, TBl> {
+    inner: HeaderVerifySuccessInner<TRq, TSrc, TBl>,
+    shared: Shared<TRq>,
+    verified_block_hash: [u8; 32],
+}
+
+enum HeaderVerifySuccessInner<TRq, TSrc, TBl> {
+    AllForks(
+        all_forks::HeaderVerifySuccess<
+            Option<TBl>,
+            AllForksRequestExtra<TRq>,
+            AllForksSourceExtra<TSrc>,
+        >,
+    ),
+    Optimistic(
+        optimistic::BlockVerifySuccess<
+            OptimisticRequestExtra<TRq>,
+            OptimisticSourceExtra<TSrc>,
+            TBl,
+        >,
+    ),
+}
+
+impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
+    /// Returns the height of the block that was verified.
+    pub fn height(&self) -> u64 {
+        match &self.inner {
+            HeaderVerifySuccessInner::AllForks(verify) => verify.height(),
+            HeaderVerifySuccessInner::Optimistic(verify) => verify.height(),
+        }
+    }
+
+    /// Returns the hash of the block that was verified.
+    pub fn hash(&self) -> [u8; 32] {
+        match &self.inner {
+            HeaderVerifySuccessInner::AllForks(verify) => *verify.hash(),
+            HeaderVerifySuccessInner::Optimistic(verify) => verify.hash(),
+        }
+    }
+
+    /// Returns the list of SCALE-encoded extrinsics of the block to verify.
+    ///
+    /// This is `Some` if and only if [`Config::full_mode`] is `true`
+    pub fn scale_encoded_extrinsics(
+        &'_ self,
+    ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
+        match &self.inner {
+            HeaderVerifySuccessInner::AllForks(_verify) => todo!(), // TODO: /!\
+            HeaderVerifySuccessInner::Optimistic(verify) => verify.scale_encoded_extrinsics(),
+        }
+    }
+
+    /// Returns the hash of the parent of the block that was verified.
+    pub fn parent_hash(&self) -> &[u8; 32] {
+        match &self.inner {
+            HeaderVerifySuccessInner::AllForks(verify) => verify.parent_hash(),
+            HeaderVerifySuccessInner::Optimistic(verify) => verify.parent_hash(),
+        }
+    }
+
+    /// Returns the user data of the parent of the block to be verified, or `None` if the parent
+    /// is the finalized block.
+    pub fn parent_user_data(&self) -> Option<&TBl> {
+        match &self.inner {
+            HeaderVerifySuccessInner::AllForks(_verify) => todo!(), // TODO: /!\
+            HeaderVerifySuccessInner::Optimistic(verify) => verify.parent_user_data(),
+        }
+    }
+
+    /// Returns the SCALE-encoded header of the block that was verified.
+    pub fn scale_encoded_header(&self) -> &[u8] {
+        match &self.inner {
+            HeaderVerifySuccessInner::AllForks(verify) => verify.scale_encoded_header(),
+            HeaderVerifySuccessInner::Optimistic(verify) => verify.scale_encoded_header(),
+        }
+    }
+
+    /// Returns the SCALE-encoded header of the parent of the block.
+    pub fn parent_scale_encoded_header(&self) -> Vec<u8> {
+        match &self.inner {
+            HeaderVerifySuccessInner::AllForks(_inner) => todo!(), // TODO: /!\
+            HeaderVerifySuccessInner::Optimistic(inner) => inner.parent_scale_encoded_header(),
+        }
+    }
+
+    /// Reject the block and mark it as bad.
+    pub fn reject_bad_block(self) -> AllSync<TRq, TSrc, TBl> {
+        match self.inner {
+            HeaderVerifySuccessInner::AllForks(inner) => {
+                let sync = inner.reject_bad_block();
+                AllSync {
+                    inner: AllSyncInner::AllForks(sync),
+                    shared: self.shared,
+                }
+            }
+            HeaderVerifySuccessInner::Optimistic(inner) => {
+                let sync = inner.reject_bad_block();
+                AllSync {
+                    inner: AllSyncInner::Optimistic { inner: sync },
+                    shared: self.shared,
+                }
+            }
+        }
+    }
+
+    /// Finish inserting the block header.
+    pub fn finish(self, user_data: TBl) -> AllSync<TRq, TSrc, TBl> {
+        let height = self.height();
+        match self.inner {
+            HeaderVerifySuccessInner::AllForks(inner) => {
+                let mut sync = inner.finish();
+                *sync.block_user_data_mut(height, &self.verified_block_hash) = Some(user_data);
+                AllSync {
+                    inner: AllSyncInner::AllForks(sync),
+                    shared: self.shared,
+                }
+            }
+            HeaderVerifySuccessInner::Optimistic(inner) => {
+                let sync = inner.finish(user_data);
+                AllSync {
+                    inner: AllSyncInner::Optimistic { inner: sync },
+                    shared: self.shared,
+                }
+            }
+        }
+    }
 }
 
 // TODO: should be used by the optimistic syncing as well
@@ -2724,382 +2879,6 @@ impl<TRq, TSrc, TBl> WarpSyncBuildChainInformation<TRq, TSrc, TBl> {
                 None => Ok(()),
             },
         )
-    }
-}
-
-pub struct HeaderBodyVerify<TRq, TSrc, TBl> {
-    inner: HeaderBodyVerifyInner<TRq, TSrc, TBl>,
-    shared: Shared<TRq>,
-}
-
-enum HeaderBodyVerifyInner<TRq, TSrc, TBl> {
-    Optimistic(
-        optimistic::BlockVerify<OptimisticRequestExtra<TRq>, OptimisticSourceExtra<TSrc>, TBl>,
-    ),
-}
-
-impl<TRq, TSrc, TBl> HeaderBodyVerify<TRq, TSrc, TBl> {
-    /// Returns the height of the block to be verified.
-    pub fn height(&self) -> u64 {
-        match &self.inner {
-            HeaderBodyVerifyInner::Optimistic(verify) => verify.height(),
-        }
-    }
-
-    /// Returns the hash of the block to be verified.
-    pub fn hash(&self) -> [u8; 32] {
-        match &self.inner {
-            HeaderBodyVerifyInner::Optimistic(verify) => verify.hash(),
-        }
-    }
-
-    /// Returns the hash of the parent of the block to be verified.
-    pub fn parent_hash(&self) -> [u8; 32] {
-        match &self.inner {
-            HeaderBodyVerifyInner::Optimistic(verify) => verify.parent_hash(),
-        }
-    }
-
-    /// Returns the user data of the parent of the block to be verified, or `None` if the parent
-    /// is the finalized block.
-    pub fn parent_user_data(&self) -> Option<&TBl> {
-        match &self.inner {
-            HeaderBodyVerifyInner::Optimistic(verify) => verify.parent_user_data(),
-        }
-    }
-
-    /// Returns the SCALE-encoded header of the block about to be verified.
-    pub fn scale_encoded_header(&self) -> &[u8] {
-        match &self.inner {
-            HeaderBodyVerifyInner::Optimistic(verify) => verify.scale_encoded_header(),
-        }
-    }
-
-    /// Start the verification process.
-    pub fn start(
-        self,
-        now_from_unix_epoch: Duration,
-        parent_runtime: host::HostVmPrototype,
-        user_data: TBl,
-    ) -> BlockVerification<TRq, TSrc, TBl> {
-        match self.inner {
-            HeaderBodyVerifyInner::Optimistic(verify) => BlockVerification::from_inner(
-                verify.start(now_from_unix_epoch, Some(parent_runtime)),
-                self.shared,
-                user_data,
-            ),
-        }
-    }
-}
-
-/// State of the processing of blocks.
-pub enum BlockVerification<TRq, TSrc, TBl> {
-    /// Block has been successfully verified.
-    Success {
-        /// True if the newly-verified block is considered the new best block.
-        is_new_best: bool,
-        /// Changes to the storage made by this block compared to its parent.
-        storage_changes: StorageChanges,
-        /// State trie version indicated by the runtime. All the storage changes indicated by
-        /// [`BlockVerification::Success::storage_changes`] should store this version
-        /// alongside with them.
-        state_trie_version: TrieEntryVersion,
-        /// List of changes to the off-chain storage that this block performs.
-        offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
-        /// Runtime of the parent, as was provided at the start of the verification.
-        parent_runtime: host::HostVmPrototype,
-        /// If `Some`, the block has modified the runtime compared to its parent. Contains the new
-        /// runtime.
-        new_runtime: Option<host::HostVmPrototype>,
-        /// State machine yielded back. Use to continue the processing.
-        sync: AllSync<TRq, TSrc, TBl>,
-    },
-
-    /// Block verification failed.
-    Error {
-        /// State machine yielded back. Use to continue the processing.
-        sync: AllSync<TRq, TSrc, TBl>,
-        /// Runtime of the parent, as was provided at the start of the verification.
-        parent_runtime: host::HostVmPrototype,
-        /// Error that happened.
-        error: BlockVerificationError,
-        /// User data that was passed to [`HeaderVerify::perform`] and is unused.
-        user_data: TBl,
-    },
-
-    /// Loading a storage value of the parent block is required in order to continue.
-    ParentStorageGet(StorageGet<TRq, TSrc, TBl>),
-
-    /// Obtaining the Merkle value of a trie node of the parent block storage is required in order
-    /// to continue.
-    ParentStorageMerkleValue(StorageClosestDescendantMerkleValue<TRq, TSrc, TBl>),
-
-    /// Fetching the key of the parent block storage that follows a given one is required in
-    /// order to continue.
-    ParentStorageNextKey(StorageNextKey<TRq, TSrc, TBl>),
-
-    /// Compiling a runtime is required in order to continue.
-    RuntimeCompilation(BlockVerificationRuntimeCompilation<TRq, TSrc, TBl>),
-}
-
-/// Error that can happen when verifying a block body.
-#[derive(Debug, derive_more::Display)]
-pub enum BlockVerificationError {
-    /// Error while decoding a header.
-    #[display(fmt = "Failed to decode header: {_0}")]
-    InvalidHeader(header::Error),
-    /// Error while verifying a header.
-    #[display(fmt = "{_0}")]
-    HeaderError(blocks_tree::HeaderVerifyError),
-    /// Error while verifying a header and body.
-    #[display(fmt = "{_0}")]
-    HeaderBodyError(blocks_tree::BodyVerifyError),
-}
-
-impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
-    fn from_inner(
-        inner: optimistic::BlockVerification<
-            OptimisticRequestExtra<TRq>,
-            OptimisticSourceExtra<TSrc>,
-            TBl,
-        >,
-        shared: Shared<TRq>,
-        user_data: TBl,
-    ) -> Self {
-        match inner {
-            optimistic::BlockVerification::NewBest {
-                sync,
-                full:
-                    Some(optimistic::BlockVerificationSuccessFull {
-                        storage_changes,
-                        state_trie_version,
-                        offchain_storage_changes,
-                        parent_runtime,
-                        new_runtime,
-                    }),
-                ..
-            } => {
-                // TODO: transition to all_forks
-                BlockVerification::Success {
-                    is_new_best: true,
-                    storage_changes,
-                    state_trie_version,
-                    offchain_storage_changes,
-                    parent_runtime,
-                    new_runtime,
-                    sync: AllSync {
-                        inner: AllSyncInner::Optimistic { inner: sync },
-                        shared,
-                    },
-                }
-            }
-            optimistic::BlockVerification::NewBest { full: None, .. } => unreachable!(),
-            optimistic::BlockVerification::Reset {
-                sync,
-                reason,
-                parent_runtime,
-                ..
-            } => BlockVerification::Error {
-                sync: AllSync {
-                    inner: AllSyncInner::Optimistic { inner: sync },
-                    shared,
-                },
-                parent_runtime: parent_runtime.unwrap(),
-                error: match reason {
-                    optimistic::ResetCause::InvalidHeader(err) => {
-                        BlockVerificationError::InvalidHeader(err)
-                    }
-                    optimistic::ResetCause::HeaderError(err) => {
-                        BlockVerificationError::HeaderError(err)
-                    }
-                    optimistic::ResetCause::HeaderBodyError(err) => {
-                        BlockVerificationError::HeaderBodyError(err)
-                    }
-                    optimistic::ResetCause::NonCanonical => BlockVerificationError::HeaderError(
-                        // TODO: completely wrong error; unclear how to handle this
-                        blocks_tree::HeaderVerifyError::VerificationFailed(
-                            verify::header_only::Error::NonSequentialBlockNumber,
-                        ),
-                    ),
-                },
-                user_data,
-            },
-            optimistic::BlockVerification::ParentStorageGet(inner) => {
-                BlockVerification::ParentStorageGet(StorageGet {
-                    inner,
-                    shared,
-                    user_data,
-                })
-            }
-            optimistic::BlockVerification::ParentStorageMerkleValue(inner) => {
-                BlockVerification::ParentStorageMerkleValue(StorageClosestDescendantMerkleValue {
-                    inner,
-                    shared,
-                    user_data,
-                })
-            }
-            optimistic::BlockVerification::ParentStorageNextKey(inner) => {
-                BlockVerification::ParentStorageNextKey(StorageNextKey {
-                    inner,
-                    shared,
-                    user_data,
-                })
-            }
-            optimistic::BlockVerification::RuntimeCompilation(inner) => {
-                BlockVerification::RuntimeCompilation(BlockVerificationRuntimeCompilation {
-                    inner,
-                    shared,
-                    user_data,
-                })
-            }
-        }
-    }
-}
-
-/// Loading a storage value is required in order to continue.
-#[must_use]
-pub struct StorageGet<TRq, TSrc, TBl> {
-    inner: optimistic::StorageGet<OptimisticRequestExtra<TRq>, OptimisticSourceExtra<TSrc>, TBl>,
-    shared: Shared<TRq>,
-    user_data: TBl,
-}
-
-impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
-    /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.inner.key()
-    }
-
-    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
-        self.inner.child_trie()
-    }
-
-    /// Injects the corresponding storage value.
-    pub fn inject_value(
-        self,
-        value: Option<(&[u8], TrieEntryVersion)>,
-    ) -> BlockVerification<TRq, TSrc, TBl> {
-        let inner = self.inner.inject_value(value);
-        BlockVerification::from_inner(inner, self.shared, self.user_data)
-    }
-}
-
-/// Obtaining the Merkle value of the closest descendant of a trie node is required in order to
-/// continue.
-#[must_use]
-pub struct StorageClosestDescendantMerkleValue<TRq, TSrc, TBl> {
-    inner: optimistic::StorageClosestDescendantMerkleValue<
-        OptimisticRequestExtra<TRq>,
-        OptimisticSourceExtra<TSrc>,
-        TBl,
-    >,
-    shared: Shared<TRq>,
-    user_data: TBl,
-}
-
-impl<TRq, TSrc, TBl> StorageClosestDescendantMerkleValue<TRq, TSrc, TBl> {
-    /// Returns the key whose closest descendant Merkle value must be passed back.
-    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
-        self.inner.key()
-    }
-
-    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
-        self.inner.child_trie()
-    }
-
-    /// Indicate that the value is unknown and resume the calculation.
-    ///
-    /// This function be used if you are unaware of the Merkle value. The algorithm will perform
-    /// the calculation of this Merkle value manually, which takes more time.
-    pub fn resume_unknown(self) -> BlockVerification<TRq, TSrc, TBl> {
-        let inner = self.inner.resume_unknown();
-        BlockVerification::from_inner(inner, self.shared, self.user_data)
-    }
-
-    /// Injects the corresponding Merkle value.
-    ///
-    /// `None` can be passed if there is no descendant or, in the case of a child trie read, in
-    /// order to indicate that the child trie does not exist.
-    pub fn inject_merkle_value(
-        self,
-        merkle_value: Option<&[u8]>,
-    ) -> BlockVerification<TRq, TSrc, TBl> {
-        let inner = self.inner.inject_merkle_value(merkle_value);
-        BlockVerification::from_inner(inner, self.shared, self.user_data)
-    }
-}
-
-/// Fetching the key that follows a given one is required in order to continue.
-#[must_use]
-pub struct StorageNextKey<TRq, TSrc, TBl> {
-    inner:
-        optimistic::StorageNextKey<OptimisticRequestExtra<TRq>, OptimisticSourceExtra<TSrc>, TBl>,
-    shared: Shared<TRq>,
-    user_data: TBl,
-}
-
-impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
-    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
-        self.inner.key()
-    }
-
-    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
-    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
-        self.inner.child_trie()
-    }
-
-    /// If `true`, then the provided value must the one superior or equal to the requested key.
-    /// If `false`, then the provided value must be strictly superior to the requested key.
-    pub fn or_equal(&self) -> bool {
-        self.inner.or_equal()
-    }
-
-    /// If `true`, then the search must include both branch nodes and storage nodes. If `false`,
-    /// the search only covers storage nodes.
-    pub fn branch_nodes(&self) -> bool {
-        self.inner.branch_nodes()
-    }
-
-    /// Returns the prefix the next key must start with. If the next key doesn't start with the
-    /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
-        self.inner.prefix()
-    }
-
-    /// Injects the key.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the key passed as parameter isn't strictly superior to the requested key.
-    ///
-    pub fn inject_key(
-        self,
-        key: Option<impl Iterator<Item = Nibble>>,
-    ) -> BlockVerification<TRq, TSrc, TBl> {
-        let inner = self.inner.inject_key(key);
-        BlockVerification::from_inner(inner, self.shared, self.user_data)
-    }
-}
-
-/// Compiling a new runtime is necessary as part of the verification.
-#[must_use]
-pub struct BlockVerificationRuntimeCompilation<TRq, TSrc, TBl> {
-    inner: optimistic::RuntimeCompilation<
-        OptimisticRequestExtra<TRq>,
-        OptimisticSourceExtra<TSrc>,
-        TBl,
-    >,
-    shared: Shared<TRq>,
-    user_data: TBl,
-}
-
-impl<TRq, TSrc, TBl> BlockVerificationRuntimeCompilation<TRq, TSrc, TBl> {
-    /// Builds the runtime.
-    pub fn build(self) -> BlockVerification<TRq, TSrc, TBl> {
-        let inner = self.inner.build();
-        BlockVerification::from_inner(inner, self.shared, self.user_data)
     }
 }
 

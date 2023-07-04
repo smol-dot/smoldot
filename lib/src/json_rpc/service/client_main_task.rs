@@ -97,6 +97,9 @@ struct SerializedRequestsQueue {
     /// Event notified after an element from [`SerializedRequestsQueue::queue`] has been pushed.
     on_pushed: event_listener::Event,
 
+    /// Event notified after an element from [`SerializedRequestsQueue::queue`] has been pulled.
+    on_pulled: event_listener::Event,
+
     /// Number of requests that have have been received from the client but whose answer hasn't
     /// been sent back to the client yet. Includes requests whose response is still in
     /// [`Inner::pending_serialized_responses`].
@@ -183,6 +186,7 @@ pub fn client_main_task(config: Config) -> (ClientMainTask, SerializedRequestsIo
             serialized_requests_queue: Arc::new(SerializedRequestsQueue {
                 queue: crossbeam_queue::SegQueue::new(),
                 on_pushed: event_listener::Event::new(),
+                on_pulled: event_listener::Event::new(),
                 num_requests_in_fly: AtomicU32::new(0),
                 max_requests_in_fly: config.max_pending_requests,
             }),
@@ -227,6 +231,10 @@ impl ClientMainTask {
                     let mut wait = None;
                     loop {
                         if let Some(elem) = self.inner.serialized_requests_queue.queue.pop() {
+                            self.inner
+                                .serialized_requests_queue
+                                .on_pulled
+                                .notify(usize::max_value());
                             break elem;
                         }
                         if let Some(wait) = wait.take() {
@@ -773,7 +781,61 @@ impl SerializedRequestsIo {
             .ok_or(WaitNextResponseError::ClientMainTaskDestroyed)
     }
 
-    // TODO: add functions for when you want to block the sending
+    /// Adds a JSON-RPC request to the queue of requests of the [`ClientMainTask`]. Waits if the
+    /// queue is full.
+    ///
+    /// This might cause a call to [`ClientMainTask::run_until_event`] to return
+    /// [`Event::HandleRequest`] or [`Event::HandleSubscriptionStart`].
+    pub async fn send_request(&self, request: String) -> Result<(), SendRequestError> {
+        // Try parse the request here. This guarantees that the [`ClientMainTask`] can't receive
+        // requests that can't be parsed.
+        if let Err(methods::ParseCallError::JsonRpcParse(err)) = methods::parse_json_call(&request)
+        {
+            return Err(SendRequestError {
+                request,
+                cause: SendRequestErrorCause::MalformedJson(err),
+            });
+        }
+
+        let Some(queue) = self.serialized_requests_queue.upgrade() else {
+            return Err(SendRequestError {
+                request,
+                cause: SendRequestErrorCause::ClientMainTaskDestroyed,
+            });
+        };
+
+        // Wait until it is possible to increment `num_requests_in_fly`.
+        let mut wait = None;
+        loop {
+            if queue
+                .num_requests_in_fly
+                .fetch_update(Ordering::SeqCst, Ordering::Relaxed, |old_value| {
+                    if old_value < queue.max_requests_in_fly.get() {
+                        // Considering that `old_value < max`, and `max` fits in a `u32` by
+                        // definition, then `old_value + 1` also always fits in a `u32`. QED.
+                        // There's no risk of overflow.
+                        Some(old_value + 1)
+                    } else {
+                        None
+                    }
+                })
+                .is_ok()
+            {
+                break;
+            }
+
+            if let Some(wait) = wait.take() {
+                wait.await;
+            } else {
+                wait = Some(queue.on_pulled.listen());
+            }
+        }
+
+        // Everything successful.
+        queue.queue.push(request);
+        queue.on_pushed.notify(usize::max_value());
+        Ok(())
+    }
 
     /// Tries to add a JSON-RPC request to the queue of requests of the [`ClientMainTask`].
     ///
@@ -790,13 +852,12 @@ impl SerializedRequestsIo {
             });
         }
 
-        let Some(queue) = self.serialized_requests_queue.upgrade()
-            else {
-                return Err(TrySendRequestError {
-                    request,
-                    cause: TrySendRequestErrorCause::ClientMainTaskDestroyed,
-                });
-            };
+        let Some(queue) = self.serialized_requests_queue.upgrade() else {
+            return Err(TrySendRequestError {
+                request,
+                cause: TrySendRequestErrorCause::ClientMainTaskDestroyed,
+            });
+        };
 
         // Try to increment `num_requests_in_fly`. Return an error if it is past the maximum.
         if queue
@@ -835,6 +896,26 @@ impl fmt::Debug for SerializedRequestsIo {
 /// See [`SerializedRequestsIo::wait_next_response`].
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum WaitNextResponseError {
+    /// The attached [`ClientMainTask`] has been destroyed.
+    ClientMainTaskDestroyed,
+}
+
+/// Error returned by [`SerializedRequestsIo::send_request`].
+#[derive(Debug, derive_more::Display)]
+#[display(fmt = "{cause}")]
+pub struct SendRequestError {
+    /// The JSON-RPC request that was passed as parameter.
+    pub request: String,
+    /// Reason for the error.
+    pub cause: SendRequestErrorCause,
+}
+
+/// See [`SendRequestError::cause`].
+#[derive(Debug, derive_more::Display)]
+pub enum SendRequestErrorCause {
+    /// Data is not JSON, or JSON is missing or has invalid fields.
+    #[display(fmt = "{_0}")]
+    MalformedJson(ParseError),
     /// The attached [`ClientMainTask`] has been destroyed.
     ClientMainTaskDestroyed,
 }

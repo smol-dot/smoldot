@@ -70,7 +70,7 @@ use crate::{
 };
 
 use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
-use core::{cmp, fmt};
+use core::{cmp, fmt, mem};
 
 /// Name of the protocol, typically used when negotiated it using *multistream-select*.
 pub const PROTOCOL_NAME: &str = "/noise";
@@ -128,6 +128,12 @@ impl NoiseKey {
     }
 }
 
+impl Drop for NoiseKey {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.key.private);
+    }
+}
+
 /// Prototype for a [`NoiseKey`].
 ///
 /// This type is provided for situations where the user has access to some signing mechanism,
@@ -167,7 +173,7 @@ impl UnsignedNoiseKey {
 
     /// Turns this [`UnsignedNoiseKey`] into a [`NoiseKey`] after signing it using the libp2p
     /// private key.
-    pub fn sign(self, libp2p_public_ed25519_key: [u8; 32], signature: [u8; 64]) -> NoiseKey {
+    pub fn sign(mut self, libp2p_public_ed25519_key: [u8; 32], signature: [u8; 64]) -> NoiseKey {
         let libp2p_pubkey_protobuf =
             PublicKey::Ed25519(libp2p_public_ed25519_key).to_protobuf_encoding();
 
@@ -190,10 +196,22 @@ impl UnsignedNoiseKey {
         };
 
         NoiseKey {
-            key: self.key,
+            key: mem::replace(
+                &mut self.key,
+                snow::Keypair {
+                    private: Vec::new(),
+                    public: Vec::new(),
+                },
+            ),
             libp2p_public_ed25519_key,
             handshake_message,
         }
+    }
+}
+
+impl Drop for UnsignedNoiseKey {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.key.private);
     }
 }
 

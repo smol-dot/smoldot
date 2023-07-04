@@ -189,7 +189,7 @@ impl Keystore {
                         match Self::load_ed25519_from_file(keys_directory.join(entry.path())).await
                         {
                             Ok(kp) => {
-                                if ed25519_zebra::VerificationKey::from(&kp).as_ref() != public_key
+                                if ed25519_zebra::VerificationKey::from(&*kp).as_ref() != public_key
                                 {
                                     continue;
                                 }
@@ -242,8 +242,9 @@ impl Keystore {
         namespaces: impl Iterator<Item = KeyNamespace>,
         private_key: &[u8; 64],
     ) -> [u8; 32] {
+        // TODO: we can't wrap this private_key into a `Zeroizing` because of the call to `to_keypair()` below, needs fixing in schnorrkel
         let private_key = schnorrkel::SecretKey::from_bytes(&private_key[..]).unwrap();
-        let keypair = private_key.to_keypair();
+        let keypair = zeroize::Zeroizing::new(private_key.to_keypair());
         let public_key = keypair.public.to_bytes();
 
         for namespace in namespaces {
@@ -274,8 +275,9 @@ impl Keystore {
         // the mutex while the private key is being generated. This reduces the time during which
         // the mutex is locked, but in practice generating a key is a rare enough event that this
         // is not worth the effort.
-        let private_key = ed25519_zebra::SigningKey::new(&mut guarded.gen_rng);
-        let public_key: [u8; 32] = ed25519_zebra::VerificationKey::from(&private_key).into();
+        let private_key =
+            zeroize::Zeroizing::new(ed25519_zebra::SigningKey::new(&mut guarded.gen_rng));
+        let public_key: [u8; 32] = ed25519_zebra::VerificationKey::from(&*private_key).into();
 
         let save_path = if save {
             self.path_of_key_ed25519(namespace, &public_key)
@@ -325,8 +327,12 @@ impl Keystore {
         // the mutex while the private key is being generated. This reduces the time during which
         // the mutex is locked, but in practice generating a key is a rare enough event that this
         // is not worth the effort.
-        let mini_secret = schnorrkel::MiniSecretKey::generate_with(&mut guarded.gen_rng);
-        let keypair = mini_secret.expand_to_keypair(schnorrkel::ExpansionMode::Ed25519);
+        let mini_secret = zeroize::Zeroizing::new(schnorrkel::MiniSecretKey::generate_with(
+            &mut guarded.gen_rng,
+        ));
+        let keypair = zeroize::Zeroizing::new(
+            mini_secret.expand_to_keypair(schnorrkel::ExpansionMode::Ed25519),
+        );
         let public_key = keypair.public.to_bytes();
 
         let save_path = if save {
@@ -477,39 +483,44 @@ impl Keystore {
 
     async fn load_ed25519_from_file(
         path: impl AsRef<path::Path>,
-    ) -> Result<ed25519_zebra::SigningKey, KeyLoadError> {
+    ) -> Result<zeroize::Zeroizing<ed25519_zebra::SigningKey>, KeyLoadError> {
         // TODO: read asynchronously?
         let bytes = fs::read(path).map_err(KeyLoadError::Io)?;
         let phrase =
             str::from_utf8(&bytes).map_err(|err| KeyLoadError::BadFormat(err.to_string()))?;
-        let private_key = seed_phrase::decode_ed25519_private_key(phrase)
+        let mut private_key = seed_phrase::decode_ed25519_private_key(phrase)
             .map_err(|err| KeyLoadError::BadFormat(err.to_string()))?;
-        // TODO: zero memory of the private key on drop ^
-        Ok(ed25519_zebra::SigningKey::from(private_key))
+        let zebra_key = zeroize::Zeroizing::new(ed25519_zebra::SigningKey::from(*private_key));
+        zeroize::Zeroize::zeroize(&mut *private_key);
+        Ok(zebra_key)
     }
 
     async fn load_sr25519_from_file(
         path: impl AsRef<path::Path>,
-    ) -> Result<schnorrkel::Keypair, KeyLoadError> {
+    ) -> Result<zeroize::Zeroizing<schnorrkel::Keypair>, KeyLoadError> {
         // TODO: read asynchronously?
         let bytes = fs::read(path).map_err(KeyLoadError::Io)?;
         let phrase =
             str::from_utf8(&bytes).map_err(|err| KeyLoadError::BadFormat(err.to_string()))?;
-        let private_key = seed_phrase::decode_sr25519_private_key(phrase)
+        let mut private_key = seed_phrase::decode_sr25519_private_key(phrase)
             .map_err(|err| KeyLoadError::BadFormat(err.to_string()))?;
-        // TODO: zero memory of the private key on drop ^
         // `from_bytes` only panics if the key is of the wrong length, which we know can't
         // happen here.
-        Ok(schnorrkel::SecretKey::from_bytes(&private_key)
-            .unwrap()
-            .into())
+        let schnorrkel_key = zeroize::Zeroizing::new(
+            schnorrkel::SecretKey::from_bytes(&*private_key)
+                .unwrap()
+                .into(),
+        );
+        zeroize::Zeroize::zeroize(&mut *private_key);
+        Ok(schnorrkel_key)
     }
 
     async fn write_to_file_ed25519(
         path: impl AsRef<path::Path>,
         key: &ed25519_zebra::SigningKey,
     ) -> Result<(), io::Error> {
-        let phrase = hex::encode(key.as_ref());
+        let mut phrase = zeroize::Zeroizing::new(vec![0; key.as_ref().len() * 2]);
+        hex::encode_to_slice(key.as_ref(), &mut phrase).unwrap();
         Self::write_to_file(path, &phrase).await
     }
 
@@ -517,20 +528,23 @@ impl Keystore {
         path: impl AsRef<path::Path>,
         key: &schnorrkel::MiniSecretKey,
     ) -> Result<(), io::Error> {
-        let phrase = hex::encode(key.to_bytes());
+        // TODO: `to_bytes` isn't zeroize-friendly
+        let bytes = key.to_bytes();
+        let mut phrase = zeroize::Zeroizing::new(vec![0; bytes.len() * 2]);
+        hex::encode_to_slice(&bytes, &mut phrase).unwrap();
         Self::write_to_file(path, &phrase).await
     }
 
     async fn write_to_file(
         path: impl AsRef<path::Path>,
-        key_phrase: &str,
+        key_phrase: &[u8],
     ) -> Result<(), io::Error> {
         let mut file = fs::File::create(path)?;
         // TODO: proper security flags on Windows?
         #[cfg(target_family = "unix")]
         file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o400))?;
         io::Write::write_all(&mut file, b"0x")?;
-        io::Write::write_all(&mut file, key_phrase.as_bytes())?;
+        io::Write::write_all(&mut file, key_phrase)?;
         io::Write::flush(&mut file)?; // This call is generally useless, but doesn't hurt.
         file.sync_all()?;
         Ok(())
@@ -626,8 +640,8 @@ pub enum SignVrfError {
 }
 
 enum PrivateKey {
-    MemoryEd25519(ed25519_zebra::SigningKey),
-    MemorySr25519(schnorrkel::Keypair),
+    MemoryEd25519(zeroize::Zeroizing<ed25519_zebra::SigningKey>),
+    MemorySr25519(zeroize::Zeroizing<schnorrkel::Keypair>),
     FileEd25519,
     FileSr25519,
 }

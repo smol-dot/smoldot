@@ -52,8 +52,13 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         self: &Arc<Self>,
         request: service::SubscriptionStartProcess,
     ) {
-        let methods::MethodCall::chainHead_unstable_call { follow_subscription, .. } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::chainHead_unstable_call {
+            follow_subscription,
+            ..
+        } = request.request()
+        else {
+            unreachable!()
+        };
 
         // This is implemented by sending a message to the notifications task.
         // The task dedicated to this subscription will receive the message and send a response to
@@ -88,7 +93,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         request: service::SubscriptionStartProcess,
     ) {
         let methods::MethodCall::chainHead_unstable_follow { with_runtime } = request.request()
-            else { unreachable!() };
+        else {
+            unreachable!()
+        };
 
         let events = if with_runtime {
             let subscribe_all = self
@@ -303,8 +310,13 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         self: &Arc<Self>,
         request: service::SubscriptionStartProcess,
     ) {
-        let methods::MethodCall::chainHead_unstable_storage { follow_subscription, .. } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::chainHead_unstable_storage {
+            follow_subscription,
+            ..
+        } = request.request()
+        else {
+            unreachable!()
+        };
 
         // This is implemented by sending a message to the notifications task.
         // The task dedicated to this subscription will receive the message and send a response to
@@ -339,7 +351,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         request: service::RequestProcess,
     ) {
         let methods::MethodCall::chainHead_unstable_storageContinue { .. } = request.request()
-            else { unreachable!() };
+        else {
+            unreachable!()
+        };
         // TODO: not implemented properly
         request.respond(methods::Response::chainHead_unstable_storageContinue(()));
     }
@@ -349,8 +363,13 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         self: &Arc<Self>,
         request: service::SubscriptionStartProcess,
     ) {
-        let methods::MethodCall::chainHead_unstable_body { follow_subscription, .. } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::chainHead_unstable_body {
+            follow_subscription,
+            ..
+        } = request.request()
+        else {
+            unreachable!()
+        };
 
         // This is implemented by sending a message to the notifications task.
         // The task dedicated to this subscription will receive the message and send a response to
@@ -384,8 +403,13 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         self: &Arc<Self>,
         request: service::RequestProcess,
     ) {
-        let methods::MethodCall::chainHead_unstable_header { follow_subscription, .. } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::chainHead_unstable_header {
+            follow_subscription,
+            ..
+        } = request.request()
+        else {
+            unreachable!()
+        };
 
         // This is implemented by sending a message to the notifications task.
         // The task dedicated to this subscription will receive the message and send a response to
@@ -412,8 +436,13 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         self: &Arc<Self>,
         request: service::RequestProcess,
     ) {
-        let methods::MethodCall::chainHead_unstable_unpin { follow_subscription, .. } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::chainHead_unstable_unpin {
+            follow_subscription,
+            ..
+        } = request.request()
+        else {
+            unreachable!()
+        };
 
         // This is implemented by sending a message to the notifications task.
         // The task dedicated to this subscription will receive the message and send a response to
@@ -752,8 +781,14 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
     }
 
     async fn start_chain_head_body(&mut self, request: service::SubscriptionStartProcess) {
-        let methods::MethodCall::chainHead_unstable_body { hash, network_config, .. } = request.request()
-            else { unreachable!() };
+        let methods::MethodCall::chainHead_unstable_body {
+            hash,
+            network_config,
+            ..
+        } = request.request()
+        else {
+            unreachable!()
+        };
 
         // Determine whether the requested block hash is valid, and if yes its number.
         let block_number = {
@@ -851,7 +886,9 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             network_config,
             ..
         } = request.request()
-            else { unreachable!() };
+        else {
+            unreachable!()
+        };
 
         // Obtain the header of the requested block.
         let block_scale_encoded_header = {
@@ -1056,7 +1093,9 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 network_config,
                 ..
             } = request.request()
-                else { unreachable!() };
+            else {
+                unreachable!()
+            };
 
             let network_config = network_config.unwrap_or(methods::NetworkConfig {
                 max_parallel: 1,

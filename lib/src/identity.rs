@@ -28,12 +28,11 @@
 //!
 //! For this reason, Substrate-defines two human-readable formats:
 //!
-//! - A human-readable format for public keys.
-//! - A human-readable format for private keys, named SS58.
+//! - A human-readable format for public keys, named SS58.
+//! - A human-readable format for private keys.
 //!
-//! These formats unfortunately do not mention which asymmetric cryptographic algorithm (e.g.
-//! Ed25519 or Sr25519) is used for the public and private keys. This must be deduced from the
-//! context.
+//! These formats do not mention which asymmetric cryptographic algorithm (e.g. ed25519 or sr25519)
+//! is used for the public and private keys. This must be deduced from the context.
 //!
 //! ## Public keys (SS58)
 //!
@@ -55,7 +54,7 @@
 //! [here](https://wiki.polkadot.network/docs/build-ss58-registry).
 //!
 //! The checksum is verified when the human-readable format is turned into a public key. Its
-//! presence of a checksum guarantees that simple copying mistakes will be caught.
+//! presence guarantees that simple copying mistakes will be caught.
 //!
 //! ## Private keys
 //!

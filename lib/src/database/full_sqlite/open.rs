@@ -27,7 +27,7 @@ use super::{
 };
 use crate::chain::chain_information;
 
-use std::{fs, path::Path};
+use std::path::Path;
 
 /// Opens the database using the given [`Config`].
 ///
@@ -44,14 +44,7 @@ pub fn open(config: Config) -> Result<DatabaseOpen, InternalError> {
         rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
 
     let database = match config.ty {
-        ConfigTy::Disk { path, .. } => {
-            // Ignoring errors in `create_dir_all`, in order to avoid making the API of this
-            // function more complex. If `create_dir_all` fails, opening the database will most
-            // likely fail too.
-            let _ = fs::create_dir_all(path);
-            // TODO: don't join, directly take the file as input
-            rusqlite::Connection::open_with_flags(path.join("database.sqlite"), flags)
-        }
+        ConfigTy::Disk { path, .. } => rusqlite::Connection::open_with_flags(path, flags),
         ConfigTy::Memory => rusqlite::Connection::open_in_memory_with_flags(flags),
     }
     .map_err(InternalError)?;

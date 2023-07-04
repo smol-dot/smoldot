@@ -405,13 +405,17 @@ impl NetworkService {
                 let mut on_foreground_shutdown = foreground_shutdown.listen();
                 async move {
                     loop {
-                        let Some(accept_result) =
-                            future::or(async {
+                        let Some(accept_result) = future::or(
+                            async {
                                 (&mut on_foreground_shutdown).await;
                                 None
-                            }, async { Some(tcp_listener.accept().await) })
-                            .await
-                            else { break };
+                            },
+                            async { Some(tcp_listener.accept().await) },
+                        )
+                        .await
+                        else {
+                            break;
+                        };
 
                         let (socket, addr) = match accept_result {
                             Ok(v) => v,
@@ -620,7 +624,7 @@ impl NetworkService {
         config: protocol::BlocksRequestConfig,
     ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
         self.log_callback.log(LogLevel::Debug, format!(
-            "blocks-request-start; perr_id={}; chain_index={}; start={}; desired_count={}; direction={}",
+            "blocks-request-start; peer_id={}; chain_index={}; start={}; desired_count={}; direction={}",
             target, chain_index,
             match &config.start {
                 protocol::BlocksRequestConfigStart::Hash(h) => either::Left(HashDisplay(h)),
@@ -1087,8 +1091,9 @@ async fn background_task(mut inner: Inner) {
                 inner.process_network_service_events = true;
 
                 // We check this before generating an event.
-                let either::Left(mut event_senders) = inner.event_senders
-                    else { unreachable!() };
+                let either::Left(mut event_senders) = inner.event_senders else {
+                    unreachable!()
+                };
 
                 inner.event_senders = either::Right(Box::pin(async move {
                     // This little `if` avoids having to do `event.clone()` if we don't have to.
@@ -1132,7 +1137,9 @@ async fn background_task(mut inner: Inner) {
                         })
                         .cloned();
 
-                    let Some(peer_to_assign) = peer_to_assign else { break };
+                    let Some(peer_to_assign) = peer_to_assign else {
+                        break;
+                    };
                     inner.log_callback.log(
                         LogLevel::Debug,
                         format!(

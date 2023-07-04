@@ -51,7 +51,6 @@ impl DefaultPlatform {
 
 impl PlatformRef for Arc<DefaultPlatform> {
     type Delay = future::BoxFuture<'static, ()>;
-    type Yield = future::Ready<()>;
     type Instant = std::time::Instant;
     type MultiStream = std::convert::Infallible;
     type Stream = Stream;
@@ -95,11 +94,6 @@ impl PlatformRef for Arc<DefaultPlatform> {
 
     fn client_version(&self) -> Cow<str> {
         Cow::Borrowed(&self.client_version)
-    }
-
-    fn yield_after_cpu_intensive(&self) -> Self::Yield {
-        // No-op.
-        future::ready(())
     }
 
     fn connect(&self, multiaddr: &str) -> Self::ConnectFuture {
@@ -239,7 +233,9 @@ impl PlatformRef for Arc<DefaultPlatform> {
 
     fn update_stream<'a>(&self, stream: &'a mut Self::Stream) -> Self::StreamUpdateFuture<'a> {
         Box::pin(future::poll_fn(|cx| {
-            let Some((read_buffer, write_buffer)) = stream.buffers.as_mut() else { return Poll::Pending };
+            let Some((read_buffer, write_buffer)) = stream.buffers.as_mut() else {
+                return Poll::Pending;
+            };
 
             // Whether the future returned by `update_stream` should return `Ready` or `Pending`.
             let mut update_stream_future_ready = false;
@@ -368,7 +364,7 @@ impl PlatformRef for Arc<DefaultPlatform> {
             stream.buffers.as_mut().map(|(r, _)| r)
         else {
             assert_eq!(extra_bytes, 0);
-            return
+            return;
         };
 
         assert!(cursor.start + extra_bytes <= cursor.end);
@@ -376,8 +372,14 @@ impl PlatformRef for Arc<DefaultPlatform> {
     }
 
     fn writable_bytes(&self, stream: &mut Self::Stream) -> usize {
-        let Some(StreamWriteBuffer::Open { ref mut buffer, must_close: false, ..}) =
-            stream.buffers.as_mut().map(|(_, w)| w) else { return 0 };
+        let Some(StreamWriteBuffer::Open {
+            ref mut buffer,
+            must_close: false,
+            ..
+        }) = stream.buffers.as_mut().map(|(_, w)| w)
+        else {
+            return 0;
+        };
         buffer.capacity() - buffer.len()
     }
 
@@ -387,15 +389,20 @@ impl PlatformRef for Arc<DefaultPlatform> {
         // Because `writable_bytes` returns 0 if the writing side is closed, and because `data`
         // must always have a size inferior or equal to `writable_bytes`, we know for sure that
         // the writing side isn't closed.
-        let Some(StreamWriteBuffer::Open { ref mut buffer, .. } )=
-            stream.buffers.as_mut().map(|(_, w)| w) else { panic!() };
+        let Some(StreamWriteBuffer::Open { ref mut buffer, .. }) =
+            stream.buffers.as_mut().map(|(_, w)| w)
+        else {
+            panic!()
+        };
         buffer.reserve(data.len());
         buffer.extend(data.iter().copied());
     }
 
     fn close_send(&self, stream: &mut Self::Stream) {
         // It is not illegal to call this on an already-reset stream.
-        let Some((_, write_buffer)) = stream.buffers.as_mut() else { return };
+        let Some((_, write_buffer)) = stream.buffers.as_mut() else {
+            return;
+        };
 
         match write_buffer {
             StreamWriteBuffer::Open {
