@@ -69,8 +69,6 @@ pub(super) fn start_task<TPlat: PlatformRef>(
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     requests_rx: async_channel::Receiver<Message<TPlat>>,
 ) {
-    // TODO: this is actually racy, as a block subscription task could report a new block to a client, and then client can query it, before this block has been been added to the cache
-    // TODO: extract to separate function
     platform.clone().spawn_task(
         format!("{}-cache-populate", log_target).into(),
         Box::pin(async move {
