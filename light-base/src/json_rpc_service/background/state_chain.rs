@@ -19,16 +19,11 @@
 
 use super::{Background, GetKeysPagedCacheKey, PlatformRef};
 
-use crate::{runtime_service, sync_service};
+use crate::sync_service;
 
 use alloc::{borrow::ToOwned as _, format, string::ToString as _, sync::Arc, vec, vec::Vec};
 use async_lock::MutexGuard;
-use core::{
-    iter,
-    num::{NonZeroU32, NonZeroUsize},
-    pin,
-    time::Duration,
-};
+use core::{iter, num::NonZeroU32, pin, time::Duration};
 use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use smoldot::{
     header,
@@ -403,80 +398,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 }
             },
         );
-    }
-
-    /// Handles a call to [`methods::MethodCall::chain_subscribeNewHeads`].
-    pub(super) async fn chain_subscribe_new_heads(
-        self: &Arc<Self>,
-        request: service::SubscriptionStartProcess,
-    ) {
-        let methods::MethodCall::chain_subscribeNewHeads {} = request.request() else {
-            unreachable!()
-        };
-
-        let mut blocks_list = {
-            let (block_header, blocks_subscription) =
-                sub_utils::subscribe_best(&self.runtime_service).await;
-            stream::once(future::ready(block_header)).chain(blocks_subscription)
-        };
-
-        self.platform
-            .spawn_task(format!("{}-subscribe-new-heads", self.log_target).into(), {
-                let log_target = self.log_target.clone();
-                let sync_service = self.sync_service.clone();
-
-                async move {
-                    let mut subscription = request.accept();
-                    let subscription_id = subscription.subscription_id().to_owned();
-
-                    loop {
-                        let event = {
-                            let unsubscribed = pin::pin!(subscription.wait_until_stale());
-                            match future::select(blocks_list.next(), unsubscribed).await {
-                                future::Either::Left((ev, _)) => either::Left(ev),
-                                future::Either::Right((ev, _)) => either::Right(ev),
-                            }
-                        };
-
-                        match event {
-                            either::Left(None) => {
-                                // Stream returned by `subscribe_best` is always unlimited.
-                                unreachable!()
-                            }
-                            either::Left(Some(header)) => {
-                                let header = match methods::Header::from_scale_encoded_header(
-                                    &header,
-                                    sync_service.block_number_bytes(),
-                                ) {
-                                    Ok(h) => h,
-                                    Err(error) => {
-                                        log::warn!(
-                                        target: &log_target,
-                                        "`chain_subscribeNewHeads` subscription has skipped block \
-                                        due to undecodable header. Hash: {}. Error: {}",
-                                        HashDisplay(&header::hash_from_scale_encoded_header(
-                                            &header
-                                        )),
-                                        error,
-                                    );
-                                        continue;
-                                    }
-                                };
-
-                                subscription
-                                    .send_notification(methods::ServerToClient::chain_newHead {
-                                        subscription: (&subscription_id).into(),
-                                        result: header,
-                                    })
-                                    .await;
-                            }
-                            either::Right(()) => {
-                                break;
-                            }
-                        }
-                    }
-                }
-            });
     }
 
     /// Handles a call to [`methods::MethodCall::payment_queryInfo`].

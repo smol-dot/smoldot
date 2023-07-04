@@ -105,6 +105,10 @@ pub(super) fn start_task<TPlat: PlatformRef>(
                                 8,
                                 Default::default(),
                             ),
+                            new_heads_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+                                8,
+                                Default::default(),
+                            ),
                         })
                         .await;
 
@@ -126,6 +130,8 @@ struct Task<TPlat: PlatformRef> {
     requests_rx: async_channel::Receiver<service::SubscriptionStartProcess>,
     // TODO: shrink_to_fit?
     all_heads_subscriptions: hashbrown::HashMap<String, service::Subscription, fnv::FnvBuildHasher>,
+    // TODO: shrink_to_fit?
+    new_heads_subscriptions: hashbrown::HashMap<String, service::Subscription, fnv::FnvBuildHasher>,
 }
 
 async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
@@ -153,8 +159,8 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     Err(error) => {
                         log::warn!(
                             target: &task.log_target,
-                            "`chain_subscribeAllHeads` subscription has skipped \
-                            block due to undecodable header. Hash: {}. Error: {}",
+                            "`chain_subscribeAllHeads` or `chain_subscribeNewHeads` subscription \
+                            has skipped block due to undecodable header. Hash: {}. Error: {}",
                             HashDisplay(&header::hash_from_scale_encoded_header(
                                 &block.scale_encoded_header
                             )),
@@ -179,15 +185,37 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                         })
                         .await;
                 }
+
+                if block.is_new_best {
+                    for (subscription_id, subscription) in &mut task.new_heads_subscriptions {
+                        subscription
+                            .send_notification(methods::ServerToClient::chain_newHead {
+                                subscription: subscription_id.as_str().into(),
+                                result: json_rpc_header.clone(),
+                            })
+                            .await;
+                    }
+                }
             }
-            either::Left(Some(runtime_service::Notification::Finalized { .. }))
-            | either::Left(Some(runtime_service::Notification::BestBlockChanged { .. })) => {}
+            either::Left(Some(runtime_service::Notification::Finalized { .. })) => {}
+            either::Left(Some(runtime_service::Notification::BestBlockChanged {
+                hash, ..
+            })) => {
+                // TODO: report a chain_newHead subscription
+            }
 
             either::Right(Some(request)) => match request.request() {
-                methods::MethodCall::chain_subscribeNewHeads {} => {
+                methods::MethodCall::chain_subscribeAllHeads {} => {
                     let subscription = request.accept();
                     let subscription_id = subscription.subscription_id().to_owned();
                     task.all_heads_subscriptions
+                        .insert(subscription_id, subscription);
+                }
+                methods::MethodCall::chain_subscribeNewHeads {} => {
+                    let subscription = request.accept();
+                    let subscription_id = subscription.subscription_id().to_owned();
+                    // TODO: must immediately send the current best block
+                    task.new_heads_subscriptions
                         .insert(subscription_id, subscription);
                 }
                 _ => unreachable!(), // TODO: stronger typing to avoid this?
