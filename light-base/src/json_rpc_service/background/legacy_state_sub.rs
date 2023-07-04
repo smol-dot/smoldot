@@ -73,7 +73,7 @@ pub(super) fn start_task<TPlat: PlatformRef>(
         format!("{}-cache-populate", log_target).into(),
         Box::pin(async move {
             loop {
-                let mut cache = Cache {
+                run(Task {
                     recent_pinned_blocks: lru::LruCache::with_hasher(
                         NonZeroUsize::new(32).unwrap(),
                         Default::default(),
@@ -83,10 +83,6 @@ pub(super) fn start_task<TPlat: PlatformRef>(
                         NonZeroUsize::new(32).unwrap(),
                         Default::default(),
                     ),
-                };
-
-                run(Task {
-                    cache,
                     log_target: log_target.clone(),
                     platform: platform.clone(),
                     sync_service,
@@ -111,7 +107,7 @@ pub(super) fn start_task<TPlat: PlatformRef>(
     );
 }
 
-struct Cache {
+struct Task<TPlat: PlatformRef> {
     /// When the runtime service reports a new block, it is kept pinned and inserted in this LRU
     /// cache. When an entry in removed from the cache, it is unpinned.
     ///
@@ -152,10 +148,7 @@ struct Cache {
         >,
         fnv::FnvBuildHasher,
     >,
-}
 
-struct Task<TPlat: PlatformRef> {
-    cache: Cache,
     log_target: String,
     platform: TPlat,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
@@ -213,29 +206,26 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
 
         match event {
             WhatHappened::SubscriptionReady(subscribe_all) => {
-                task.cache.subscription_id = Some(subscribe_all.new_blocks.id());
-                task.cache.recent_pinned_blocks.clear();
-                debug_assert!(task.cache.recent_pinned_blocks.cap().get() >= 1);
+                task.subscription_id = Some(subscribe_all.new_blocks.id());
+                task.recent_pinned_blocks.clear();
+                debug_assert!(task.recent_pinned_blocks.cap().get() >= 1);
 
                 let finalized_block_hash = header::hash_from_scale_encoded_header(
                     &subscribe_all.finalized_block_scale_encoded_header,
                 );
-                task.cache.recent_pinned_blocks.put(
+                task.recent_pinned_blocks.put(
                     finalized_block_hash,
                     subscribe_all.finalized_block_scale_encoded_header,
                 );
 
                 for block in subscribe_all.non_finalized_blocks_ancestry_order {
-                    if task.cache.recent_pinned_blocks.len()
-                        == task.cache.recent_pinned_blocks.cap().get()
-                    {
-                        let (hash, _) = task.cache.recent_pinned_blocks.pop_lru().unwrap();
+                    if task.recent_pinned_blocks.len() == task.recent_pinned_blocks.cap().get() {
+                        let (hash, _) = task.recent_pinned_blocks.pop_lru().unwrap();
                         subscribe_all.new_blocks.unpin_block(&hash).await;
                     }
 
                     let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                    task.cache
-                        .recent_pinned_blocks
+                    task.recent_pinned_blocks
                         .put(hash, block.scale_encoded_header);
                 }
 
@@ -246,10 +236,8 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 runtime_service::Notification::Block(block),
                 subscription,
             ) => {
-                if task.cache.recent_pinned_blocks.len()
-                    == task.cache.recent_pinned_blocks.cap().get()
-                {
-                    let (hash, _) = task.cache.recent_pinned_blocks.pop_lru().unwrap();
+                if task.recent_pinned_blocks.len() == task.recent_pinned_blocks.cap().get() {
+                    let (hash, _) = task.recent_pinned_blocks.pop_lru().unwrap();
                     subscription.unpin_block(&hash).await;
                 }
 
@@ -273,8 +261,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 };
 
                 let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                task.cache
-                    .recent_pinned_blocks
+                task.recent_pinned_blocks
                     .put(hash, block.scale_encoded_header);
 
                 for (subscription_id, subscription) in &mut task.all_heads_subscriptions {
@@ -335,14 +322,11 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 block_hash,
                 result_tx,
             }) => {
-                let access = if task.cache.recent_pinned_blocks.contains(&block_hash) {
+                let access = if task.recent_pinned_blocks.contains(&block_hash) {
                     // The runtime service has the block pinned, meaning that we can ask the runtime
                     // service to perform the call.
                     task.runtime_service
-                        .pinned_block_runtime_access(
-                            task.cache.subscription_id.unwrap(),
-                            &block_hash,
-                        )
+                        .pinned_block_runtime_access(task.subscription_id.unwrap(), &block_hash)
                         .await
                         .ok()
                 } else {
@@ -356,20 +340,15 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 block_hash,
                 result_tx,
             }) => {
-                if let Some(future) = task
-                    .cache
-                    .block_state_root_hashes_numbers
-                    .get_mut(&block_hash)
-                {
+                if let Some(future) = task.block_state_root_hashes_numbers.get_mut(&block_hash) {
                     let _ = future.now_or_never();
                 }
 
                 let block_number = match (
-                    task.cache
-                        .recent_pinned_blocks
+                    task.recent_pinned_blocks
                         .get(&block_hash)
                         .map(|h| header::decode(h, task.runtime_service.block_number_bytes())),
-                    task.cache.block_state_root_hashes_numbers.get(&block_hash),
+                    task.block_state_root_hashes_numbers.get(&block_hash),
                 ) {
                     (Some(Ok(header)), _) => Some(header.number),
                     (_, Some(future::MaybeDone::Done(Ok((_, num))))) => Some(*num),
@@ -383,8 +362,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 block_hash,
                 result_tx,
             }) => {
-                let header = if let Some(header) = task.cache.recent_pinned_blocks.get(&block_hash)
-                {
+                let header = if let Some(header) = task.recent_pinned_blocks.get(&block_hash) {
                     Some(header.clone())
                 } else {
                     None
@@ -402,7 +380,6 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
 
                     // Look in `recent_pinned_blocks`.
                     match task
-                        .cache
                         .recent_pinned_blocks
                         .get(&block_hash)
                         .map(|h| header::decode(h, task.runtime_service.block_number_bytes()))
@@ -420,7 +397,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     }
 
                     // Look in `block_state_root_hashes`.
-                    match task.cache.block_state_root_hashes_numbers.get(&block_hash) {
+                    match task.block_state_root_hashes_numbers.get(&block_hash) {
                         Some(future::MaybeDone::Done(Ok(val))) => {
                             let _ = result_tx.send(Ok(*val));
                             continue;
@@ -486,8 +463,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                             let wrapped = (Box::pin(fetch)
                                 as Pin<Box<dyn Future<Output = _> + Send>>)
                                 .shared();
-                            task.cache
-                                .block_state_root_hashes_numbers
+                            task.block_state_root_hashes_numbers
                                 .put(block_hash, future::maybe_done(wrapped.clone()));
                             wrapped
                         }
