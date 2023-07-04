@@ -135,26 +135,6 @@ impl Frontend {
     /// isn't called often enough. Use [`HandleRpcError::into_json_rpc_error`] to build the
     /// JSON-RPC response to immediately send back to the user.
     pub fn queue_rpc_request(&self, json_rpc_request: String) -> Result<(), HandleRpcError> {
-        // If the request isn't even a valid JSON-RPC request, we can't even send back a response.
-        // We have no choice but to immediately refuse the request.
-        if let Err(error) = json_rpc::parse::parse_call(&json_rpc_request) {
-            log::warn!(
-                target: &self.log_target,
-                "Refused malformed JSON-RPC request: {}", error
-            );
-            return Err(HandleRpcError::MalformedJsonRpc(error));
-        }
-
-        // Logging the request before it is queued.
-        log::debug!(
-            target: &self.log_target,
-            "PendingRequestsQueue <= {}",
-            crate::util::truncated_str(
-                json_rpc_request.chars().filter(|c| !c.is_control()),
-                100,
-            )
-        );
-
         match self
             .requests_responses_io
             .try_send_request(json_rpc_request)
@@ -167,9 +147,17 @@ impl Frontend {
                 json_rpc_request: request,
             }),
             Err(service::TrySendRequestError {
-                cause: service::TrySendRequestErrorCause::MalformedJson(err),
+                cause: service::TrySendRequestErrorCause::MalformedJson(error),
                 ..
-            }) => Err(HandleRpcError::MalformedJsonRpc(err)),
+            }) => {
+                // If the request isn't even a valid JSON-RPC request, we can't even send back a
+                // response. We have no choice but to immediately refuse the request.
+                log::warn!(
+                    target: &self.log_target,
+                    "Refused malformed JSON-RPC request: {}", error
+                );
+                Err(HandleRpcError::MalformedJsonRpc(error))
+            }
             Err(service::TrySendRequestError {
                 cause: service::TrySendRequestErrorCause::ClientMainTaskDestroyed,
                 ..
