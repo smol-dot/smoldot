@@ -28,7 +28,7 @@ use futures_channel::oneshot;
 use futures_lite::{FutureExt as _, StreamExt as _};
 use futures_util::{future, stream::AbortRegistration, FutureExt as _};
 use smoldot::{
-    header,
+    executor, header,
     informant::HashDisplay,
     json_rpc::{methods, service},
     network::protocol,
@@ -152,6 +152,7 @@ enum Subscription<TPlat: PlatformRef> {
 
 struct RecentBlock {
     scale_encoded_header: Vec<u8>,
+    runtime_version: Arc<Result<executor::CoreVersion, runtime_service::RuntimeError>>,
 }
 
 async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
@@ -212,6 +213,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     finalized_block_hash,
                     RecentBlock {
                         scale_encoded_header: subscribe_all.finalized_block_scale_encoded_header,
+                        runtime_version: Arc::new(subscribe_all.finalized_block_runtime),
                     },
                 );
 
@@ -226,6 +228,10 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                         hash,
                         RecentBlock {
                             scale_encoded_header: block.scale_encoded_header,
+                            runtime_version: block
+                                .new_runtime
+                                .map(Arc::new)
+                                .unwrap_or_else(|| todo!()), // TODO:
                         },
                     );
                 }
@@ -270,6 +276,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     hash,
                     RecentBlock {
                         scale_encoded_header: block.scale_encoded_header,
+                        runtime_version: block.new_runtime.map(Arc::new).unwrap_or_else(|| todo!()), // TODO:
                     },
                 );
 
