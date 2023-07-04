@@ -87,7 +87,7 @@ struct Background<TPlat: PlatformRef> {
 
     /// Various information caches about blocks, to potentially reduce the number of network
     /// requests to perform.
-    cache: Mutex<Cache>,
+    cache: Arc<Mutex<Cache>>,
 
     /// Hash of the genesis block.
     /// Keeping the genesis block is important, as the genesis block hash is included in
@@ -190,7 +190,7 @@ pub(super) fn start<TPlat: PlatformRef>(
         sync_service: config.sync_service.clone(),
         runtime_service: config.runtime_service.clone(),
         transactions_service: config.transactions_service.clone(),
-        cache: Mutex::new(Cache {
+        cache: Arc::new(Mutex::new(Cache {
             recent_pinned_blocks: lru::LruCache::with_hasher(
                 NonZeroUsize::new(32).unwrap(),
                 Default::default(),
@@ -204,7 +204,7 @@ pub(super) fn start<TPlat: PlatformRef>(
                 NonZeroUsize::new(2).unwrap(),
                 util::SipHasherBuild::new(rand::random()),
             ),
-        }),
+        })),
         genesis_block_hash: config.genesis_block_hash,
         printed_legacy_json_rpc_warning: atomic::AtomicBool::new(false),
         chain_head_follow_tasks: Mutex::new(hashbrown::HashMap::with_hasher(Default::default())),
@@ -282,7 +282,13 @@ pub(super) fn start<TPlat: PlatformRef>(
         );
     }
 
-    legacy_state_sub::start_task(me, background_abort_registrations.next().unwrap());
+    legacy_state_sub::start_task(
+        me.cache.clone(),
+        me.platform.clone(),
+        me.log_target.clone(),
+        me.runtime_service.clone(),
+        background_abort_registrations.next().unwrap(),
+    );
 
     debug_assert!(background_abort_registrations.next().is_none());
 }

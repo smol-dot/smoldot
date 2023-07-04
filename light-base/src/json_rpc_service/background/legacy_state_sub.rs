@@ -17,28 +17,32 @@
 
 use core::num::NonZeroUsize;
 
-use alloc::{format, sync::Arc};
+use alloc::{format, string::String, sync::Arc};
+use async_lock::Mutex;
 use futures_util::{future, stream::AbortRegistration, FutureExt};
 use smoldot::header;
 
 use crate::{platform::PlatformRef, runtime_service};
 
-use super::Background;
+use super::Cache;
 
 // Spawn one task dedicated to filling the `Cache` with new blocks from the runtime service.
 pub(super) fn start_task<TPlat: PlatformRef>(
-    me: Arc<Background<TPlat>>,
+    cache: Arc<Mutex<Cache>>,
+    platform: TPlat,
+    log_target: String,
+    runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     abort_registration: AbortRegistration,
 ) {
     // TODO: this is actually racy, as a block subscription task could report a new block to a client, and then client can query it, before this block has been been added to the cache
     // TODO: extract to separate function
-    me.platform
+    platform
         .clone()
-        .spawn_task(format!("{}-cache-populate", me.log_target).into(), {
+        .spawn_task(format!("{}-cache-populate", log_target).into(), {
             future::Abortable::new(
                 async move {
                     loop {
-                        let mut cache = me.cache.lock().await;
+                        let mut cache_lock = cache.lock().await;
 
                         // Subscribe to new runtime service blocks in order to push them in the
                         // cache as soon as they are available.
@@ -47,8 +51,7 @@ pub(super) fn start_task<TPlat: PlatformRef>(
                         // The maximum number of pinned block is ignored, as this maximum is a way to
                         // avoid malicious behaviors. This code is by definition not considered
                         // malicious.
-                        let mut subscribe_all = me
-                            .runtime_service
+                        let subscribe_all = runtime_service
                             .subscribe_all(
                                 "json-rpc-blocks-cache",
                                 32,
@@ -56,39 +59,39 @@ pub(super) fn start_task<TPlat: PlatformRef>(
                             )
                             .await;
 
-                        cache.subscription_id = Some(subscribe_all.new_blocks.id());
-                        cache.recent_pinned_blocks.clear();
-                        debug_assert!(cache.recent_pinned_blocks.cap().get() >= 1);
+                        cache_lock.subscription_id = Some(subscribe_all.new_blocks.id());
+                        cache_lock.recent_pinned_blocks.clear();
+                        debug_assert!(cache_lock.recent_pinned_blocks.cap().get() >= 1);
 
                         let finalized_block_hash = header::hash_from_scale_encoded_header(
                             &subscribe_all.finalized_block_scale_encoded_header,
                         );
-                        cache.recent_pinned_blocks.put(
+                        cache_lock.recent_pinned_blocks.put(
                             finalized_block_hash,
                             subscribe_all.finalized_block_scale_encoded_header,
                         );
 
                         for block in subscribe_all.non_finalized_blocks_ancestry_order {
-                            if cache.recent_pinned_blocks.len()
-                                == cache.recent_pinned_blocks.cap().get()
+                            if cache_lock.recent_pinned_blocks.len()
+                                == cache_lock.recent_pinned_blocks.cap().get()
                             {
-                                let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
+                                let (hash, _) = cache_lock.recent_pinned_blocks.pop_lru().unwrap();
                                 subscribe_all.new_blocks.unpin_block(&hash).await;
                             }
 
                             let hash =
                                 header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                            cache
+                            cache_lock
                                 .recent_pinned_blocks
                                 .put(hash, block.scale_encoded_header);
                         }
 
-                        drop(cache);
+                        drop(cache_lock);
 
                         run(Task {
-                            background: me,
+                            cache: cache.clone(),
                             new_blocks: subscribe_all.new_blocks,
-                        });
+                        }).await;
                     }
                 },
                 abort_registration,
@@ -99,7 +102,7 @@ pub(super) fn start_task<TPlat: PlatformRef>(
 }
 
 struct Task<TPlat: PlatformRef> {
-    background: Arc<Background<TPlat>>,
+    cache: Arc<Mutex<Cache>>,
     new_blocks: runtime_service::Subscription<TPlat>,
 }
 
@@ -108,7 +111,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
         let notification = task.new_blocks.next().await;
         match notification {
             Some(runtime_service::Notification::Block(block)) => {
-                let mut cache = task.background.cache.lock().await;
+                let mut cache = task.cache.lock().await;
 
                 if cache.recent_pinned_blocks.len() == cache.recent_pinned_blocks.cap().get() {
                     let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
