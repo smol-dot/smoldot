@@ -40,9 +40,16 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             unreachable!()
         };
 
-        let block_hash = header::hash_from_scale_encoded_header(
-            sub_utils::subscribe_best(&self.runtime_service).await.0,
-        );
+        let block_hash = {
+            let (tx, rx) = oneshot::channel();
+            self.to_legacy
+                .lock()
+                .await
+                .send(legacy_state_sub::Message::CurrentBestBlockHash { result_tx: tx })
+                .await
+                .unwrap();
+            rx.await.unwrap()
+        };
 
         let result = self
             .runtime_call(
@@ -89,9 +96,16 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         // `hash` equal to `None` means "the current best block".
         let hash = match hash {
             Some(h) => h.0,
-            None => header::hash_from_scale_encoded_header(
-                sub_utils::subscribe_best(&self.runtime_service).await.0,
-            ),
+            None => {
+                let (tx, rx) = oneshot::channel();
+                self.to_legacy
+                    .lock()
+                    .await
+                    .send(legacy_state_sub::Message::CurrentBestBlockHash { result_tx: tx })
+                    .await
+                    .unwrap();
+                rx.await.unwrap()
+            }
         };
 
         // Try to determine the block number by looking for the block in cache.
@@ -185,9 +199,17 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 methods::HashHexString(self.genesis_block_hash),
             )),
             None => {
-                let best_block = header::hash_from_scale_encoded_header(
-                    sub_utils::subscribe_best(&self.runtime_service).await.0,
-                );
+                let best_block = {
+                    let (tx, rx) = oneshot::channel();
+                    self.to_legacy
+                        .lock()
+                        .await
+                        .send(legacy_state_sub::Message::CurrentBestBlockHash { result_tx: tx })
+                        .await
+                        .unwrap();
+                    rx.await.unwrap()
+                };
+
                 request.respond(methods::Response::chain_getBlockHash(
                     methods::HashHexString(best_block),
                 ));
@@ -211,9 +233,16 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         // `hash` equal to `None` means "best block".
         let hash = match hash {
             Some(h) => h.0,
-            None => header::hash_from_scale_encoded_header(
-                sub_utils::subscribe_best(&self.runtime_service).await.0,
-            ),
+            None => {
+                let (tx, rx) = oneshot::channel();
+                self.to_legacy
+                    .lock()
+                    .await
+                    .send(legacy_state_sub::Message::CurrentBestBlockHash { result_tx: tx })
+                    .await
+                    .unwrap();
+                rx.await.unwrap()
+            }
         };
 
         // Try to look in the cache of recent blocks. If not found, ask the peer-to-peer network.
@@ -337,9 +366,16 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
         let block_hash = match block_hash {
             Some(h) => h.0,
-            None => header::hash_from_scale_encoded_header(
-                sub_utils::subscribe_best(&self.runtime_service).await.0,
-            ),
+            None => {
+                let (tx, rx) = oneshot::channel();
+                self.to_legacy
+                    .lock()
+                    .await
+                    .send(legacy_state_sub::Message::CurrentBestBlockHash { result_tx: tx })
+                    .await
+                    .unwrap();
+                rx.await.unwrap()
+            }
         };
 
         let result = self
@@ -395,9 +431,14 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let block_hash = if let Some(hash) = hash {
             hash.0
         } else {
-            header::hash_from_scale_encoded_header(
-                sub_utils::subscribe_best(&self.runtime_service).await.0,
-            )
+            let (tx, rx) = oneshot::channel();
+            self.to_legacy
+                .lock()
+                .await
+                .send(legacy_state_sub::Message::CurrentBestBlockHash { result_tx: tx })
+                .await
+                .unwrap();
+            rx.await.unwrap()
         };
 
         let result = self
@@ -431,9 +472,16 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         // `hash` equal to `None` means "best block".
         let hash = match hash {
             Some(h) => h.0,
-            None => header::hash_from_scale_encoded_header(
-                sub_utils::subscribe_best(&self.runtime_service).await.0,
-            ),
+            None => {
+                let (tx, rx) = oneshot::channel();
+                self.to_legacy
+                    .lock()
+                    .await
+                    .send(legacy_state_sub::Message::CurrentBestBlockHash { result_tx: tx })
+                    .await
+                    .unwrap();
+                rx.await.unwrap()
+            }
         };
 
         // Obtain the state trie root and height of the requested block.
@@ -514,9 +562,16 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         // `hash` equal to `None` means "best block".
         let hash = match hash {
             Some(h) => h.0,
-            None => header::hash_from_scale_encoded_header(
-                sub_utils::subscribe_best(&self.runtime_service).await.0,
-            ),
+            None => {
+                let (tx, rx) = oneshot::channel();
+                self.to_legacy
+                    .lock()
+                    .await
+                    .send(legacy_state_sub::Message::CurrentBestBlockHash { result_tx: tx })
+                    .await
+                    .unwrap();
+                rx.await.unwrap()
+            }
         };
 
         // A prefix of `None` means "empty".
@@ -636,9 +691,14 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let block_hash = if let Some(hash) = hash {
             hash.0
         } else {
-            header::hash_from_scale_encoded_header(
-                sub_utils::subscribe_best(&self.runtime_service).await.0,
-            )
+            let (tx, rx) = oneshot::channel();
+            self.to_legacy
+                .lock()
+                .await
+                .send(legacy_state_sub::Message::CurrentBestBlockHash { result_tx: tx })
+                .await
+                .unwrap();
+            rx.await.unwrap()
         };
 
         let result = self
@@ -691,9 +751,16 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
         let block_hash = match block_hash {
             Some(h) => h.0,
-            None => header::hash_from_scale_encoded_header(
-                sub_utils::subscribe_best(&self.runtime_service).await.0,
-            ),
+            None => {
+                let (tx, rx) = oneshot::channel();
+                self.to_legacy
+                    .lock()
+                    .await
+                    .send(legacy_state_sub::Message::CurrentBestBlockHash { result_tx: tx })
+                    .await
+                    .unwrap();
+                rx.await.unwrap()
+            }
         };
 
         match self
@@ -736,12 +803,19 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             unreachable!()
         };
 
-        let hash = hash
-            .as_ref()
-            .map(|h| h.0)
-            .unwrap_or(header::hash_from_scale_encoded_header(
-                sub_utils::subscribe_best(&self.runtime_service).await.0,
-            ));
+        let hash = match hash {
+            Some(h) => h.0,
+            None => {
+                let (tx, rx) = oneshot::channel();
+                self.to_legacy
+                    .lock()
+                    .await
+                    .send(legacy_state_sub::Message::CurrentBestBlockHash { result_tx: tx })
+                    .await
+                    .unwrap();
+                rx.await.unwrap()
+            }
+        };
 
         let fut = self.storage_query(
             iter::once(&key.0),
@@ -769,9 +843,16 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             unreachable!()
         };
 
-        let best_block = header::hash_from_scale_encoded_header(
-            &sub_utils::subscribe_best(&self.runtime_service).await.0,
-        );
+        let best_block = {
+            let (tx, rx) = oneshot::channel();
+            self.to_legacy
+                .lock()
+                .await
+                .send(legacy_state_sub::Message::CurrentBestBlockHash { result_tx: tx })
+                .await
+                .unwrap();
+            rx.await.unwrap()
+        };
 
         let at = at.as_ref().map(|h| h.0).unwrap_or(best_block);
 

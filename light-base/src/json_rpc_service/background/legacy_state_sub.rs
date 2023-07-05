@@ -47,6 +47,9 @@ pub(super) enum Message<TPlat: PlatformRef> {
         block_hash: [u8; 32],
         result_tx: oneshot::Sender<Option<runtime_service::RuntimeAccess<TPlat>>>,
     },
+    CurrentBestBlockHash {
+        result_tx: oneshot::Sender<[u8; 32]>,
+    },
     BlockStateRootAndNumber {
         block_hash: [u8; 32],
         result_tx: oneshot::Sender<Result<([u8; 32], u64), StateTrieRootHashError>>,
@@ -78,6 +81,7 @@ pub(super) fn start_task<TPlat: PlatformRef>(
             ),
             log_target: log_target.clone(),
             platform: platform.clone(),
+            best_block_report: Vec::with_capacity(4),
             sync_service,
             runtime_service,
             subscription: Subscription::NotCreated,
@@ -127,6 +131,8 @@ struct Task<TPlat: PlatformRef> {
 
     log_target: String,
     platform: TPlat,
+    // TODO: shrink_to_fit?
+    best_block_report: Vec<oneshot::Sender<[u8; 32]>>,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     subscription: Subscription<TPlat>,
@@ -178,6 +184,16 @@ struct RecentBlock {
 
 async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
     loop {
+        if let Subscription::Active {
+            current_best_block, ..
+        } = &task.subscription
+        {
+            while let Some(sender) = task.best_block_report.pop() {
+                let _ = sender.send(*current_best_block);
+            }
+            task.best_block_report.shrink_to_fit();
+        }
+
         enum WhatHappened<'a, TPlat: PlatformRef> {
             SubscriptionNotification {
                 notification: runtime_service::Notification,
@@ -610,6 +626,19 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 };
 
                 let _ = result_tx.send(access);
+            }
+
+            WhatHappened::Message(Message::CurrentBestBlockHash { result_tx }) => {
+                match &task.subscription {
+                    Subscription::Active {
+                        current_best_block, ..
+                    } => {
+                        let _ = result_tx.send(*current_best_block);
+                    }
+                    Subscription::Pending(_) | Subscription::NotCreated => {
+                        task.best_block_report.push(result_tx);
+                    }
+                }
             }
 
             WhatHappened::Message(Message::BlockNumber {
