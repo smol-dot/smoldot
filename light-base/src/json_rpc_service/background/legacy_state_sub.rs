@@ -38,51 +38,96 @@ use crate::{platform::PlatformRef, runtime_service, sync_service};
 
 use super::StateTrieRootHashError;
 
+/// Message that can be passed to the task started with [`start_task`].
 pub(super) enum Message<TPlat: PlatformRef> {
+    /// JSON-RPC client has sent a subscription request.
+    ///
+    /// Only the legacy API subscription requests are supported. Any other will trigger a panic.
     SubscriptionStart(service::SubscriptionStartProcess),
+
+    /// JSON-RPC client has unsubscribed from something.
     SubscriptionDestroyed {
+        /// Identifier of the subscription. Does not necessarily match any of the subscriptions
+        /// previously passed through [`Message::SubscriptionStart`].
         subscription_id: String,
     },
+
+    /// The task must send back access to the runtime of the given block, or `None` if the block
+    /// isn't available in the cache.
     RecentBlockRuntimeAccess {
+        /// Hash of the block to query.
         block_hash: [u8; 32],
+        /// How to send back the result.
         result_tx: oneshot::Sender<Option<runtime_service::RuntimeAccess<TPlat>>>,
     },
+
+    /// The task must send back the current best block hash.
+    ///
+    /// Waits for the runtime service to be ready, which can potentially take a long time.
     CurrentBestBlockHash {
+        /// How to send back the result.
         result_tx: oneshot::Sender<[u8; 32]>,
     },
+
+    /// The task must send back the state root and number the given block. If the block isn't
+    /// available in the cache, a network request is performed.
+    // TODO: refactor this message and the ones below to be more consistent
     BlockStateRootAndNumber {
+        /// Hash of the block to query.
         block_hash: [u8; 32],
+        /// How to send back the result.
         result_tx: oneshot::Sender<Result<([u8; 32], u64), StateTrieRootHashError>>,
     },
+
+    /// The task must send back the number of the given block, or `None` if the block isn't
+    /// available in the cache.
     BlockNumber {
+        /// Hash of the block to query.
         block_hash: [u8; 32],
+        /// How to send back the result.
         result_tx: oneshot::Sender<Option<u64>>,
     },
+
+    /// The task must send back the header of the given block, or `None` if the block isn't
+    /// available in the cache.
     BlockHeader {
+        /// Hash of the block to query.
         block_hash: [u8; 32],
+        /// How to send back the result.
         result_tx: oneshot::Sender<Option<Vec<u8>>>,
     },
+
+    /// Internal message. Do not use.
     StorageFetch {
+        /// Hash of the block the storage fetch targets.
         block_hash: [u8; 32],
+        /// Results provided by the [`sync_service`].
         result: Result<Vec<sync_service::StorageResultItem>, sync_service::StorageQueryError>,
     },
 }
 
+/// Configuration to pass to [`start_task`].
 pub(super) struct Config<TPlat: PlatformRef> {
+    /// Access to the platform bindings.
     pub platform: TPlat,
+    /// Prefix used for all the logging in this module.
     pub log_target: String,
+    /// Sync service used to start networking requests.
     pub sync_service: Arc<sync_service::SyncService<TPlat>>,
+    /// Runtime service used to subscribe to notifications regarding blocks and report them to
+    /// the JSON-RPC client.
     pub runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
 }
 
-// Spawn one task dedicated to filling the `Cache` with new blocks from the runtime service.
+/// Spawn a task dedicated to holding a cache and fulfilling the legacy API subscriptions that the
+/// JSON-RPC client starts.
 pub(super) fn start_task<TPlat: PlatformRef>(
     config: Config<TPlat>,
 ) -> async_channel::Sender<Message<TPlat>> {
     let (requests_tx, requests_rx) = async_channel::bounded(8);
 
     config.platform.clone().spawn_task(
-        format!("{}-cache", config.log_target).into(),
+        format!("{}-legacy-state-subscriptions", config.log_target).into(),
         Box::pin(run(Task {
             block_state_root_hashes_numbers: lru::LruCache::with_hasher(
                 NonZeroUsize::new(32).unwrap(),
@@ -132,6 +177,63 @@ pub(super) fn start_task<TPlat: PlatformRef>(
 }
 
 struct Task<TPlat: PlatformRef> {
+    /// See [`Config::log_target`].
+    log_target: String,
+    /// See [`Config::platform`].
+    platform: TPlat,
+    /// See [`Config::sync_service`].
+    sync_service: Arc<sync_service::SyncService<TPlat>>,
+    /// See [`Config::runtime_service`].
+    runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
+
+    /// State of the subscription towards the runtime service.
+    subscription: Subscription<TPlat>,
+    /// Whenever the subscription becomes active and the best block becomes available, it must be
+    /// sent on these channels as soon as possible.
+    best_block_report: Vec<oneshot::Sender<[u8; 32]>>,
+
+    /// Sending side of [`Task::requests_rx`].
+    requests_tx: async_channel::WeakSender<Message<TPlat>>,
+    /// How to receive messages from the API user.
+    requests_rx: async_channel::Receiver<Message<TPlat>>,
+
+    /// List of all active `chain_subscribeAllHeads` subscriptions, indexed by the subscription ID.
+    // TODO: shrink_to_fit?
+    all_heads_subscriptions: hashbrown::HashMap<String, service::Subscription, fnv::FnvBuildHasher>,
+    /// List of all active `chain_subscribeNewHeads` subscriptions, indexed by the subscription ID.
+    // TODO: shrink_to_fit?
+    new_heads_subscriptions: hashbrown::HashMap<String, service::Subscription, fnv::FnvBuildHasher>,
+    // TODO: shrink_to_fit?
+    /// List of all active `chain_subscribeFinalizedHeads` subscriptions, indexed by the
+    /// subscription ID.
+    finalized_heads_subscriptions:
+        hashbrown::HashMap<String, service::Subscription, fnv::FnvBuildHasher>,
+    // TODO: shrink_to_fit?
+    /// List of all active `state_subscribeRuntimeVersion` subscriptions, indexed by the
+    /// subscription ID.
+    runtime_version_subscriptions:
+        hashbrown::HashMap<String, service::Subscription, fnv::FnvBuildHasher>,
+
+    /// List of all active `state_subscribeStorage` subscriptions, indexed by the subscription ID.
+    /// The value is the subscription plus the list of keys requested by this subscription.
+    // TODO: shrink_to_fit?
+    storage_subscriptions:
+        hashbrown::HashMap<String, (service::Subscription, Vec<Vec<u8>>), fnv::FnvBuildHasher>,
+    /// Identical to [`Task::storage_subscriptions`] by indexed by requested key. The inner
+    /// `HashSet`s are never empty.
+    // TODO: shrink_to_fit?
+    storage_subscriptions_by_key: hashbrown::HashMap<
+        Vec<u8>,
+        hashbrown::HashSet<String, fnv::FnvBuildHasher>,
+        crate::util::SipHasherBuild,
+    >,
+    /// List of storage subscriptions whose latest sent notification isn't about the current
+    /// best block.
+    stale_storage_subscriptions: hashbrown::HashSet<String, fnv::FnvBuildHasher>,
+    /// `true` if there exists a background task currently fetching storage items for storage
+    /// subscriptions. This task will send a [`Message::StorageFetch`] once it's finished.
+    storage_query_in_progress: bool,
+
     /// State trie root hashes and numbers of blocks that were not in
     /// [`Cache::recent_pinned_blocks`].
     ///
@@ -157,45 +259,11 @@ struct Task<TPlat: PlatformRef> {
         >,
         fnv::FnvBuildHasher,
     >,
-
-    log_target: String,
-    platform: TPlat,
-    best_block_report: Vec<oneshot::Sender<[u8; 32]>>,
-    sync_service: Arc<sync_service::SyncService<TPlat>>,
-    runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
-    subscription: Subscription<TPlat>,
-    /// Sending side of [`Task::requests_rx`].
-    requests_tx: async_channel::WeakSender<Message<TPlat>>,
-    requests_rx: async_channel::Receiver<Message<TPlat>>,
-    // TODO: shrink_to_fit?
-    all_heads_subscriptions: hashbrown::HashMap<String, service::Subscription, fnv::FnvBuildHasher>,
-    // TODO: shrink_to_fit?
-    new_heads_subscriptions: hashbrown::HashMap<String, service::Subscription, fnv::FnvBuildHasher>,
-    // TODO: shrink_to_fit?
-    finalized_heads_subscriptions:
-        hashbrown::HashMap<String, service::Subscription, fnv::FnvBuildHasher>,
-    // TODO: shrink_to_fit?
-    runtime_version_subscriptions:
-        hashbrown::HashMap<String, service::Subscription, fnv::FnvBuildHasher>,
-    // TODO: shrink_to_fit?
-    storage_subscriptions:
-        hashbrown::HashMap<String, (service::Subscription, Vec<Vec<u8>>), fnv::FnvBuildHasher>,
-    // TODO: shrink_to_fit?
-    storage_subscriptions_by_key: hashbrown::HashMap<
-        Vec<u8>,
-        hashbrown::HashSet<String, fnv::FnvBuildHasher>,
-        crate::util::SipHasherBuild,
-    >,
-    /// List of storage subscriptions whose latest sent notification isn't about the current
-    /// best block.
-    stale_storage_subscriptions: hashbrown::HashSet<String, fnv::FnvBuildHasher>,
-
-    /// `true` if there exists a background task currently fetching storage items for storage
-    /// subscriptions. This task will send a [`Message::StorageFetch`] once it's finished.
-    storage_query_in_progress: bool,
 }
 
+/// State of the subscription towards the runtime service. See [`Task::subscription`].
 enum Subscription<TPlat: PlatformRef> {
+    /// Subscription is active.
     Active {
         /// Object representing the subscription.
         subscription: runtime_service::Subscription<TPlat>,
@@ -222,7 +290,13 @@ enum Subscription<TPlat: PlatformRef> {
         /// recently used blocks are removed and unpinned.
         finalized_and_pruned_lru: lru::LruCache<[u8; 32], (), fnv::FnvBuildHasher>,
     },
+
+    /// Wiating for the runtime service to start the subscription. Can potentially take a long
+    /// time.
     Pending(Pin<Box<dyn Future<Output = runtime_service::SubscribeAll<TPlat>> + Send>>),
+
+    /// Subscription not requested yet. Should transition to [`Subscription::Pending`] as soon
+    /// as possible.
     NotCreated,
 }
 
@@ -232,20 +306,26 @@ struct RecentBlock {
     runtime_version: Arc<Result<executor::CoreVersion, runtime_service::RuntimeError>>,
 }
 
+/// Actually run the task.
 async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
     loop {
+        // Perform some internal state updates if necessary.
         if let Subscription::Active {
             pinned_blocks,
             current_best_block,
             ..
         } = &task.subscription
         {
+            // Process the content of `best_block_report`
             while let Some(sender) = task.best_block_report.pop() {
                 let _ = sender.send(*current_best_block);
             }
             task.best_block_report.shrink_to_fit();
 
+            // Start a task that fetches the storage items of the stale storage subscriptions.
             if !task.storage_query_in_progress && !task.stale_storage_subscriptions.is_empty() {
+                // If the header of the current best block can't be decoded, we don't start
+                // the task.
                 let (block_number, state_trie_root) = match header::decode(
                     &pinned_blocks
                         .get(current_best_block)
@@ -264,8 +344,8 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     }
                 };
 
-                task.storage_query_in_progress = true;
-
+                // Build the list of keys that must be requested by aggregating the keys requested
+                // by all stale storage subscriptions.
                 let mut keys = hashbrown::HashSet::with_hasher(crate::util::SipHasherBuild::new(
                     rand::random(),
                 ));
@@ -276,6 +356,17 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                         .flat_map(|keys_list| keys_list.iter().cloned()),
                 );
 
+                // If the list of keys to query is empty, we mark all subscriptions as no longer
+                // stale and loop again. This is necessary in order to prevent infinite loops if
+                // the JSON-RPC client subscribes to an empty list of items.
+                if keys.is_empty() {
+                    task.stale_storage_subscriptions.clear();
+                    continue;
+                }
+
+                // Start the task in the background.
+                // The task will send a `Message::StorageFetch` once it is done.
+                task.storage_query_in_progress = true;
                 task.platform.spawn_task(
                     format!("{}-storage-subscriptions-fetch", task.log_target).into(),
                     Box::pin({
@@ -329,7 +420,8 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             ForegroundDead,
         }
 
-        let event = {
+        // Asynchronously wait for something to happen. This can potentially take a long time.
+        let event: WhatHappened<'_, TPlat> = {
             let subscription_event = async {
                 match &mut task.subscription {
                     Subscription::NotCreated => WhatHappened::SubscriptionDead,
@@ -366,8 +458,11 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             subscription_event.or(message).await
         };
 
+        // Perform internal state updates depending on what happened.
         match event {
+            // Runtime service is now ready to give us blocks.
             WhatHappened::SubscriptionReady(subscribe_all) => {
+                // We must transition to `Subscription::Active`.
                 let mut pinned_blocks =
                     hashbrown::HashMap::with_capacity_and_hasher(32, Default::default());
                 let mut finalized_and_pruned_lru = lru::LruCache::with_hasher(
@@ -411,8 +506,12 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     }
                 }
 
+                // All storage subscriptions are unconditionally marked as stale, as the best
+                // block has most likely changed.
                 task.stale_storage_subscriptions
                     .extend(task.storage_subscriptions.keys().cloned());
+
+                // TODO: must notify finalized heads and new heads subscriptions
 
                 task.subscription = Subscription::Active {
                     subscription: subscribe_all.new_blocks,
@@ -423,6 +522,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 };
             }
 
+            // A new non-finalized block has appeared!
             WhatHappened::SubscriptionNotification {
                 notification: runtime_service::Notification::Block(block),
                 pinned_blocks,
@@ -449,7 +549,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 };
 
                 let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                pinned_blocks.insert(
+                let _was_in = pinned_blocks.insert(
                     hash,
                     RecentBlock {
                         scale_encoded_header: block.scale_encoded_header,
@@ -463,6 +563,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                         },
                     },
                 );
+                debug_assert!(_was_in.is_none());
 
                 for (subscription_id, subscription) in &mut task.all_heads_subscriptions {
                     subscription
@@ -510,6 +611,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 }
             }
 
+            // A block has been finalized.
             WhatHappened::SubscriptionNotification {
                 notification:
                     runtime_service::Notification::Finalized {
@@ -556,10 +658,14 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                         .await;
                 }
 
+                // Add the pruned and finalized blocks to the LRU cache. The least-recently used
+                // entries in the cache are unpinned and no longer tracked.
+                //
                 // An important detail here is that the newly-finalized block is added to the list
                 // at the end, in order to guaranteed that it doesn't get removed. This is
                 // necessary in order to guarantee that the current finalized (and current best,
-                // if the best block is also the finalized block) remains pinned.
+                // if the best block is also the finalized block) remains pinned until at least
+                // a different block gets finalized.
                 for block_hash in pruned_blocks.into_iter().chain(iter::once(finalized_hash)) {
                     if finalized_and_pruned_lru.len() == finalized_and_pruned_lru.cap().get() {
                         let (hash_to_unpin, _) = finalized_and_pruned_lru.pop_lru().unwrap();
@@ -631,6 +737,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 }
             }
 
+            // The current best block has now changed.
             WhatHappened::SubscriptionNotification {
                 notification:
                     runtime_service::Notification::BestBlockChanged {
@@ -695,6 +802,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 *current_best_block = new_best_hash;
             }
 
+            // Request from the JSON-RPC client.
             WhatHappened::Message(Message::SubscriptionStart(request)) => match request.request() {
                 methods::MethodCall::chain_subscribeAllHeads {} => {
                     let subscription = request.accept();
@@ -847,10 +955,15 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                         (subscription, list.into_iter().map(|l| l.0).collect()),
                     );
                 }
+
+                // Any other request.
                 _ => unreachable!(), // TODO: stronger typing to avoid this?
             },
 
+            // JSON-RPC client has unsubscribed.
             WhatHappened::Message(Message::SubscriptionDestroyed { subscription_id }) => {
+                // We don't know the type of the unsubscription, that's not a big deal. Just
+                // remove the entry from everywhere.
                 task.all_heads_subscriptions.remove(&subscription_id);
                 task.new_heads_subscriptions.remove(&subscription_id);
                 task.finalized_heads_subscriptions.remove(&subscription_id);
@@ -1085,6 +1198,8 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     });
             }
 
+            // Background task dedicated to performing a storage query for the storage
+            // subscription has finished.
             WhatHappened::Message(Message::StorageFetch {
                 block_hash,
                 result: Ok(result),
@@ -1092,6 +1207,8 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 debug_assert!(task.storage_query_in_progress);
                 task.storage_query_in_progress = false;
 
+                // Determine whether another storage query targeting a more up-to-date block
+                // must be started afterwards.
                 let is_up_to_date = match task.subscription {
                     Subscription::Active {
                         current_best_block, ..
@@ -1099,6 +1216,10 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     Subscription::NotCreated | Subscription::Pending(_) => true,
                 };
 
+                // Because all the keys of all the subscriptions are merged into one network
+                // request, we must now attribute each item in the result back to its subscription.
+                // While this solution is a bit CPU-heavy, it is a more elegant solution than
+                // keeping track of subscription in the background task.
                 let mut notifications_to_send = hashbrown::HashMap::<
                     String,
                     Vec<(methods::HexString, Option<methods::HexString>)>,
@@ -1107,7 +1228,6 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     task.storage_subscriptions.len(),
                     fnv::FnvBuildHasher::default(),
                 );
-
                 for item in result {
                     let sync_service::StorageResultItem::Value { key, value } = item
                         else { unreachable!() };
@@ -1127,6 +1247,8 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     }
                 }
 
+                // Send the notifications and mark the subscriptions as no longer stale if
+                // relevant.
                 for (subscription_id, changes) in notifications_to_send {
                     if is_up_to_date {
                         task.stale_storage_subscriptions.remove(&subscription_id);
@@ -1146,6 +1268,8 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 }
             }
 
+            // Background task dedicated to performing a storage query for the storage
+            // subscription has finished but was unsuccessful.
             WhatHappened::Message(Message::StorageFetch {
                 block_hash,
                 result: Err(_),
@@ -1155,13 +1279,13 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 // TODO: add a delay or something?
             }
 
+            // JSON-RPC service has been destroyed. Stop the task altogether.
             WhatHappened::ForegroundDead => {
-                break;
+                return;
             }
 
+            // The subscription towards the runtime service needs to be renewed.
             WhatHappened::SubscriptionDead => {
-                // Subscribe to new runtime service blocks in order to push them in the
-                // cache as soon as they are available.
                 // The buffer size should be large enough so that, if the CPU is busy, it
                 // doesn't become full before the execution of this task resumes.
                 // The maximum number of pinned block is ignored, as this maximum is a way to
