@@ -323,12 +323,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
 
         // Process the content of `best_block_report`
         if let Subscription::Active {
-            pinned_blocks,
-            current_best_block,
-            new_heads_and_runtime_subscriptions_stale,
-            current_finalized_block,
-            finalized_heads_subscriptions_stale,
-            ..
+            current_best_block, ..
         } = &task.subscription
         {
             while let Some(sender) = task.best_block_report.pop() {
@@ -341,8 +336,6 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
         // report it to them.
         if let Subscription::Active {
             pinned_blocks,
-            current_best_block,
-            new_heads_and_runtime_subscriptions_stale,
             current_finalized_block,
             finalized_heads_subscriptions_stale,
             ..
@@ -390,8 +383,6 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             pinned_blocks,
             current_best_block,
             new_heads_and_runtime_subscriptions_stale,
-            current_finalized_block,
-            finalized_heads_subscriptions_stale,
             ..
         } = &mut task.subscription
         {
@@ -455,9 +446,6 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
         if let Subscription::Active {
             pinned_blocks,
             current_best_block,
-            new_heads_and_runtime_subscriptions_stale,
-            current_finalized_block,
-            finalized_heads_subscriptions_stale,
             ..
         } = &task.subscription
         {
@@ -769,7 +757,6 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                         hash: new_best_hash,
                         ..
                     },
-                pinned_blocks,
                 current_best_block,
                 new_heads_and_runtime_subscriptions_stale,
                 ..
@@ -1246,10 +1233,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
 
             // Background task dedicated to performing a storage query for the storage
             // subscription has finished but was unsuccessful.
-            WhatHappened::Message(Message::StorageFetch {
-                block_hash,
-                result: Err(_),
-            }) => {
+            WhatHappened::Message(Message::StorageFetch { result: Err(_), .. }) => {
                 debug_assert!(task.storage_query_in_progress);
                 task.storage_query_in_progress = false;
                 // TODO: add a delay or something?

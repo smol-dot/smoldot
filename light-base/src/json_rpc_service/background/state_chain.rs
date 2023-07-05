@@ -21,10 +21,9 @@ use super::{legacy_state_sub, Background, GetKeysPagedCacheKey, PlatformRef};
 
 use crate::sync_service;
 
-use alloc::{borrow::ToOwned as _, format, string::ToString as _, sync::Arc, vec, vec::Vec};
-use core::{iter, num::NonZeroU32, pin, time::Duration};
+use alloc::{format, string::ToString as _, sync::Arc, vec, vec::Vec};
+use core::{iter, num::NonZeroU32, time::Duration};
 use futures_channel::oneshot;
-use futures_util::{future, stream, StreamExt as _};
 use smoldot::{
     header,
     json_rpc::{self, methods, service},
