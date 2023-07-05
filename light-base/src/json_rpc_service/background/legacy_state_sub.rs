@@ -665,8 +665,8 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     Err(error) => {
                         log::warn!(
                             target: &task.log_target,
-                            "`chain_subscribeAllHeads` or `chain_subscribeNewHeads` subscription \
-                            has skipped block due to undecodable header. Hash: {}. Error: {}",
+                            "`chain_subscribeAllHeads` subscription has skipped block due to \
+                            undecodable header. Hash: {}. Error: {}",
                             HashDisplay(&header::hash_from_scale_encoded_header(
                                 &block.scale_encoded_header
                             )),
