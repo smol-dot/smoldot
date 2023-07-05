@@ -272,12 +272,18 @@ enum Subscription<TPlat: PlatformRef> {
         /// [`Subscription::Active::pinned_blocks`].
         current_best_block: [u8; 32],
 
+        /// If `Some`, the new heads and runtime version subscriptions haven't been updated about
+        /// the new current best block yet. Contains the previous best block that the
+        /// subscriptions are aware of. The previous best block is guaranteed to be in
+        /// [`Subscription::Active::pinned_blocks`].
+        new_heads_and_runtime_subscriptions_stale: Option<Option<[u8; 32]>>,
+
         /// Hash of the current finalized block. Guaranteed to be in
         /// [`Subscription::Active::pinned_blocks`].
         current_finalized_block: [u8; 32],
 
-        /// If `true`, the finalized heads subscriptions hasn't been updated about the new
-        /// current block yet.
+        /// If `true`, the finalized heads subscriptions haven't been updated about the new
+        /// current finalized block yet.
         finalized_heads_subscriptions_stale: bool,
 
         /// When the runtime service reports a new block, it is kept pinned and inserted in this
@@ -317,6 +323,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
         if let Subscription::Active {
             pinned_blocks,
             current_best_block,
+            new_heads_and_runtime_subscriptions_stale,
             current_finalized_block,
             finalized_heads_subscriptions_stale,
             ..
@@ -363,6 +370,63 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 }
 
                 *finalized_heads_subscriptions_stale = false;
+            }
+
+            // If the new heads and runtime version subscriptions aren't up-to-date with the latest
+            // best block, report it to them.
+            if let Some(previous_best_block) = new_heads_and_runtime_subscriptions_stale.take() {
+                let best_block_header = &pinned_blocks
+                    .get(current_best_block)
+                    .unwrap()
+                    .scale_encoded_header;
+                let best_block_json_rpc_header = match methods::Header::from_scale_encoded_header(
+                    &best_block_header,
+                    task.runtime_service.block_number_bytes(),
+                ) {
+                    Ok(h) => h,
+                    Err(error) => {
+                        log::warn!(
+                            target: &task.log_target,
+                            "`chain_subscribeNewHeads` subscription has skipped block due to \
+                            undecodable header. Hash: {}. Error: {}",
+                            HashDisplay(current_best_block),
+                            error,
+                        );
+                        continue;
+                    }
+                };
+
+                for (subscription_id, subscription) in &mut task.new_heads_subscriptions {
+                    subscription
+                        .send_notification(methods::ServerToClient::chain_newHead {
+                            subscription: subscription_id.as_str().into(),
+                            result: best_block_json_rpc_header.clone(),
+                        })
+                        .await;
+                }
+
+                let new_best_runtime = &pinned_blocks
+                    .get(current_best_block)
+                    .unwrap()
+                    .runtime_version;
+                if previous_best_block.map_or(true, |prev_best_block| {
+                    !Arc::ptr_eq(
+                        new_best_runtime,
+                        &pinned_blocks.get(&prev_best_block).unwrap().runtime_version,
+                    )
+                }) {
+                    for (subscription_id, subscription) in &mut task.runtime_version_subscriptions {
+                        subscription
+                            .send_notification(methods::ServerToClient::state_runtimeVersion {
+                                subscription: subscription_id.as_str().into(),
+                                result: convert_runtime_version(new_best_runtime),
+                            })
+                            .await;
+                    }
+                }
+
+                task.stale_storage_subscriptions
+                    .extend(task.storage_subscriptions.keys().cloned());
             }
 
             // Start a task that fetches the storage items of the stale storage subscriptions.
@@ -455,6 +519,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     &'a mut hashbrown::HashMap<[u8; 32], RecentBlock, fnv::FnvBuildHasher>,
                 finalized_and_pruned_lru: &'a mut lru::LruCache<[u8; 32], (), fnv::FnvBuildHasher>,
                 current_best_block: &'a mut [u8; 32],
+                new_heads_and_runtime_subscriptions_stale: &'a mut Option<Option<[u8; 32]>>,
                 current_finalized_block: &'a mut [u8; 32],
                 finalized_heads_subscriptions_stale: &'a mut bool,
             },
@@ -474,6 +539,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                         pinned_blocks,
                         finalized_and_pruned_lru,
                         current_best_block,
+                        new_heads_and_runtime_subscriptions_stale,
                         current_finalized_block,
                         finalized_heads_subscriptions_stale,
                     } => match subscription.next().await {
@@ -483,6 +549,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                             pinned_blocks,
                             finalized_and_pruned_lru,
                             current_best_block,
+                            new_heads_and_runtime_subscriptions_stale,
                             current_finalized_block,
                             finalized_heads_subscriptions_stale,
                         },
@@ -552,18 +619,12 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     }
                 }
 
-                // All storage subscriptions are unconditionally marked as stale, as the best
-                // block has most likely changed.
-                task.stale_storage_subscriptions
-                    .extend(task.storage_subscriptions.keys().cloned());
-
-                // TODO: must notify new heads subscriptions
-
                 task.subscription = Subscription::Active {
                     subscription: subscribe_all.new_blocks,
                     pinned_blocks,
                     finalized_and_pruned_lru,
                     current_best_block,
+                    new_heads_and_runtime_subscriptions_stale: Some(None),
                     current_finalized_block: finalized_block_hash,
                     finalized_heads_subscriptions_stale: true,
                 };
@@ -574,6 +635,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 notification: runtime_service::Notification::Block(block),
                 pinned_blocks,
                 current_best_block,
+                new_heads_and_runtime_subscriptions_stale,
                 ..
             } => {
                 let json_rpc_header = match methods::Header::from_scale_encoded_header(
@@ -622,38 +684,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 }
 
                 if block.is_new_best {
-                    for (subscription_id, subscription) in &mut task.new_heads_subscriptions {
-                        subscription
-                            .send_notification(methods::ServerToClient::chain_newHead {
-                                subscription: subscription_id.as_str().into(),
-                                result: json_rpc_header.clone(),
-                            })
-                            .await;
-                    }
-
-                    let new_best_runtime = &pinned_blocks.get(&hash).unwrap().runtime_version;
-                    if !Arc::ptr_eq(
-                        new_best_runtime,
-                        &pinned_blocks
-                            .get(current_best_block)
-                            .unwrap()
-                            .runtime_version,
-                    ) {
-                        for (subscription_id, subscription) in
-                            &mut task.runtime_version_subscriptions
-                        {
-                            subscription
-                                .send_notification(methods::ServerToClient::state_runtimeVersion {
-                                    subscription: subscription_id.as_str().into(),
-                                    result: convert_runtime_version(new_best_runtime),
-                                })
-                                .await;
-                        }
-                    }
-
-                    task.stale_storage_subscriptions
-                        .extend(task.storage_subscriptions.keys().cloned());
-
+                    *new_heads_and_runtime_subscriptions_stale = Some(Some(*current_best_block));
                     *current_best_block = hash;
                 }
             }
@@ -670,6 +701,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 finalized_and_pruned_lru,
                 subscription,
                 current_best_block,
+                new_heads_and_runtime_subscriptions_stale,
                 current_finalized_block,
                 finalized_heads_subscriptions_stale,
             } => {
@@ -694,63 +726,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 }
 
                 if *current_best_block != new_best_block_hash {
-                    let best_block_header = &pinned_blocks
-                        .get(&new_best_block_hash)
-                        .unwrap()
-                        .scale_encoded_header;
-                    let best_block_json_rpc_header =
-                        match methods::Header::from_scale_encoded_header(
-                            &best_block_header,
-                            task.runtime_service.block_number_bytes(),
-                        ) {
-                            Ok(h) => h,
-                            Err(error) => {
-                                log::warn!(
-                                    target: &task.log_target,
-                                    "`chain_subscribeNewHeads` subscription has skipped block due to \
-                                    undecodable header. Hash: {}. Error: {}",
-                                    HashDisplay(&new_best_block_hash),
-                                    error,
-                                );
-                                continue;
-                            }
-                        };
-
-                    for (subscription_id, subscription) in &mut task.new_heads_subscriptions {
-                        subscription
-                            .send_notification(methods::ServerToClient::chain_newHead {
-                                subscription: subscription_id.as_str().into(),
-                                result: best_block_json_rpc_header.clone(),
-                            })
-                            .await;
-                    }
-
-                    let new_best_runtime = &pinned_blocks
-                        .get(&new_best_block_hash)
-                        .unwrap()
-                        .runtime_version;
-                    if !Arc::ptr_eq(
-                        new_best_runtime,
-                        &pinned_blocks
-                            .get(current_best_block)
-                            .unwrap()
-                            .runtime_version,
-                    ) {
-                        for (subscription_id, subscription) in
-                            &mut task.runtime_version_subscriptions
-                        {
-                            subscription
-                                .send_notification(methods::ServerToClient::state_runtimeVersion {
-                                    subscription: subscription_id.as_str().into(),
-                                    result: convert_runtime_version(new_best_runtime),
-                                })
-                                .await;
-                        }
-                    }
-
-                    task.stale_storage_subscriptions
-                        .extend(task.storage_subscriptions.keys().cloned());
-
+                    *new_heads_and_runtime_subscriptions_stale = Some(Some(*current_best_block));
                     *current_best_block = new_best_block_hash;
                 }
             }
@@ -764,59 +740,10 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     },
                 pinned_blocks,
                 current_best_block,
+                new_heads_and_runtime_subscriptions_stale,
                 ..
             } => {
-                let header = &pinned_blocks
-                    .get(&new_best_hash)
-                    .unwrap()
-                    .scale_encoded_header;
-                let json_rpc_header = match methods::Header::from_scale_encoded_header(
-                    &header,
-                    task.runtime_service.block_number_bytes(),
-                ) {
-                    Ok(h) => h,
-                    Err(error) => {
-                        log::warn!(
-                            target: &task.log_target,
-                            "`chain_subscribeNewHeads` subscription has skipped block due to \
-                            undecodable header. Hash: {}. Error: {}",
-                            HashDisplay(&new_best_hash),
-                            error,
-                        );
-                        continue;
-                    }
-                };
-
-                for (subscription_id, subscription) in &mut task.new_heads_subscriptions {
-                    subscription
-                        .send_notification(methods::ServerToClient::chain_newHead {
-                            subscription: subscription_id.as_str().into(),
-                            result: json_rpc_header.clone(),
-                        })
-                        .await;
-                }
-
-                let new_best_runtime = &pinned_blocks.get(&new_best_hash).unwrap().runtime_version;
-                if !Arc::ptr_eq(
-                    new_best_runtime,
-                    &pinned_blocks
-                        .get(current_best_block)
-                        .unwrap()
-                        .runtime_version,
-                ) {
-                    for (subscription_id, subscription) in &mut task.runtime_version_subscriptions {
-                        subscription
-                            .send_notification(methods::ServerToClient::state_runtimeVersion {
-                                subscription: subscription_id.as_str().into(),
-                                result: convert_runtime_version(new_best_runtime),
-                            })
-                            .await;
-                    }
-                }
-
-                task.stale_storage_subscriptions
-                    .extend(task.storage_subscriptions.keys().cloned());
-
+                *new_heads_and_runtime_subscriptions_stale = Some(Some(*current_best_block));
                 *current_best_block = new_best_hash;
             }
 
