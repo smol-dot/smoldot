@@ -146,6 +146,14 @@ enum Subscription<TPlat: PlatformRef> {
         /// Object representing the subscription.
         subscription: runtime_service::Subscription<TPlat>,
 
+        /// Hash of the current best block. Guaranteed to be in
+        /// [`Subscription::Active::pinned_blocks`].
+        current_best_block: [u8; 32],
+
+        /// Hash of the current finalized block. Guaranteed to be in
+        /// [`Subscription::Active::pinned_blocks`].
+        current_finalized_block: [u8; 32],
+
         /// When the runtime service reports a new block, it is kept pinned and inserted in this
         /// list.
         ///
@@ -178,6 +186,8 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 pinned_blocks:
                     &'a mut hashbrown::HashMap<[u8; 32], RecentBlock, fnv::FnvBuildHasher>,
                 finalized_and_pruned_lru: &'a mut lru::LruCache<[u8; 32], (), fnv::FnvBuildHasher>,
+                current_best_block: &'a mut [u8; 32],
+                current_finalized_block: &'a mut [u8; 32],
             },
             SubscriptionDead,
             SubscriptionReady(runtime_service::SubscribeAll<TPlat>),
@@ -193,12 +203,16 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                         subscription,
                         pinned_blocks,
                         finalized_and_pruned_lru,
+                        current_best_block,
+                        current_finalized_block,
                     } => match subscription.next().await {
                         Some(notification) => WhatHappened::SubscriptionNotification {
                             notification,
                             subscription,
                             pinned_blocks,
                             finalized_and_pruned_lru,
+                            current_best_block,
+                            current_finalized_block,
                         },
                         None => WhatHappened::SubscriptionDead,
                     },
@@ -239,6 +253,8 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 );
                 finalized_and_pruned_lru.put(finalized_block_hash, ());
 
+                let mut current_best_block = finalized_block_hash;
+
                 for block in subscribe_all.non_finalized_blocks_ancestry_order {
                     let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
                     pinned_blocks.insert(
@@ -255,12 +271,18 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                             },
                         },
                     );
+
+                    if block.is_new_best {
+                        current_best_block = hash;
+                    }
                 }
 
                 task.subscription = Subscription::Active {
                     subscription: subscribe_all.new_blocks,
                     pinned_blocks,
                     finalized_and_pruned_lru,
+                    current_best_block,
+                    current_finalized_block: finalized_block_hash,
                 };
             }
 
@@ -331,12 +353,16 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     runtime_service::Notification::Finalized {
                         hash: finalized_hash,
                         pruned_blocks,
-                        best_block_hash,
+                        best_block_hash: new_best_block_hash,
                     },
                 pinned_blocks,
                 finalized_and_pruned_lru,
                 subscription,
+                current_best_block,
+                current_finalized_block,
             } => {
+                *current_finalized_block = finalized_hash;
+
                 let finalized_block_header = &pinned_blocks
                     .get(&finalized_hash)
                     .unwrap()
@@ -350,9 +376,9 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                         Err(error) => {
                             log::warn!(
                                 target: &task.log_target,
-                                "`chain_subscribeNewHeads` subscription has skipped block due to \
-                                undecodable header. Hash: {}. Error: {}",
-                                HashDisplay(&best_block_hash),
+                                "`chain_subscribeFinalizedHeads` subscription has skipped block \
+                                due to undecodable header. Hash: {}. Error: {}",
+                                HashDisplay(&new_best_block_hash),
                                 error,
                             );
                             continue;
@@ -368,6 +394,10 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                         .await;
                 }
 
+                // An important detail here is that the newly-finalized block is added to the list
+                // at the end, in order to guaranteed that it doesn't get removed. This is
+                // necessary in order to guarantee that the current finalized (and current best,
+                // if the best block is also the finalized block) remains pinned.
                 for block_hash in pruned_blocks.into_iter().chain(iter::once(finalized_hash)) {
                     if finalized_and_pruned_lru.len() == finalized_and_pruned_lru.cap().get() {
                         let (hash_to_unpin, _) = finalized_and_pruned_lru.pop_lru().unwrap();
@@ -377,35 +407,39 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     finalized_and_pruned_lru.put(block_hash, ());
                 }
 
-                // TODO: skip below if best block didn't change
-                let best_block_header = &pinned_blocks
-                    .get(&best_block_hash)
-                    .unwrap()
-                    .scale_encoded_header;
-                let best_block_json_rpc_header = match methods::Header::from_scale_encoded_header(
-                    &best_block_header,
-                    task.runtime_service.block_number_bytes(),
-                ) {
-                    Ok(h) => h,
-                    Err(error) => {
-                        log::warn!(
-                            target: &task.log_target,
-                            "`chain_subscribeNewHeads` subscription has skipped block due to \
-                            undecodable header. Hash: {}. Error: {}",
-                            HashDisplay(&best_block_hash),
-                            error,
-                        );
-                        continue;
-                    }
-                };
+                if *current_best_block != new_best_block_hash {
+                    *current_best_block = new_best_block_hash;
 
-                for (subscription_id, subscription) in &mut task.new_heads_subscriptions {
-                    subscription
-                        .send_notification(methods::ServerToClient::chain_newHead {
-                            subscription: subscription_id.as_str().into(),
-                            result: best_block_json_rpc_header.clone(),
-                        })
-                        .await;
+                    let best_block_header = &pinned_blocks
+                        .get(&new_best_block_hash)
+                        .unwrap()
+                        .scale_encoded_header;
+                    let best_block_json_rpc_header =
+                        match methods::Header::from_scale_encoded_header(
+                            &best_block_header,
+                            task.runtime_service.block_number_bytes(),
+                        ) {
+                            Ok(h) => h,
+                            Err(error) => {
+                                log::warn!(
+                                    target: &task.log_target,
+                                    "`chain_subscribeNewHeads` subscription has skipped block due to \
+                                    undecodable header. Hash: {}. Error: {}",
+                                    HashDisplay(&new_best_block_hash),
+                                    error,
+                                );
+                                continue;
+                            }
+                        };
+
+                    for (subscription_id, subscription) in &mut task.new_heads_subscriptions {
+                        subscription
+                            .send_notification(methods::ServerToClient::chain_newHead {
+                                subscription: subscription_id.as_str().into(),
+                                result: best_block_json_rpc_header.clone(),
+                            })
+                            .await;
+                    }
                 }
             }
 
@@ -450,16 +484,90 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                         .insert(subscription_id, subscription);
                 }
                 methods::MethodCall::chain_subscribeNewHeads {} => {
-                    let subscription = request.accept();
+                    let mut subscription = request.accept();
                     let subscription_id = subscription.subscription_id().to_owned();
-                    // TODO: must immediately send the current best block
+                    let to_send = if let Subscription::Active {
+                        current_best_block,
+                        pinned_blocks,
+                        ..
+                    } = &task.subscription
+                    {
+                        Some(
+                            match methods::Header::from_scale_encoded_header(
+                                &pinned_blocks
+                                    .get(current_best_block)
+                                    .unwrap()
+                                    .scale_encoded_header,
+                                task.runtime_service.block_number_bytes(),
+                            ) {
+                                Ok(h) => h,
+                                Err(error) => {
+                                    log::warn!(
+                                        target: &task.log_target,
+                                        "`chain_subscribeNewHeads` subscription has skipped \
+                                        block due to undecodable header. Hash: {}. Error: {}",
+                                        HashDisplay(current_best_block),
+                                        error,
+                                    );
+                                    continue;
+                                }
+                            },
+                        )
+                    } else {
+                        None
+                    };
+                    if let Some(to_send) = to_send {
+                        subscription
+                            .send_notification(methods::ServerToClient::chain_newHead {
+                                subscription: subscription_id.as_str().into(),
+                                result: to_send,
+                            })
+                            .await;
+                    }
                     task.new_heads_subscriptions
                         .insert(subscription_id, subscription);
                 }
                 methods::MethodCall::chain_subscribeFinalizedHeads {} => {
-                    let subscription = request.accept();
+                    let mut subscription = request.accept();
                     let subscription_id = subscription.subscription_id().to_owned();
-                    // TODO: must immediately send the current finalized block
+                    let to_send = if let Subscription::Active {
+                        current_finalized_block,
+                        pinned_blocks,
+                        ..
+                    } = &task.subscription
+                    {
+                        Some(
+                            match methods::Header::from_scale_encoded_header(
+                                &pinned_blocks
+                                    .get(current_finalized_block)
+                                    .unwrap()
+                                    .scale_encoded_header,
+                                task.runtime_service.block_number_bytes(),
+                            ) {
+                                Ok(h) => h,
+                                Err(error) => {
+                                    log::warn!(
+                                        target: &task.log_target,
+                                        "`chain_subscribeFinalizedHeads` subscription has skipped \
+                                        block due to undecodable header. Hash: {}. Error: {}",
+                                        HashDisplay(current_finalized_block),
+                                        error,
+                                    );
+                                    continue;
+                                }
+                            },
+                        )
+                    } else {
+                        None
+                    };
+                    if let Some(to_send) = to_send {
+                        subscription
+                            .send_notification(methods::ServerToClient::chain_finalizedHead {
+                                subscription: subscription_id.as_str().into(),
+                                result: to_send,
+                            })
+                            .await;
+                    }
                     task.finalized_heads_subscriptions
                         .insert(subscription_id, subscription);
                 }
