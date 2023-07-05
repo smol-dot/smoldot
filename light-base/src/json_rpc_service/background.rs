@@ -148,7 +148,7 @@ pub(super) fn start<TPlat: PlatformRef>(
         sync_service: config.sync_service.clone(),
         runtime_service: config.runtime_service.clone(),
         transactions_service: config.transactions_service.clone(),
-        to_legacy: Mutex::new(to_legacy_tx),
+        to_legacy: Mutex::new(to_legacy_tx.clone()),
         state_get_keys_paged_cache: Mutex::new(lru::LruCache::with_hasher(
             NonZeroUsize::new(2).unwrap(),
             util::SipHasherBuild::new(rand::random()),
@@ -187,7 +187,8 @@ pub(super) fn start<TPlat: PlatformRef>(
                                 methods::MethodCall::chain_subscribeAllHeads {}
                                 | methods::MethodCall::chain_subscribeNewHeads {}
                                 | methods::MethodCall::chain_subscribeFinalizedHeads {}
-                                | methods::MethodCall::state_subscribeRuntimeVersion {} => {
+                                | methods::MethodCall::state_subscribeRuntimeVersion {}
+                                | methods::MethodCall::state_subscribeStorage { .. } => {
                                     me.to_legacy
                                         .lock()
                                         .await
@@ -256,6 +257,7 @@ pub(super) fn start<TPlat: PlatformRef>(
         me.log_target.clone(),
         me.sync_service.clone(),
         me.runtime_service.clone(),
+        to_legacy_tx,
         to_legacy_rx,
     );
 }

@@ -23,14 +23,17 @@ use core::{
     time::Duration,
 };
 
-use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
+use alloc::{
+    borrow::ToOwned as _, boxed::Box, collections::BTreeSet, format, string::String, sync::Arc,
+    vec::Vec,
+};
 use futures_channel::oneshot;
 use futures_lite::{FutureExt as _, StreamExt as _};
 use futures_util::{future, FutureExt as _};
 use smoldot::{
     executor, header,
     informant::HashDisplay,
-    json_rpc::{methods, service},
+    json_rpc::{self, methods, service},
     network::protocol,
 };
 
@@ -62,16 +65,24 @@ pub(super) enum Message<TPlat: PlatformRef> {
         block_hash: [u8; 32],
         result_tx: oneshot::Sender<Option<Vec<u8>>>,
     },
+    StorageFetch {
+        block_hash: [u8; 32],
+        result: Result<Vec<sync_service::StorageResultItem>, sync_service::StorageQueryError>,
+    },
 }
 
 // Spawn one task dedicated to filling the `Cache` with new blocks from the runtime service.
+// TODO: weird to pass both the sender and receiver
 pub(super) fn start_task<TPlat: PlatformRef>(
     platform: TPlat,
     log_target: String,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
+    requests_tx: async_channel::Sender<Message<TPlat>>,
     requests_rx: async_channel::Receiver<Message<TPlat>>,
 ) {
+    let requests_tx = async_channel::Sender::downgrade(&requests_tx);
+
     platform.clone().spawn_task(
         format!("{}-cache", log_target).into(),
         Box::pin(run(Task {
@@ -85,23 +96,37 @@ pub(super) fn start_task<TPlat: PlatformRef>(
             sync_service,
             runtime_service,
             subscription: Subscription::NotCreated,
+            requests_tx,
             requests_rx,
             all_heads_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
-                8,
+                2,
                 Default::default(),
             ),
             new_heads_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
-                8,
+                2,
                 Default::default(),
             ),
             finalized_heads_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
-                8,
+                2,
                 Default::default(),
             ),
             runtime_version_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
-                8,
+                2,
                 Default::default(),
             ),
+            storage_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+                16,
+                Default::default(),
+            ),
+            storage_subscriptions_by_key: hashbrown::HashMap::with_capacity_and_hasher(
+                16,
+                crate::util::SipHasherBuild::new([0; 16]), // TODO: proper seed
+            ),
+            stale_storage_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
+                16,
+                Default::default(),
+            ),
+            storage_query_in_progress: false,
         })),
     );
 }
@@ -140,6 +165,8 @@ struct Task<TPlat: PlatformRef> {
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     subscription: Subscription<TPlat>,
+    /// Sending side of [`Task::requests_rx`].
+    requests_tx: async_channel::WeakSender<Message<TPlat>>,
     requests_rx: async_channel::Receiver<Message<TPlat>>,
     // TODO: shrink_to_fit?
     all_heads_subscriptions: hashbrown::HashMap<String, service::Subscription, fnv::FnvBuildHasher>,
@@ -151,6 +178,22 @@ struct Task<TPlat: PlatformRef> {
     // TODO: shrink_to_fit?
     runtime_version_subscriptions:
         hashbrown::HashMap<String, service::Subscription, fnv::FnvBuildHasher>,
+    // TODO: shrink_to_fit?
+    storage_subscriptions:
+        hashbrown::HashMap<String, (service::Subscription, Vec<Vec<u8>>), fnv::FnvBuildHasher>,
+    // TODO: shrink_to_fit?
+    storage_subscriptions_by_key: hashbrown::HashMap<
+        Vec<u8>,
+        hashbrown::HashSet<String, fnv::FnvBuildHasher>,
+        crate::util::SipHasherBuild,
+    >,
+    /// List of storage subscriptions whose latest sent notification isn't about the current
+    /// best block.
+    stale_storage_subscriptions: hashbrown::HashSet<String, fnv::FnvBuildHasher>,
+
+    /// `true` if there exists a background task currently fetching storage items for storage
+    /// subscriptions. This task will send a [`Message::StorageFetch`] once it's finished.
+    storage_query_in_progress: bool,
 }
 
 enum Subscription<TPlat: PlatformRef> {
@@ -192,13 +235,81 @@ struct RecentBlock {
 async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
     loop {
         if let Subscription::Active {
-            current_best_block, ..
+            pinned_blocks,
+            current_best_block,
+            ..
         } = &task.subscription
         {
             while let Some(sender) = task.best_block_report.pop() {
                 let _ = sender.send(*current_best_block);
             }
             task.best_block_report.shrink_to_fit();
+
+            if !task.storage_query_in_progress && !task.stale_storage_subscriptions.is_empty() {
+                let (block_number, state_trie_root) = match header::decode(
+                    &pinned_blocks
+                        .get(current_best_block)
+                        .unwrap()
+                        .scale_encoded_header,
+                    task.runtime_service.block_number_bytes(),
+                ) {
+                    Ok(header) => (header.number, *header.state_root),
+                    Err(_) => {
+                        // Can't decode the header of the current best block.
+                        // All the subscriptions are marked as non-stale, since they are up-to-date
+                        // with the current best block.
+                        // TODO: print warning?
+                        task.stale_storage_subscriptions.clear();
+                        continue;
+                    }
+                };
+
+                task.storage_query_in_progress = true;
+
+                let mut keys =
+                    hashbrown::HashSet::with_hasher(crate::util::SipHasherBuild::new([0; 16])); // TODO: proper seed
+                keys.extend(
+                    task.stale_storage_subscriptions
+                        .iter()
+                        .map(|s_id| &task.storage_subscriptions.get(s_id).unwrap().1)
+                        .flat_map(|keys_list| keys_list.iter().cloned()),
+                );
+
+                task.platform.spawn_task(
+                    format!("{}-storage-subscriptions-fetch", task.log_target).into(),
+                    Box::pin({
+                        let block_hash = current_best_block.clone();
+                        let sync_service = task.sync_service.clone();
+                        // TODO: a bit overcomplicated because `WeakSender` doesn't implement `Clone`: https://github.com/smol-rs/async-channel/pull/62
+                        let requests_tx = async_channel::Sender::downgrade(
+                            &task.requests_tx.upgrade().unwrap().clone(),
+                        );
+                        async move {
+                            let result = sync_service
+                                .clone()
+                                .storage_query(
+                                    block_number,
+                                    &block_hash,
+                                    &state_trie_root,
+                                    keys.into_iter()
+                                        .map(|key| sync_service::StorageRequestItem {
+                                            key,
+                                            ty: sync_service::StorageRequestItemTy::Value,
+                                        }),
+                                    4,
+                                    Duration::from_secs(12),
+                                    NonZeroU32::new(2).unwrap(),
+                                )
+                                .await;
+                            if let Some(requests_tx) = requests_tx.upgrade() {
+                                let _ = requests_tx
+                                    .send(Message::StorageFetch { block_hash, result })
+                                    .await;
+                            }
+                        }
+                    }),
+                );
+            }
         }
 
         enum WhatHappened<'a, TPlat: PlatformRef> {
@@ -299,6 +410,9 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     }
                 }
 
+                task.stale_storage_subscriptions
+                    .extend(task.storage_subscriptions.keys().cloned());
+
                 task.subscription = Subscription::Active {
                     subscription: subscribe_all.new_blocks,
                     pinned_blocks,
@@ -387,6 +501,9 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                                 .await;
                         }
                     }
+
+                    task.stale_storage_subscriptions
+                        .extend(task.storage_subscriptions.keys().cloned());
 
                     *current_best_block = hash;
                 }
@@ -506,6 +623,9 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                         }
                     }
 
+                    task.stale_storage_subscriptions
+                        .extend(task.storage_subscriptions.keys().cloned());
+
                     *current_best_block = new_best_block_hash;
                 }
             }
@@ -567,6 +687,9 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                             .await;
                     }
                 }
+
+                task.stale_storage_subscriptions
+                    .extend(task.storage_subscriptions.keys().cloned());
 
                 *current_best_block = new_best_hash;
             }
@@ -695,6 +818,34 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     task.runtime_version_subscriptions
                         .insert(subscription_id, subscription);
                 }
+                methods::MethodCall::state_subscribeStorage { list } => {
+                    // TODO: limit the size of `list` to avoid DoS attacks
+                    if list.is_empty() {
+                        // When the list of keys is empty, that means we want to subscribe to *all*
+                        // storage changes. It is not possible to reasonably implement this in a
+                        // light client.
+                        request.fail(json_rpc::parse::ErrorResponse::ServerError(
+                            -32000,
+                            "Subscribing to all storage changes isn't supported",
+                        ));
+                        continue;
+                    }
+
+                    let subscription = request.accept();
+                    let subscription_id = subscription.subscription_id().to_owned();
+                    task.stale_storage_subscriptions
+                        .insert(subscription_id.clone());
+                    for key in &list {
+                        task.storage_subscriptions_by_key
+                            .entry(key.0.clone())
+                            .or_default()
+                            .insert(subscription_id.clone());
+                    }
+                    task.storage_subscriptions.insert(
+                        subscription_id,
+                        (subscription, list.into_iter().map(|l| l.0).collect()),
+                    );
+                }
                 _ => unreachable!(), // TODO: stronger typing to avoid this?
             },
 
@@ -703,6 +854,18 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 task.new_heads_subscriptions.remove(&subscription_id);
                 task.finalized_heads_subscriptions.remove(&subscription_id);
                 task.runtime_version_subscriptions.remove(&subscription_id);
+                if let Some((_, keys)) = task.storage_subscriptions.remove(&subscription_id) {
+                    for key in keys {
+                        let hashbrown::hash_map::Entry::Occupied(mut entry) = task.storage_subscriptions_by_key.entry(key)
+                            else { unreachable!() };
+                        let _was_in = entry.get_mut().remove(&subscription_id);
+                        debug_assert!(_was_in);
+                        if entry.get().is_empty() {
+                            entry.remove();
+                        }
+                    }
+                }
+                task.stale_storage_subscriptions.remove(&subscription_id);
                 // TODO: shrink_to_fit?
             }
 
@@ -919,6 +1082,76 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                         let outcome = fetch.await;
                         let _ = result_tx.send(outcome);
                     });
+            }
+
+            WhatHappened::Message(Message::StorageFetch {
+                block_hash,
+                result: Ok(result),
+            }) => {
+                debug_assert!(task.storage_query_in_progress);
+                task.storage_query_in_progress = false;
+
+                let is_up_to_date = match task.subscription {
+                    Subscription::Active {
+                        current_best_block, ..
+                    } => current_best_block == block_hash,
+                    Subscription::NotCreated | Subscription::Pending(_) => true,
+                };
+
+                let mut notifications_to_send = hashbrown::HashMap::<
+                    String,
+                    Vec<(methods::HexString, Option<methods::HexString>)>,
+                    _,
+                >::with_capacity_and_hasher(
+                    task.storage_subscriptions.len(),
+                    fnv::FnvBuildHasher::default(),
+                );
+
+                for item in result {
+                    let sync_service::StorageResultItem::Value { key, value } = item
+                        else { unreachable!() };
+                    for subscription_id in task
+                        .storage_subscriptions_by_key
+                        .get(&key)
+                        .into_iter()
+                        .flat_map(|list| list.iter())
+                    {
+                        notifications_to_send
+                            .entry_ref(subscription_id)
+                            .or_insert_with(Vec::new)
+                            .push((
+                                methods::HexString(key.clone()),
+                                value.clone().map(methods::HexString),
+                            ));
+                    }
+                }
+
+                for (subscription_id, changes) in notifications_to_send {
+                    if is_up_to_date {
+                        task.stale_storage_subscriptions.remove(&subscription_id);
+                    }
+                    task.storage_subscriptions
+                        .get_mut(&subscription_id)
+                        .unwrap()
+                        .0
+                        .send_notification(methods::ServerToClient::state_storage {
+                            subscription: subscription_id.into(),
+                            result: methods::StorageChangeSet {
+                                block: methods::HashHexString(block_hash),
+                                changes,
+                            },
+                        })
+                        .await;
+                }
+            }
+
+            WhatHappened::Message(Message::StorageFetch {
+                block_hash,
+                result: Err(_),
+            }) => {
+                debug_assert!(task.storage_query_in_progress);
+                task.storage_query_in_progress = false;
+                // TODO: add a delay or something?
             }
 
             WhatHappened::ForegroundDead => {
