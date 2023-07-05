@@ -72,16 +72,13 @@ pub(super) enum Message<TPlat: PlatformRef> {
 }
 
 // Spawn one task dedicated to filling the `Cache` with new blocks from the runtime service.
-// TODO: weird to pass both the sender and receiver
 pub(super) fn start_task<TPlat: PlatformRef>(
     platform: TPlat,
     log_target: String,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
-    requests_tx: async_channel::Sender<Message<TPlat>>,
-    requests_rx: async_channel::Receiver<Message<TPlat>>,
-) {
-    let requests_tx = async_channel::Sender::downgrade(&requests_tx);
+) -> async_channel::Sender<Message<TPlat>> {
+    let (requests_tx, requests_rx) = async_channel::bounded(8);
 
     platform.clone().spawn_task(
         format!("{}-cache", log_target).into(),
@@ -96,7 +93,7 @@ pub(super) fn start_task<TPlat: PlatformRef>(
             sync_service,
             runtime_service,
             subscription: Subscription::NotCreated,
-            requests_tx,
+            requests_tx: async_channel::Sender::downgrade(&requests_tx),
             requests_rx,
             all_heads_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
                 2,
@@ -129,6 +126,8 @@ pub(super) fn start_task<TPlat: PlatformRef>(
             storage_query_in_progress: false,
         })),
     );
+
+    requests_tx
 }
 
 struct Task<TPlat: PlatformRef> {
