@@ -40,7 +40,6 @@ use core::{
 use futures_channel::oneshot;
 use smoldot::{
     executor::{host, runtime_host},
-    header,
     json_rpc::{self, methods, service},
     libp2p::{multiaddr, PeerId},
 };
@@ -117,7 +116,7 @@ struct Background<TPlat: PlatformRef> {
     >,
 }
 
-/// See [`Cache::state_get_keys_paged`].
+/// See [`Background::state_get_keys_paged_cache`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct GetKeysPagedCacheKey {
     /// Value of the `hash` parameter of the call to `state_getKeysPaged`.
@@ -1114,7 +1113,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 enum StorageQueryError {
     /// Error while finding the storage root hash of the requested block.
     #[display(fmt = "Failed to obtain block state trie root: {_0}")]
-    FindStorageRootHashError(StateTrieRootHashError),
+    FindStorageRootHashError(legacy_state_sub::StateTrieRootHashError),
     /// Error while retrieving the storage item from other nodes.
     #[display(fmt = "{_0}")]
     StorageRetrieval(sync_service::StorageQueryError),
@@ -1125,7 +1124,7 @@ enum StorageQueryError {
 enum RuntimeCallError {
     /// Error while finding the storage root hash of the requested block.
     #[display(fmt = "Failed to obtain block state trie root: {_0}")]
-    FindStorageRootHashError(StateTrieRootHashError),
+    FindStorageRootHashError(legacy_state_sub::StateTrieRootHashError),
     #[display(fmt = "{_0}")]
     Call(runtime_service::RuntimeCallError),
     #[display(fmt = "{_0}")]
@@ -1141,15 +1140,6 @@ enum RuntimeCallError {
         /// Version that the runtime supports.
         actual_version: u32,
     },
-}
-
-/// Error potentially returned by [`Background::state_trie_root_hash`].
-#[derive(Debug, derive_more::Display, Clone)]
-enum StateTrieRootHashError {
-    /// Failed to decode block header.
-    HeaderDecodeError(header::Error),
-    /// Error while fetching block header from network.
-    NetworkQueryError,
 }
 
 #[derive(Debug)]

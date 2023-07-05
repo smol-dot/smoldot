@@ -36,8 +36,6 @@ use smoldot::{
 
 use crate::{platform::PlatformRef, runtime_service, sync_service};
 
-use super::StateTrieRootHashError;
-
 /// Message that can be passed to the task started with [`start_task`].
 pub(super) enum Message<TPlat: PlatformRef> {
     /// JSON-RPC client has sent a subscription request.
@@ -117,6 +115,15 @@ pub(super) struct Config<TPlat: PlatformRef> {
     /// Runtime service used to subscribe to notifications regarding blocks and report them to
     /// the JSON-RPC client.
     pub runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
+}
+
+/// Error potentially returned by [`Message::BlockStateRootAndNumber`].
+#[derive(Debug, derive_more::Display, Clone)]
+pub(super) enum StateTrieRootHashError {
+    /// Failed to decode block header.
+    HeaderDecodeError(header::Error),
+    /// Error while fetching block header from network.
+    NetworkQueryError,
 }
 
 /// Spawn a task dedicated to holding a cache and fulfilling the legacy API subscriptions that the
@@ -235,7 +242,7 @@ struct Task<TPlat: PlatformRef> {
     storage_query_in_progress: bool,
 
     /// State trie root hashes and numbers of blocks that were not in
-    /// [`Cache::recent_pinned_blocks`].
+    /// [`Subscription::Active::pinned_blocks`].
     ///
     /// The state trie root hash can also be an `Err` if the network request failed or if the
     /// header is of an invalid format.
@@ -246,10 +253,10 @@ struct Task<TPlat: PlatformRef> {
     /// requests can all wait on that single future.
     ///
     /// Most of the time, the JSON-RPC client will query blocks that are found in
-    /// [`Cache::recent_pinned_blocks`], but occasionally it will query older blocks. When the
-    /// storage of an older block is queried, it is common for the JSON-RPC client to make several
-    /// storage requests to that same old block. In order to avoid having to retrieve the state
-    /// trie root hash multiple, we store these hashes in this LRU cache.
+    /// [`Subscription::Active::pinned_blocks`], but occasionally it will query older blocks. When
+    /// the storage of an older block is queried, it is common for the JSON-RPC client to make
+    /// several storage requests to that same old block. In order to avoid having to retrieve the
+    /// state trie root hash multiple, we store these hashes in this LRU cache.
     block_state_root_hashes_numbers: lru::LruCache<
         [u8; 32],
         future::MaybeDone<
