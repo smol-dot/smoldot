@@ -186,7 +186,8 @@ pub(super) fn start<TPlat: PlatformRef>(
                             match subscription_start.request() {
                                 methods::MethodCall::chain_subscribeAllHeads {}
                                 | methods::MethodCall::chain_subscribeNewHeads {}
-                                | methods::MethodCall::chain_subscribeFinalizedHeads {} => {
+                                | methods::MethodCall::chain_subscribeFinalizedHeads {}
+                                | methods::MethodCall::state_subscribeRuntimeVersion {} => {
                                     me.to_legacy
                                         .lock()
                                         .await

@@ -98,6 +98,10 @@ pub(super) fn start_task<TPlat: PlatformRef>(
                 8,
                 Default::default(),
             ),
+            runtime_version_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+                8,
+                Default::default(),
+            ),
         })),
     );
 }
@@ -143,6 +147,9 @@ struct Task<TPlat: PlatformRef> {
     new_heads_subscriptions: hashbrown::HashMap<String, service::Subscription, fnv::FnvBuildHasher>,
     // TODO: shrink_to_fit?
     finalized_heads_subscriptions:
+        hashbrown::HashMap<String, service::Subscription, fnv::FnvBuildHasher>,
+    // TODO: shrink_to_fit?
+    runtime_version_subscriptions:
         hashbrown::HashMap<String, service::Subscription, fnv::FnvBuildHasher>,
 }
 
@@ -304,6 +311,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             WhatHappened::SubscriptionNotification {
                 notification: runtime_service::Notification::Block(block),
                 pinned_blocks,
+                current_best_block,
                 ..
             } => {
                 let json_rpc_header = match methods::Header::from_scale_encoded_header(
@@ -359,6 +367,28 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                             })
                             .await;
                     }
+
+                    let new_best_runtime = &pinned_blocks.get(&hash).unwrap().runtime_version;
+                    if !Arc::ptr_eq(
+                        new_best_runtime,
+                        &pinned_blocks
+                            .get(current_best_block)
+                            .unwrap()
+                            .runtime_version,
+                    ) {
+                        for (subscription_id, subscription) in
+                            &mut task.runtime_version_subscriptions
+                        {
+                            subscription
+                                .send_notification(methods::ServerToClient::state_runtimeVersion {
+                                    subscription: subscription_id.as_str().into(),
+                                    result: convert_runtime_version(new_best_runtime),
+                                })
+                                .await;
+                        }
+                    }
+
+                    *current_best_block = hash;
                 }
             }
 
@@ -422,8 +452,6 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 }
 
                 if *current_best_block != new_best_block_hash {
-                    *current_best_block = new_best_block_hash;
-
                     let best_block_header = &pinned_blocks
                         .get(&new_best_block_hash)
                         .unwrap()
@@ -454,15 +482,48 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                             })
                             .await;
                     }
+
+                    let new_best_runtime = &pinned_blocks
+                        .get(&new_best_block_hash)
+                        .unwrap()
+                        .runtime_version;
+                    if !Arc::ptr_eq(
+                        new_best_runtime,
+                        &pinned_blocks
+                            .get(current_best_block)
+                            .unwrap()
+                            .runtime_version,
+                    ) {
+                        for (subscription_id, subscription) in
+                            &mut task.runtime_version_subscriptions
+                        {
+                            subscription
+                                .send_notification(methods::ServerToClient::state_runtimeVersion {
+                                    subscription: subscription_id.as_str().into(),
+                                    result: convert_runtime_version(new_best_runtime),
+                                })
+                                .await;
+                        }
+                    }
+
+                    *current_best_block = new_best_block_hash;
                 }
             }
 
             WhatHappened::SubscriptionNotification {
-                notification: runtime_service::Notification::BestBlockChanged { hash, .. },
+                notification:
+                    runtime_service::Notification::BestBlockChanged {
+                        hash: new_best_hash,
+                        ..
+                    },
                 pinned_blocks,
+                current_best_block,
                 ..
             } => {
-                let header = &pinned_blocks.get(&hash).unwrap().scale_encoded_header;
+                let header = &pinned_blocks
+                    .get(&new_best_hash)
+                    .unwrap()
+                    .scale_encoded_header;
                 let json_rpc_header = match methods::Header::from_scale_encoded_header(
                     &header,
                     task.runtime_service.block_number_bytes(),
@@ -473,7 +534,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                             target: &task.log_target,
                             "`chain_subscribeNewHeads` subscription has skipped block due to \
                             undecodable header. Hash: {}. Error: {}",
-                            HashDisplay(&hash),
+                            HashDisplay(&new_best_hash),
                             error,
                         );
                         continue;
@@ -488,6 +549,26 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                         })
                         .await;
                 }
+
+                let new_best_runtime = &pinned_blocks.get(&new_best_hash).unwrap().runtime_version;
+                if !Arc::ptr_eq(
+                    new_best_runtime,
+                    &pinned_blocks
+                        .get(current_best_block)
+                        .unwrap()
+                        .runtime_version,
+                ) {
+                    for (subscription_id, subscription) in &mut task.runtime_version_subscriptions {
+                        subscription
+                            .send_notification(methods::ServerToClient::state_runtimeVersion {
+                                subscription: subscription_id.as_str().into(),
+                                result: convert_runtime_version(new_best_runtime),
+                            })
+                            .await;
+                    }
+                }
+
+                *current_best_block = new_best_hash;
             }
 
             WhatHappened::Message(Message::SubscriptionStart(request)) => match request.request() {
@@ -585,6 +666,35 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     task.finalized_heads_subscriptions
                         .insert(subscription_id, subscription);
                 }
+                methods::MethodCall::state_subscribeRuntimeVersion {} => {
+                    let mut subscription = request.accept();
+                    let subscription_id = subscription.subscription_id().to_owned();
+                    let to_send = if let Subscription::Active {
+                        current_best_block,
+                        pinned_blocks,
+                        ..
+                    } = &task.subscription
+                    {
+                        Some(convert_runtime_version(
+                            &pinned_blocks
+                                .get(current_best_block)
+                                .unwrap()
+                                .runtime_version,
+                        ))
+                    } else {
+                        None
+                    };
+                    if let Some(to_send) = to_send {
+                        subscription
+                            .send_notification(methods::ServerToClient::state_runtimeVersion {
+                                subscription: (&subscription_id).into(),
+                                result: to_send,
+                            })
+                            .await;
+                    }
+                    task.runtime_version_subscriptions
+                        .insert(subscription_id, subscription);
+                }
                 _ => unreachable!(), // TODO: stronger typing to avoid this?
             },
 
@@ -592,6 +702,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 task.all_heads_subscriptions.remove(&subscription_id);
                 task.new_heads_subscriptions.remove(&subscription_id);
                 task.finalized_heads_subscriptions.remove(&subscription_id);
+                task.runtime_version_subscriptions.remove(&subscription_id);
                 // TODO: shrink_to_fit?
             }
 
@@ -834,5 +945,28 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 }));
             }
         }
+    }
+}
+
+fn convert_runtime_version(
+    runtime: &Arc<Result<executor::CoreVersion, runtime_service::RuntimeError>>,
+) -> Option<methods::RuntimeVersion> {
+    if let Ok(runtime_spec) = &**runtime {
+        let runtime_spec = runtime_spec.decode();
+        Some(methods::RuntimeVersion {
+            spec_name: runtime_spec.spec_name.into(),
+            impl_name: runtime_spec.impl_name.into(),
+            authoring_version: u64::from(runtime_spec.authoring_version),
+            spec_version: u64::from(runtime_spec.spec_version),
+            impl_version: u64::from(runtime_spec.impl_version),
+            transaction_version: runtime_spec.transaction_version.map(u64::from),
+            state_version: runtime_spec.state_version.map(u8::from).map(u64::from),
+            apis: runtime_spec
+                .apis
+                .map(|api| (methods::HexString(api.name_hash.to_vec()), api.version))
+                .collect(),
+        })
+    } else {
+        None
     }
 }
