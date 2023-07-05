@@ -320,6 +320,25 @@ struct RecentBlock {
 async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
     loop {
         // Perform some internal state updates if necessary.
+
+        // Process the content of `best_block_report`
+        if let Subscription::Active {
+            pinned_blocks,
+            current_best_block,
+            new_heads_and_runtime_subscriptions_stale,
+            current_finalized_block,
+            finalized_heads_subscriptions_stale,
+            ..
+        } = &task.subscription
+        {
+            while let Some(sender) = task.best_block_report.pop() {
+                let _ = sender.send(*current_best_block);
+            }
+            task.best_block_report.shrink_to_fit();
+        }
+
+        // If the finalized heads subcriptions aren't up-to-date with the latest finalized block,
+        // report it to them.
         if let Subscription::Active {
             pinned_blocks,
             current_best_block,
@@ -329,14 +348,6 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             ..
         } = &mut task.subscription
         {
-            // Process the content of `best_block_report`
-            while let Some(sender) = task.best_block_report.pop() {
-                let _ = sender.send(*current_best_block);
-            }
-            task.best_block_report.shrink_to_fit();
-
-            // If the finalized heads subcriptions aren't up-to-date with the latest finalized
-            // block, report it to them.
             if *finalized_heads_subscriptions_stale {
                 let finalized_block_header = &pinned_blocks
                     .get(current_finalized_block)
@@ -371,9 +382,19 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
 
                 *finalized_heads_subscriptions_stale = false;
             }
+        }
 
-            // If the new heads and runtime version subscriptions aren't up-to-date with the latest
-            // best block, report it to them.
+        // If the new heads and runtime version subscriptions aren't up-to-date with the latest
+        // best block, report it to them.
+        if let Subscription::Active {
+            pinned_blocks,
+            current_best_block,
+            new_heads_and_runtime_subscriptions_stale,
+            current_finalized_block,
+            finalized_heads_subscriptions_stale,
+            ..
+        } = &mut task.subscription
+        {
             if let Some(previous_best_block) = new_heads_and_runtime_subscriptions_stale.take() {
                 let best_block_header = &pinned_blocks
                     .get(current_best_block)
@@ -428,8 +449,18 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 task.stale_storage_subscriptions
                     .extend(task.storage_subscriptions.keys().cloned());
             }
+        }
 
-            // Start a task that fetches the storage items of the stale storage subscriptions.
+        // Start a task that fetches the storage items of the stale storage subscriptions.
+        if let Subscription::Active {
+            pinned_blocks,
+            current_best_block,
+            new_heads_and_runtime_subscriptions_stale,
+            current_finalized_block,
+            finalized_heads_subscriptions_stale,
+            ..
+        } = &task.subscription
+        {
             if !task.storage_query_in_progress && !task.stale_storage_subscriptions.is_empty() {
                 // If the header of the current best block can't be decoded, we don't start
                 // the task.
