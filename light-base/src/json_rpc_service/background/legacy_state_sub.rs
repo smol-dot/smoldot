@@ -160,7 +160,6 @@ struct Task<TPlat: PlatformRef> {
 
     log_target: String,
     platform: TPlat,
-    // TODO: shrink_to_fit?
     best_block_report: Vec<oneshot::Sender<[u8; 32]>>,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,

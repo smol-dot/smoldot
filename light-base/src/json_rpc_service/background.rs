@@ -265,14 +265,6 @@ pub(super) fn start<TPlat: PlatformRef>(
 impl<TPlat: PlatformRef> Background<TPlat> {
     /// Pulls one request from the inner state machine, and processes it.
     async fn handle_request(self: &Arc<Self>, request: service::RequestProcess) {
-        // TODO: restore some form of logging
-        /*log::debug!(target: &self.log_target, "PendingRequestsQueue => {}",
-            crate::util::truncated_str(
-                json_rpc_request.chars().filter(|c| !c.is_control()),
-                100,
-            )
-        );*/
-
         // Print a warning for legacy JSON-RPC functions.
         match request.request() {
             methods::MethodCall::account_nextIndex { .. }

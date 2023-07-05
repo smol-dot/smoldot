@@ -43,7 +43,11 @@ use crate::{
     network_service, platform::PlatformRef, runtime_service, sync_service, transactions_service,
 };
 
-use alloc::{format, string::String, sync::Arc};
+use alloc::{
+    format,
+    string::{String, ToString as _},
+    sync::Arc,
+};
 use core::num::{NonZeroU32, NonZeroUsize};
 use smoldot::{
     chain_spec,
@@ -135,11 +139,22 @@ impl Frontend {
     /// isn't called often enough. Use [`HandleRpcError::into_json_rpc_error`] to build the
     /// JSON-RPC response to immediately send back to the user.
     pub fn queue_rpc_request(&self, json_rpc_request: String) -> Result<(), HandleRpcError> {
+        let log_friendly_request =
+            crate::util::truncated_str(json_rpc_request.chars().filter(|c| !c.is_control()), 100)
+                .to_string();
+
         match self
             .requests_responses_io
             .try_send_request(json_rpc_request)
         {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                log::debug!(
+                    target: &self.log_target,
+                    "JSON-RPC => {}",
+                    log_friendly_request
+                );
+                Ok(())
+            }
             Err(service::TrySendRequestError {
                 cause: service::TrySendRequestErrorCause::TooManyPendingRequests,
                 request,
