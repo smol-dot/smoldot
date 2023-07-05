@@ -654,7 +654,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 unreachable!()
             }
             methods::MethodCall::state_subscribeRuntimeVersion {} => {
-                self.state_subscribe_runtime_version(request).await;
+                unreachable!()
             }
             methods::MethodCall::state_subscribeStorage { .. } => {
                 self.state_subscribe_storage(request).await;
