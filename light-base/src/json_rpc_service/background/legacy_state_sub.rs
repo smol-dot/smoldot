@@ -24,10 +24,9 @@ use core::{
 };
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
-use async_lock::Mutex;
 use futures_channel::oneshot;
 use futures_lite::{FutureExt as _, StreamExt as _};
-use futures_util::{future, stream::AbortRegistration, FutureExt as _};
+use futures_util::{future, FutureExt as _};
 use smoldot::{
     executor, header,
     informant::HashDisplay,
@@ -288,7 +287,6 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
 
             WhatHappened::SubscriptionNotification {
                 notification: runtime_service::Notification::Block(block),
-                subscription,
                 pinned_blocks,
                 ..
             } => {

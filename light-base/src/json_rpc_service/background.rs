@@ -38,13 +38,11 @@ use core::{
     time::Duration,
 };
 use futures_channel::oneshot;
-use futures_util::{future, FutureExt as _};
 use smoldot::{
     executor::{host, runtime_host},
     header,
     json_rpc::{self, methods, service},
     libp2p::{multiaddr, PeerId},
-    network::protocol,
 };
 
 mod chain_head;

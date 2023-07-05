@@ -27,7 +27,6 @@ use futures_channel::oneshot;
 use futures_util::{future, stream, StreamExt as _};
 use smoldot::{
     header,
-    informant::HashDisplay,
     json_rpc::{self, methods, service},
     network::protocol,
 };
