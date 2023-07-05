@@ -638,20 +638,12 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             methods::MethodCall::author_submitAndWatchExtrinsic { .. } => {
                 self.submit_and_watch_transaction(request).await
             }
-            methods::MethodCall::chain_subscribeAllHeads {} => {
+            methods::MethodCall::chain_subscribeAllHeads {}
+            | methods::MethodCall::chain_subscribeFinalizedHeads {}
+            | methods::MethodCall::chain_subscribeNewHeads {}
+            | methods::MethodCall::state_subscribeRuntimeVersion {}
+            | methods::MethodCall::state_subscribeStorage { .. } => {
                 unreachable!()
-            }
-            methods::MethodCall::chain_subscribeFinalizedHeads {} => {
-                unreachable!()
-            }
-            methods::MethodCall::chain_subscribeNewHeads {} => {
-                unreachable!()
-            }
-            methods::MethodCall::state_subscribeRuntimeVersion {} => {
-                unreachable!()
-            }
-            methods::MethodCall::state_subscribeStorage { .. } => {
-                self.state_subscribe_storage(request).await;
             }
 
             methods::MethodCall::chainHead_unstable_body { .. } => {
