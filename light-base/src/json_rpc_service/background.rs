@@ -132,12 +132,12 @@ pub(super) fn start<TPlat: PlatformRef>(
     mut requests_processing_task: service::ClientMainTask,
     max_parallel_requests: NonZeroU32,
 ) {
-    let to_legacy_tx = legacy_state_sub::start_task(
-        config.platform.clone(),
-        log_target.clone(),
-        config.sync_service.clone(),
-        config.runtime_service.clone(),
-    );
+    let to_legacy_tx = legacy_state_sub::start_task(legacy_state_sub::Config {
+        platform: config.platform.clone(),
+        log_target: log_target.clone(),
+        sync_service: config.sync_service.clone(),
+        runtime_service: config.runtime_service.clone(),
+    });
 
     let me = Arc::new(Background {
         log_target,

@@ -23,10 +23,7 @@ use core::{
     time::Duration,
 };
 
-use alloc::{
-    borrow::ToOwned as _, boxed::Box, collections::BTreeSet, format, string::String, sync::Arc,
-    vec::Vec,
-};
+use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use futures_channel::oneshot;
 use futures_lite::{FutureExt as _, StreamExt as _};
 use futures_util::{future, FutureExt as _};
@@ -71,27 +68,31 @@ pub(super) enum Message<TPlat: PlatformRef> {
     },
 }
 
+pub(super) struct Config<TPlat: PlatformRef> {
+    pub platform: TPlat,
+    pub log_target: String,
+    pub sync_service: Arc<sync_service::SyncService<TPlat>>,
+    pub runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
+}
+
 // Spawn one task dedicated to filling the `Cache` with new blocks from the runtime service.
 pub(super) fn start_task<TPlat: PlatformRef>(
-    platform: TPlat,
-    log_target: String,
-    sync_service: Arc<sync_service::SyncService<TPlat>>,
-    runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
+    config: Config<TPlat>,
 ) -> async_channel::Sender<Message<TPlat>> {
     let (requests_tx, requests_rx) = async_channel::bounded(8);
 
-    platform.clone().spawn_task(
-        format!("{}-cache", log_target).into(),
+    config.platform.clone().spawn_task(
+        format!("{}-cache", config.log_target).into(),
         Box::pin(run(Task {
             block_state_root_hashes_numbers: lru::LruCache::with_hasher(
                 NonZeroUsize::new(32).unwrap(),
                 Default::default(),
             ),
-            log_target: log_target.clone(),
-            platform: platform.clone(),
+            log_target: config.log_target.clone(),
+            platform: config.platform.clone(),
             best_block_report: Vec::with_capacity(4),
-            sync_service,
-            runtime_service,
+            sync_service: config.sync_service,
+            runtime_service: config.runtime_service,
             subscription: Subscription::NotCreated,
             requests_tx: async_channel::Sender::downgrade(&requests_tx),
             requests_rx,
@@ -117,7 +118,7 @@ pub(super) fn start_task<TPlat: PlatformRef>(
             ),
             storage_subscriptions_by_key: hashbrown::HashMap::with_capacity_and_hasher(
                 16,
-                crate::util::SipHasherBuild::new([0; 16]), // TODO: proper seed
+                crate::util::SipHasherBuild::new(rand::random()),
             ),
             stale_storage_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
                 16,
@@ -265,8 +266,9 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
 
                 task.storage_query_in_progress = true;
 
-                let mut keys =
-                    hashbrown::HashSet::with_hasher(crate::util::SipHasherBuild::new([0; 16])); // TODO: proper seed
+                let mut keys = hashbrown::HashSet::with_hasher(crate::util::SipHasherBuild::new(
+                    rand::random(),
+                ));
                 keys.extend(
                     task.stale_storage_subscriptions
                         .iter()
