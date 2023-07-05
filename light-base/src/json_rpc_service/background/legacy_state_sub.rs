@@ -228,6 +228,7 @@ enum Subscription<TPlat: PlatformRef> {
 
 struct RecentBlock {
     scale_encoded_header: Vec<u8>,
+    // TODO: do we really need to keep the runtime version here, given that the block is still pinned in the runtime service?
     runtime_version: Arc<Result<executor::CoreVersion, runtime_service::RuntimeError>>,
 }
 
