@@ -587,10 +587,13 @@ pub enum HostVm {
     /// Need to provide the storage key that follows a specific one.
     #[from]
     ExternalStorageNextKey(ExternalStorageNextKey),
+    /// Must set off-chain index value.
+    #[from]
+    ExternalOffchainIndexSet(ExternalOffchainIndexSet),
     /// Must load an offchain storage value.
     #[from]
     ExternalOffchainStorageGet(ExternalOffchainStorageGet),
-    /// Must the set value of an off-chain storage entry.
+    /// Must set value of an off-chain storage entry.
     #[from]
     ExternalOffchainStorageSet(ExternalOffchainStorageSet),
     /// Need to provide the current timestamp.
@@ -646,6 +649,7 @@ impl HostVm {
             HostVm::ExternalStorageClearPrefix(inner) => inner.inner.into_prototype(),
             HostVm::ExternalStorageRoot(inner) => inner.inner.into_prototype(),
             HostVm::ExternalStorageNextKey(inner) => inner.inner.into_prototype(),
+            HostVm::ExternalOffchainIndexSet(inner) => inner.inner.into_prototype(),
             HostVm::ExternalOffchainStorageGet(inner) => inner.inner.into_prototype(),
             HostVm::ExternalOffchainStorageSet(inner) => inner.inner.into_prototype(),
             HostVm::OffchainTimestamp(inner) => inner.inner.into_prototype(),
@@ -1703,17 +1707,22 @@ impl ReadyToRun {
                 )
             }
             HostFunction::ext_offchain_index_set_version_1 => {
-                // TODO: offchain overlay storage
-                HostVm::ReadyToRun(ReadyToRun {
+                let (key_ptr, key_size) = expect_pointer_size_raw!(0);
+                let (value_ptr, value_size) = expect_pointer_size_raw!(1);
+                HostVm::ExternalOffchainIndexSet(ExternalOffchainIndexSet {
+                    key_ptr,
+                    key_size,
+                    value: Some((value_ptr, value_size)),
                     inner: self.inner,
-                    resume_value: None,
                 })
             }
             HostFunction::ext_offchain_index_clear_version_1 => {
-                // TODO: offchain overlay storage
-                HostVm::ReadyToRun(ReadyToRun {
+                let (key_ptr, key_size) = expect_pointer_size_raw!(0);
+                HostVm::ExternalOffchainIndexSet(ExternalOffchainIndexSet {
+                    key_ptr,
+                    key_size,
+                    value: None,
                     inner: self.inner,
-                    resume_value: None,
                 })
             }
             HostFunction::ext_offchain_is_validator_version_1 => HostVm::ReadyToRun(ReadyToRun {
@@ -2968,6 +2977,54 @@ impl CallRuntimeVersion {
 impl fmt::Debug for CallRuntimeVersion {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("CallRuntimeVersion").finish()
+    }
+}
+
+/// Must set off-chain index value.
+pub struct ExternalOffchainIndexSet {
+    inner: Box<Inner>,
+
+    /// Pointer to the key whose value must be set. Guaranteed to be in range.
+    key_ptr: u32,
+    /// Size of the key whose value must be set. Guaranteed to be in range.
+    key_size: u32,
+
+    /// Pointer and size of the value to set. `None` for clearing. Guaranteed to be in range.
+    value: Option<(u32, u32)>,
+}
+
+impl ExternalOffchainIndexSet {
+    /// Returns the key whose value must be set.
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+        self.inner
+            .vm
+            .read_memory(self.key_ptr, self.key_size)
+            .unwrap()
+    }
+
+    /// Returns the value to set.
+    ///
+    /// If `None` is returned, the key should be removed from the storage entirely.
+    pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        if let Some((ptr, size)) = self.value {
+            Some(self.inner.vm.read_memory(ptr, size).unwrap())
+        } else {
+            None
+        }
+    }
+
+    /// Resumes execution after having set the value.
+    pub fn resume(self) -> HostVm {
+        HostVm::ReadyToRun(ReadyToRun {
+            inner: self.inner,
+            resume_value: None,
+        })
+    }
+}
+
+impl fmt::Debug for ExternalOffchainIndexSet {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("ExternalOffchainIndexSet").finish()
     }
 }
 

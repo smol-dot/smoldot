@@ -114,6 +114,7 @@ pub fn run(
                 Default::default(),
             ),
             tries_changes: BTreeMap::new(),
+            offchain_index: hashbrown::HashMap::default(),
         },
         state_trie_version,
         transactions_stack: Vec::new(),
@@ -1069,6 +1070,9 @@ struct PendingStorageChanges {
 
     /// Changes to the trie nodes of all the tries.
     tries_changes: BTreeMap<(Option<Vec<u8>>, Vec<Nibble>), PendingStorageChangesTrieNode>,
+
+    /// Changes to the off-chain storage committed by on-chain transactions.
+    offchain_index: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
 }
 
 /// See [`PendingStorageChanges::tries_changes`].
@@ -1319,13 +1323,23 @@ impl Inner {
                         .stale_child_tries_root_hashes
                         .is_empty());
 
+                    let mut offchain_storage_changes = self.offchain_storage_changes;
+
+                    // apply pending offchain changes into offchain storage
+                    self.pending_storage_changes
+                        .offchain_index
+                        .drain()
+                        .for_each(|(k, v)| {
+                            offchain_storage_changes.insert(k.clone(), v.clone());
+                        });
+
                     return RuntimeHostVm::Finished(Ok(Success {
                         virtual_machine: SuccessVirtualMachine(finished),
                         storage_changes: StorageChanges {
                             inner: self.pending_storage_changes,
                         },
                         state_trie_version: self.state_trie_version,
-                        offchain_storage_changes: self.offchain_storage_changes,
+                        offchain_storage_changes,
                         logs: self.logs,
                     }));
                 }
@@ -1446,6 +1460,15 @@ impl Inner {
                         key_overwrite: None,
                         keys_removed_so_far: 0,
                     });
+                }
+
+                host::HostVm::ExternalOffchainIndexSet(req) => {
+                    self.pending_storage_changes.offchain_index.insert(
+                        req.key().as_ref().to_vec(),
+                        req.value().map(|v| v.as_ref().to_vec()),
+                    );
+
+                    self.vm = req.resume();
                 }
 
                 host::HostVm::ExternalOffchainStorageGet(req) => {
