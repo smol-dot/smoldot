@@ -246,10 +246,14 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                         hash,
                         RecentBlock {
                             scale_encoded_header: block.scale_encoded_header,
-                            runtime_version: block
-                                .new_runtime
-                                .map(Arc::new)
-                                .unwrap_or_else(|| todo!()), // TODO:
+                            runtime_version: match block.new_runtime {
+                                Some(r) => Arc::new(r),
+                                None => pinned_blocks
+                                    .get(&block.parent_hash)
+                                    .unwrap()
+                                    .runtime_version
+                                    .clone(),
+                            },
                         },
                     );
                 }
@@ -291,7 +295,14 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     hash,
                     RecentBlock {
                         scale_encoded_header: block.scale_encoded_header,
-                        runtime_version: block.new_runtime.map(Arc::new).unwrap_or_else(|| todo!()), // TODO:
+                        runtime_version: match block.new_runtime {
+                            Some(r) => Arc::new(r),
+                            None => pinned_blocks
+                                .get(&block.parent_hash)
+                                .unwrap()
+                                .runtime_version
+                                .clone(),
+                        },
                     },
                 );
 
