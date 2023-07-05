@@ -187,7 +187,8 @@ pub(super) fn start<TPlat: PlatformRef>(
                             requests_processing_task = task;
                             match subscription_start.request() {
                                 methods::MethodCall::chain_subscribeAllHeads {}
-                                | methods::MethodCall::chain_subscribeNewHeads {} => {
+                                | methods::MethodCall::chain_subscribeNewHeads {}
+                                | methods::MethodCall::chain_subscribeFinalizedHeads {} => {
                                     me.to_legacy
                                         .lock()
                                         .await
@@ -648,7 +649,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 unreachable!()
             }
             methods::MethodCall::chain_subscribeFinalizedHeads {} => {
-                self.chain_subscribe_finalized_heads(request).await;
+                unreachable!()
             }
             methods::MethodCall::chain_subscribeNewHeads {} => {
                 unreachable!()

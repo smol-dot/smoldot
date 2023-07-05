@@ -92,6 +92,10 @@ pub(super) fn start_task<TPlat: PlatformRef>(
                 8,
                 Default::default(),
             ),
+            finalized_heads_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+                8,
+                Default::default(),
+            ),
         })),
     );
 }
@@ -133,6 +137,9 @@ struct Task<TPlat: PlatformRef> {
     all_heads_subscriptions: hashbrown::HashMap<String, service::Subscription, fnv::FnvBuildHasher>,
     // TODO: shrink_to_fit?
     new_heads_subscriptions: hashbrown::HashMap<String, service::Subscription, fnv::FnvBuildHasher>,
+    // TODO: shrink_to_fit?
+    finalized_heads_subscriptions:
+        hashbrown::HashMap<String, service::Subscription, fnv::FnvBuildHasher>,
 }
 
 enum Subscription<TPlat: PlatformRef> {
@@ -312,7 +319,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             WhatHappened::SubscriptionNotification {
                 notification:
                     runtime_service::Notification::Finalized {
-                        hash,
+                        hash: finalized_hash,
                         pruned_blocks,
                         best_block_hash,
                     },
@@ -320,7 +327,38 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 finalized_and_pruned_lru,
                 subscription,
             } => {
-                for block_hash in pruned_blocks.into_iter().chain(iter::once(hash)) {
+                let finalized_block_header = &pinned_blocks
+                    .get(&finalized_hash)
+                    .unwrap()
+                    .scale_encoded_header;
+                let finalized_block_json_rpc_header =
+                    match methods::Header::from_scale_encoded_header(
+                        finalized_block_header,
+                        task.runtime_service.block_number_bytes(),
+                    ) {
+                        Ok(h) => h,
+                        Err(error) => {
+                            log::warn!(
+                                target: &task.log_target,
+                                "`chain_subscribeNewHeads` subscription has skipped block due to \
+                                undecodable header. Hash: {}. Error: {}",
+                                HashDisplay(&best_block_hash),
+                                error,
+                            );
+                            continue;
+                        }
+                    };
+
+                for (subscription_id, subscription) in &mut task.finalized_heads_subscriptions {
+                    subscription
+                        .send_notification(methods::ServerToClient::chain_finalizedHead {
+                            subscription: subscription_id.as_str().into(),
+                            result: finalized_block_json_rpc_header.clone(),
+                        })
+                        .await;
+                }
+
+                for block_hash in pruned_blocks.into_iter().chain(iter::once(finalized_hash)) {
                     if finalized_and_pruned_lru.len() == finalized_and_pruned_lru.cap().get() {
                         let (hash_to_unpin, _) = finalized_and_pruned_lru.pop_lru().unwrap();
                         subscription.unpin_block(&hash_to_unpin).await;
@@ -408,12 +446,20 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     task.new_heads_subscriptions
                         .insert(subscription_id, subscription);
                 }
+                methods::MethodCall::chain_subscribeFinalizedHeads {} => {
+                    let subscription = request.accept();
+                    let subscription_id = subscription.subscription_id().to_owned();
+                    // TODO: must immediately send the current finalized block
+                    task.finalized_heads_subscriptions
+                        .insert(subscription_id, subscription);
+                }
                 _ => unreachable!(), // TODO: stronger typing to avoid this?
             },
 
             WhatHappened::Message(Message::SubscriptionDestroyed { subscription_id }) => {
                 task.all_heads_subscriptions.remove(&subscription_id);
                 task.new_heads_subscriptions.remove(&subscription_id);
+                task.finalized_heads_subscriptions.remove(&subscription_id);
                 // TODO: shrink_to_fit?
             }
 
