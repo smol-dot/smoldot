@@ -276,6 +276,10 @@ enum Subscription<TPlat: PlatformRef> {
         /// [`Subscription::Active::pinned_blocks`].
         current_finalized_block: [u8; 32],
 
+        /// If `true`, the finalized heads subscriptions hasn't been updated about the new
+        /// current block yet.
+        finalized_heads_subscriptions_stale: bool,
+
         /// When the runtime service reports a new block, it is kept pinned and inserted in this
         /// list.
         ///
@@ -313,14 +317,53 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
         if let Subscription::Active {
             pinned_blocks,
             current_best_block,
+            current_finalized_block,
+            finalized_heads_subscriptions_stale,
             ..
-        } = &task.subscription
+        } = &mut task.subscription
         {
             // Process the content of `best_block_report`
             while let Some(sender) = task.best_block_report.pop() {
                 let _ = sender.send(*current_best_block);
             }
             task.best_block_report.shrink_to_fit();
+
+            // If the finalized heads subcriptions aren't up-to-date with the latest finalized
+            // block, report it to them.
+            if *finalized_heads_subscriptions_stale {
+                let finalized_block_header = &pinned_blocks
+                    .get(current_finalized_block)
+                    .unwrap()
+                    .scale_encoded_header;
+                let finalized_block_json_rpc_header =
+                    match methods::Header::from_scale_encoded_header(
+                        finalized_block_header,
+                        task.runtime_service.block_number_bytes(),
+                    ) {
+                        Ok(h) => h,
+                        Err(error) => {
+                            log::warn!(
+                                target: &task.log_target,
+                                "`chain_subscribeFinalizedHeads` subscription has skipped block \
+                                due to undecodable header. Hash: {}. Error: {}",
+                                HashDisplay(current_finalized_block),
+                                error,
+                            );
+                            continue;
+                        }
+                    };
+
+                for (subscription_id, subscription) in &mut task.finalized_heads_subscriptions {
+                    subscription
+                        .send_notification(methods::ServerToClient::chain_finalizedHead {
+                            subscription: subscription_id.as_str().into(),
+                            result: finalized_block_json_rpc_header.clone(),
+                        })
+                        .await;
+                }
+
+                *finalized_heads_subscriptions_stale = false;
+            }
 
             // Start a task that fetches the storage items of the stale storage subscriptions.
             if !task.storage_query_in_progress && !task.stale_storage_subscriptions.is_empty() {
@@ -413,6 +456,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 finalized_and_pruned_lru: &'a mut lru::LruCache<[u8; 32], (), fnv::FnvBuildHasher>,
                 current_best_block: &'a mut [u8; 32],
                 current_finalized_block: &'a mut [u8; 32],
+                finalized_heads_subscriptions_stale: &'a mut bool,
             },
             SubscriptionDead,
             SubscriptionReady(runtime_service::SubscribeAll<TPlat>),
@@ -431,6 +475,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                         finalized_and_pruned_lru,
                         current_best_block,
                         current_finalized_block,
+                        finalized_heads_subscriptions_stale,
                     } => match subscription.next().await {
                         Some(notification) => WhatHappened::SubscriptionNotification {
                             notification,
@@ -439,6 +484,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                             finalized_and_pruned_lru,
                             current_best_block,
                             current_finalized_block,
+                            finalized_heads_subscriptions_stale,
                         },
                         None => WhatHappened::SubscriptionDead,
                     },
@@ -511,7 +557,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 task.stale_storage_subscriptions
                     .extend(task.storage_subscriptions.keys().cloned());
 
-                // TODO: must notify finalized heads and new heads subscriptions
+                // TODO: must notify new heads subscriptions
 
                 task.subscription = Subscription::Active {
                     subscription: subscribe_all.new_blocks,
@@ -519,6 +565,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     finalized_and_pruned_lru,
                     current_best_block,
                     current_finalized_block: finalized_block_hash,
+                    finalized_heads_subscriptions_stale: true,
                 };
             }
 
@@ -624,39 +671,10 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 subscription,
                 current_best_block,
                 current_finalized_block,
+                finalized_heads_subscriptions_stale,
             } => {
                 *current_finalized_block = finalized_hash;
-
-                let finalized_block_header = &pinned_blocks
-                    .get(&finalized_hash)
-                    .unwrap()
-                    .scale_encoded_header;
-                let finalized_block_json_rpc_header =
-                    match methods::Header::from_scale_encoded_header(
-                        finalized_block_header,
-                        task.runtime_service.block_number_bytes(),
-                    ) {
-                        Ok(h) => h,
-                        Err(error) => {
-                            log::warn!(
-                                target: &task.log_target,
-                                "`chain_subscribeFinalizedHeads` subscription has skipped block \
-                                due to undecodable header. Hash: {}. Error: {}",
-                                HashDisplay(&new_best_block_hash),
-                                error,
-                            );
-                            continue;
-                        }
-                    };
-
-                for (subscription_id, subscription) in &mut task.finalized_heads_subscriptions {
-                    subscription
-                        .send_notification(methods::ServerToClient::chain_finalizedHead {
-                            subscription: subscription_id.as_str().into(),
-                            result: finalized_block_json_rpc_header.clone(),
-                        })
-                        .await;
-                }
+                *finalized_heads_subscriptions_stale = true;
 
                 // Add the pruned and finalized blocks to the LRU cache. The least-recently used
                 // entries in the cache are unpinned and no longer tracked.
