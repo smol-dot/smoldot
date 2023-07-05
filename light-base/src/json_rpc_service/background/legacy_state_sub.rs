@@ -83,7 +83,6 @@ pub(super) fn start_task<TPlat: PlatformRef>(
             runtime_service,
             subscription: Subscription::NotCreated,
             requests_rx,
-            // TODO: all the subscriptions are dropped if the task returns
             all_heads_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
                 8,
                 Default::default(),
