@@ -241,6 +241,7 @@ impl ConsensusService {
                 NonZeroU32::new(2000).unwrap()
             },
             full_mode: true,
+            code_trie_node_hint: None,
         });
 
         let finalized_runtime = {
