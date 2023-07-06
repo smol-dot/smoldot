@@ -3103,14 +3103,14 @@ pub struct ExternalOffchainStorageGet {
     /// [`VmCommon::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
     calling: usize,
 
-    /// Pointer to the key whose value must be set. Guaranteed to be in range.
+    /// Pointer to the key whose value must be loaded. Guaranteed to be in range.
     key_ptr: u32,
-    /// Size of the key whose value must be set. Guaranteed to be in range.
+    /// Size of the key whose value must be loaded. Guaranteed to be in range.
     key_size: u32,
 }
 
 impl ExternalOffchainStorageGet {
-    /// Returns the key whose value must be set.
+    /// Returns the key whose value must be loaded.
     pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
         self.inner
             .vm
