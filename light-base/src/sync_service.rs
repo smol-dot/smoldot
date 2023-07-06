@@ -39,7 +39,7 @@ use smoldot::{
     executor::host,
     libp2p::PeerId,
     network::{protocol, service},
-    trie::{self, prefix_proof, proof_decode},
+    trie::{self, prefix_proof, proof_decode, Nibble},
 };
 
 mod parachain;
@@ -100,6 +100,8 @@ pub struct ConfigRelayChainRuntimeCodeHint {
     pub storage_value: Vec<u8>,
     /// Merkle value of the `:code` trie node in the storage main trie.
     pub merkle_value: Vec<u8>,
+    /// Closest ancestor of the `:code` key except for `:code` itself.
+    pub closest_ancestor_excluding: Vec<Nibble>,
 }
 
 /// See [`ConfigChainType::Parachain`].
@@ -688,28 +690,36 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         }
                     }
                     RequestImpl::ClosestDescendantMerkleValue { key } => {
-                        match decoded_proof.closest_descendant_merkle_value(
-                            main_trie_root_hash,
-                            &trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>(),
-                        ) {
-                            Ok(Some(merkle_value)) => final_results.push(
-                                StorageResultItem::ClosestDescendantMerkleValue {
-                                    requested_key: key,
-                                    closest_descendant_merkle_value: Some(
-                                        merkle_value.as_ref().to_vec(),
-                                    ),
-                                },
-                            ),
-                            Ok(None) => final_results.push(
-                                StorageResultItem::ClosestDescendantMerkleValue {
-                                    requested_key: key,
-                                    closest_descendant_merkle_value: None,
-                                },
-                            ),
+                        let key_nibbles =
+                            &trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>();
+
+                        let closest_descendant_merkle_value = match decoded_proof
+                            .closest_descendant_merkle_value(main_trie_root_hash, &key_nibbles)
+                        {
+                            Ok(Some(merkle_value)) => Some(merkle_value.as_ref().to_vec()),
+                            Ok(None) => None,
                             Err(proof_decode::IncompleteProofError { .. }) => {
                                 outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                                continue;
                             }
-                        }
+                        };
+
+                        let found_closest_ancestor_excluding = match decoded_proof
+                            .closest_ancestor_in_proof(main_trie_root_hash, &key_nibbles)
+                        {
+                            Ok(Some(ancestor)) => Some(ancestor.to_vec()),
+                            Ok(None) => None,
+                            Err(proof_decode::IncompleteProofError { .. }) => {
+                                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                                continue;
+                            }
+                        };
+
+                        final_results.push(StorageResultItem::ClosestDescendantMerkleValue {
+                            requested_key: key,
+                            closest_descendant_merkle_value,
+                            found_closest_ancestor_excluding,
+                        })
                     }
                 }
             }
@@ -857,6 +867,10 @@ pub enum StorageResultItem {
     ClosestDescendantMerkleValue {
         /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
         requested_key: Vec<u8>,
+        /// Closest ancestor to the requested key that was found in the proof. If
+        /// [`StorageResultItem::DescendantValue::closest_descendant_merkle_value`] is `Some`, then
+        /// this is always the parent of the requested key.
+        found_closest_ancestor_excluding: Option<Vec<Nibble>>,
         /// Merkle value of the closest descendant of
         /// [`StorageResultItem::DescendantValue::requested_key`]. The key that corresponds
         /// to this Merkle value is not included. `None` if the key has no descendant.
@@ -995,6 +1009,9 @@ pub struct FinalizedBlockRuntime {
 
     /// Merkle value of the `:code` key.
     pub code_merkle_value: Option<Vec<u8>>,
+
+    /// Closest ancestor of the `:code` key except for `:code` itself.
+    pub closest_ancestor_excluding: Option<Vec<Nibble>>,
 }
 
 /// Notification about a new block or a new finalized block.

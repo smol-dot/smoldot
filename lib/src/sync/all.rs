@@ -35,6 +35,7 @@ use crate::{
     executor::host,
     header,
     sync::{all_forks, optimistic, warp_sync},
+    trie::Nibble,
     verify,
 };
 
@@ -1319,6 +1320,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     finalized_storage_code,
                     finalized_storage_heap_pages,
                     finalized_storage_code_merkle_value,
+                    finalized_storage_code_closest_ancestor_excluding,
                 ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
                 self.inner = AllSyncInner::AllForks(new_inner);
                 ProcessOne::WarpSyncFinished {
@@ -1327,6 +1329,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     finalized_storage_code,
                     finalized_storage_heap_pages,
                     finalized_storage_code_merkle_value,
+                    finalized_storage_code_closest_ancestor_excluding,
                 }
             }
             AllSyncInner::AllForks(sync) => match sync.process_one() {
@@ -2316,6 +2319,10 @@ pub enum ProcessOne<TRq, TSrc, TBl> {
 
         /// Merkle value of the `:code` trie node of the finalized block.
         finalized_storage_code_merkle_value: Option<Vec<u8>>,
+
+        /// Closest ancestor of the `:code` trie node of the finalized block excluding `:code`
+        /// itself.
+        finalized_storage_code_closest_ancestor_excluding: Option<Vec<Nibble>>,
     },
 
     /// Ready to start verifying a block.
@@ -2988,6 +2995,7 @@ impl<TRq> Shared<TRq> {
         Option<Vec<u8>>,
         Option<Vec<u8>>,
         Option<Vec<u8>>,
+        Option<Vec<Nibble>>,
     ) {
         let mut all_forks = all_forks::AllForksSync::new(all_forks::Config {
             chain_information: grandpa.chain_information,
@@ -3092,6 +3100,7 @@ impl<TRq> Shared<TRq> {
             grandpa.finalized_storage_code,
             grandpa.finalized_storage_heap_pages,
             grandpa.finalized_storage_code_merkle_value,
+            grandpa.finalized_storage_code_closest_ancestor_excluding,
         )
     }
 }

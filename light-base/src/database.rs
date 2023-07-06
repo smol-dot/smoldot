@@ -30,6 +30,7 @@
 use alloc::{
     borrow::ToOwned as _,
     boxed::Box,
+    format,
     string::{String, ToString as _},
     vec::Vec,
 };
@@ -41,6 +42,8 @@ use smoldot::{
 };
 
 use crate::{network_service, platform, runtime_service, sync_service};
+
+pub use smoldot::trie::Nibble;
 
 /// A decoded database.
 pub struct DatabaseContent {
@@ -54,17 +57,21 @@ pub struct DatabaseContent {
     /// Known valid Merkle value and storage value combination for the `:code` key.
     ///
     /// Does **not** necessarily match the finalized block found in
-    /// [`DatabaseCOntent::chain_information`].
+    /// [`DatabaseContent::chain_information`].
     pub runtime_code_hint: Option<DatabaseContentRuntimeCodeHint>,
 }
 
 /// See [`DatabaseContent::runtime_code_hint`].
+#[derive(Debug)]
 pub struct DatabaseContentRuntimeCodeHint {
     /// Storage value of the `:code` trie node corresponding to
     /// [`DatabaseContentRuntimeCodeHint::code_merkle_value`].
     pub code: Vec<u8>,
     /// Merkle value of the `:code` trie node in the storage main trie.
     pub code_merkle_value: Vec<u8>,
+    /// Closest ancestor of the `:code` key except for `:code` itself.
+    // TODO: this punches a bit through abstraction layers, but it's temporary
+    pub closest_ancestor_excluding: Vec<Nibble>,
 }
 
 /// Serializes the finalized state of the chain, using the given services.
@@ -78,10 +85,10 @@ pub async fn encode_database<TPlat: platform::PlatformRef>(
     genesis_block_hash: &[u8; 32],
     max_size: usize,
 ) -> String {
-    let (code_storage_value, code_merkle_value) = runtime_service
+    let (code_storage_value, code_merkle_value, code_closest_ancestor_excluding) = runtime_service
         .finalized_runtime_storage_merkle_values()
         .await
-        .unwrap_or((None, None));
+        .unwrap_or((None, None, None));
 
     // Craft the structure containing all the data that we would like to include.
     let mut database_draft = SerdeDatabase {
@@ -118,6 +125,11 @@ pub async fn encode_database<TPlat: platform::PlatformRef>(
         // normally already zstd-compressed, and additional compressing shouldn't improve the size.
         code_storage_value: code_storage_value.map(|data| {
             base64::Engine::encode(&base64::engine::general_purpose::STANDARD_NO_PAD, data)
+        }),
+        code_closest_ancestor_excluding: code_closest_ancestor_excluding.map(|key| {
+            key.iter()
+                .map(|nibble| format!("{:x}", nibble))
+                .collect::<String>()
         }),
     };
 
@@ -201,11 +213,20 @@ pub fn decode_database(encoded: &str, block_number_bytes: usize) -> Result<Datab
         })
         .collect::<Vec<_>>();
 
-    let runtime_code_hint = match (decoded.code_merkle_value, decoded.code_storage_value) {
-        (Some(mv), Some(sv)) => Some(DatabaseContentRuntimeCodeHint {
+    let runtime_code_hint = match (
+        decoded.code_merkle_value,
+        decoded.code_storage_value,
+        decoded.code_closest_ancestor_excluding,
+    ) {
+        (Some(mv), Some(sv), Some(an)) => Some(DatabaseContentRuntimeCodeHint {
             code: base64::Engine::decode(&base64::engine::general_purpose::STANDARD_NO_PAD, &sv)
                 .map_err(|_| ())?,
             code_merkle_value: hex::decode(&mv).map_err(|_| ())?,
+            closest_ancestor_excluding: an
+                .as_bytes()
+                .iter()
+                .map(|char| Nibble::from_ascii_hex_digit(*char).ok_or(()))
+                .collect::<Result<Vec<Nibble>, ()>>()?,
         }),
         // A combination of `Some` and `None` is technically invalid, but we simply ignore this
         // situation.
@@ -227,8 +248,22 @@ struct SerdeDatabase {
     genesis_hash: String,
     chain: Box<serde_json::value::RawValue>,
     nodes: hashbrown::HashMap<String, Vec<String>, fnv::FnvBuildHasher>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "runtimeCode",
+        default = "Default::default",
+        skip_serializing_if = "Option::is_none"
+    )]
     code_storage_value: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "codeMerkleValue",
+        default = "Default::default",
+        skip_serializing_if = "Option::is_none"
+    )]
     code_merkle_value: Option<String>,
+    #[serde(
+        rename = "codeClosestAncestor",
+        default = "Default::default",
+        skip_serializing_if = "Option::is_none"
+    )]
+    code_closest_ancestor_excluding: Option<String>,
 }

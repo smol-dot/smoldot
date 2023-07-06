@@ -41,6 +41,21 @@ impl Nibble {
         }
         Some(Nibble(new_nibble))
     }
+
+    /// Converts an ASCII headecimal digit (i.e. `0..9`, `a..f`, `A..F`) into a nibble.
+    ///
+    /// Returns `None` if `digit` is out of range.
+    pub fn from_ascii_hex_digit(digit: u8) -> Option<Self> {
+        if digit.is_ascii_digit() {
+            Some(Nibble(digit - b'0'))
+        } else if (b'a'..=b'f').contains(&digit) {
+            Some(Nibble(10 + digit - b'a'))
+        } else if (b'A'..=b'F').contains(&digit) {
+            Some(Nibble(10 + digit - b'A'))
+        } else {
+            None
+        }
+    }
 }
 
 impl TryFrom<u8> for Nibble {
@@ -321,6 +336,20 @@ mod tests {
             Nibble::try_from(255),
             Err(NibbleFromU8Error::TooLarge)
         ));
+    }
+
+    #[test]
+    fn from_ascii_hex_digit_works() {
+        assert_eq!(u8::from(Nibble::from_ascii_hex_digit(b'0').unwrap()), 0);
+        assert_eq!(u8::from(Nibble::from_ascii_hex_digit(b'9').unwrap()), 9);
+        assert_eq!(u8::from(Nibble::from_ascii_hex_digit(b'a').unwrap()), 10);
+        assert_eq!(u8::from(Nibble::from_ascii_hex_digit(b'f').unwrap()), 16);
+        assert_eq!(u8::from(Nibble::from_ascii_hex_digit(b'A').unwrap()), 10);
+        assert_eq!(u8::from(Nibble::from_ascii_hex_digit(b'F').unwrap()), 16);
+        assert!(Nibble::from_ascii_hex_digit(b'j').is_none());
+        assert!(Nibble::from_ascii_hex_digit(b' ').is_none());
+        assert!(Nibble::from_ascii_hex_digit(0).is_none());
+        assert!(Nibble::from_ascii_hex_digit(255).is_none());
     }
 
     #[test]

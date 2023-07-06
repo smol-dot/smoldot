@@ -1038,7 +1038,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             closest_descendant_merkle_value: None,
                                         })
                                     }
-                                    sync_service::StorageResultItem::ClosestDescendantMerkleValue { requested_key, closest_descendant_merkle_value: merkle_value } => {
+                                    sync_service::StorageResultItem::ClosestDescendantMerkleValue { requested_key, closest_descendant_merkle_value: merkle_value, .. } => {
                                         Some(methods::ChainHeadStorageResponseItem {
                                             key: methods::HexString(requested_key),
                                             value: None,

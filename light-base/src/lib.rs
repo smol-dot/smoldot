@@ -1170,6 +1170,7 @@ async fn start_services<TPlat: platform::PlatformRef>(
                             sync_service::ConfigRelayChainRuntimeCodeHint {
                                 storage_value: hint.code,
                                 merkle_value: hint.code_merkle_value,
+                                closest_ancestor_excluding: hint.closest_ancestor_excluding,
                             }
                         }),
                     },

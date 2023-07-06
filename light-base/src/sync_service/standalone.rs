@@ -89,6 +89,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
             code_trie_node_hint: runtime_code_hint.map(|hint| all::ConfigCodeTrieNodeHint {
                 merkle_value: hint.merkle_value,
                 storage_value: hint.storage_value,
+                closest_ancestor_excluding: hint.closest_ancestor_excluding,
             }),
         }),
         network_up_to_date_best: true,
@@ -649,6 +650,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 sync,
                 finalized_block_runtime,
                 finalized_storage_code,
+                finalized_storage_code_closest_ancestor_excluding,
                 finalized_storage_heap_pages,
                 finalized_storage_code_merkle_value,
             } => {
@@ -671,6 +673,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     storage_code: finalized_storage_code,
                     storage_heap_pages: finalized_storage_heap_pages,
                     code_merkle_value: finalized_storage_code_merkle_value,
+                    closest_ancestor_excluding: finalized_storage_code_closest_ancestor_excluding,
                 });
 
                 self.network_up_to_date_finalized = false;
