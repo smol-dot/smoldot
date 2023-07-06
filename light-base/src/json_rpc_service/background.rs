@@ -37,17 +37,16 @@ use core::{
     sync::atomic,
     time::Duration,
 };
-use futures_util::{future, FutureExt as _};
+use futures_channel::oneshot;
 use smoldot::{
     executor::{host, runtime_host},
-    header,
     json_rpc::{self, methods, service},
     libp2p::{multiaddr, PeerId},
-    network::protocol,
 };
 
 mod chain_head;
 mod getters;
+mod legacy_state_sub;
 mod state_chain;
 mod transactions;
 
@@ -84,9 +83,16 @@ struct Background<TPlat: PlatformRef> {
     /// See [`StartConfig::transactions_service`].
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
 
-    /// Various information caches about blocks, to potentially reduce the number of network
-    /// requests to perform.
-    cache: Mutex<Cache>,
+    /// Channel where to send requests that concern the legacy JSON-RPC API that are handled by
+    /// a dedicated task.
+    to_legacy: Mutex<async_channel::Sender<legacy_state_sub::Message<TPlat>>>,
+
+    /// When `state_getKeysPaged` is called and the response is truncated, the response is
+    /// inserted in this cache. The API user is likely to call `state_getKeysPaged` again with
+    /// the same parameters, in which case we hit the cache and avoid the networking requests.
+    /// The values are list of keys.
+    state_get_keys_paged_cache:
+        Mutex<lru::LruCache<GetKeysPagedCacheKey, Vec<Vec<u8>>, util::SipHasherBuild>>,
 
     /// Hash of the genesis block.
     /// Keeping the genesis block is important, as the genesis block hash is included in
@@ -110,56 +116,7 @@ struct Background<TPlat: PlatformRef> {
     >,
 }
 
-struct Cache {
-    /// When the runtime service reports a new block, it is kept pinned and inserted in this LRU
-    /// cache. When an entry in removed from the cache, it is unpinned.
-    ///
-    /// JSON-RPC clients are more likely to ask for information about recent blocks and perform
-    /// calls on them, hence a cache of recent blocks.
-    recent_pinned_blocks: lru::LruCache<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
-
-    /// Subscription on the runtime service under which the blocks of
-    /// [`Cache::recent_pinned_blocks`] are pinned.
-    ///
-    /// Contains `None` only at initialization, in which case [`Cache::recent_pinned_blocks`]
-    /// is guaranteed to be empty. In other words, if a block is found in
-    /// [`Cache::recent_pinned_blocks`] then this field is guaranteed to be `Some`.
-    subscription_id: Option<runtime_service::SubscriptionId>,
-
-    /// State trie root hashes and numbers of blocks that were not in
-    /// [`Cache::recent_pinned_blocks`].
-    ///
-    /// The state trie root hash can also be an `Err` if the network request failed or if the
-    /// header is of an invalid format.
-    ///
-    /// The state trie root hash and number are wrapped in a `Shared` future. When multiple
-    /// requests need the state trie root hash and number of the same block, they are only queried
-    /// once and the query is inserted in the cache while in progress. This way, the multiple
-    /// requests can all wait on that single future.
-    ///
-    /// Most of the time, the JSON-RPC client will query blocks that are found in
-    /// [`Cache::recent_pinned_blocks`], but occasionally it will query older blocks. When the
-    /// storage of an older block is queried, it is common for the JSON-RPC client to make several
-    /// storage requests to that same old block. In order to avoid having to retrieve the state
-    /// trie root hash multiple, we store these hashes in this LRU cache.
-    block_state_root_hashes_numbers: lru::LruCache<
-        [u8; 32],
-        future::MaybeDone<
-            future::Shared<
-                future::BoxFuture<'static, Result<([u8; 32], u64), StateTrieRootHashError>>,
-            >,
-        >,
-        fnv::FnvBuildHasher,
-    >,
-
-    /// When `state_getKeysPaged` is called and the response is truncated, the response is
-    /// inserted in this cache. The API user is likely to call `state_getKeysPaged` again with
-    /// the same parameters, in which case we hit the cache and avoid the networking requests.
-    /// The values are list of keys.
-    state_get_keys_paged: lru::LruCache<GetKeysPagedCacheKey, Vec<Vec<u8>>, util::SipHasherBuild>,
-}
-
-/// See [`Cache::state_get_keys_paged`].
+/// See [`Background::state_get_keys_paged_cache`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct GetKeysPagedCacheKey {
     /// Value of the `hash` parameter of the call to `state_getKeysPaged`.
@@ -173,8 +130,14 @@ pub(super) fn start<TPlat: PlatformRef>(
     config: StartConfig<'_, TPlat>,
     mut requests_processing_task: service::ClientMainTask,
     max_parallel_requests: NonZeroU32,
-    background_abort_registrations: Vec<future::AbortRegistration>,
 ) {
+    let to_legacy_tx = legacy_state_sub::start_task(legacy_state_sub::Config {
+        platform: config.platform.clone(),
+        log_target: log_target.clone(),
+        sync_service: config.sync_service.clone(),
+        runtime_service: config.runtime_service.clone(),
+    });
+
     let me = Arc::new(Background {
         log_target,
         platform: config.platform,
@@ -189,27 +152,15 @@ pub(super) fn start<TPlat: PlatformRef>(
         sync_service: config.sync_service.clone(),
         runtime_service: config.runtime_service.clone(),
         transactions_service: config.transactions_service.clone(),
-        cache: Mutex::new(Cache {
-            recent_pinned_blocks: lru::LruCache::with_hasher(
-                NonZeroUsize::new(32).unwrap(),
-                Default::default(),
-            ),
-            subscription_id: None,
-            block_state_root_hashes_numbers: lru::LruCache::with_hasher(
-                NonZeroUsize::new(32).unwrap(),
-                Default::default(),
-            ),
-            state_get_keys_paged: lru::LruCache::with_hasher(
-                NonZeroUsize::new(2).unwrap(),
-                util::SipHasherBuild::new(rand::random()),
-            ),
-        }),
+        to_legacy: Mutex::new(to_legacy_tx.clone()),
+        state_get_keys_paged_cache: Mutex::new(lru::LruCache::with_hasher(
+            NonZeroUsize::new(2).unwrap(),
+            util::SipHasherBuild::new(rand::random()),
+        )),
         genesis_block_hash: config.genesis_block_hash,
         printed_legacy_json_rpc_warning: atomic::AtomicBool::new(false),
         chain_head_follow_tasks: Mutex::new(hashbrown::HashMap::with_hasher(Default::default())),
     });
-
-    let mut background_abort_registrations = background_abort_registrations.into_iter();
 
     let (tx, rx) = async_channel::bounded(
         usize::try_from(max_parallel_requests.get()).unwrap_or(usize::max_value()),
@@ -236,7 +187,23 @@ pub(super) fn start<TPlat: PlatformRef>(
                             subscription_start,
                         } => {
                             requests_processing_task = task;
-                            tx.send(either::Right(subscription_start)).await.unwrap();
+                            match subscription_start.request() {
+                                methods::MethodCall::chain_subscribeAllHeads {}
+                                | methods::MethodCall::chain_subscribeNewHeads {}
+                                | methods::MethodCall::chain_subscribeFinalizedHeads {}
+                                | methods::MethodCall::state_subscribeRuntimeVersion {}
+                                | methods::MethodCall::state_subscribeStorage { .. } => {
+                                    me.to_legacy
+                                        .lock()
+                                        .await
+                                        .send(legacy_state_sub::Message::SubscriptionStart(
+                                            subscription_start,
+                                        ))
+                                        .await
+                                        .unwrap();
+                                }
+                                _ => tx.send(either::Right(subscription_start)).await.unwrap(),
+                            }
                         }
                         service::Event::SubscriptionDestroyed {
                             task,
@@ -248,6 +215,14 @@ pub(super) fn start<TPlat: PlatformRef>(
                                 .lock()
                                 .await
                                 .remove(&subscription_id);
+                            me.to_legacy
+                                .lock()
+                                .await
+                                .send(legacy_state_sub::Message::SubscriptionDestroyed {
+                                    subscription_id,
+                                })
+                                .await
+                                .unwrap();
                         }
                         service::Event::SerializedRequestsIoClosed => {
                             break;
@@ -280,114 +255,11 @@ pub(super) fn start<TPlat: PlatformRef>(
             },
         );
     }
-
-    // Spawn one task dedicated to filling the `Cache` with new blocks from the runtime
-    // service.
-    // TODO: this is actually racy, as a block subscription task could report a new block to a client, and then client can query it, before this block has been been added to the cache
-    // TODO: extract to separate function
-    me.platform
-        .clone()
-        .spawn_task(format!("{}-cache-populate", me.log_target).into(), {
-            future::Abortable::new(
-                async move {
-                    loop {
-                        let mut cache = me.cache.lock().await;
-
-                        // Subscribe to new runtime service blocks in order to push them in the
-                        // cache as soon as they are available.
-                        // The buffer size should be large enough so that, if the CPU is busy, it
-                        // doesn't become full before the execution of this task resumes.
-                        // The maximum number of pinned block is ignored, as this maximum is a way to
-                        // avoid malicious behaviors. This code is by definition not considered
-                        // malicious.
-                        let mut subscribe_all = me
-                            .runtime_service
-                            .subscribe_all(
-                                "json-rpc-blocks-cache",
-                                32,
-                                NonZeroUsize::new(usize::max_value()).unwrap(),
-                            )
-                            .await;
-
-                        cache.subscription_id = Some(subscribe_all.new_blocks.id());
-                        cache.recent_pinned_blocks.clear();
-                        debug_assert!(cache.recent_pinned_blocks.cap().get() >= 1);
-
-                        let finalized_block_hash = header::hash_from_scale_encoded_header(
-                            &subscribe_all.finalized_block_scale_encoded_header,
-                        );
-                        cache.recent_pinned_blocks.put(
-                            finalized_block_hash,
-                            subscribe_all.finalized_block_scale_encoded_header,
-                        );
-
-                        for block in subscribe_all.non_finalized_blocks_ancestry_order {
-                            if cache.recent_pinned_blocks.len()
-                                == cache.recent_pinned_blocks.cap().get()
-                            {
-                                let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
-                                subscribe_all.new_blocks.unpin_block(&hash).await;
-                            }
-
-                            let hash =
-                                header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                            cache
-                                .recent_pinned_blocks
-                                .put(hash, block.scale_encoded_header);
-                        }
-
-                        drop(cache);
-
-                        loop {
-                            let notification = subscribe_all.new_blocks.next().await;
-                            match notification {
-                                Some(runtime_service::Notification::Block(block)) => {
-                                    let mut cache = me.cache.lock().await;
-
-                                    if cache.recent_pinned_blocks.len()
-                                        == cache.recent_pinned_blocks.cap().get()
-                                    {
-                                        let (hash, _) =
-                                            cache.recent_pinned_blocks.pop_lru().unwrap();
-                                        subscribe_all.new_blocks.unpin_block(&hash).await;
-                                    }
-
-                                    let hash = header::hash_from_scale_encoded_header(
-                                        &block.scale_encoded_header,
-                                    );
-                                    cache
-                                        .recent_pinned_blocks
-                                        .put(hash, block.scale_encoded_header);
-                                }
-                                Some(runtime_service::Notification::Finalized { .. })
-                                | Some(runtime_service::Notification::BestBlockChanged {
-                                    ..
-                                }) => {}
-                                None => break,
-                            }
-                        }
-                    }
-                },
-                background_abort_registrations.next().unwrap(),
-            )
-            .map(|_: Result<(), _>| ())
-            .boxed()
-        });
-
-    debug_assert!(background_abort_registrations.next().is_none());
 }
 
 impl<TPlat: PlatformRef> Background<TPlat> {
     /// Pulls one request from the inner state machine, and processes it.
     async fn handle_request(self: &Arc<Self>, request: service::RequestProcess) {
-        // TODO: restore some form of logging
-        /*log::debug!(target: &self.log_target, "PendingRequestsQueue => {}",
-            crate::util::truncated_str(
-                json_rpc_request.chars().filter(|c| !c.is_control()),
-                100,
-            )
-        );*/
-
         // Print a warning for legacy JSON-RPC functions.
         match request.request() {
             methods::MethodCall::account_nextIndex { .. }
@@ -761,20 +633,12 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             methods::MethodCall::author_submitAndWatchExtrinsic { .. } => {
                 self.submit_and_watch_transaction(request).await
             }
-            methods::MethodCall::chain_subscribeAllHeads {} => {
-                self.chain_subscribe_all_heads(request).await;
-            }
-            methods::MethodCall::chain_subscribeFinalizedHeads {} => {
-                self.chain_subscribe_finalized_heads(request).await;
-            }
-            methods::MethodCall::chain_subscribeNewHeads {} => {
-                self.chain_subscribe_new_heads(request).await;
-            }
-            methods::MethodCall::state_subscribeRuntimeVersion {} => {
-                self.state_subscribe_runtime_version(request).await;
-            }
-            methods::MethodCall::state_subscribeStorage { .. } => {
-                self.state_subscribe_storage(request).await;
+            methods::MethodCall::chain_subscribeAllHeads {}
+            | methods::MethodCall::chain_subscribeFinalizedHeads {}
+            | methods::MethodCall::chain_subscribeNewHeads {}
+            | methods::MethodCall::state_subscribeRuntimeVersion {}
+            | methods::MethodCall::state_subscribeStorage { .. } => {
+                unreachable!()
             }
 
             methods::MethodCall::chainHead_unstable_body { .. } => {
@@ -850,97 +714,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         }
     }
 
-    /// Obtain the state trie root hash and number of the given block, and make sure to put it
-    /// in cache.
-    async fn state_trie_root_hash(
-        &self,
-        hash: &[u8; 32],
-    ) -> Result<([u8; 32], u64), StateTrieRootHashError> {
-        let fetch = {
-            // Try to find an existing entry in cache, and if not create one.
-            let mut cache_lock = self.cache.lock().await;
-
-            // Look in `recent_pinned_blocks`.
-            match cache_lock
-                .recent_pinned_blocks
-                .get(hash)
-                .map(|h| header::decode(h, self.sync_service.block_number_bytes()))
-            {
-                Some(Ok(header)) => return Ok((*header.state_root, header.number)),
-                Some(Err(err)) => return Err(StateTrieRootHashError::HeaderDecodeError(err)), // TODO: can this actually happen? unclear
-                None => {}
-            }
-
-            // Look in `block_state_root_hashes`.
-            match cache_lock.block_state_root_hashes_numbers.get(hash) {
-                Some(future::MaybeDone::Done(Ok(val))) => return Ok(*val),
-                Some(future::MaybeDone::Future(f)) => f.clone(),
-                Some(future::MaybeDone::Gone) => unreachable!(), // We never use `Gone`.
-                Some(future::MaybeDone::Done(Err(
-                    err @ StateTrieRootHashError::HeaderDecodeError(_),
-                ))) => {
-                    // In case of a fatal error, return immediately.
-                    return Err(err.clone());
-                }
-                Some(future::MaybeDone::Done(Err(StateTrieRootHashError::NetworkQueryError)))
-                | None => {
-                    // No existing cache entry. Create the future that will perform the fetch
-                    // but do not actually start doing anything now.
-                    let fetch = {
-                        let sync_service = self.sync_service.clone();
-                        let hash = *hash;
-                        async move {
-                            // The sync service knows which peers are potentially aware of
-                            // this block.
-                            let result = sync_service
-                                .clone()
-                                .block_query_unknown_number(
-                                    hash,
-                                    protocol::BlocksRequestFields {
-                                        header: true,
-                                        body: false,
-                                        justifications: false,
-                                    },
-                                    4,
-                                    Duration::from_secs(8),
-                                    NonZeroU32::new(2).unwrap(),
-                                )
-                                .await;
-
-                            if let Ok(block) = result {
-                                // If successful, the `block_query` function guarantees that the
-                                // header is present and valid.
-                                let header = block.header.unwrap();
-                                debug_assert_eq!(
-                                    header::hash_from_scale_encoded_header(&header),
-                                    hash
-                                );
-                                let decoded =
-                                    header::decode(&header, sync_service.block_number_bytes())
-                                        .unwrap();
-                                Ok((*decoded.state_root, decoded.number))
-                            } else {
-                                // TODO: better error details?
-                                Err(StateTrieRootHashError::NetworkQueryError)
-                            }
-                        }
-                    };
-
-                    // Insert the future in the cache, so that any other call will use the same
-                    // future.
-                    let wrapped = fetch.boxed().shared();
-                    cache_lock
-                        .block_state_root_hashes_numbers
-                        .put(*hash, future::maybe_done(wrapped.clone()));
-                    wrapped
-                }
-            }
-        };
-
-        // We await separately to be certain that the lock isn't held anymore.
-        fetch.await
-    }
-
     async fn storage_query(
         &self,
         keys: impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone,
@@ -949,10 +722,25 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         timeout_per_request: Duration,
         max_parallel: NonZeroU32,
     ) -> Result<Vec<Option<Vec<u8>>>, StorageQueryError> {
-        let (state_trie_root_hash, block_number) = self
-            .state_trie_root_hash(hash)
-            .await
-            .map_err(StorageQueryError::FindStorageRootHashError)?;
+        let (state_trie_root_hash, block_number) = {
+            let (tx, rx) = oneshot::channel();
+            self.to_legacy
+                .lock()
+                .await
+                .send(legacy_state_sub::Message::BlockStateRootAndNumber {
+                    block_hash: *hash,
+                    result_tx: tx,
+                })
+                .await
+                .unwrap();
+
+            match rx.await.unwrap() {
+                Ok(v) => v,
+                Err(err) => {
+                    return Err(StorageQueryError::FindStorageRootHashError(err));
+                }
+            }
+        };
 
         let result = self
             .sync_service
@@ -997,114 +785,124 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         self: &Arc<Self>,
         block_hash: &[u8; 32],
     ) -> Result<runtime_service::RuntimeAccess<TPlat>, RuntimeCallError> {
-        let cache_lock = self.cache.lock().await;
-
         // Try to find the block in the cache of recent blocks. Most of the time, the call target
         // should be in there.
-        let lock = if cache_lock.recent_pinned_blocks.contains(block_hash) {
-            // The runtime service has the block pinned, meaning that we can ask the runtime
-            // service to perform the call.
-            self.runtime_service
-                .pinned_block_runtime_access(cache_lock.subscription_id.unwrap(), block_hash)
+        if let Some(runtime_access) = {
+            let (tx, rx) = oneshot::channel();
+            self.to_legacy
+                .lock()
                 .await
-                .ok()
-        } else {
-            None
+                .send(legacy_state_sub::Message::RecentBlockRuntimeAccess {
+                    block_hash: *block_hash,
+                    result_tx: tx,
+                })
+                .await
+                .unwrap();
+            rx.await.unwrap()
+        } {
+            return Ok(runtime_access);
         };
 
-        Ok(if let Some(lock) = lock {
-            lock
-        } else {
-            // Second situation: the block is not in the cache of recent blocks. This isn't great.
-            drop::<async_lock::MutexGuard<_>>(cache_lock);
+        // Second situation: the block is not in the cache of recent blocks. This isn't great.
+        // The only solution is to download the runtime of the block in question from the network.
 
-            // The only solution is to download the runtime of the block in question from the network.
+        // TODO: considering caching the runtime code the same way as the state trie root hash
 
-            // TODO: considering caching the runtime code the same way as the state trie root hash
-
-            // In order to grab the runtime code and perform the call network request, we need
-            // to know the state trie root hash and the height of the block.
-            let (state_trie_root_hash, block_number) = self
-                .state_trie_root_hash(block_hash)
+        // In order to grab the runtime code and perform the call network request, we need
+        // to know the state trie root hash and the height of the block.
+        let (state_trie_root_hash, block_number) = {
+            let (tx, rx) = oneshot::channel();
+            self.to_legacy
+                .lock()
                 .await
-                .map_err(RuntimeCallError::FindStorageRootHashError)?;
+                .send(legacy_state_sub::Message::BlockStateRootAndNumber {
+                    block_hash: *block_hash,
+                    result_tx: tx,
+                })
+                .await
+                .unwrap();
 
-            // Download the runtime of this block. This takes a long time as the runtime is rather
-            // big (around 1MiB in general).
-            let (storage_code, storage_heap_pages) = {
-                let entries = self
-                    .sync_service
-                    .clone()
-                    .storage_query(
-                        block_number,
-                        block_hash,
-                        &state_trie_root_hash,
-                        [
-                            sync_service::StorageRequestItem {
-                                key: b":code".to_vec(),
-                                ty: sync_service::StorageRequestItemTy::Value,
-                            },
-                            sync_service::StorageRequestItem {
-                                key: b":heappages".to_vec(),
-                                ty: sync_service::StorageRequestItemTy::Value,
-                            },
-                        ]
-                        .into_iter(),
-                        3,
-                        Duration::from_secs(20),
-                        NonZeroU32::new(1).unwrap(),
-                    )
-                    .await
-                    .map_err(runtime_service::RuntimeCallError::StorageQuery)
-                    .map_err(RuntimeCallError::Call)?;
-                // TODO: not elegant
-                let heap_pages = entries
-                    .iter()
-                    .find_map(|entry| match entry {
-                        sync_service::StorageResultItem::Value { key, value }
-                            if key == b":heappages" =>
-                        {
-                            Some(value.clone()) // TODO: overhead
-                        }
-                        _ => None,
-                    })
-                    .unwrap();
-                let code = entries
-                    .iter()
-                    .find_map(|entry| match entry {
-                        sync_service::StorageResultItem::Value { key, value }
-                            if key == b":code" =>
-                        {
-                            Some(value.clone()) // TODO: overhead
-                        }
-                        _ => None,
-                    })
-                    .unwrap();
-                (code, heap_pages)
-            };
+            match rx.await.unwrap() {
+                Ok(v) => v,
+                Err(err) => {
+                    return Err(RuntimeCallError::FindStorageRootHashError(err));
+                }
+            }
+        };
 
-            // Give the code and heap pages to the runtime service. The runtime service will
-            // try to find any similar runtime it might have, and if not will compile it.
-            let pinned_runtime_id = self
-                .runtime_service
-                .compile_and_pin_runtime(storage_code, storage_heap_pages)
-                .await;
-
-            let precall = self
-                .runtime_service
-                .pinned_runtime_access(
-                    pinned_runtime_id.clone(),
-                    *block_hash,
+        // Download the runtime of this block. This takes a long time as the runtime is rather
+        // big (around 1MiB in general).
+        let (storage_code, storage_heap_pages) = {
+            let entries = self
+                .sync_service
+                .clone()
+                .storage_query(
                     block_number,
-                    state_trie_root_hash,
+                    block_hash,
+                    &state_trie_root_hash,
+                    [
+                        sync_service::StorageRequestItem {
+                            key: b":code".to_vec(),
+                            ty: sync_service::StorageRequestItemTy::Value,
+                        },
+                        sync_service::StorageRequestItem {
+                            key: b":heappages".to_vec(),
+                            ty: sync_service::StorageRequestItemTy::Value,
+                        },
+                    ]
+                    .into_iter(),
+                    3,
+                    Duration::from_secs(20),
+                    NonZeroU32::new(1).unwrap(),
                 )
-                .await;
+                .await
+                .map_err(runtime_service::RuntimeCallError::StorageQuery)
+                .map_err(RuntimeCallError::Call)?;
+            // TODO: not elegant
+            let heap_pages = entries
+                .iter()
+                .find_map(|entry| match entry {
+                    sync_service::StorageResultItem::Value { key, value }
+                        if key == b":heappages" =>
+                    {
+                        Some(value.clone()) // TODO: overhead
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let code = entries
+                .iter()
+                .find_map(|entry| match entry {
+                    sync_service::StorageResultItem::Value { key, value } if key == b":code" => {
+                        Some(value.clone()) // TODO: overhead
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            (code, heap_pages)
+        };
 
-            // TODO: consider keeping pinned runtimes in a cache instead
-            self.runtime_service.unpin_runtime(pinned_runtime_id).await;
+        // Give the code and heap pages to the runtime service. The runtime service will
+        // try to find any similar runtime it might have, and if not will compile it.
+        let pinned_runtime_id = self
+            .runtime_service
+            .compile_and_pin_runtime(storage_code, storage_heap_pages)
+            .await;
 
-            precall
-        })
+        let precall = self
+            .runtime_service
+            .pinned_runtime_access(
+                pinned_runtime_id.clone(),
+                *block_hash,
+                block_number,
+                state_trie_root_hash,
+            )
+            .await;
+
+        // TODO: consider keeping pinned runtimes in a cache instead
+        self.runtime_service.unpin_runtime(pinned_runtime_id).await;
+
+        Ok(precall)
     }
 
     /// Performs a runtime call to a random block.
@@ -1315,7 +1113,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 enum StorageQueryError {
     /// Error while finding the storage root hash of the requested block.
     #[display(fmt = "Failed to obtain block state trie root: {_0}")]
-    FindStorageRootHashError(StateTrieRootHashError),
+    FindStorageRootHashError(legacy_state_sub::StateTrieRootHashError),
     /// Error while retrieving the storage item from other nodes.
     #[display(fmt = "{_0}")]
     StorageRetrieval(sync_service::StorageQueryError),
@@ -1326,7 +1124,7 @@ enum StorageQueryError {
 enum RuntimeCallError {
     /// Error while finding the storage root hash of the requested block.
     #[display(fmt = "Failed to obtain block state trie root: {_0}")]
-    FindStorageRootHashError(StateTrieRootHashError),
+    FindStorageRootHashError(legacy_state_sub::StateTrieRootHashError),
     #[display(fmt = "{_0}")]
     Call(runtime_service::RuntimeCallError),
     #[display(fmt = "{_0}")]
@@ -1342,15 +1140,6 @@ enum RuntimeCallError {
         /// Version that the runtime supports.
         actual_version: u32,
     },
-}
-
-/// Error potentially returned by [`Background::state_trie_root_hash`].
-#[derive(Debug, derive_more::Display, Clone)]
-enum StateTrieRootHashError {
-    /// Failed to decode block header.
-    HeaderDecodeError(header::Error),
-    /// Error while fetching block header from network.
-    NetworkQueryError,
 }
 
 #[derive(Debug)]
