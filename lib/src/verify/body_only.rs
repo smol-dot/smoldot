@@ -111,9 +111,6 @@ pub struct Success {
     /// [`Success::storage_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
 
-    /// List of changes to the off-chain storage that this block performs.
-    pub offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
-
     /// Concatenation of all the log messages printed by the runtime.
     pub logs: String,
 }
@@ -263,7 +260,6 @@ pub fn verify(
                     .chain(encoded_list.map(either::Right))
             },
             storage_main_trie_changes: Default::default(),
-            offchain_storage_changes: Default::default(),
             max_log_level: config.max_log_level,
         });
 
@@ -304,6 +300,8 @@ pub enum Verify {
     StorageClosestDescendantMerkleValue(StorageClosestDescendantMerkleValue),
     /// Fetching the key that follows a given one is required in order to continue.
     StorageNextKey(StorageNextKey),
+    /// Setting the value of an offchain storage value is required.
+    OffchainStorageSet(OffchainStorageSet),
 }
 
 struct VerifyInner {
@@ -356,7 +354,6 @@ impl VerifyInner {
                             storage_main_trie_changes: success
                                 .storage_changes
                                 .into_main_trie_diff(),
-                            offchain_storage_changes: success.offchain_storage_changes,
                             max_log_level: 0,
                         });
 
@@ -434,7 +431,6 @@ impl VerifyInner {
                                 heap_pages,
                                 parent_code,
                                 logs: success.logs,
-                                offchain_storage_changes: success.offchain_storage_changes,
                                 storage_changes: success.storage_changes,
                                 state_trie_version: success.state_trie_version,
                             });
@@ -446,7 +442,6 @@ impl VerifyInner {
                         new_runtime: None,
                         storage_changes: success.storage_changes,
                         state_trie_version: success.state_trie_version,
-                        offchain_storage_changes: success.offchain_storage_changes,
                         logs: success.logs,
                     }));
                 }
@@ -463,6 +458,9 @@ impl VerifyInner {
                 }
                 (runtime_host::RuntimeHostVm::NextKey(inner), phase) => {
                     break Verify::StorageNextKey(StorageNextKey { inner, phase })
+                }
+                (runtime_host::RuntimeHostVm::OffchainStorageSet(inner), phase) => {
+                    break Verify::OffchainStorageSet(OffchainStorageSet { inner, phase })
                 }
                 (runtime_host::RuntimeHostVm::SignatureVerification(sig), phase) => {
                     self.inner = sig.verify_and_resume();
@@ -634,6 +632,37 @@ impl StorageNextKey {
     }
 }
 
+/// Setting the value of an offchain storage value is required.
+#[must_use]
+pub struct OffchainStorageSet {
+    inner: runtime_host::OffchainStorageSet,
+    /// See [`VerifyInner::phase`].
+    phase: VerifyInnerPhase,
+}
+
+impl OffchainStorageSet {
+    /// Returns the key whose value must be set.
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+        self.inner.key()
+    }
+
+    /// Returns the value to set.
+    ///
+    /// If `None` is returned, the key should be removed from the storage entirely.
+    pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.inner.value()
+    }
+
+    /// Resumes execution after having set the value.
+    pub fn resume(self) -> Verify {
+        VerifyInner {
+            inner: self.inner.resume(),
+            phase: self.phase,
+        }
+        .run()
+    }
+}
+
 /// A new runtime must be compiled.
 ///
 /// This variant doesn't require any specific input from the user, but is provided in order to
@@ -643,7 +672,6 @@ pub struct RuntimeCompilation {
     parent_runtime: host::HostVmPrototype,
     storage_changes: StorageChanges,
     state_trie_version: TrieEntryVersion,
-    offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
     logs: String,
     heap_pages: vm::HeapPages,
     parent_code: Option<Option<Vec<u8>>>,
@@ -680,7 +708,6 @@ impl RuntimeCompilation {
             new_runtime: Some(new_runtime),
             storage_changes: self.storage_changes,
             state_trie_version: self.state_trie_version,
-            offchain_storage_changes: self.offchain_storage_changes,
             logs: self.logs,
         }))
     }

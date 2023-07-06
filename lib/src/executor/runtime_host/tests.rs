@@ -95,7 +95,6 @@ fn execute_blocks() {
             virtual_machine,
             function_to_call: "Core_execute_block",
             max_log_level: 3,
-            offchain_storage_changes: Default::default(),
             storage_main_trie_changes: Default::default(),
             parameter: {
                 // Block header + number of extrinsics + extrinsics
@@ -179,7 +178,7 @@ fn execute_blocks() {
 
                     execution = req.inject_key(next_key.map(|nk| nk.into_iter()));
                 }
-                RuntimeHostVm::Offchain(_req) => {
+                RuntimeHostVm::OffchainStorageSet(_) | RuntimeHostVm::Offchain(_) => {
                     unimplemented!()
                 }
             }

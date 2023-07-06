@@ -74,10 +74,6 @@ pub struct Config<'a, TParams> {
     // TODO: accept also child trie modifications
     pub storage_main_trie_changes: storage_diff::TrieDiff,
 
-    /// Initial state of [`Success::offchain_storage_changes`]. The changes made during this
-    /// execution will be pushed over the value in this field.
-    pub offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
-
     /// Maximum log level of the runtime.
     ///
     /// > **Note**: This value is opaque from the point of the view of the client, and the runtime
@@ -114,11 +110,11 @@ pub fn run(
                 Default::default(),
             ),
             tries_changes: BTreeMap::new(),
-            offchain_index: hashbrown::HashMap::default(),
+            offchain_storage_changes: BTreeMap::new(),
         },
         state_trie_version,
         transactions_stack: Vec::new(),
-        offchain_storage_changes: config.offchain_storage_changes,
+        offchain_storage_changes: BTreeMap::new(),
         root_calculation: None,
         logs: String::new(),
         max_log_level: config.max_log_level,
@@ -137,8 +133,6 @@ pub struct Success {
     /// State trie version indicated by the runtime. All the storage changes indicated by
     /// [`Success::storage_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
-    /// List of changes to the off-chain storage that this block performs.
-    pub offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
     /// Concatenation of all the log messages printed by the runtime.
     pub logs: String,
 }
@@ -413,6 +407,11 @@ pub enum RuntimeHostVm {
     NextKey(NextKey),
     /// Verifying whether a signature is correct is required in order to continue.
     SignatureVerification(SignatureVerification),
+    /// Setting an offchain storage value is required in order to continue.
+    ///
+    /// Contrary to [`RuntimeHostVm::Offchain::StorageSet`], this variant is allowed to happen
+    /// outside of offchain workers.
+    OffchainStorageSet(OffchainStorageSet),
     /// Functions that can only be called within the context of an offchain worker.
     Offchain(OffchainContext),
 }
@@ -427,6 +426,7 @@ impl RuntimeHostVm {
             RuntimeHostVm::ClosestDescendantMerkleValue(inner) => inner.inner.vm.into_prototype(),
             RuntimeHostVm::NextKey(inner) => inner.inner.vm.into_prototype(),
             RuntimeHostVm::SignatureVerification(inner) => inner.inner.vm.into_prototype(),
+            RuntimeHostVm::OffchainStorageSet(inner) => inner.inner.vm.into_prototype(),
             RuntimeHostVm::Offchain(inner) => inner.into_prototype(),
         }
     }
@@ -435,6 +435,11 @@ impl RuntimeHostVm {
 pub enum OffchainContext {
     /// Loading an offchain storage value is required in order to continue.
     StorageGet(OffchainStorageGet),
+    /// Setting an offchain storage value is required in order to continue.
+    ///
+    /// Contrary to [`RuntimeHostVm::OffchainStorageSet`], this variant can only happen in offchain
+    /// workers.
+    StorageSet(OffchainStorageCompareSet),
     /// Timestamp for offchain worker.
     Timestamp(OffchainTimestamp),
     /// Random seed for offchain worker.
@@ -447,6 +452,7 @@ impl OffchainContext {
     pub fn into_prototype(self) -> host::HostVmPrototype {
         match self {
             OffchainContext::StorageGet(inner) => inner.inner.vm.into_prototype(),
+            OffchainContext::StorageSet(inner) => inner.inner.vm.into_prototype(),
             OffchainContext::Timestamp(inner) => inner.inner.vm.into_prototype(),
             OffchainContext::RandomSeed(inner) => inner.inner.vm.into_prototype(),
             OffchainContext::SubmitTransaction(inner) => inner.inner.vm.into_prototype(),
@@ -938,13 +944,132 @@ impl OffchainStorageGet {
     pub fn inject_value(mut self, value: Option<impl AsRef<[u8]>>) -> RuntimeHostVm {
         match self.inner.vm {
             host::HostVm::ExternalOffchainStorageGet(req) => {
-                self.inner.offchain_storage_changes.insert(
-                    req.key().as_ref().to_vec(),
-                    value.as_ref().map(|v| v.as_ref().to_vec()),
-                );
                 self.inner.vm = req.resume(value.as_ref().map(|v| v.as_ref()));
             }
             // We only create a `OffchainStorageGet` if the state is one of the above.
+            _ => unreachable!(),
+        };
+
+        self.inner.run()
+    }
+}
+
+/// Setting the value of an offchain storage value is required.
+#[must_use]
+pub struct OffchainStorageSet {
+    inner: Inner,
+}
+
+impl OffchainStorageSet {
+    /// Returns the key whose value must be set.
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+        match &self.inner.vm {
+            host::HostVm::Finished(_) => {
+                self.inner
+                    .offchain_storage_changes
+                    .first_key_value()
+                    .unwrap()
+                    .0
+            }
+            // We only create a `OffchainStorageSet` if the state is one of the above.
+            _ => unreachable!(),
+        }
+    }
+
+    /// Returns the value to set.
+    ///
+    /// If `None` is returned, the key should be removed from the storage entirely.
+    pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        match &self.inner.vm {
+            host::HostVm::Finished(_) => self
+                .inner
+                .offchain_storage_changes
+                .first_key_value()
+                .unwrap()
+                .1
+                .as_ref(),
+            // We only create a `OffchainStorageSet` if the state is one of the above.
+            _ => unreachable!(),
+        }
+    }
+
+    /// Resumes execution after having set the value.
+    pub fn resume(mut self) -> RuntimeHostVm {
+        match self.inner.vm {
+            host::HostVm::Finished(_) => {
+                self.inner.offchain_storage_changes.pop_first();
+            }
+            // We only create a `OffchainStorageSet` if the state is one of the above.
+            _ => unreachable!(),
+        };
+
+        self.inner.run()
+    }
+}
+
+/// Setting the value of an offchain storage value is required.
+#[must_use]
+pub struct OffchainStorageCompareSet {
+    inner: Inner,
+}
+
+impl OffchainStorageCompareSet {
+    /// Returns the key whose value must be set.
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+        match &self.inner.vm {
+            host::HostVm::ExternalOffchainStorageSet(req) => either::Left(req.key()),
+            host::HostVm::Finished(_) => either::Right(
+                self.inner
+                    .offchain_storage_changes
+                    .first_key_value()
+                    .unwrap()
+                    .0,
+            ),
+            // We only create a `OffchainStorageSet` if the state is one of the above.
+            _ => unreachable!(),
+        }
+    }
+
+    /// Returns the value to set.
+    ///
+    /// If `None` is returned, the key should be removed from the storage entirely.
+    pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        match &self.inner.vm {
+            host::HostVm::ExternalOffchainStorageSet(req) => req.value().map(either::Left),
+            host::HostVm::Finished(_) => self
+                .inner
+                .offchain_storage_changes
+                .first_key_value()
+                .unwrap()
+                .1
+                .as_ref()
+                .map(either::Right),
+
+            // We only create a `OffchainStorageSet` if the state is one of the above.
+            _ => unreachable!(),
+        }
+    }
+
+    /// Returns the value the current value should be compared against. The operation is a no-op if they don't compare equal.
+    pub fn old_value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        match &self.inner.vm {
+            host::HostVm::ExternalOffchainStorageSet(req) => req.old_value(),
+            host::HostVm::Finished(_) => None,
+            // We only create a `OffchainStorageSet` if the state is one of the above.
+            _ => unreachable!(),
+        }
+    }
+
+    /// Resumes execution after having set the value. Must indicate whether a value was written.
+    pub fn resume(mut self, replaced: bool) -> RuntimeHostVm {
+        match self.inner.vm {
+            host::HostVm::ExternalOffchainStorageSet(req) => {
+                self.inner.vm = req.resume(replaced);
+            }
+            host::HostVm::Finished(_) => {
+                self.inner.offchain_storage_changes.pop_first();
+            }
+            // We only create a `OffchainStorageSet` if the state is one of the above.
             _ => unreachable!(),
         };
 
@@ -1044,7 +1169,7 @@ struct Inner {
     state_trie_version: TrieEntryVersion,
 
     /// Pending changes to the off-chain storage that this execution performs.
-    offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    offchain_storage_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 
     /// Trie root calculation in progress. Contains the trie whose root is being calculated
     /// (`Some` for a child trie or `None` for the main trie) and the calculation state machine.
@@ -1072,7 +1197,7 @@ struct PendingStorageChanges {
     tries_changes: BTreeMap<(Option<Vec<u8>>, Vec<Nibble>), PendingStorageChangesTrieNode>,
 
     /// Changes to the off-chain storage committed by on-chain transactions.
-    offchain_index: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    offchain_storage_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 }
 
 /// See [`PendingStorageChanges::tries_changes`].
@@ -1303,6 +1428,12 @@ impl Inner {
                 }
             }
 
+            if matches!(self.vm, host::HostVm::Finished(_))
+                && !self.offchain_storage_changes.is_empty()
+            {
+                return RuntimeHostVm::OffchainStorageSet(OffchainStorageSet { inner: self });
+            }
+
             match self.vm {
                 host::HostVm::ReadyToRun(r) => self.vm = r.run(),
 
@@ -1322,16 +1453,7 @@ impl Inner {
                         .pending_storage_changes
                         .stale_child_tries_root_hashes
                         .is_empty());
-
-                    let mut offchain_storage_changes = self.offchain_storage_changes;
-
-                    // apply pending offchain changes into offchain storage
-                    self.pending_storage_changes
-                        .offchain_index
-                        .drain()
-                        .for_each(|(k, v)| {
-                            offchain_storage_changes.insert(k.clone(), v.clone());
-                        });
+                    debug_assert!(self.offchain_storage_changes.is_empty());
 
                     return RuntimeHostVm::Finished(Ok(Success {
                         virtual_machine: SuccessVirtualMachine(finished),
@@ -1339,7 +1461,6 @@ impl Inner {
                             inner: self.pending_storage_changes,
                         },
                         state_trie_version: self.state_trie_version,
-                        offchain_storage_changes,
                         logs: self.logs,
                     }));
                 }
@@ -1463,10 +1584,12 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalOffchainIndexSet(req) => {
-                    self.pending_storage_changes.offchain_index.insert(
-                        req.key().as_ref().to_vec(),
-                        req.value().map(|v| v.as_ref().to_vec()),
-                    );
+                    self.pending_storage_changes
+                        .offchain_storage_changes
+                        .insert(
+                            req.key().as_ref().to_vec(),
+                            req.value().map(|v| v.as_ref().to_vec()),
+                        );
 
                     self.vm = req.resume();
                 }
@@ -1485,23 +1608,10 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalOffchainStorageSet(req) => {
-                    let current_value = self.offchain_storage_changes.get(req.key().as_ref());
-
-                    let replace = match (current_value, req.old_value()) {
-                        (Some(Some(current_value)), Some(old_value)) => {
-                            old_value.as_ref().to_vec().eq(current_value)
-                        }
-                        _ => true,
-                    };
-
-                    if replace {
-                        self.offchain_storage_changes.insert(
-                            req.key().as_ref().to_vec(),
-                            req.value().map(|v| v.as_ref().to_vec()),
-                        );
-                    }
-
-                    self.vm = req.resume(replace);
+                    self.vm = req.into();
+                    return RuntimeHostVm::Offchain(OffchainContext::StorageSet(
+                        OffchainStorageCompareSet { inner: self },
+                    ));
                 }
 
                 host::HostVm::SignatureVerification(req) => {
