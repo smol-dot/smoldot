@@ -96,7 +96,7 @@ pub struct ConfigRelayChain {
 /// See [`ConfigRelayChain::runtime_code_hint`].
 pub struct ConfigRelayChainRuntimeCodeHint {
     /// Storage value of the `:code` trie node corresponding to
-    /// [`ConfigRelayChainRuntimeCodeHint::code_merkle_value`].
+    /// [`ConfigRelayChainRuntimeCodeHint::merkle_value`].
     pub storage_value: Vec<u8>,
     /// Merkle value of the `:code` trie node in the storage main trie.
     pub merkle_value: Vec<u8>,
@@ -868,8 +868,8 @@ pub enum StorageResultItem {
         /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
         requested_key: Vec<u8>,
         /// Closest ancestor to the requested key that was found in the proof. If
-        /// [`StorageResultItem::DescendantValue::closest_descendant_merkle_value`] is `Some`, then
-        /// this is always the parent of the requested key.
+        /// [`StorageResultItem::ClosestDescendantMerkleValue::closest_descendant_merkle_value`]
+        /// is `Some`, then this is always the parent of the requested key.
         found_closest_ancestor_excluding: Option<Vec<Nibble>>,
         /// Merkle value of the closest descendant of
         /// [`StorageResultItem::DescendantValue::requested_key`]. The key that corresponds
