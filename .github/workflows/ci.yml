@@ -54,7 +54,7 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v2
-    - uses: actions/setup-node@v3.6.0
+    - uses: actions/setup-node@v3.7.0
       with:
         node-version: '16'  # An old version is used to ensure compatibility
     - uses: denoland/setup-deno@v1
