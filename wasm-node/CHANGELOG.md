@@ -4,7 +4,7 @@
 
 ### Changed
 
-- The runtime code of the finalized block is now stored in the database. At initialization, smoldot now only downloads the hash of the runtime and compares it with the one in cache. If the hashes match (which is the case if no runtime update has happened on the chain since the database has been created), smoldot doesn't download the runtime code but uses the value in the cache. This saves a relatively heavy download (typically around 1 MiB to 1.5 MiB depending on the chain) and speeds up the loading time.
+- The runtime code of the finalized block is now stored in the database. At initialization, smoldot now only downloads the hash of the runtime and compares it with the one in cache. If the hashes match (which is the case if no runtime update has happened on the chain since the database has been created), smoldot doesn't download the runtime code but uses the value in the cache. This saves a relatively heavy download (typically around 1 MiB to 1.5 MiB depending on the chain) and speeds up the loading time. ([#863](https://github.com/smol-dot/smoldot/pull/863))
 - The `chainHead_unstable_storage` JSON-RPC function now supports a `type` equal to `closest-descendant-merkle-value` and no longer supports `closest-ancestor-merkle-value`, in accordance with the latest changes in the JSON-RPC API specification. ([#824](https://github.com/smol-dot/smoldot/pull/824))
 - Blocks are now reported to `chain_subscribeAllHeads` and `chain_subscribeNewHeads` subscribers only after they have been put in the cache, preventing race conditions where JSON-RPC clients suffer from a cache miss if they ask information about these blocks too quickly. ([#854](https://github.com/smol-dot/smoldot/pull/854))
 - Runtime updates are now always reported to `state_subscribeRuntimeVersion` subscribers immediately after the `chain_subscribeNewHeads` notification corresponding to the block containing the runtime update. They were previously reported in a pseudo-random order. ([#854](https://github.com/smol-dot/smoldot/pull/854))
@@ -12,7 +12,7 @@
 
 ### Fixed
 
-- Fix downloading the runtime code twice during the warp syncing process.
+- Fix downloading the runtime code twice during the warp syncing process. ([#863](https://github.com/smol-dot/smoldot/pull/863))
 
 ## 1.0.11 - 2023-06-25
 
