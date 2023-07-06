@@ -8,7 +8,7 @@
 - Blocks are now reported to `chain_subscribeAllHeads` and `chain_subscribeNewHeads` subscribers only after they have been put in the cache, preventing race conditions where JSON-RPC clients suffer from a cache miss if they ask information about these blocks too quickly. ([#854](https://github.com/smol-dot/smoldot/pull/854))
 - Runtime updates are now always reported to `state_subscribeRuntimeVersion` subscribers immediately after the `chain_subscribeNewHeads` notification corresponding to the block containing the runtime update. They were previously reported in a pseudo-random order. ([#854](https://github.com/smol-dot/smoldot/pull/854))
 - All the storage subscriptions made using `state_subscribeStorage` are now queried together into a single networking request per block, instead of sending one networking query per storage key and per subscription. ([#854](https://github.com/smol-dot/smoldot/pull/854))
-- An `AddChainError` is now thrown if the `databaseContent` parameter is not of type `string`. The database was previously silently ignored.
+- An `AddChainError` is now thrown if the `databaseContent` parameter is not of type `string`. The database was previously silently ignored. ([#861](https://github.com/smol-dot/smoldot/pull/861))
 
 ## 1.0.11 - 2023-06-25
 
