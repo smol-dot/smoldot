@@ -343,9 +343,9 @@ mod tests {
         assert_eq!(u8::from(Nibble::from_ascii_hex_digit(b'0').unwrap()), 0);
         assert_eq!(u8::from(Nibble::from_ascii_hex_digit(b'9').unwrap()), 9);
         assert_eq!(u8::from(Nibble::from_ascii_hex_digit(b'a').unwrap()), 10);
-        assert_eq!(u8::from(Nibble::from_ascii_hex_digit(b'f').unwrap()), 16);
+        assert_eq!(u8::from(Nibble::from_ascii_hex_digit(b'f').unwrap()), 15);
         assert_eq!(u8::from(Nibble::from_ascii_hex_digit(b'A').unwrap()), 10);
-        assert_eq!(u8::from(Nibble::from_ascii_hex_digit(b'F').unwrap()), 16);
+        assert_eq!(u8::from(Nibble::from_ascii_hex_digit(b'F').unwrap()), 15);
         assert!(Nibble::from_ascii_hex_digit(b'j').is_none());
         assert!(Nibble::from_ascii_hex_digit(b' ').is_none());
         assert!(Nibble::from_ascii_hex_digit(0).is_none());
