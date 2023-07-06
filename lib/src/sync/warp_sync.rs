@@ -102,7 +102,7 @@ use crate::{
         vm::ExecHint,
     },
     header::{self, Header},
-    trie::proof_decode,
+    trie::{self, proof_decode},
 };
 
 use alloc::{
@@ -143,6 +143,7 @@ pub enum Error {
 }
 
 /// The configuration for [`start_warp_sync()`].
+#[derive(Debug)]
 pub struct Config {
     /// The chain information of the starting point of the warp syncing.
     pub start_chain_information: ValidChainInformation,
@@ -156,6 +157,24 @@ pub struct Config {
 
     /// The initial capacity of the list of requests.
     pub requests_capacity: usize,
+
+    /// Known valid Merkle value and storage value combination for the `:code` key.
+    ///
+    /// If provided, the warp syncing algorithm will first fetch the Merkle value of `:code`, and
+    /// if it matches the Merkle value provided in the hint, use the storage value in the hint
+    /// instead of downloading it. If the hint doesn't match, an extra round-trip will be needed,
+    /// but if the hint matches it saves a big download.
+    pub code_trie_node_hint: Option<ConfigCodeTrieNodeHint>,
+}
+
+/// See [`Config::code_trie_node_hint`].
+#[derive(Debug)]
+pub struct ConfigCodeTrieNodeHint {
+    /// Potential Merkle value of the `:code` key.
+    pub merkle_value: Vec<u8>,
+
+    /// Storage value corresponding to [`ConfigCodeTrieNodeHint::merkle_value`].
+    pub storage_value: Vec<u8>,
 }
 
 /// Initializes the warp sync state machine.
@@ -186,6 +205,7 @@ pub fn start_warp_sync<TSrc, TRq>(
 
     Ok(InProgressWarpSync {
         start_chain_information: config.start_chain_information,
+        code_trie_node_hint: config.code_trie_node_hint,
         block_number_bytes: config.block_number_bytes,
         sources: slab::Slab::with_capacity(config.sources_capacity),
         in_progress_requests: slab::Slab::with_capacity(config.requests_capacity),
@@ -236,6 +256,9 @@ pub struct Success<TSrc, TRq> {
     /// Storage value at the `:heappages` key of the finalized block.
     pub finalized_storage_heap_pages: Option<Vec<u8>>,
 
+    /// Merkle value of the `:code` trie node of the finalized block.
+    pub finalized_storage_code_merkle_value: Option<Vec<u8>>,
+
     /// The list of sources that were added to the state machine.
     /// The list is ordered by [`SourceId`].
     pub sources_ordered: Vec<(SourceId, TSrc)>,
@@ -275,6 +298,8 @@ impl<TSrc, TRq> ops::IndexMut<SourceId> for InProgressWarpSync<TSrc, TRq> {
 pub struct InProgressWarpSync<TSrc, TRq> {
     /// See [`Phase`].
     phase: Phase,
+    /// See [`Config::code_trie_node_hint`].
+    code_trie_node_hint: Option<ConfigCodeTrieNodeHint>,
     /// Starting point of the warp syncing, as provided to [`start_warp_sync`].
     start_chain_information: ValidChainInformation,
     /// Number of bytes used to encode the block number in headers.
@@ -317,6 +342,9 @@ enum Phase {
         /// Source we downloaded the last fragments from. Assuming that the source isn't malicious,
         /// it is guaranteed to have access to the storage of the finalized block.
         warp_sync_source_id: SourceId,
+        /// `true` if it is known that [`InProgressWarpSync::code_trie_node_hint`] doesn't match
+        /// the storage of the header we warp synced to.
+        hint_doesnt_match: bool,
         /// Merkle proof containing the runtime information, or `None` if it was not downloaded yet.
         downloaded_runtime: Option<Vec<u8>>,
     },
@@ -353,6 +381,8 @@ struct DownloadedRuntime {
     storage_code: Option<Vec<u8>>,
     /// Storage item at the `:heappages` key. `None` if there is no entry at that key.
     storage_heap_pages: Option<Vec<u8>>,
+    /// Merkle value of the `:code` trie node. `None` if there is no entry at that key.
+    code_merkle_value: Option<Vec<u8>>,
 }
 
 /// See [`InProgressWarpSync::status`].
@@ -620,9 +650,17 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         let runtime_parameters_get = if let Phase::RuntimeDownload {
             header,
             warp_sync_source_id,
+            hint_doesnt_match,
             ..
         } = &self.phase
         {
+            let code_key_to_request = if !*hint_doesnt_match && self.code_trie_node_hint.is_some() {
+                // TODO: this is actually missing a nibble in order to be sure that the Merkle value of `:code` will be found in the proof, but given that this whole mechanism will be replaced with something else in the future, I don't want to make tons of API changes to support nibbles here
+                &b":cod"[..]
+            } else {
+                &b":code"[..]
+            };
+
             // TODO: O(n)
             if !self.in_progress_requests.iter().any(|(_, rq)| {
                 rq.0 == *warp_sync_source_id
@@ -631,7 +669,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                             block_hash: ref b,
                             ref keys,
                         } if *b == header.hash(self.block_number_bytes)
-                            && keys.iter().any(|k| k == b":code")
+                            && keys.iter().any(|k| k == code_key_to_request)
                             && keys.iter().any(|k| k == b":heappages"))
             }) {
                 Some((
@@ -640,7 +678,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     DesiredRequest::StorageGetMerkleProof {
                         block_hash: header.hash(self.block_number_bytes),
                         state_trie_root: header.state_root,
-                        keys: vec![b":code".to_vec(), b":heappages".to_vec()],
+                        keys: vec![code_key_to_request.to_vec(), b":heappages".to_vec()],
                     },
                 ))
             } else {
@@ -1133,6 +1171,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                             .into(),
                         warp_sync_source_id: *downloaded_source,
                         downloaded_runtime: None,
+                        hint_doesnt_match: false,
                     };
                 }
                 Ok(verifier::Next::Success {
@@ -1152,6 +1191,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                             chain_information_finality,
                             warp_sync_source_id: *downloaded_source,
                             downloaded_runtime: None,
+                            hint_doesnt_match: false,
                         };
                     } else {
                         self.inner.phase = Phase::DownloadFragments {
@@ -1198,6 +1238,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             downloaded_runtime,
             chain_information_finality,
             warp_sync_source_id,
+            hint_doesnt_match,
             ..
         } = &mut self.inner.phase
         {
@@ -1221,7 +1262,45 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     }
                 };
 
-            let finalized_storage_code =
+            let finalized_storage_code_merkle_value = match decoded_downloaded_runtime
+                .closest_descendant_merkle_value(
+                    &header.state_root,
+                    &trie::bytes_to_nibbles(b":code".iter().copied()).collect::<Vec<_>>(),
+                ) {
+                Ok(Some(merkle_value)) => merkle_value.to_owned(),
+                Ok(None) => {
+                    self.inner.phase = Phase::DownloadFragments {
+                        previous_verifier_values: Some((
+                            header.clone(),
+                            chain_information_finality.clone(),
+                        )),
+                    };
+                    return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
+                }
+                Err(proof_decode::IncompleteProofError { .. }) => {
+                    self.inner.phase = Phase::DownloadFragments {
+                        previous_verifier_values: Some((
+                            header.clone(),
+                            chain_information_finality.clone(),
+                        )),
+                    };
+                    return (
+                        WarpSync::InProgress(self.inner),
+                        Some(Error::MerkleProofEntriesMissing),
+                    );
+                }
+            };
+
+            let finalized_storage_code = if let (false, Some(hint)) =
+                (*hint_doesnt_match, self.inner.code_trie_node_hint.as_ref())
+            {
+                if hint.merkle_value == finalized_storage_code_merkle_value {
+                    &hint.storage_value
+                } else {
+                    *hint_doesnt_match = true;
+                    return (WarpSync::InProgress(self.inner), None);
+                }
+            } else {
                 match decoded_downloaded_runtime.storage_value(&header.state_root, b":code") {
                     Ok(Some((code, _))) => code,
                     Ok(None) => {
@@ -1245,7 +1324,8 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                             Some(Error::MerkleProofEntriesMissing),
                         );
                     }
-                };
+                }
+            };
 
             let finalized_storage_heappages =
                 match decoded_downloaded_runtime.storage_value(&header.state_root, b":heappages") {
@@ -1332,6 +1412,9 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                             finalized_storage_code: Some(finalized_storage_code.to_owned()),
                             finalized_storage_heap_pages: finalized_storage_heappages
                                 .map(|v| v.to_vec()),
+                            finalized_storage_code_merkle_value: Some(
+                                finalized_storage_code_merkle_value,
+                            ),
                             sources_ordered: mem::take(&mut self.inner.sources)
                                 .into_iter()
                                 .map(|(id, source)| (SourceId(id), source.user_data))
@@ -1377,6 +1460,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 downloaded_runtime: Some(DownloadedRuntime {
                     storage_code: Some(finalized_storage_code.to_vec()),
                     storage_heap_pages: finalized_storage_heappages.map(|v| v.to_vec()),
+                    code_merkle_value: Some(finalized_storage_code_merkle_value),
                 }),
                 chain_info_builder: Some(chain_info_builder),
                 calls,
@@ -1482,6 +1566,8 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                         finalized_storage_code: downloaded_runtime.storage_code,
                                         finalized_storage_heap_pages: downloaded_runtime
                                             .storage_heap_pages,
+                                        finalized_storage_code_merkle_value: downloaded_runtime
+                                            .code_merkle_value,
                                         sources_ordered: mem::take(&mut self.inner.sources)
                                             .into_iter()
                                             .map(|(id, source)| (SourceId(id), source.user_data))

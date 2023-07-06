@@ -15,7 +15,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use super::{BlockNotification, FinalizedBlockRuntime, Notification, SubscribeAll, ToBackground};
+use super::{
+    BlockNotification, ConfigRelayChainRuntimeCodeHint, FinalizedBlockRuntime, Notification,
+    SubscribeAll, ToBackground,
+};
 use crate::{network_service, platform::PlatformRef, util};
 
 use alloc::{borrow::ToOwned as _, string::String, sync::Arc, vec::Vec};
@@ -41,6 +44,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
     platform: TPlat,
     chain_information: chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
+    runtime_code_hint: Option<ConfigRelayChainRuntimeCodeHint>,
     mut from_foreground: mpsc::Receiver<ToBackground>,
     network_service: Arc<network_service::NetworkService<TPlat>>,
     network_chain_index: usize,
@@ -82,6 +86,10 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 NonZeroU32::new(5000).unwrap()
             },
             full_mode: false,
+            code_trie_node_hint: runtime_code_hint.map(|hint| all::ConfigCodeTrieNodeHint {
+                merkle_value: hint.merkle_value,
+                storage_value: hint.storage_value,
+            }),
         }),
         network_up_to_date_best: true,
         network_up_to_date_finalized: true,
@@ -642,6 +650,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 finalized_block_runtime,
                 finalized_storage_code,
                 finalized_storage_heap_pages,
+                finalized_storage_code_merkle_value,
             } => {
                 self.sync = sync;
 
@@ -661,6 +670,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     virtual_machine: finalized_block_runtime,
                     storage_code: finalized_storage_code,
                     storage_heap_pages: finalized_storage_heap_pages,
+                    code_merkle_value: finalized_storage_code_merkle_value,
                 });
 
                 self.network_up_to_date_finalized = false;

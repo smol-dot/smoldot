@@ -40,7 +40,7 @@ use smoldot::{
     libp2p::{multiaddr, PeerId},
 };
 
-use crate::{network_service, platform, sync_service};
+use crate::{network_service, platform, runtime_service, sync_service};
 
 /// A decoded database.
 pub struct DatabaseContent {
@@ -51,6 +51,20 @@ pub struct DatabaseContent {
     /// List of nodes that were known to be part of the peer-to-peer network when the database
     /// was encoded.
     pub known_nodes: Vec<(PeerId, Vec<multiaddr::Multiaddr>)>,
+    /// Known valid Merkle value and storage value combination for the `:code` key.
+    ///
+    /// Does **not** necessarily match the finalized block found in
+    /// [`DatabaseCOntent::chain_information`].
+    pub runtime_code_hint: Option<DatabaseContentRuntimeCodeHint>,
+}
+
+/// See [`DatabaseContent::runtime_code_hint`].
+pub struct DatabaseContentRuntimeCodeHint {
+    /// Storage value of the `:code` trie node corresponding to
+    /// [`DatabaseContentRuntimeCodeHint::code_merkle_value`].
+    pub code: Vec<u8>,
+    /// Merkle value of the `:code` trie node in the storage main trie.
+    pub code_merkle_value: Vec<u8>,
 }
 
 /// Serializes the finalized state of the chain, using the given services.
@@ -60,9 +74,15 @@ pub struct DatabaseContent {
 pub async fn encode_database<TPlat: platform::PlatformRef>(
     network_service: &network_service::NetworkService<TPlat>,
     sync_service: &sync_service::SyncService<TPlat>,
+    runtime_service: &runtime_service::RuntimeService<TPlat>,
     genesis_block_hash: &[u8; 32],
     max_size: usize,
 ) -> String {
+    let (code_storage_value, code_merkle_value) = runtime_service
+        .finalized_runtime_storage_merkle_values()
+        .await
+        .unwrap_or((None, None));
+
     // Craft the structure containing all the data that we would like to include.
     let mut database_draft = SerdeDatabase {
         genesis_hash: hex::encode(genesis_block_hash),
@@ -93,6 +113,12 @@ pub async fn encode_database<TPlat: platform::PlatformRef>(
                 )
             })
             .collect(),
+        code_merkle_value: code_merkle_value.map(hex::encode),
+        // While it might seem like a good idea to compress the runtime code, in practice it is
+        // normally already zstd-compressed, and additional compressing shouldn't improve the size.
+        code_storage_value: code_storage_value.map(|data| {
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD_NO_PAD, data)
+        }),
     };
 
     // Cap the database length to the maximum size.
@@ -101,6 +127,14 @@ pub async fn encode_database<TPlat: platform::PlatformRef>(
         if serialized.len() <= max_size {
             // Success!
             return serialized;
+        }
+
+        // Scrap the code, as it is the biggest item.
+        if database_draft.code_merkle_value.is_some() || database_draft.code_storage_value.is_some()
+        {
+            database_draft.code_merkle_value = None;
+            database_draft.code_storage_value = None;
+            continue;
         }
 
         if database_draft.nodes.is_empty() {
@@ -167,10 +201,22 @@ pub fn decode_database(encoded: &str, block_number_bytes: usize) -> Result<Datab
         })
         .collect::<Vec<_>>();
 
+    let runtime_code_hint = match (decoded.code_merkle_value, decoded.code_storage_value) {
+        (Some(mv), Some(sv)) => Some(DatabaseContentRuntimeCodeHint {
+            code: base64::Engine::decode(&base64::engine::general_purpose::STANDARD_NO_PAD, &sv)
+                .map_err(|_| ())?,
+            code_merkle_value: hex::decode(&mv).map_err(|_| ())?,
+        }),
+        // A combination of `Some` and `None` is technically invalid, but we simply ignore this
+        // situation.
+        _ => None,
+    };
+
     Ok(DatabaseContent {
         genesis_block_hash,
         chain_information,
         known_nodes,
+        runtime_code_hint,
     })
 }
 
@@ -181,4 +227,8 @@ struct SerdeDatabase {
     genesis_hash: String,
     chain: Box<serde_json::value::RawValue>,
     nodes: hashbrown::HashMap<String, Vec<String>, fnv::FnvBuildHasher>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code_storage_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code_merkle_value: Option<String>,
 }
