@@ -409,7 +409,7 @@ pub enum RuntimeHostVm {
     SignatureVerification(SignatureVerification),
     /// Setting an offchain storage value is required in order to continue.
     ///
-    /// Contrary to [`RuntimeHostVm::Offchain::StorageSet`], this variant is allowed to happen
+    /// Contrary to [`OffchainContext::StorageSet`], this variant is allowed to happen
     /// outside of offchain workers.
     OffchainStorageSet(OffchainStorageSet),
     /// Functions that can only be called within the context of an offchain worker.
