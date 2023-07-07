@@ -58,8 +58,21 @@
 //! which all further communications should go through.
 //!
 //! Use [`Noise::encrypt`] in order to send out data to the remote, and
-//! [`Noise::inject_inbound_data`] when data is received.
-// TODO: review this last sentence, as this API might change after some experience with it
+//! [`Noise::decrypt_to_vecdeque`] when data is received.
+
+// # Q&A
+//
+// ## Why not use a library such as `snow`?
+//
+// Snow suffers from a variety of problems:
+//
+// - It doesn't support `no_std`.
+// - It uses outdated versions of dependencies.
+// - It doesn't allow writing a single Noise message onto two consecutive buffers.
+// - It doesn't support encoding a Noise message already present in the output buffer.
+// - It isn't really maintained.
+// - It doesn't give control over its random number generator.
+//
 
 use crate::{
     libp2p::{
@@ -70,7 +83,7 @@ use crate::{
 };
 
 use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
-use core::{cmp, fmt, mem};
+use core::{cmp, fmt, iter, mem};
 
 /// Name of the protocol, typically used when negotiated it using *multistream-select*.
 pub const PROTOCOL_NAME: &str = "/noise";
@@ -98,7 +111,8 @@ pub const PROTOCOL_NAME: &str = "/noise";
 /// device.
 ///
 pub struct NoiseKey {
-    key: snow::Keypair,
+    private_key: x25519_dalek::ReusableSecret,
+    public_key: x25519_dalek::PublicKey,
     /// Handshake to encrypt then send on the wire.
     handshake_message: Vec<u8>,
     /// Ed25519 public key used for the signature in the handshake message.
@@ -130,7 +144,7 @@ impl NoiseKey {
 
 impl Drop for NoiseKey {
     fn drop(&mut self) {
-        zeroize::Zeroize::zeroize(&mut self.key.private);
+        zeroize::Zeroize::zeroize(&mut self.private_key);
     }
 }
 
@@ -141,23 +155,29 @@ impl Drop for NoiseKey {
 ///
 /// For simple cases, prefer using [`NoiseKey::new`].
 pub struct UnsignedNoiseKey {
-    key: snow::Keypair,
+    private_key: Option<x25519_dalek::ReusableSecret>,
+    public_key: x25519_dalek::PublicKey,
 }
 
 impl UnsignedNoiseKey {
     /// Generates a new private and public key pair.
     pub fn random() -> Self {
+        // TODO: let the API user pass the key
+        let private_key = x25519_dalek::ReusableSecret::random_from_rng(&mut rand::thread_rng());
+        let public_key = x25519_dalek::PublicKey::from(&private_key);
         UnsignedNoiseKey {
-            // TODO: can panic if there's no RNG
-            key: snow::Builder::new(noise_params())
-                .generate_keypair()
-                .unwrap(),
+            private_key: Some(private_key),
+            public_key,
         }
     }
 
     /// Returns the data that has to be signed.
     pub fn payload_to_sign(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
-        [&b"noise-libp2p-static-key:"[..], &self.key.public[..]].into_iter()
+        [
+            &b"noise-libp2p-static-key:"[..],
+            &self.public_key.as_bytes()[..],
+        ]
+        .into_iter()
     }
 
     /// Returns the data that has to be signed.
@@ -196,13 +216,8 @@ impl UnsignedNoiseKey {
         };
 
         NoiseKey {
-            key: mem::replace(
-                &mut self.key,
-                snow::Keypair {
-                    private: Vec::new(),
-                    public: Vec::new(),
-                },
-            ),
+            public_key: self.public_key,
+            private_key: self.private_key.take().unwrap(),
             libp2p_public_ed25519_key,
             handshake_message,
         }
@@ -211,7 +226,7 @@ impl UnsignedNoiseKey {
 
 impl Drop for UnsignedNoiseKey {
     fn drop(&mut self) {
-        zeroize::Zeroize::zeroize(&mut self.key.private);
+        zeroize::Zeroize::zeroize(&mut self.private_key);
     }
 }
 
@@ -236,251 +251,274 @@ pub struct Config<'a> {
 
 /// State of the noise encryption/decryption cipher.
 pub struct Noise {
-    inner: snow::TransportState,
+    /// See [`Config::is_initiator`].
+    is_initiator: bool,
 
-    /// Buffer of data containing data received on the wire, before decryption. Always either
-    /// empty or contains a partial frame (including the two bytes of length prefix). Frames,
-    /// once full, are immediately decoded and moved to `rx_buffer_decrypted`.
+    /// Cipher used to encrypt outgoing data.
+    out_cipher_state: CipherState,
+
+    /// Cipher used to decrypt incoming data.
+    in_cipher_state: CipherState,
+
+    /// Buffer of data containing data received on the wire (still encrypted) but that isn't
+    /// enough to form a full message. Includes the two bytes of libp2p length prefix.
     rx_buffer_encrypted: Vec<u8>,
-
-    /// Buffer of data containing data received on the wire, after decryption.
-    rx_buffer_decrypted: Vec<u8>,
 }
 
 impl Noise {
-    /// Feeds data received from the wire.
-    // TODO: document or redesign the return value; at the moment is can different from payload.len() only if the decrypted buffer is full
-    pub fn inject_inbound_data(&mut self, mut payload: &[u8]) -> Result<usize, CipherError> {
-        // As a reminder, noise frames consist of two bytes of length (big endian) followed with
-        // the message of that length destined to the `snow` library.
-
+    /// Feeds encrypted data received from the wire and writes the decrypted data into `out`.
+    ///
+    /// Returns the number of bytes from `encrypted_data` that it has processed. These bytes must
+    /// be discarded and not passed again.
+    ///
+    /// The [`Noise`] state machine might copy some of the encrypted data internally for later.
+    /// Consequently, be aware that it is not possible to (easily) predict how much `out` is going
+    /// to grow based on the size of `encrypted_data`.
+    ///
+    /// This function always writes as much data to `out` as possible. In other words, calling
+    /// this function with an empty `encrypted_data` always has no effect.
+    // TODO: this API is very specific, maybe provide a way to decode into slices?
+    pub fn decrypt_to_vecdeque(
+        &mut self,
+        mut encrypted_data: &[u8],
+        out: &mut VecDeque<u8>,
+    ) -> Result<usize, CipherError> {
         let mut total_read = 0;
 
         loop {
-            // Buffering up too much data in the output buffer should be avoided. As such, past
-            // a certain threshold, return early and refuse to read more.
-            // TODO: is this a good idea?
-            // TODO: should be configurable value
-            if self.rx_buffer_decrypted.len() >= 65536 * 4 {
-                return Ok(total_read);
-            }
-
             // Try to construct the length prefix in `rx_buffer_encrypted` by moving bytes from
             // `payload`.
             while self.rx_buffer_encrypted.len() < 2 {
-                if payload.is_empty() {
+                if encrypted_data.is_empty() {
                     return Ok(total_read);
                 }
 
-                self.rx_buffer_encrypted.push(payload[0]);
-                payload = &payload[1..];
+                self.rx_buffer_encrypted.push(encrypted_data[0]);
+                encrypted_data = &encrypted_data[1..];
                 total_read += 1;
             }
 
-            // Length of the frame currently being received.
+            // Length of the message currently being received.
             let expected_len = usize::from(u16::from_be_bytes(
                 <[u8; 2]>::try_from(&self.rx_buffer_encrypted[..2]).unwrap(),
             ));
 
-            // If there isn't enough data available for the full frame, copy the partial frame
+            // If there isn't enough data available for the full message, copy the partial message
             // to `rx_buffer_encrypted` and return early.
-            if self.rx_buffer_encrypted.len() + payload.len() < expected_len + 2 {
-                self.rx_buffer_encrypted.extend_from_slice(payload);
-                total_read += payload.len();
+            if self.rx_buffer_encrypted.len() + encrypted_data.len() < expected_len + 2 {
+                self.rx_buffer_encrypted.extend_from_slice(encrypted_data);
+                total_read += encrypted_data.len();
                 return Ok(total_read);
             }
 
             // Construct the encrypted slice of data to decode.
             let to_decode_slice = if self.rx_buffer_encrypted.len() == 2 {
-                // If the entirety of the frame is in `payload`, decode it from there without
-                // moving data.
-                debug_assert!(payload.len() >= expected_len);
-                let decode = &payload[..expected_len];
-                payload = &payload[expected_len..];
+                // If the entirety of the message is in `payload`, decode it from there without
+                // moving data. This is the most common situation.
+                debug_assert!(encrypted_data.len() >= expected_len);
+                let decode = &encrypted_data[..expected_len];
+                encrypted_data = &encrypted_data[expected_len..];
                 total_read += expected_len;
                 decode
             } else {
-                // Otherwise, copy the rest of the frame to `rx_buffer_encrypted`.
+                // Otherwise, copy the rest of the message to `rx_buffer_encrypted`.
                 let remains = expected_len - (self.rx_buffer_encrypted.len() - 2);
                 self.rx_buffer_encrypted
-                    .extend_from_slice(&payload[..remains]);
-                payload = &payload[remains..];
+                    .extend_from_slice(&encrypted_data[..remains]);
+                encrypted_data = &encrypted_data[remains..];
                 total_read += remains;
                 &self.rx_buffer_encrypted[2..]
             };
 
-            // Allocate the space to decode to.
-            // Each frame consists of the payload plus 16 bytes of authentication data, therefore
-            // the payload size is `expected_len - 16`.
-            // We use `saturating_sub` in order to avoid panicking in case the `expected_len` is
-            // invalid. An invalid `expected_len` should trigger an error when decoding the
-            // message below.
-            let len_before = self.rx_buffer_decrypted.len();
-            self.rx_buffer_decrypted
-                .resize(len_before + expected_len.saturating_sub(16), 0);
+            // Read and decrypt the message.
+            self.in_cipher_state
+                .read_chachapoly_message_to_vecdeque(&[], to_decode_slice, out)?;
 
-            // Finally decoding the data.
-            let written = self
-                .inner
-                .read_message(to_decode_slice, &mut self.rx_buffer_decrypted[len_before..])
-                .map_err(CipherError)?;
-            self.rx_buffer_decrypted.truncate(len_before + written);
-
-            // Clear the now-decoded frame.
+            // Clear the now-decoded message.
             self.rx_buffer_encrypted.clear();
         }
     }
 
     /// Returns true if the local side has opened the connection.
     pub fn is_initiator(&self) -> bool {
-        self.inner.is_initiator()
+        self.is_initiator
     }
 
-    // TODO: if rx_buffer_decrypted becomes a VecDeque, this leads to a potentially weird API
-    //       where calling consume_inbound_data can lead to decoded_inbound_data to provide more
-    //       data
-    pub fn decoded_inbound_data(&self) -> &[u8] {
-        &self.rx_buffer_decrypted
-    }
-
-    pub fn consume_inbound_data(&mut self, n: usize) {
-        // TODO: be smarter than copying
-        self.rx_buffer_decrypted = self.rx_buffer_decrypted[n..].to_vec();
-    }
-
-    /// Reads data from `payload` and writes it to `destination`. Returns, in order, the number
-    /// of bytes read from `payload` and the number of bytes written to `destination`. The data
-    /// written out is always slightly larger than the data read, in order to add the
-    /// [`HMAC`](https://en.wikipedia.org/wiki/HMAC)s.
+    /// Start the encryption process.
     ///
-    /// This function returns only after the input bytes are fully consumed or the output buffer
-    /// is full.
+    /// Must provide two destination buffers where the encrypted data will be written. The
+    /// implementation will try fill the first buffer until it is full, then switch to the second
+    /// buffer.
     ///
-    /// The number of bytes read and written is only a function of the size of the input and of
-    /// the available output. Use [`Noise::encrypt_size_conv`] to determine the maximum payload
-    /// size that fits a certain output buffers.
+    /// Call [`Encrypt::unencrypted_write_buffers`] in order to obtain an iterator of sub-slices.
+    /// These sub-slices always point within `destination`. Write the unencrypted data to the
+    /// buffers returned by this iterator. Once done, call [`Encrypt::encrypt`], providing the
+    /// amount of unencrypted data that was written.
     ///
-    /// > **Note**: Because each message has a prefix and a suffix, you are encouraged to batch
-    /// >           as much data as possible into `payload` before calling this function.
+    /// Returns an error if the nonce has overflowed and that no more message can be written.
+    // TODO: write to temporary buffer if destination is too small
     pub fn encrypt<'a>(
-        &mut self,
-        mut payload: impl Iterator<Item = impl AsRef<[u8]>>,
+        &'a mut self,
         destination: (&'a mut [u8], &'a mut [u8]),
-    ) -> (usize, usize) {
-        // TODO: The API exposes `payload` as an iterator of buffers rather than a single
-        //       contiguous buffer. The reason is that, theoretically speaking, the underlying
-        //       implementation should be able to read bytes from an iterator. Rather than
-        //       providing an API whose usage might force an overhead, the overhead is instead
-        //       moved to the body of this method, while keeping in mind that this overhead can
-        //       be fixed later.
-
-        // The three possible paths below are: the iterator is empty, the iterator contains
-        // exactly one buffer, the iterator contains two or more buffers.
-
-        let first_buf = match payload.next() {
-            Some(b) => b,
-            None => return (0, 0),
-        };
-
-        if let Some(next) = payload.next() {
-            let mut buf = first_buf.as_ref().to_vec();
-            buf.extend_from_slice(next.as_ref());
-            let payload = payload.fold(buf, |mut a, b| {
-                a.extend_from_slice(b.as_ref());
-                a
-            });
-            self.encrypt_inner(&payload, destination)
-        } else {
-            self.encrypt_inner(first_buf.as_ref(), destination)
-        }
-    }
-
-    fn encrypt_inner<'a>(
-        &mut self,
-        mut payload: &[u8],
-        mut destination: (&'a mut [u8], &'a mut [u8]),
-    ) -> (usize, usize) {
-        let mut total_read = 0;
-        let mut total_written = 0;
-
-        // At least 18 bytes must be available in `destination` in order to fit an entire noise
-        // frame. The check is for 19 because it doesn't make sense to send an empty frame.
-        // TODO: this is error-prone ^ as a user might accidentally have a maximum buffer size that is < 19
-        while destination.0.len() + destination.1.len() >= 19 {
-            let in_len = cmp::min(
-                payload.len(),
-                cmp::min(65536, destination.0.len() + destination.1.len() - 18),
-            );
-            if in_len == 0 {
-                debug_assert!(payload.is_empty());
-                break;
-            }
-
-            let out_len = in_len + 2 + 16;
-
-            if out_len <= destination.0.len() {
-                let written = self
-                    .inner
-                    .write_message(&payload[..in_len], &mut destination.0[2..in_len + 2 + 16])
-                    .unwrap();
-                debug_assert_eq!(written, in_len + 16);
-
-                let len_bytes = u16::try_from(written).unwrap().to_be_bytes();
-                destination.0[..2].copy_from_slice(&len_bytes);
-
-                total_read += in_len;
-                payload = &payload[in_len..];
-                total_written += written + 2;
-                destination.0 = &mut destination.0[written + 2..];
-
-                if destination.0.is_empty() {
-                    destination = (destination.1, &mut []);
-                }
-            } else {
-                debug_assert!(out_len <= destination.0.len() + destination.1.len());
-                let mut intermediary_buffer = vec![0; out_len];
-                let _written = self
-                    .inner
-                    .write_message(&payload[..in_len], &mut intermediary_buffer[2..])
-                    .unwrap();
-                debug_assert_eq!(_written + 2, out_len);
-
-                let len_bytes = u16::try_from(out_len - 2).unwrap().to_be_bytes();
-                intermediary_buffer[..2].copy_from_slice(&len_bytes);
-
-                total_read += in_len;
-                payload = &payload[in_len..];
-                total_written += out_len;
-
-                destination
-                    .0
-                    .copy_from_slice(&intermediary_buffer[..destination.0.len()]);
-                destination.1[..out_len - destination.0.len()]
-                    .copy_from_slice(&intermediary_buffer[destination.0.len()..]);
-                destination = (&mut destination.1[out_len - destination.0.len()..], &mut []);
-            }
-        }
-
-        (total_read, total_written)
-    }
-
-    /// Returns the size of unencrypted data that fits a buffer of encrypted data.
-    // TODO: doc
-    pub fn encrypt_size_conv(&self, out_size: usize) -> usize {
-        let mut total = 0;
-        let mut dest_len = out_size;
-        while dest_len >= 19 {
-            let in_len = cmp::min(65536, dest_len - 18);
-            total += in_len;
-            dest_len -= in_len + 18;
-        }
-        total
+    ) -> Result<Encrypt<'a>, EncryptError> {
+        Ok(Encrypt {
+            out_cipher_state: &mut self.out_cipher_state,
+            destination,
+        })
     }
 }
 
 impl fmt::Debug for Noise {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Noise").finish()
+    }
+}
+
+impl Drop for Noise {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.out_cipher_state.key);
+        zeroize::Zeroize::zeroize(&mut self.in_cipher_state.key);
+    }
+}
+
+#[must_use]
+pub struct Encrypt<'a> {
+    out_cipher_state: &'a mut CipherState,
+    destination: (&'a mut [u8], &'a mut [u8]),
+}
+
+impl<'a> Encrypt<'a> {
+    /// Returns an iterator to a list of buffers where the unencrypted data must be written.
+    ///
+    /// All the buffers are subslices of the `destination` parameter that was provided.
+    pub fn unencrypted_write_buffers(&'_ mut self) -> impl Iterator<Item = &'_ mut [u8]> + '_ {
+        let full_message_len = usize::from(u16::max_value()) + 2;
+
+        let max_messages_before_nonce_overflow =
+            usize::try_from(u64::max_value() - self.out_cipher_state.nonce)
+                .unwrap_or(usize::max_value())
+                .saturating_add(1);
+
+        let dest0_len = self.destination.0.len();
+        let dest1_len = self.destination.1.len();
+
+        let dest0 = self
+            .destination
+            .0
+            .chunks_mut(full_message_len)
+            .filter_map(move |buffer| {
+                let len = buffer.len();
+                let len_avail = cmp::min(len.saturating_add(dest1_len), full_message_len);
+                // The minium message size is 18, but that would give an empty message.
+                if len_avail < 19 {
+                    return None;
+                }
+                return Some(&mut buffer[2..cmp::min(len, len_avail - 16)]);
+            });
+
+        let (dest1_first, dest1_rest) = self.destination.1.split_at_mut(cmp::min(
+            dest1_len,
+            full_message_len - (dest0_len % full_message_len),
+        ));
+
+        let dest1_first = iter::once(dest1_first).filter_map(move |buf| {
+            let len = buf.len();
+            let start_discard = 2usize.saturating_sub(dest0_len % full_message_len);
+            if len < 17 {
+                return None;
+            }
+            Some(&mut buf[start_discard..len - 16])
+        });
+
+        let dest1_rest = dest1_rest
+            .chunks_mut(full_message_len)
+            .filter_map(move |buffer| {
+                let len = buffer.len();
+                // The minium message size is 18, but that would give an empty message.
+                if len < 19 {
+                    return None;
+                }
+                return Some(&mut buffer[2..len - 16]);
+            });
+
+        dest0
+            .chain(dest1_first)
+            .chain(dest1_rest)
+            .take(max_messages_before_nonce_overflow)
+    }
+
+    /// Performs the actual encryption. Must be passed the number of bytes that were written to the
+    /// buffers returned by [`Encrypt::destination_buffers`]. Returns the total number of bytes
+    /// written to `destination`.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `num_written` is larger than the sum of the buffers that were returned by
+    /// [`Encrypt::unencrypted_write_buffers`].
+    ///
+    pub fn encrypt(mut self, mut num_written: usize) -> usize {
+        let mut num_written_encrypted = 0;
+
+        loop {
+            if num_written == 0 {
+                break;
+            }
+
+            // This debug_assert! can trigger if `num_written` is out of bounds. However, passing
+            // a correct `num_written` is rather easy, and so it might most likely detect a bug
+            // in the Noise code.
+            debug_assert!(self.destination.0.len() + self.destination.1.len() >= 19);
+
+            // Number of unencrypted bytes to include in the next message out.
+            let next_message_payload_size =
+                cmp::min(num_written, usize::from(u16::max_value() - 16));
+            num_written -= next_message_payload_size;
+            let next_message_size = next_message_payload_size + 16;
+
+            // Write the libp2p length prefix and advance `self.destination`.
+            {
+                let message_length_prefix = u16::try_from(next_message_size).unwrap().to_be_bytes();
+                if self.destination.0.len() >= 1 {
+                    self.destination.0[0] = message_length_prefix[0];
+                    self.destination.0 = &mut self.destination.0[1..];
+                } else {
+                    self.destination.1[0] = message_length_prefix[0];
+                    self.destination.1 = &mut self.destination.1[1..];
+                }
+                if self.destination.0.len() >= 1 {
+                    self.destination.0[0] = message_length_prefix[1];
+                    self.destination.0 = &mut self.destination.0[1..];
+                } else {
+                    self.destination.1[0] = message_length_prefix[1];
+                    self.destination.1 = &mut self.destination.1[1..];
+                }
+                num_written_encrypted += 2;
+            }
+
+            // `self.destination` now points to slices that contain `next_message_payload_size`
+            // bytes of unencrypted data plus 16 bytes reserved for the HMAC, which we can write
+            // in place.
+            let destination0_message_end = cmp::min(next_message_size, self.destination.0.len());
+            let destination1_message_end = next_message_size - destination0_message_end;
+            // `write_chachapoly_message_in_place` can only fail if the nonce overflowed, which
+            // can happen only if the user has passed a `num_written` too large.
+            self.out_cipher_state
+                .write_chachapoly_message_in_place(&[], {
+                    let message_dest0 = &mut self.destination.0[..destination0_message_end];
+                    let message_dest1 = &mut self.destination.1[..destination1_message_end];
+                    (message_dest0, message_dest1)
+                })
+                .unwrap();
+
+            // Update `destination` to be after these bytes.
+            self.destination = (
+                &mut self.destination.0[destination0_message_end..],
+                &mut self.destination.1[destination1_message_end..],
+            );
+            num_written_encrypted += next_message_size;
+        }
+
+        num_written_encrypted
     }
 }
 
@@ -504,44 +542,76 @@ pub struct HandshakeInProgress(Box<HandshakeInProgressInner>);
 /// The actual fields are wrapped within a `Box` because we move the `HandshakeInProgress`
 /// frequently.
 struct HandshakeInProgressInner {
-    /// Underlying noise state machine.
+    /// See [`Config::is_initiator`].
+    is_initiator: bool,
+
+    /// Queued data that should be sent out as soon as possible.
+    pending_out_data: VecDeque<u8>,
+
+    /// Buffer of data containing data received on the wire. This buffer is only used in rare
+    /// situations where Noise handshake messages are split and received in multiple calls
+    /// to `read_write`.
+    receive_buffer: Vec<u8>,
+
+    /// Progression of the handshake.
     ///
-    /// Libp2p always uses the XX handshake.
+    /// Every time a message is sent out or buffered in
+    /// [`HandshakeInProgressInner::pending_out_data`], this is increased by 1.
+    num_buffered_or_transmitted_messages: u8,
+
+    /// A single cipher is used during the handshake, as each side takes turn to send data rather
+    /// than both at the same time.
+    cipher_state: CipherState,
+
+    /// Product of the diffie-hellmans between the various keys that are exchanged. Used to
+    /// initialize the ciphers once the handshake is over.
     ///
-    /// While the `snow` library ensures that the emitted and received messages respect the
-    /// handshake according to the noise specification, libp2p extends this noise specification
-    /// with a payload that must be transmitted on the second and third messages of the exchange.
-    /// This payload must contain a signature of the noise key made using the libp2p key and can
-    /// be found in the `tx_payload` field.
-    inner: snow::HandshakeState,
+    /// Corresponds to the `ck` field of the `SymmetricState` in the Noise specification.
+    /// See <https://noiseprotocol.org/noise.html#the-symmetricstate-object>.
+    chaining_key: [u8; 32],
 
-    /// Unencrypted payload to send as part of the handshake.
-    /// If the payload has already been sent, contains `None`.
-    /// If the payload hasn't been sent yet, contains the index of the call to
-    /// [`snow::HandshakeState::write_message`] that must contain the payload.
-    tx_payload: Option<(u8, Box<[u8]>)>,
+    /// Hash that maintains the state of the data that we've sent out or received. Used as the
+    /// associated data whenever we produce or verify a frame during the handshake.
+    ///
+    /// Corresponds to the `h` field of the `SymmetricState` in the Noise specification.
+    /// See <https://noiseprotocol.org/noise.html#the-symmetricstate-object>.
+    hash: [u8; 32],
 
-    /// State of the remote payload reception.
-    rx_payload: RxPayload,
+    /// Local ephemeral key. Generate for this handshake specifically.
+    ///
+    /// Corresponds to the `e` field of the `HandshakeState` in the Noise specification.
+    /// See <https://noiseprotocol.org/noise.html#the-handshakestate-object>.
+    local_ephemeral_private_key: x25519_dalek::ReusableSecret,
 
-    /// Number of messages remaining to be received. Used to know whether an incoming packet is
-    /// still part of the handshake or not.
-    rx_messages_remain: u8,
+    /// Local static key. Corresponds to a [`NoiseKey`].
+    ///
+    /// Corresponds to the `s` field of the `HandshakeState` in the Noise specification.
+    /// See <https://noiseprotocol.org/noise.html#the-handshakestate-object>.
+    local_static_private_key: x25519_dalek::ReusableSecret,
 
-    /// Buffer of data containing data received on the wire, before decryption.
-    rx_buffer_encrypted: Vec<u8>,
+    /// Public key corresponding to [`HandshakeInProgressInner::local_static_private_key`].
+    local_static_public_key: x25519_dalek::PublicKey,
 
-    /// Buffer of data containing data waiting to be sent on the wire, after encryption. Includes
-    /// the length prefixes.
-    tx_buffer_encrypted: VecDeque<u8>,
-}
+    /// Ephemeral public key of the remote. Initially set to `0`s, then set to the correct value
+    /// once it's been received.
+    ///
+    /// Corresponds to the `re` field of the `HandshakeState` in the Noise specification.
+    /// See <https://noiseprotocol.org/noise.html#the-handshakestate-object>.
+    remote_ephemeral_public_key: x25519_dalek::PublicKey,
 
-enum RxPayload {
-    /// Remote payload has been received.
-    Received(PeerId),
-    /// Index of the call to [`snow::HandshakeState::read_message`], from now, that is expected
-    /// to contains the payload.
-    NthMessage(u8),
+    /// Static public key of the remote. Initially set to `0`s, then set to the correct value
+    /// once it's been received.
+    ///
+    /// Corresponds to the `rs` field of the `HandshakeState` in the Noise specification.
+    /// See <https://noiseprotocol.org/noise.html#the-handshakestate-object>.
+    remote_static_public_key: x25519_dalek::PublicKey,
+
+    /// Libp2p public key of the remote. Initially `None`, then set to the correct value once
+    /// we've received it.
+    remote_public_key: Option<PublicKey>,
+
+    /// Libp2p-specific additional handshake message to encrypt then send to the remote.
+    libp2p_handshake_message: Vec<u8>,
 }
 
 impl NoiseHandshake {
@@ -555,120 +625,54 @@ impl NoiseHandshake {
 impl HandshakeInProgress {
     /// Initializes a new noise handshake state machine.
     pub fn new(config: Config) -> Self {
-        let inner = {
-            let builder = snow::Builder::new(noise_params())
-                .local_private_key(&config.key.key.private)
-                .prologue(config.prologue);
-            if config.is_initiator {
-                builder.build_initiator()
+        // Generate a new ephemeral key for this handshake.
+        // TODO: get key from API user?
+        let local_ephemeral_private_key =
+            x25519_dalek::ReusableSecret::random_from_rng(&mut rand::thread_rng());
+
+        // Initialize the hash.
+        let mut hash = [0u8; 32];
+
+        // InitializeSymmetric(protocol_name).
+        {
+            const PROTOCOL_NAME: &[u8] = b"Noise_XX_25519_ChaChaPoly_SHA256";
+            if PROTOCOL_NAME.len() <= hash.len() {
+                hash[..PROTOCOL_NAME.len()].copy_from_slice(PROTOCOL_NAME);
+                hash[PROTOCOL_NAME.len()..].fill(0);
             } else {
-                builder.build_responder()
+                let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+                sha2::Digest::update(&mut hasher, &PROTOCOL_NAME);
+                sha2::Digest::finalize_into(
+                    hasher,
+                    &mut sha2::digest::generic_array::GenericArray::from_mut_slice(&mut hash),
+                );
             }
-            .unwrap()
-        };
-
-        // Configure according to the XX handshake.
-        let (tx_payload, rx_payload, rx_messages_remain) = if config.is_initiator {
-            let tx = Some((1, config.key.handshake_message.clone().into_boxed_slice()));
-            let rx = RxPayload::NthMessage(0);
-            (tx, rx, 1)
-        } else {
-            let tx = Some((0, config.key.handshake_message.clone().into_boxed_slice()));
-            let rx = RxPayload::NthMessage(1);
-            (tx, rx, 2)
-        };
-
-        let mut handshake = HandshakeInProgress(Box::new(HandshakeInProgressInner {
-            inner,
-            tx_payload,
-            rx_payload,
-            rx_messages_remain,
-            rx_buffer_encrypted: Vec::with_capacity(65536 + 2),
-            tx_buffer_encrypted: VecDeque::new(),
-        }));
-
-        handshake.update_message_write();
-        handshake
-    }
-
-    /// Calls [`snow::HandshakeState::write_message`] if necessary, updates all the internal state,
-    /// and puts the message into `tx_buffer_encrypted`.
-    fn update_message_write(&mut self) {
-        if self.0.inner.is_handshake_finished() || !self.0.inner.is_my_turn() {
-            return;
         }
+        let chaining_key = hash;
 
-        debug_assert!(self.0.tx_buffer_encrypted.is_empty());
+        // Perform MixHash(prologue).
+        mix_hash(&mut hash, config.prologue);
 
-        let payload = match &mut self.0.tx_payload {
-            None => None,
-            Some((n, _)) if *n != 0 => {
-                *n -= 1;
-                None
-            }
-            opt @ Some(_) => {
-                let (_n, payload) = opt.take().unwrap();
-                debug_assert_eq!(_n, 0);
-                Some(payload)
-            }
-        };
-
-        self.0.tx_buffer_encrypted.resize(512, 0);
-        self.0.tx_buffer_encrypted.make_contiguous(); // TODO: this is a hack to fix the follow-up debug_assert! from triggering; fixing this properly requires bigger changes
-        debug_assert!(self.0.tx_buffer_encrypted.as_slices().1.is_empty());
-        let written = self
-            .0
-            .inner
-            .write_message(
-                payload.as_ref().map(|p| &p[..]).unwrap_or(&[]),
-                self.0.tx_buffer_encrypted.as_mut_slices().0,
-            )
-            .unwrap();
-        assert!(written < self.0.tx_buffer_encrypted.len()); // be sure that the message has fit into `out`.
-        self.0.tx_buffer_encrypted.truncate(written);
-
-        // Handshake must also be prefixed with two bytes indicating its length.
-        // The message is guaranteed by the Noise specs to not be more than 64kiB.
-        let length_bytes = u16::try_from(self.0.tx_buffer_encrypted.len())
-            .unwrap()
-            .to_be_bytes();
-        self.0.tx_buffer_encrypted.push_front(length_bytes[1]);
-        self.0.tx_buffer_encrypted.push_front(length_bytes[0]);
-    }
-
-    /// Try to turn this [`HandshakeInProgress`] into a [`NoiseHandshake::Success`] if possible.
-    fn try_finish(self) -> NoiseHandshake {
-        if !self.0.tx_buffer_encrypted.is_empty() {
-            return NoiseHandshake::InProgress(self);
-        }
-
-        if !self.0.inner.is_handshake_finished() {
-            return NoiseHandshake::InProgress(self);
-        }
-
-        // `into_transport_mode()` can only panic if `!is_handshake_finished()`.
-        let cipher = self.0.inner.into_transport_mode().unwrap();
-
-        let remote_peer_id = match self.0.rx_payload {
-            RxPayload::Received(peer_id) => peer_id,
-            // Since `is_handshake_finished()` has returned true, all messages have been
-            // exchanged. As such, the remote payload cannot be in a "still waiting to come"
-            // situation other than because of logic error within the code.
-            RxPayload::NthMessage(_) => unreachable!(),
-        };
-
-        // If `rx_buffer_encrypted` wasn't empty, that would mean there would still be a handshake
-        // message to decode, which shouldn't be possible given that the handshake is finished.
-        debug_assert!(self.0.rx_buffer_encrypted.is_empty());
-
-        NoiseHandshake::Success {
-            cipher: Noise {
-                inner: cipher,
-                rx_buffer_encrypted: self.0.rx_buffer_encrypted,
-                rx_buffer_decrypted: Vec::new(), // TODO: with_capacity
+        HandshakeInProgress(Box::new(HandshakeInProgressInner {
+            cipher_state: CipherState {
+                key: [0; 32],
+                nonce: 0,
+                nonce_has_overflowed: false,
             },
-            remote_peer_id,
-        }
+            chaining_key,
+            hash,
+            local_ephemeral_private_key,
+            local_static_private_key: config.key.private_key.clone(),
+            local_static_public_key: config.key.public_key.clone(),
+            remote_ephemeral_public_key: x25519_dalek::PublicKey::from([0; 32]),
+            remote_static_public_key: x25519_dalek::PublicKey::from([0; 32]),
+            remote_public_key: None,
+            is_initiator: config.is_initiator,
+            pending_out_data: VecDeque::with_capacity(usize::from(u16::max_value()) + 2),
+            receive_buffer: Vec::with_capacity(usize::from(u16::max_value()) + 2),
+            num_buffered_or_transmitted_messages: 0,
+            libp2p_handshake_message: config.key.handshake_message.clone(),
+        }))
     }
 
     /// Feeds data coming from a socket and outputs data to write to the socket.
@@ -681,158 +685,545 @@ impl HandshakeInProgress {
         mut self,
         read_write: &mut ReadWrite<'_, TNow>,
     ) -> Result<NoiseHandshake, HandshakeError> {
-        'outer_loop: loop {
-            // Copy data from `self.tx_buffer_encrypted` to `read_write`.
-            loop {
-                debug_assert!(
-                    !self.0.tx_buffer_encrypted.as_slices().0.is_empty()
-                        || self.0.tx_buffer_encrypted.as_slices().1.is_empty()
-                );
-
-                let to_write = self.0.tx_buffer_encrypted.as_slices().0;
-                if !to_write.is_empty() && read_write.outgoing_buffer.is_none() {
-                    return Err(HandshakeError::WriteClosed);
-                }
-
-                let to_write_len = cmp::min(to_write.len(), read_write.outgoing_buffer_available());
-                if to_write_len == 0 {
-                    break;
-                }
-
-                read_write.write_out(&to_write[..to_write_len]);
-                for _ in 0..to_write_len {
-                    self.0.tx_buffer_encrypted.pop_front().unwrap();
-                }
+        loop {
+            // Write out the data currently buffered waiting to be written out.
+            // If we didn't finish writing our payload, don't do anything more and return now.
+            // Don't even read the data from the remote.
+            read_write.write_from_vec_deque(&mut self.0.pending_out_data);
+            if !self.0.pending_out_data.is_empty() {
+                return Ok(NoiseHandshake::InProgress(self));
             }
 
-            // Check if incoming data is still part of the handshake.
-            // If not, return now without reading anything more.
-            if self.0.rx_messages_remain == 0 {
-                break;
+            // If the handshake has finished, we return successfully here.
+            if self.0.num_buffered_or_transmitted_messages == 3 {
+                debug_assert!(self.0.pending_out_data.is_empty());
+                debug_assert!(self.0.receive_buffer.is_empty());
+
+                // Perform the `Split()`.
+                let (init_to_resp, resp_to_init, _) = hkdf(&self.0.chaining_key, &[]);
+                let (out_key, in_key) = match self.0.is_initiator {
+                    true => (init_to_resp, resp_to_init),
+                    false => (resp_to_init, init_to_resp),
+                };
+                return Ok(NoiseHandshake::Success {
+                    cipher: Noise {
+                        is_initiator: self.0.is_initiator,
+                        out_cipher_state: CipherState {
+                            key: out_key,
+                            nonce: 0,
+                            nonce_has_overflowed: false,
+                        },
+                        in_cipher_state: CipherState {
+                            key: in_key,
+                            nonce: 0,
+                            nonce_has_overflowed: false,
+                        },
+                        // We reuse `self.receive_buffer` as it already has the correct capacity.
+                        rx_buffer_encrypted: mem::take(&mut self.0.receive_buffer),
+                    },
+                    remote_peer_id: {
+                        // The logic of this module guarantees that `remote_peer_id` has
+                        // been set during the handshake.
+                        self.0
+                            .remote_public_key
+                            .take()
+                            .unwrap_or_else(|| unreachable!())
+                            .into_peer_id()
+                    },
+                });
             }
 
-            // The remaining of the body requires reading from `read_write`. As such, error if
-            // the reading side is closed.
-            if read_write.incoming_buffer.is_none() {
-                return Err(HandshakeError::ReadClosed);
-            }
+            // If the handshake is in a phase where we need to send out more data, queue said
+            // data to `pending_out_data` and continue.
+            match (
+                self.0.num_buffered_or_transmitted_messages,
+                self.0.is_initiator,
+            ) {
+                (0, true) => {
+                    // Send `e`, the ephemeral local public key.
 
-            // Handshake message must start with two bytes of length.
-            // Copy bytes one by one from payload until we reach a length of two.
-            while self.0.rx_buffer_encrypted.len() < 2 {
-                if read_write.incoming_buffer_available() == 0 {
-                    break 'outer_loop;
+                    // Process `e`.
+                    let local_ephemeral_public_key =
+                        x25519_dalek::PublicKey::from(&self.0.local_ephemeral_private_key);
+                    self.0
+                        .pending_out_data
+                        .extend(local_ephemeral_public_key.as_bytes());
+                    mix_hash(&mut self.0.hash, local_ephemeral_public_key.as_bytes());
+
+                    // Call MixHash(&[]) to process the empty payload.
+                    mix_hash(&mut self.0.hash, &[]);
+
+                    // Add the libp2p message length.
+                    let len = u16::try_from(self.0.pending_out_data.len())
+                        .unwrap()
+                        .to_be_bytes();
+                    self.0.pending_out_data.push_front(len[1]);
+                    self.0.pending_out_data.push_front(len[0]);
+
+                    // Message is now fully queued.
+                    self.0.num_buffered_or_transmitted_messages += 1;
+                    continue;
                 }
+                (1, false) => {
+                    // Send `e, ee, s, es` and the libp2p-specific handshake.
 
-                self.0
-                    .rx_buffer_encrypted
-                    .push(read_write.read_bytes::<1>()[0]);
+                    // Process `e`.
+                    let local_ephemeral_public_key =
+                        x25519_dalek::PublicKey::from(&self.0.local_ephemeral_private_key);
+                    self.0
+                        .pending_out_data
+                        .extend(local_ephemeral_public_key.as_bytes());
+                    mix_hash(&mut self.0.hash, local_ephemeral_public_key.as_bytes());
+
+                    // Process `ee`. Call MixKey(DH(e, re)).
+                    let (chaining_key_update, key_update, _) = hkdf(
+                        &self.0.chaining_key,
+                        self.0
+                            .local_ephemeral_private_key
+                            .diffie_hellman(&self.0.remote_ephemeral_public_key)
+                            .as_bytes(),
+                    );
+                    self.0.chaining_key = chaining_key_update;
+                    self.0.cipher_state.key = key_update;
+                    self.0.cipher_state.nonce = 0;
+
+                    // Process `s`. Append EncryptAndHash(s.public_key) to the buffer.
+                    let encrypted_static_public_key = self
+                        .0
+                        .cipher_state
+                        .write_chachapoly_message_to_vec(
+                            &self.0.hash,
+                            self.0.local_static_public_key.as_bytes(),
+                        )
+                        .unwrap();
+                    self.0
+                        .pending_out_data
+                        .extend(encrypted_static_public_key.iter().copied());
+                    mix_hash(&mut self.0.hash, &encrypted_static_public_key);
+
+                    // Process `es`. Call MixKey(DH(s, re)).
+                    let (chaining_key_update, key_update, _) = hkdf(
+                        &self.0.chaining_key,
+                        self.0
+                            .local_static_private_key
+                            .diffie_hellman(&self.0.remote_ephemeral_public_key)
+                            .as_bytes(),
+                    );
+                    self.0.chaining_key = chaining_key_update;
+                    self.0.cipher_state.key = key_update;
+                    self.0.cipher_state.nonce = 0;
+
+                    // Add the libp2p handshake message.
+                    let encrypted_libp2p_handshake = self
+                        .0
+                        .cipher_state
+                        .write_chachapoly_message_to_vec(
+                            &self.0.hash,
+                            &self.0.libp2p_handshake_message,
+                        )
+                        .unwrap();
+                    self.0
+                        .pending_out_data
+                        .extend(encrypted_libp2p_handshake.iter().copied());
+                    mix_hash(&mut self.0.hash, &encrypted_libp2p_handshake);
+
+                    // Add the libp2p message length.
+                    let len = u16::try_from(self.0.pending_out_data.len())
+                        .unwrap()
+                        .to_be_bytes();
+                    self.0.pending_out_data.push_front(len[1]);
+                    self.0.pending_out_data.push_front(len[0]);
+
+                    // Message is now fully queued.
+                    self.0.num_buffered_or_transmitted_messages += 1;
+                    continue;
+                }
+                (2, true) => {
+                    // Send `s, se` and the libp2p-specific handshake.
+
+                    // Process `s`. Append EncryptAndHash(s.public_key) to the buffer.
+                    let encrypted_static_public_key = self
+                        .0
+                        .cipher_state
+                        .write_chachapoly_message_to_vec(
+                            &self.0.hash,
+                            self.0.local_static_public_key.as_bytes(),
+                        )
+                        .unwrap();
+                    self.0
+                        .pending_out_data
+                        .extend(encrypted_static_public_key.iter().copied());
+                    mix_hash(&mut self.0.hash, &encrypted_static_public_key);
+
+                    // Process `se`. Call MixKey(DH(s, re)).
+                    let (chaining_key_update, key_update, _) = hkdf(
+                        &self.0.chaining_key,
+                        self.0
+                            .local_static_private_key
+                            .diffie_hellman(&self.0.remote_ephemeral_public_key)
+                            .as_bytes(),
+                    );
+                    self.0.chaining_key = chaining_key_update;
+                    self.0.cipher_state.key = key_update;
+                    self.0.cipher_state.nonce = 0;
+
+                    // Add the libp2p handshake message.
+                    let encrypted_libp2p_handshake = self
+                        .0
+                        .cipher_state
+                        .write_chachapoly_message_to_vec(
+                            &self.0.hash,
+                            &self.0.libp2p_handshake_message,
+                        )
+                        .unwrap();
+                    self.0
+                        .pending_out_data
+                        .extend(encrypted_libp2p_handshake.iter().copied());
+                    mix_hash(&mut self.0.hash, &encrypted_libp2p_handshake);
+
+                    // Add the libp2p message length.
+                    let len = u16::try_from(self.0.pending_out_data.len())
+                        .unwrap()
+                        .to_be_bytes();
+                    self.0.pending_out_data.push_front(len[1]);
+                    self.0.pending_out_data.push_front(len[0]);
+
+                    // Message is now fully queued.
+                    self.0.num_buffered_or_transmitted_messages += 1;
+                    continue;
+                }
+                _ => {}
             }
 
-            // Decoding the first two bytes, which are the length of the handshake message.
-            let expected_len =
-                u16::from_be_bytes(<[u8; 2]>::try_from(&self.0.rx_buffer_encrypted[..2]).unwrap());
-            debug_assert!(
-                expected_len == 0
-                    || self.0.rx_buffer_encrypted.len() < 2 + usize::from(expected_len)
-            );
-
-            // Copy as much data as possible from `payload` to `self.rx_buffer_encrypted`, without
-            // copying more than the handshake message.
-            let to_copy = cmp::min(
-                usize::from(expected_len) + 2 - self.0.rx_buffer_encrypted.len(),
-                read_write.incoming_buffer_available(),
-            );
-            self.0
-                .rx_buffer_encrypted
-                .extend(read_write.incoming_bytes_iter().take(to_copy));
-            debug_assert!(self.0.rx_buffer_encrypted.len() <= usize::from(expected_len) + 2);
-
-            // Return early if the entire handshake message has not been received yet.
-            if self.0.rx_buffer_encrypted.len() < usize::from(expected_len) + 2 {
-                break;
-            }
-
-            // Entire handshake message has been received.
-            // Decoding the potential payload into `decoded_payload`.
-            let decoded_payload = {
-                // The decrypted payload can only ever be smaller than the encrypted message. As
-                // such, we allocate a buffer of size equal to the encrypted message.
-                let mut decoded = vec![0; usize::from(expected_len)];
-                match self
-                    .0
-                    .inner
-                    .read_message(&self.0.rx_buffer_encrypted[2..], &mut decoded)
-                {
-                    Err(err) => {
-                        return Err(HandshakeError::Cipher(CipherError(err)));
-                    }
-                    Ok(n) => {
-                        debug_assert!(n <= decoded.len());
-                        decoded.truncate(n);
-                    }
-                }
-                decoded
-            };
-
-            // Data in `rx_buffer_encrypted` has been fully decoded and can be thrown away.
-            self.0.rx_buffer_encrypted.clear();
-            self.0.rx_messages_remain -= 1;
-
-            // Check and update the status of the payload reception.
-            let payload_expected = match &mut self.0.rx_payload {
-                RxPayload::NthMessage(0) => true,
-                RxPayload::NthMessage(n) => {
-                    *n -= 1;
-                    false
-                }
-                RxPayload::Received(_) => false,
-            };
-
-            if payload_expected {
-                // The decoded handshake is a protobuf message.
-                // See https://github.com/libp2p/specs/tree/master/noise#the-libp2p-handshake-payload
-                let (identity_key, identity_sig) = {
-                    let mut parser =
-                        nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
-                            nom::combinator::complete(protobuf::message_decode! {
-                                #[required] key = 1 => protobuf::bytes_tag_decode,
-                                #[required] sig = 2 => protobuf::bytes_tag_decode,
-                            }),
-                        );
-                    match nom::Finish::finish(parser(&decoded_payload)) {
-                        Ok((_, out)) => (out.key, out.sig),
-                        Err(_) => return Err(HandshakeError::PayloadDecode(PayloadDecodeError)),
-                    }
+            // Since we have no more data to write out, and that the handshake isn't finished yet,
+            // the next step is necessarily receiving a message sent by the remote.
+            // Most of the time, `incoming_buffer` will contain an entire Noise handshake message.
+            // However, it is also possible that the Noise message is split into multiple chunks
+            // received over time. When that is the case, we have to fall back to `receive_buffer`.
+            let available_message: &[u8] = {
+                // The remaining of the body requires reading from `read_write`. As such, error if
+                // the reading side is closed.
+                let Some(incoming_buffer) = read_write.incoming_buffer else {
+                    return Err(HandshakeError::ReadClosed);
                 };
 
-                let remote_public_key = PublicKey::from_protobuf_encoding(identity_key)
-                    .map_err(|_| HandshakeError::InvalidKey)?;
+                // If `self.receive_buffer` is empty and `incoming_data` contains at least a
+                // whole message, we can directly extract said message.
+                if self.0.receive_buffer.is_empty()
+                    && incoming_buffer.len() >= 2
+                    && incoming_buffer.len()
+                        >= usize::from(u16::from_be_bytes(
+                            <[u8; 2]>::try_from(&incoming_buffer[..2]).unwrap(),
+                        )) + 2
+                {
+                    let message_length = usize::from(u16::from_be_bytes(
+                        <[u8; 2]>::try_from(&incoming_buffer[..2]).unwrap(),
+                    )) + 2;
+                    read_write.read_bytes += message_length;
+                    read_write.incoming_buffer = Some(&incoming_buffer[message_length..]);
+                    &incoming_buffer[2..message_length]
+                } else {
+                    // The incoming buffer only contains a partial message, or we have started
+                    // reading a partial message in a previous iteration.
+                    // This is the more uncommon and complicated situation. We need to copy the
+                    // data from the incoming buffer to the receive buffer.
+                    let mut incoming_buffer_iter = incoming_buffer.iter();
+                    while self.0.receive_buffer.len() < 2 {
+                        let Some(byte) = incoming_buffer_iter.next() else {
+                            read_write.incoming_buffer = Some(incoming_buffer_iter.as_slice());
+                            return Ok(NoiseHandshake::InProgress(self));
+                        };
+                        read_write.read_bytes += 1;
+                        self.0.receive_buffer.push(*byte);
+                    }
 
-                // Assuming that the libp2p+noise specifications are well-designed, the payload
-                // will only arrive after `get_remote_static` is `Some`. Since we have already
-                // checked that the payload arrives when it is supposed to, this can never panic.
-                let remote_noise_static = self.0.inner.get_remote_static().unwrap();
-                // TODO: don't use concat() in order to not allocate a Vec
-                remote_public_key
-                    .verify(
-                        &[b"noise-libp2p-static-key:", remote_noise_static].concat(),
-                        identity_sig,
-                    )
-                    .map_err(HandshakeError::SignatureVerificationFailed)?;
+                    let message_length = usize::from(u16::from_be_bytes(
+                        <[u8; 2]>::try_from(&self.0.receive_buffer[..2]).unwrap(),
+                    )) + 2;
+                    while self.0.receive_buffer.len() < message_length {
+                        let Some(byte) = incoming_buffer_iter.next() else {
+                            read_write.incoming_buffer = Some(incoming_buffer_iter.as_slice());
+                            return Ok(NoiseHandshake::InProgress(self));
+                        };
+                        read_write.read_bytes += 1;
+                        self.0.receive_buffer.push(*byte);
+                    }
 
-                self.0.rx_payload = RxPayload::Received(remote_public_key.into_peer_id());
-            } else if !decoded_payload.is_empty() {
-                return Err(HandshakeError::UnexpectedPayload);
+                    // A full message is available in `receive_buffer`.
+                    read_write.incoming_buffer = Some(incoming_buffer_iter.as_slice());
+                    &self.0.receive_buffer[2..]
+                }
             };
 
-            // Now that a message has been received, check if it's the turn of the local node to
-            // send something. This puts more data in `tx_buffer_encrypted`.
-            self.update_message_write();
-        }
+            // The rest of the function depends on the current handshake phase.
+            match (
+                self.0.num_buffered_or_transmitted_messages,
+                self.0.is_initiator,
+            ) {
+                (0, false) => {
+                    // Receive `e` message from the remote.
+                    self.0.remote_ephemeral_public_key = x25519_dalek::PublicKey::from(*{
+                        // Because the remote hasn't authenticated us at this point, sending more
+                        // data than what the protocol specifies is forbidden.
+                        let mut parser = nom::combinator::all_consuming::<
+                            _,
+                            _,
+                            (&[u8], nom::error::ErrorKind),
+                            _,
+                        >(nom::combinator::map(
+                            nom::bytes::complete::take(32u32),
+                            |k| <&[u8; 32]>::try_from(k).unwrap(),
+                        ));
+                        match parser(available_message) {
+                            Ok((_, out)) => out,
+                            Err(_) => {
+                                return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
+                            }
+                        }
+                    });
+                    mix_hash(
+                        &mut self.0.hash,
+                        self.0.remote_ephemeral_public_key.as_bytes(),
+                    );
 
-        // Call `try_finish` to check whether the handshake has finished.
-        Ok(self.try_finish())
+                    // Call MixHash(&[]) to process the empty payload.
+                    mix_hash(&mut self.0.hash, &[]);
+
+                    // Message has been fully processed.
+                    self.0.receive_buffer.clear();
+                    self.0.num_buffered_or_transmitted_messages += 1;
+                    continue;
+                }
+                (1, true) => {
+                    // Receive `e, ee, s, es` and the libp2p-specific handshake from the remote.
+                    let (
+                        remote_ephemeral_public_key,
+                        remote_static_public_key_encrypted,
+                        libp2p_handshake_encrypted,
+                    ) = {
+                        // Because the remote hasn't fully authenticated us at this point, sending
+                        // more data than what the protocol specifies is forbidden.
+                        let mut parser = nom::combinator::all_consuming::<
+                            _,
+                            _,
+                            (&[u8], nom::error::ErrorKind),
+                            _,
+                        >(nom::sequence::tuple((
+                            nom::combinator::map(nom::bytes::complete::take(32u32), |k| {
+                                <&[u8; 32]>::try_from(k).unwrap()
+                            }),
+                            nom::combinator::map(nom::bytes::complete::take(48u32), |k| {
+                                <&[u8; 48]>::try_from(k).unwrap()
+                            }),
+                            nom::combinator::rest,
+                        )));
+                        match parser(available_message) {
+                            Ok((_, out)) => out,
+                            Err(_) => {
+                                return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
+                            }
+                        }
+                    };
+
+                    // Process `e`.
+                    self.0.remote_ephemeral_public_key =
+                        x25519_dalek::PublicKey::from(*remote_ephemeral_public_key);
+                    mix_hash(
+                        &mut self.0.hash,
+                        self.0.remote_ephemeral_public_key.as_bytes(),
+                    );
+
+                    // Process `ee`. Call MixKey(DH(e, re)).
+                    let (chaining_key_update, key_update, _) = hkdf(
+                        &self.0.chaining_key,
+                        self.0
+                            .local_ephemeral_private_key
+                            .diffie_hellman(&self.0.remote_ephemeral_public_key)
+                            .as_bytes(),
+                    );
+                    self.0.chaining_key = chaining_key_update;
+                    self.0.cipher_state.key = key_update;
+                    self.0.cipher_state.nonce = 0;
+
+                    // Process `s`.
+                    self.0.remote_static_public_key = x25519_dalek::PublicKey::from(
+                        self.0
+                            .cipher_state
+                            .read_chachapoly_message_to_array(
+                                &self.0.hash,
+                                remote_static_public_key_encrypted,
+                            )
+                            .map_err(HandshakeError::Cipher)?,
+                    );
+                    mix_hash(&mut self.0.hash, remote_static_public_key_encrypted);
+
+                    // Process `es`. Call MixKey(DH(e, rs)).
+                    let (chaining_key_update, key_update, _) = hkdf(
+                        &self.0.chaining_key,
+                        self.0
+                            .local_ephemeral_private_key
+                            .diffie_hellman(&self.0.remote_static_public_key)
+                            .as_bytes(),
+                    );
+                    self.0.chaining_key = chaining_key_update;
+                    self.0.cipher_state.key = key_update;
+                    self.0.cipher_state.nonce = 0;
+
+                    // Process the libp2p-specific handshake.
+                    self.0.remote_public_key = Some({
+                        let libp2p_handshake_decrypted = self
+                            .0
+                            .cipher_state
+                            .read_chachapoly_message_to_vec(
+                                &self.0.hash,
+                                libp2p_handshake_encrypted,
+                            )
+                            .map_err(HandshakeError::Cipher)?;
+                        let (libp2p_key, libp2p_signature) = {
+                            let mut parser =
+                                nom::combinator::all_consuming::<
+                                    _,
+                                    _,
+                                    (&[u8], nom::error::ErrorKind),
+                                    _,
+                                >(protobuf::message_decode! {
+                                    #[required] key = 1 => protobuf::bytes_tag_decode,
+                                    #[required] sig = 2 => protobuf::bytes_tag_decode,
+                                });
+                            match parser(&libp2p_handshake_decrypted) {
+                                Ok((_, out)) => (out.key, out.sig),
+                                Err(_) => {
+                                    return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
+                                }
+                            }
+                        };
+                        let remote_public_key = PublicKey::from_protobuf_encoding(libp2p_key)
+                            .map_err(|_| HandshakeError::InvalidKey)?;
+                        remote_public_key
+                            .verify(
+                                &[
+                                    &b"noise-libp2p-static-key:"[..],
+                                    &self.0.remote_static_public_key.as_bytes()[..],
+                                ]
+                                .concat(),
+                                libp2p_signature,
+                            )
+                            .map_err(HandshakeError::SignatureVerificationFailed)?;
+                        remote_public_key
+                    });
+                    mix_hash(&mut self.0.hash, libp2p_handshake_encrypted);
+
+                    // Message has been fully processed.
+                    self.0.receive_buffer.clear();
+                    self.0.num_buffered_or_transmitted_messages += 1;
+                    continue;
+                }
+                (2, false) => {
+                    // Receive `s, se` and the libp2p-specific handshake from the remote.
+                    let (remote_static_public_key_encrypted, libp2p_handshake_encrypted) = {
+                        // The noise and libp2p-noise specifications clearly define a noise
+                        // handshake message and a noise transport message as two different things.
+                        // While the remote could in theory send post-handshake
+                        // application-specific data in this message, in practice it is forbidden.
+                        let mut parser = nom::combinator::all_consuming::<
+                            _,
+                            _,
+                            (&[u8], nom::error::ErrorKind),
+                            _,
+                        >(nom::sequence::tuple((
+                            nom::combinator::map(nom::bytes::complete::take(48u32), |k| {
+                                <&[u8; 48]>::try_from(k).unwrap()
+                            }),
+                            nom::combinator::rest,
+                        )));
+                        match parser(available_message) {
+                            Ok((_, out)) => out,
+                            Err(_) => {
+                                return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
+                            }
+                        }
+                    };
+
+                    // Process `s`.
+                    self.0.remote_static_public_key = x25519_dalek::PublicKey::from(
+                        self.0
+                            .cipher_state
+                            .read_chachapoly_message_to_array(
+                                &self.0.hash,
+                                remote_static_public_key_encrypted,
+                            )
+                            .map_err(HandshakeError::Cipher)?,
+                    );
+                    mix_hash(&mut self.0.hash, remote_static_public_key_encrypted);
+
+                    // Process `se`. Call MixKey(DH(e, rs)).
+                    let (chaining_key_update, key_update, _) = hkdf(
+                        &self.0.chaining_key,
+                        self.0
+                            .local_ephemeral_private_key
+                            .clone()
+                            .diffie_hellman(&self.0.remote_static_public_key)
+                            .as_bytes(),
+                    );
+                    self.0.chaining_key = chaining_key_update;
+                    self.0.cipher_state.key = key_update;
+                    self.0.cipher_state.nonce = 0;
+
+                    // Process the libp2p-specific handshake.
+                    self.0.remote_public_key = Some({
+                        let libp2p_handshake_decrypted = self
+                            .0
+                            .cipher_state
+                            .read_chachapoly_message_to_vec(
+                                &self.0.hash,
+                                libp2p_handshake_encrypted,
+                            )
+                            .map_err(HandshakeError::Cipher)?;
+                        let (libp2p_key, libp2p_signature) = {
+                            let mut parser =
+                                nom::combinator::all_consuming::<
+                                    _,
+                                    _,
+                                    (&[u8], nom::error::ErrorKind),
+                                    _,
+                                >(protobuf::message_decode! {
+                                    #[required] key = 1 => protobuf::bytes_tag_decode,
+                                    #[required] sig = 2 => protobuf::bytes_tag_decode,
+                                });
+                            match parser(&libp2p_handshake_decrypted) {
+                                Ok((_, out)) => (out.key, out.sig),
+                                Err(_) => {
+                                    return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
+                                }
+                            }
+                        };
+                        let remote_public_key = PublicKey::from_protobuf_encoding(libp2p_key)
+                            .map_err(|_| HandshakeError::InvalidKey)?;
+                        remote_public_key
+                            .verify(
+                                &[
+                                    &b"noise-libp2p-static-key:"[..],
+                                    &self.0.remote_static_public_key.as_bytes()[..],
+                                ]
+                                .concat(),
+                                libp2p_signature,
+                            )
+                            .map_err(HandshakeError::SignatureVerificationFailed)?;
+                        remote_public_key
+                    });
+                    mix_hash(&mut self.0.hash, libp2p_handshake_encrypted);
+
+                    // Message has been fully processed.
+                    self.0.receive_buffer.clear();
+                    self.0.num_buffered_or_transmitted_messages += 1;
+                    continue;
+                }
+                _ => {
+                    // Any other state was handled earlier in the function.
+                    unreachable!()
+                }
+            }
+        }
     }
 }
 
@@ -842,12 +1233,14 @@ impl fmt::Debug for HandshakeInProgress {
     }
 }
 
-/// Returns the Noise configuration.
-//
-// Note that we don't use `lazy_static` because of `no_std` compatibility.
-// TODO: do this at compilation time, ideally
-fn noise_params() -> snow::params::NoiseParams {
-    "Noise_XX_25519_ChaChaPoly_SHA256".parse().unwrap()
+impl Drop for HandshakeInProgress {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0.local_ephemeral_private_key);
+        zeroize::Zeroize::zeroize(&mut self.0.local_static_private_key);
+        zeroize::Zeroize::zeroize(&mut self.0.cipher_state.key);
+        zeroize::Zeroize::zeroize(&mut self.0.hash);
+        zeroize::Zeroize::zeroize(&mut self.0.chaining_key);
+    }
 }
 
 /// Potential error during the noise handshake.
@@ -872,14 +1265,356 @@ pub enum HandshakeError {
     SignatureVerificationFailed(SignatureVerifyFailed),
 }
 
+/// Error while encrypting data.
+#[derive(Debug, derive_more::Display)]
+#[display(fmt = "Error while encrypting the Noise payload")]
+pub enum EncryptError {
+    /// The nonce has overflowed because too many messages have been exchanged. This error is a
+    /// normal situation and will happen given sufficient time.
+    NonceOverflow,
+}
+
 /// Error while decoding data.
 #[derive(Debug, derive_more::Display)]
 #[display(fmt = "Error while decrypting the Noise payload")]
-pub struct CipherError(snow::Error);
+pub enum CipherError {
+    /// Message is too small. This is likely caused by a bug either in this code or in the remote's
+    /// code.
+    MissingHmac,
+    /// Authentication data doesn't match what is expected.
+    HmacInvalid,
+    /// The nonce has overflowed because too many messages have been exchanged. This error is a
+    /// normal situation and will happen given sufficient time.
+    NonceOverflow,
+}
 
 /// Error while decoding the handshake.
 #[derive(Debug, derive_more::Display)]
 pub struct PayloadDecodeError;
+
+struct CipherState {
+    key: [u8; 32],
+    nonce: u64,
+    nonce_has_overflowed: bool,
+}
+
+impl CipherState {
+    /// Accepts two `destination` buffers that contain unencrypted data plus 16 unused bytes where
+    /// the HMAC will be written. Encrypts the data in place and writes the HMAC.
+    ///
+    /// Does *not* include the libp2p-specific message length prefix.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `destination.0.len() + destination.1.len() < 16`.
+    /// Panics if `destination.0.len() + destination.1.len() > 1 << 16`.
+    ///
+    fn write_chachapoly_message_in_place(
+        &'_ mut self,
+        associated_data: &[u8],
+        destination: (&'_ mut [u8], &'_ mut [u8]),
+    ) -> Result<(), EncryptError> {
+        debug_assert!(destination.0.len() + destination.1.len() <= usize::from(u16::max_value()));
+
+        if self.nonce_has_overflowed {
+            return Err(EncryptError::NonceOverflow);
+        }
+
+        let (mut cipher, mut mac) = self.prepare(associated_data);
+
+        // The difficulty in this function implementation is that the cipher and MAC operate on
+        // 64 bytes blocks (in other words, the data passed to them must have a size multiple of
+        // 64), and unfortunately `destination` might be weirdly aligned.
+        // To overcome this, if there's an alignment issue, we copy the data to an intermediary
+        // buffer, encrypt it, then copy it back.
+
+        // The function below does a maximum of three passes: one on `destination.0`, one on a
+        // copy of the block that overlaps between `destination.0` and `destination.1`, and one
+        // on `destination.1`.
+        // Most of the time, only one or two passes are necessary as the API user is expected to
+        // provide buffers that are aligned over 64 bytes.
+
+        // To start find where the payload ends in `destination.0` and `destination.1` by removing
+        // 16 bytes from them.
+        let payload0_length = destination.0.len() - 16usize.saturating_sub(destination.1.len());
+        let payload1_length = destination.1.len().saturating_sub(16);
+
+        // If `destination.1` is empty, we only need a single pass which processes all the bytes
+        // of `destination.0` at once. Otherwise, the first pass ends at a multiple of 64 bytes.
+        let first_chunk_end_offset = if destination.1.is_empty() {
+            payload0_length
+        } else {
+            64 * (payload0_length / 64)
+        };
+        let first_chunk = &mut destination.0[..first_chunk_end_offset];
+        chacha20::cipher::StreamCipher::apply_keystream(&mut cipher, first_chunk);
+        poly1305::universal_hash::UniversalHash::update_padded(&mut mac, first_chunk);
+
+        // Process bytes of frames that are in the block that overlaps `destination.0`
+        // and `destination.1`.
+        if first_chunk_end_offset != payload0_length {
+            let intermediary_buffer_len = (payload0_length + payload1_length) % 64;
+            let mut intermediary_buffer = vec![0; intermediary_buffer_len];
+            intermediary_buffer[..payload0_length - first_chunk_end_offset]
+                .copy_from_slice(&destination.0[first_chunk_end_offset..payload0_length]);
+            intermediary_buffer[payload0_length - first_chunk_end_offset..].copy_from_slice(
+                &destination.1
+                    [..intermediary_buffer_len - (payload0_length - first_chunk_end_offset)],
+            );
+            chacha20::cipher::StreamCipher::apply_keystream(&mut cipher, &mut intermediary_buffer);
+            poly1305::universal_hash::UniversalHash::update_padded(
+                &mut mac,
+                &mut intermediary_buffer,
+            );
+            destination.0[first_chunk_end_offset..payload0_length]
+                .copy_from_slice(&intermediary_buffer[..payload0_length - first_chunk_end_offset]);
+            destination.1[..intermediary_buffer_len - (payload0_length - first_chunk_end_offset)]
+                .copy_from_slice(&intermediary_buffer[payload0_length - first_chunk_end_offset..]);
+        }
+
+        // Process bytes aligned on a 64 bytes boundary in `destination.1`.
+        let second_chunk_start_offset = cmp::min(
+            payload1_length,
+            64 - (payload0_length - first_chunk_end_offset),
+        );
+        let second_chunk = &mut destination.1[second_chunk_start_offset..payload1_length];
+        chacha20::cipher::StreamCipher::apply_keystream(&mut cipher, second_chunk);
+        poly1305::universal_hash::UniversalHash::update_padded(&mut mac, second_chunk);
+
+        // Update the MAC with the length of the associated data and input data.
+        let mut block = poly1305::universal_hash::generic_array::GenericArray::default();
+        block[..8].copy_from_slice(&u64::try_from(associated_data.len()).unwrap().to_le_bytes());
+        block[8..].copy_from_slice(
+            &u64::try_from(payload0_length + payload1_length)
+                .unwrap()
+                .to_le_bytes(),
+        );
+        poly1305::universal_hash::UniversalHash::update(&mut mac, &[block]);
+
+        // Write the HMAC.
+        let mac_bytes: [u8; 16] = poly1305::universal_hash::UniversalHash::finalize(mac).into();
+        let destination1_length = destination.1.len();
+        destination.0[payload0_length..]
+            .copy_from_slice(&mac_bytes[..16usize.saturating_sub(destination1_length)]);
+        destination.1[payload1_length..]
+            .copy_from_slice(&mac_bytes[16usize.saturating_sub(destination1_length)..]);
+
+        // Increment the nonce by 1.
+        (self.nonce, self.nonce_has_overflowed) = self.nonce.overflowing_add(1);
+
+        Ok(())
+    }
+
+    /// Creates a ChaChaPoly1305 frame as a `Vec`.
+    ///
+    /// Does *not* include the libp2p-specific message length prefix.
+    fn write_chachapoly_message_to_vec(
+        &'_ mut self,
+        associated_data: &[u8],
+        data: &[u8],
+    ) -> Result<Vec<u8>, EncryptError> {
+        let mut out = vec![0; data.len() + 16];
+        out[..data.len()].copy_from_slice(data);
+        self.write_chachapoly_message_in_place(associated_data, (&mut out, &mut []))?;
+        Ok(out)
+    }
+
+    /// Highly-specific function when the message to decode is 32 bytes.
+    fn read_chachapoly_message_to_array(
+        &'_ mut self,
+        associated_data: &[u8],
+        message_data: &[u8; 48],
+    ) -> Result<[u8; 32], CipherError> {
+        let mut out = [0; 32];
+        self.read_chachapoly_message_to_slice(associated_data, message_data, &mut out)?;
+        Ok(out)
+    }
+
+    fn read_chachapoly_message_to_vecdeque(
+        &'_ mut self,
+        associated_data: &[u8],
+        message_data: &[u8],
+        destination: &mut VecDeque<u8>,
+    ) -> Result<(), CipherError> {
+        let original_dest_len = destination.len();
+        destination.resize(original_dest_len + message_data.len().saturating_sub(16), 0);
+
+        if destination.as_mut_slices().1.is_empty() {
+            match self.read_chachapoly_message_to_slice(
+                associated_data,
+                message_data,
+                &mut destination.as_mut_slices().0[original_dest_len..],
+            ) {
+                Ok(()) => Ok(()),
+                Err(err) => {
+                    destination.truncate(original_dest_len);
+                    Err(err)
+                }
+            }
+        } else {
+            destination.truncate(original_dest_len);
+            let intermediary =
+                self.read_chachapoly_message_to_vec(associated_data, message_data)?;
+            destination.extend(intermediary.into_iter());
+            Ok(())
+        }
+    }
+
+    fn read_chachapoly_message_to_vec(
+        &'_ mut self,
+        associated_data: &[u8],
+        message_data: &[u8],
+    ) -> Result<Vec<u8>, CipherError> {
+        let mut destination = vec![0; message_data.len().saturating_sub(16)];
+        self.read_chachapoly_message_to_slice(associated_data, message_data, &mut destination)?;
+        Ok(destination)
+    }
+
+    fn read_chachapoly_message_to_slice(
+        &'_ mut self,
+        associated_data: &[u8],
+        message_data: &[u8],
+        destination: &mut [u8],
+    ) -> Result<(), CipherError> {
+        debug_assert_eq!(destination.len(), message_data.len() - 16);
+
+        if self.nonce_has_overflowed {
+            return Err(CipherError::NonceOverflow);
+        }
+
+        // Messages that are missing a HMAC are invalid.
+        if message_data.len() < 16 {
+            return Err(CipherError::MissingHmac);
+        }
+
+        let (mut cipher, mut mac) = self.prepare(associated_data);
+
+        poly1305::universal_hash::UniversalHash::update_padded(
+            &mut mac,
+            &message_data[..message_data.len() - 16],
+        );
+
+        // Update the MAC with the length of the associated data and input data.
+        let mut block = poly1305::universal_hash::generic_array::GenericArray::default();
+        block[..8].copy_from_slice(&u64::try_from(associated_data.len()).unwrap().to_le_bytes());
+        block[8..].copy_from_slice(
+            &u64::try_from(message_data.len() - 16)
+                .unwrap()
+                .to_le_bytes(),
+        );
+        poly1305::universal_hash::UniversalHash::update(&mut mac, &[block]);
+
+        // Compare the calculated MAC with the one in the payload.
+        // This is done in constant time.
+        let obtained_mac_bytes = &message_data[message_data.len() - 16..];
+        if poly1305::universal_hash::UniversalHash::verify(
+            mac,
+            &poly1305::universal_hash::generic_array::GenericArray::from_slice(obtained_mac_bytes),
+        )
+        .is_err()
+        {
+            return Err(CipherError::HmacInvalid);
+        }
+
+        // Only after the MAC has been verified, we copy the data and decrypt it.
+        // This function returns an error if the cipher stream is exhausted. Because we recreate
+        // a cipher stream every time we encode a message, and a message is maximum 2^16 bytes,
+        // this can't happen.
+        chacha20::cipher::StreamCipher::apply_keystream_b2b(
+            &mut cipher,
+            &message_data[..message_data.len() - 16],
+            destination,
+        )
+        .unwrap_or_else(|_| unreachable!());
+
+        // Increment the nonce by 1.
+        (self.nonce, self.nonce_has_overflowed) = self.nonce.overflowing_add(1);
+
+        Ok(())
+    }
+
+    fn prepare(&self, associated_data: &[u8]) -> (chacha20::ChaCha20, poly1305::Poly1305) {
+        let mut cipher = {
+            let nonce = {
+                let mut out = [0; 12];
+                out[4..].copy_from_slice(&self.nonce.to_le_bytes());
+                out
+            };
+
+            <chacha20::ChaCha20 as chacha20::cipher::KeyIvInit>::new(
+                chacha20::cipher::generic_array::GenericArray::from_slice(&self.key[..]),
+                chacha20::cipher::generic_array::GenericArray::from_slice(&nonce[..]),
+            )
+        };
+
+        let mut mac = {
+            let mut mac_key = Box::new([0u8; 32]);
+            chacha20::cipher::StreamCipher::apply_keystream(&mut cipher, &mut *mac_key);
+            chacha20::cipher::StreamCipherSeek::seek(&mut cipher, 64);
+            let mac = <poly1305::Poly1305 as poly1305::universal_hash::KeyInit>::new(
+                poly1305::universal_hash::generic_array::GenericArray::from_slice(&*mac_key),
+            );
+            zeroize::Zeroize::zeroize(&mut *mac_key);
+            mac
+        };
+
+        poly1305::universal_hash::UniversalHash::update_padded(&mut mac, associated_data);
+
+        (cipher, mac)
+    }
+}
+
+// Implementation of `MixHash`. See <https://noiseprotocol.org/noise.html#the-symmetricstate-object>.
+fn mix_hash(hash: &mut [u8; 32], data: &[u8]) {
+    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+    sha2::Digest::update(&mut hasher, &*hash);
+    sha2::Digest::update(&mut hasher, data);
+    sha2::Digest::finalize_into(
+        hasher,
+        &mut sha2::digest::generic_array::GenericArray::from_mut_slice(hash),
+    );
+}
+
+// Implementation of `HKDF`. See <https://noiseprotocol.org/noise.html#hash-functions>.
+//
+// Contrary to the version in the Noise specification, this always returns 3 outputs. We trust the
+// compiler to optimize out the calculation of the third output.
+fn hkdf(chaining_key: &[u8; 32], input_key_material: &[u8]) -> ([u8; 32], [u8; 32], [u8; 32]) {
+    fn hmac_hash<'a>(key: &[u8; 32], data: impl IntoIterator<Item = &'a [u8]>) -> [u8; 32] {
+        // Formula is: `H(K XOR opad, H(K XOR ipad, text))`
+        // See <https://www.ietf.org/rfc/rfc2104.txt>.
+        let mut ipad = [0x36u8; 64];
+        let mut opad = [0x5cu8; 64];
+
+        // Algorithm says that we have to zero-extend `key` to 64 bits, then XOR `ipad` and `opad`
+        // with that zero-extended `key`. Given that XOR'ing with 0 is a no-op, we don't care with
+        // that and just XOR the key without zero-extending it.
+        for n in 0..key.len() {
+            ipad[n] ^= key[n];
+            opad[n] ^= key[n];
+        }
+
+        let intermediary_result = {
+            let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+            sha2::Digest::update(&mut hasher, &ipad);
+            for data in data {
+                sha2::Digest::update(&mut hasher, data);
+            }
+            sha2::Digest::finalize(hasher)
+        };
+
+        let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+        sha2::Digest::update(&mut hasher, &opad);
+        sha2::Digest::update(&mut hasher, &intermediary_result);
+        sha2::Digest::finalize(hasher).into()
+    }
+
+    let temp_key = hmac_hash(chaining_key, [input_key_material]);
+    let output1 = hmac_hash(&temp_key, [&[0x01][..]]);
+    let output2 = hmac_hash(&temp_key, [&output1, &[0x02][..]]);
+    let output3 = hmac_hash(&temp_key, [&output2, &[0x03][..]]);
+    (output1, output2, output3)
+}
 
 #[cfg(test)]
 mod tests {

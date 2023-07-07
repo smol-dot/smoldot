@@ -42,6 +42,7 @@ base64 = { version = "0.21.2", default-features = false, features = ["alloc"] }
 bip39 = { version = "2.0.0", default-features = false }
 blake2-rfc = { version = "0.2.18", default-features = false }
 bs58 = { version = "0.5.0", default-features = false, features = ["alloc"] }
+chacha20 = { version = "0.9.1", default-features = false }
 crossbeam-queue = { version = "0.3.8", default-features = false, features = ["alloc"] }
 derive_more = "0.99.17"
 ed25519-zebra = { version = "3.1.0", default-features = false }
@@ -65,6 +66,7 @@ num-rational = { version = "0.4.1", default-features = false, features = ["num-b
 num-traits = { version = "0.2.15", default-features = false }
 pbkdf2 = { version = "0.12.1", default-features = false }
 rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }  # TODO: rand is used in hack-y ways at the moment ; these features should be removed
+poly1305 = { version = "0.8.0", default-features = false }
 rand_chacha = { version = "0.3.1", default-features = false }
 ruzstd = { version = "0.4.0" }  # TODO: uses `#![feature(error_in_core)]` when the `std` feature is disabled, see https://github.com/rust-lang/rust/issues/103765
 schnorrkel = { version = "0.10.2", default-features = false, features = ["preaudit_deprecated", "u64_backend"] }
@@ -74,10 +76,10 @@ sha2 = { version = "0.10.7", default-features = false }
 siphasher = { version = "0.3.10", default-features = false }
 slab = { version = "0.4.8", default-features = false }
 smallvec = { version = "1.11.0", default-features = false }
-snow = { version = "0.9.2", default-features = false, features = ["default-resolver"] }
 tiny-keccak = { version = "2.0", features = ["keccak"] }
 twox-hash = { version = "1.6.3", default-features = false }
 wasmi = { version = "0.30.0", default-features = false }
+x25519-dalek = { version = "2.0.0-rc.3", default-features = false, features = ["alloc", "precomputed-tables", "reusable_secrets", "zeroize"] }
 zeroize = { version = "1.6.0", default-features = false, features = ["alloc"] }
 
 # `database-sqlite` feature
