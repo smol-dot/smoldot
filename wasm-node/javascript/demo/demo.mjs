@@ -82,7 +82,7 @@ const client = smoldot.start({
 // Try to open a database, expecting it to fail in most situations.
 let defaultChainDb = "";
 try {
-    defaultChainDb = fs.readFileSync('database.json', { encoding: 'utf8' });
+    defaultChainDb = fs.readFileSync('database.json', { encoding: 'utf-8' });
 } catch(error) {}
 
 // Note that We call `addChain` again with the same chain spec again every time a new WebSocket
