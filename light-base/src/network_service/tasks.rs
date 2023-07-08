@@ -268,6 +268,7 @@ async fn single_stream_connection_task<TPlat: PlatformRef>(
             // can modify the connection. Before dropping the `read_write`, clone some important
             // information from it.
             let read_bytes = read_write.read_bytes;
+            debug_assert!(read_bytes <= incoming_buffer.as_ref().map_or(0, |b| b.len()));
             let write_size_closed = write_side_was_open && read_write.outgoing_buffer.is_none();
             let written_bytes = read_write.written_bytes;
             debug_assert!(written_bytes <= writable_bytes);
@@ -518,6 +519,7 @@ async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                 // can modify the connection. Before dropping the `read_write`, clone some important
                 // information from it.
                 let read_bytes = read_write.read_bytes;
+                debug_assert!(read_bytes <= incoming_buffer.len());
                 let written_bytes = read_write.written_bytes;
                 let must_close_writing_side =
                     *write_side_was_open && read_write.outgoing_buffer.is_none();

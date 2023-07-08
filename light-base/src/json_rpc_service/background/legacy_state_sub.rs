@@ -940,8 +940,11 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 task.runtime_version_subscriptions.remove(&subscription_id);
                 if let Some((_, keys)) = task.storage_subscriptions.remove(&subscription_id) {
                     for key in keys {
-                        let hashbrown::hash_map::Entry::Occupied(mut entry) = task.storage_subscriptions_by_key.entry(key)
-                            else { unreachable!() };
+                        let hashbrown::hash_map::Entry::Occupied(mut entry) =
+                            task.storage_subscriptions_by_key.entry(key)
+                        else {
+                            unreachable!()
+                        };
                         let _was_in = entry.get_mut().remove(&subscription_id);
                         debug_assert!(_was_in);
                         if entry.get().is_empty() {
@@ -1199,8 +1202,9 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     fnv::FnvBuildHasher::default(),
                 );
                 for item in result {
-                    let sync_service::StorageResultItem::Value { key, value } = item
-                        else { unreachable!() };
+                    let sync_service::StorageResultItem::Value { key, value } = item else {
+                        unreachable!()
+                    };
                     for subscription_id in task
                         .storage_subscriptions_by_key
                         .get(&key)
