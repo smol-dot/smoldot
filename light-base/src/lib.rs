@@ -368,7 +368,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         // known as a checkpoint) is present in the chain spec, it is possible to start syncing at
         // the finalized block it describes.
         // TODO: clean up that block
-        let (chain_information, genesis_block_header, checkpoint_nodes) = {
+        let (chain_information, genesis_block_header, checkpoint_nodes, runtime_code_hint) = {
             match (
                 chain_spec.to_chain_information().map(|(ci, _)| ci), // TODO: don't just throw away the runtime
                 chain_spec
@@ -403,6 +403,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         database_content.chain_information,
                         genesis_header.into(),
                         database_content.known_nodes,
+                        database_content.runtime_code_hint,
                     )
                 }
 
@@ -438,10 +439,16 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                             database_content.chain_information,
                             genesis_header,
                             database_content.known_nodes,
+                            database_content.runtime_code_hint,
                         )
                     } else if let Some(Ok(checkpoint)) = checkpoint {
                         // Database is incorrect.
-                        (checkpoint, genesis_header, database_content.known_nodes)
+                        (
+                            checkpoint,
+                            genesis_header,
+                            database_content.known_nodes,
+                            None,
+                        )
                     } else {
                         // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
                         // TODO: is this relevant for parachains?
@@ -468,14 +475,14 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         digest: header::DigestRef::empty().into(),
                     };
 
-                    (checkpoint, genesis_header, Default::default())
+                    (checkpoint, genesis_header, Default::default(), None)
                 }
 
                 (Err(err), _, _) => return Err(AddChainError::InvalidGenesisStorage(err)),
 
                 (Ok(genesis_ci), Some(Ok(checkpoint)), _) => {
                     let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
-                    (checkpoint, genesis_header.into(), Default::default())
+                    (checkpoint, genesis_header.into(), Default::default(), None)
                 }
 
                 (
@@ -488,7 +495,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 ) => {
                     let genesis_header =
                         header::Header::from(genesis_ci.as_ref().finalized_block_header.clone());
-                    (genesis_ci, genesis_header, Default::default())
+                    (genesis_ci, genesis_header, Default::default(), None)
                 }
 
                 (_, Some(Err(err)), _) => {
@@ -705,6 +712,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                             log_name.clone(),
                             &platform,
                             chain_information,
+                            runtime_code_hint,
                             genesis_block_header
                                 .scale_encoding_vec(chain_spec.block_number_bytes().into()),
                             chain_spec,
@@ -1060,6 +1068,7 @@ async fn start_services<TPlat: platform::PlatformRef>(
     log_name: String,
     platform: &TPlat,
     chain_information: chain::chain_information::ValidChainInformation,
+    runtime_code_hint: Option<database::DatabaseContentRuntimeCodeHint>,
     genesis_block_scale_encoded_header: Vec<u8>,
     chain_spec: chain_spec::ChainSpec,
     relay_chain: Option<&ChainServices<TPlat>>,
@@ -1115,11 +1124,15 @@ async fn start_services<TPlat: platform::PlatformRef>(
                 block_number_bytes: usize::from(chain_spec.block_number_bytes()),
                 network_service: (network_service.clone(), 0),
                 network_events_receiver: network_event_receivers.pop().unwrap(),
-                parachain: Some(sync_service::ConfigParachain {
-                    parachain_id: chain_spec.relay_chain().unwrap().1,
-                    relay_chain_sync: relay_chain.runtime_service.clone(),
-                    relay_chain_block_number_bytes: relay_chain.sync_service.block_number_bytes(),
-                }),
+                chain_type: sync_service::ConfigChainType::Parachain(
+                    sync_service::ConfigParachain {
+                        parachain_id: chain_spec.relay_chain().unwrap().1,
+                        relay_chain_sync: relay_chain.runtime_service.clone(),
+                        relay_chain_block_number_bytes: relay_chain
+                            .sync_service
+                            .block_number_bytes(),
+                    },
+                ),
             })
             .await,
         );
@@ -1151,7 +1164,17 @@ async fn start_services<TPlat: platform::PlatformRef>(
                 platform: platform.clone(),
                 network_service: (network_service.clone(), 0),
                 network_events_receiver: network_event_receivers.pop().unwrap(),
-                parachain: None,
+                chain_type: sync_service::ConfigChainType::RelayChain(
+                    sync_service::ConfigRelayChain {
+                        runtime_code_hint: runtime_code_hint.map(|hint| {
+                            sync_service::ConfigRelayChainRuntimeCodeHint {
+                                storage_value: hint.code,
+                                merkle_value: hint.code_merkle_value,
+                                closest_ancestor_excluding: hint.closest_ancestor_excluding,
+                            }
+                        }),
+                    },
+                ),
             })
             .await,
         );

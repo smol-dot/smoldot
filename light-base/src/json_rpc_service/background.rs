@@ -832,7 +832,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
         // Download the runtime of this block. This takes a long time as the runtime is rather
         // big (around 1MiB in general).
-        let (storage_code, storage_heap_pages) = {
+        let (storage_code, storage_heap_pages, code_merkle_value, code_closest_ancestor_excluding) = {
             let entries = self
                 .sync_service
                 .clone()
@@ -841,6 +841,10 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     block_hash,
                     &state_trie_root_hash,
                     [
+                        sync_service::StorageRequestItem {
+                            key: b":code".to_vec(),
+                            ty: sync_service::StorageRequestItemTy::ClosestDescendantMerkleValue,
+                        },
                         sync_service::StorageRequestItem {
                             key: b":code".to_vec(),
                             ty: sync_service::StorageRequestItemTy::Value,
@@ -879,14 +883,45 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     _ => None,
                 })
                 .unwrap();
-            (code, heap_pages)
+            let (code_merkle_value, code_closest_ancestor_excluding) = if code.is_some() {
+                entries
+                    .iter()
+                    .find_map(|entry| match entry {
+                        sync_service::StorageResultItem::ClosestDescendantMerkleValue {
+                            requested_key,
+                            closest_descendant_merkle_value,
+                            found_closest_ancestor_excluding,
+                        } if requested_key == b":code" => {
+                            Some((
+                                closest_descendant_merkle_value.clone(),
+                                found_closest_ancestor_excluding.clone(),
+                            )) // TODO overhead
+                        }
+                        _ => None,
+                    })
+                    .unwrap()
+            } else {
+                (None, None)
+            };
+
+            (
+                code,
+                heap_pages,
+                code_merkle_value,
+                code_closest_ancestor_excluding,
+            )
         };
 
         // Give the code and heap pages to the runtime service. The runtime service will
         // try to find any similar runtime it might have, and if not will compile it.
         let pinned_runtime_id = self
             .runtime_service
-            .compile_and_pin_runtime(storage_code, storage_heap_pages)
+            .compile_and_pin_runtime(
+                storage_code,
+                storage_heap_pages,
+                code_merkle_value,
+                code_closest_ancestor_excluding,
+            )
             .await;
 
         let precall = self

@@ -594,7 +594,8 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
         Children { children }
     }
 
-    /// Returns the closest ancestor to the given key. If `key` is in the proof, returns `key`.
+    /// Returns the closest ancestor to the given key that can be found in the proof. If `key` is
+    /// in the proof, returns `key`.
     fn closest_ancestor<'a>(
         &'a self,
         trie_root_merkle_value: &[u8; 32],
@@ -664,6 +665,18 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                 }
             }
         }
+    }
+
+    /// Returns the key of the closest ancestor to the given key that can be found in the proof.
+    /// If `key` is in the proof, returns `key`.
+    pub fn closest_ancestor_in_proof<'a>(
+        &'a self,
+        trie_root_merkle_value: &[u8; 32],
+        key: &[nibble::Nibble],
+    ) -> Result<Option<&'a [nibble::Nibble]>, IncompleteProofError> {
+        Ok(self
+            .closest_ancestor(trie_root_merkle_value, key)?
+            .map(|(key, _)| key))
     }
 
     /// Returns information about a trie node.
@@ -1136,6 +1149,17 @@ pub enum Child<'a> {
     },
     /// Child doesn't exist.
     NoChild,
+}
+
+impl<'a> Child<'a> {
+    /// Returns the Merkle value of this child. `None` if the child doesn't exist.
+    pub fn merkle_value(&self) -> Option<&'a [u8]> {
+        match self {
+            Child::InProof { merkle_value, .. } => Some(merkle_value),
+            Child::AbsentFromProof { merkle_value } => Some(merkle_value),
+            Child::NoChild => None,
+        }
+    }
 }
 
 impl<'a> Children<'a> {
