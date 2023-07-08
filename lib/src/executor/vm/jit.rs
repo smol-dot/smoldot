@@ -29,7 +29,8 @@ use core::{
     slice,
     task::{Context, Poll, Waker},
 };
-use futures_util::{task, FutureExt as _};
+use futures_lite::FutureExt as _;
+use futures_util::task;
 // TODO: we use std::sync::Mutex rather than parking_lot::Mutex due to issues with Cargo features, see <https://github.com/paritytech/smoldot/issues/2732>
 use std::sync::Mutex;
 
