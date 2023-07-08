@@ -157,11 +157,11 @@ pub(super) async fn established_connection_task(
             let wake_up_after = read_write.wake_up_after.take();
             let outgoing_buffer_now_closed = read_write.outgoing_buffer.is_none();
 
+            socket.advance(read_bytes, written_bytes);
+
             if outgoing_buffer_now_closed && !outgoing_buffer_was_closed {
                 socket.close();
             }
-
-            socket.advance(read_bytes, written_bytes);
 
             if read_bytes != 0 || written_bytes != 0 {
                 continue;
