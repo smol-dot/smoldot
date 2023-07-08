@@ -448,8 +448,8 @@ impl<'a> Encrypt<'a> {
     }
 
     /// Performs the actual encryption. Must be passed the number of bytes that were written to the
-    /// buffers returned by [`Encrypt::destination_buffers`]. Returns the total number of bytes
-    /// written to `destination`.
+    /// buffers returned by [`Encrypt::unencrypted_write_buffers`]. Returns the total number of
+    /// bytes written to `destination`.
     ///
     /// # Panic
     ///
