@@ -277,6 +277,10 @@ impl Noise {
     ///
     /// This function always writes as much data to `out` as possible. In other words, calling
     /// this function with an empty `encrypted_data` always has no effect.
+    ///
+    /// An error is returned if part of the payload fails to decode, which can happen if a
+    /// malicious actor has added or modified data to the stream of encrypted data. You are
+    /// encouraged to shut down the connection altogether if that happens.
     // TODO: this API is very specific, maybe provide a way to decode into slices?
     pub fn decrypt_to_vecdeque(
         &mut self,
@@ -331,11 +335,18 @@ impl Noise {
             };
 
             // Read and decrypt the message.
-            self.in_cipher_state
-                .read_chachapoly_message_to_vecdeque(&[], to_decode_slice, out)?;
+            // Note that `out` isn't modified if an error is returned.
+            let result =
+                self.in_cipher_state
+                    .read_chachapoly_message_to_vecdeque(&[], to_decode_slice, out);
 
-            // Clear the now-decoded message.
+            // Clear the now-decoded message. This is done even on failure, in order to potentially
+            // continue receiving messages if it is desired.
             self.rx_buffer_encrypted.clear();
+
+            if let Err(err) = result {
+                return Err(err);
+            }
         }
     }
 
