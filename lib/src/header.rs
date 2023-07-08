@@ -1080,6 +1080,15 @@ impl<'a> DigestItemRef<'a> {
         matches!(self, DigestItemRef::GrandpaConsensus(_))
     }
 
+    /// Decodes a SCALE-encoded digest item.
+    pub fn from_scale_encoded(bytes: &'a [u8], block_number_bytes: usize) -> Result<Self, Error> {
+        let (item, remain) = decode_item(bytes, block_number_bytes)?;
+        if !remain.is_empty() {
+            return Err(Error::TooLong);
+        }
+        Ok(item)
+    }
+
     /// Returns an iterator to list of buffers which, when concatenated, produces the SCALE
     /// encoding of that digest item.
     pub fn scale_encoding(

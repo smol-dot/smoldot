@@ -21,14 +21,13 @@ use crate::{
     author::{aura, runtime},
     executor::host,
     header,
-    trie::calculate_root,
     verify::inherents,
 };
 
 use alloc::vec::Vec;
 use core::{num::NonZeroU64, time::Duration};
 
-pub use runtime::TrieEntryVersion;
+pub use runtime::{Nibble, TrieEntryVersion};
 
 /// Configuration for a block generation.
 pub struct Config<'a, TLocAuth> {
@@ -145,9 +144,9 @@ pub enum BuilderAuthoring {
     /// Loading a storage value from the parent storage is required in order to continue.
     StorageGet(StorageGet),
 
-    /// Fetching the list of keys with a given prefix from the parent storage is required in order
+    /// Obtaining the Merkle value of the closest descendant of a trie node is required in order
     /// to continue.
-    PrefixKeys(PrefixKeys),
+    ClosestDescendantMerkleValue(ClosestDescendantMerkleValue),
 
     /// Fetching the key that follows a given one in the parent storage is required in order to
     /// continue.
@@ -225,7 +224,6 @@ impl AuthoringStart {
             parent_hash: config.parent_hash,
             parent_number: config.parent_number,
             parent_runtime: config.parent_runtime,
-            main_trie_root_calculation_cache: config.main_trie_root_calculation_cache,
             block_body_capacity: config.block_body_capacity,
             consensus_digest_log_item: match self.consensus {
                 WaitSlotConsensus::Aura(slot) => {
@@ -274,10 +272,6 @@ pub struct AuthoringStartConfig<'a> {
     /// `:code` key of the parent block storage.
     pub parent_runtime: host::HostVmPrototype,
 
-    /// Optional cache corresponding to the storage trie root hash calculation coming from the
-    /// parent block verification.
-    pub main_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
-
     /// Capacity to reserve for the number of extrinsics. Should be higher than the approximate
     /// number of extrinsics that are going to be applied.
     pub block_body_capacity: usize,
@@ -323,6 +317,11 @@ impl StorageGet {
         self.0.key()
     }
 
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.0.child_trie()
+    }
+
     /// Injects the corresponding storage value.
     pub fn inject_value(
         self,
@@ -332,23 +331,38 @@ impl StorageGet {
     }
 }
 
-/// Fetching the list of keys with a given prefix from the parent storage is required in order to
-/// continue.
+/// Obtaining the Merkle value of the closest descendant of a trie node is required in order
+/// to continue.
 #[must_use]
-pub struct PrefixKeys(runtime::PrefixKeys, Shared);
+pub struct ClosestDescendantMerkleValue(runtime::ClosestDescendantMerkleValue, Shared);
 
-impl PrefixKeys {
-    /// Returns the prefix whose keys to load.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.0.prefix()
+impl ClosestDescendantMerkleValue {
+    /// Returns the key whose closest descendant Merkle value must be passed to
+    /// [`ClosestDescendantMerkleValue::inject_merkle_value`].
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+        self.0.key()
     }
 
-    /// Injects the list of keys ordered lexicographically.
-    pub fn inject_keys_ordered(
-        self,
-        keys: impl Iterator<Item = impl AsRef<[u8]>>,
-    ) -> BuilderAuthoring {
-        self.1.with_runtime_inner(self.0.inject_keys_ordered(keys))
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.0.child_trie()
+    }
+
+    /// Indicate that the value is unknown and resume the calculation.
+    ///
+    /// This function be used if you are unaware of the Merkle value. The algorithm will perform
+    /// the calculation of this Merkle value manually, which takes more time.
+    pub fn resume_unknown(self) -> BuilderAuthoring {
+        self.1.with_runtime_inner(self.0.resume_unknown())
+    }
+
+    /// Injects the corresponding Merkle value.
+    ///
+    /// `None` can be passed if there is no descendant or, in the case of a child trie read, in
+    /// order to indicate that the child trie does not exist.
+    pub fn inject_merkle_value(self, merkle_value: Option<&[u8]>) -> BuilderAuthoring {
+        self.1
+            .with_runtime_inner(self.0.inject_merkle_value(merkle_value))
     }
 }
 
@@ -359,8 +373,13 @@ pub struct NextKey(runtime::NextKey, Shared);
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.0.key()
+    }
+
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.0.child_trie()
     }
 
     /// If `true`, then the provided value must the one superior or equal to the requested key.
@@ -369,9 +388,15 @@ impl NextKey {
         self.0.or_equal()
     }
 
+    /// If `true`, then the search must include both branch nodes and storage nodes. If `false`,
+    /// the search only covers storage nodes.
+    pub fn branch_nodes(&self) -> bool {
+        self.0.branch_nodes()
+    }
+
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.0.prefix()
     }
 
@@ -381,7 +406,7 @@ impl NextKey {
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
-    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> BuilderAuthoring {
+    pub fn inject_key(self, key: Option<impl Iterator<Item = Nibble>>) -> BuilderAuthoring {
         self.1.with_runtime_inner(self.0.inject_key(key))
     }
 }
@@ -525,8 +550,10 @@ impl Shared {
                 runtime::BlockBuild::StorageGet(inner) => {
                     break BuilderAuthoring::StorageGet(StorageGet(inner, self))
                 }
-                runtime::BlockBuild::PrefixKeys(inner) => {
-                    break BuilderAuthoring::PrefixKeys(PrefixKeys(inner, self))
+                runtime::BlockBuild::ClosestDescendantMerkleValue(inner) => {
+                    break BuilderAuthoring::ClosestDescendantMerkleValue(
+                        ClosestDescendantMerkleValue(inner, self),
+                    )
                 }
                 runtime::BlockBuild::NextKey(inner) => {
                     break BuilderAuthoring::NextKey(NextKey(inner, self))

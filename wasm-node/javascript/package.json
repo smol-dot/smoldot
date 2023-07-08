@@ -1,8 +1,11 @@
 {
   "name": "smoldot",
-  "version": "1.0.7",
+  "version": "1.0.11",
   "description": "Light client that connects to Polkadot and Substrate-based blockchains",
-  "author": "Parity Technologies <admin@parity.io>",
+  "contributors": [
+    "Parity Technologies <admin@parity.io>",
+    "Pierre Krieger <pierre.krieger1708@gmail.com>"
+  ],
   "license": "GPL-3.0-or-later WITH Classpath-exception-2.0",
   "homepage": "https://github.com/smol-dot/smoldot",
   "repository": {
@@ -69,7 +72,6 @@
     "doc": "node prepare.mjs --debug && typedoc --basePath ./src --out ./dist/doc --treatWarningsAsErrors ./src/index-browser.ts"
   },
   "dependencies": {
-    "pako": "^2.0.4",
     "ws": "^8.8.1"
   },
   "devDependencies": {
@@ -78,7 +80,7 @@
     "@types/ws": "^8.5.3",
     "ava": "^5.0.1",
     "dtslint": "^4.0.6",
-    "typedoc": "^0.24.1",
-    "typescript": "^5.0.2"
+    "typedoc": "^0.24.8",
+    "typescript": "^5.1.3"
   }
 }

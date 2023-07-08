@@ -326,10 +326,7 @@ impl<'a> From<BabeAuthorityRef<'a>> for BabeAuthority {
 
 /// Information about the next epoch config, if changed. This is broadcast in the first
 /// block of the epoch, and applies using the same rules as `NextEpochDescriptor`.
-// TODO: remove the Encode & Decode trait derivation ; unfortunately used elsewhere
-#[derive(
-    Debug, Copy, Clone, PartialEq, Eq, parity_scale_codec::Encode, parity_scale_codec::Decode,
-)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct BabeNextConfig {
     /// Value of `c` in `BabeEpochConfiguration`.
     pub c: (u64, u64),
@@ -364,10 +361,7 @@ impl BabeNextConfig {
 }
 
 /// Types of allowed slots.
-// TODO: remove the Encode & Decode trait derivation ; unfortunately used elsewhere
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, parity_scale_codec::Encode, parity_scale_codec::Decode,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BabeAllowedSlots {
     /// Only allow primary slot claims.
     PrimarySlots,

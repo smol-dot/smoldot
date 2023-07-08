@@ -24,7 +24,7 @@
 // TODO: doc
 // TODO: re-review this once finished
 
-use crate::run::{database_thread, jaeger_service, network_service};
+use crate::{database_thread, jaeger_service, network_service, LogCallback, LogLevel};
 
 use core::num::NonZeroU32;
 use futures_channel::{mpsc, oneshot};
@@ -40,9 +40,13 @@ use smoldot::{
     informant::HashDisplay,
     libp2p,
     network::{self, protocol::BlockData},
-    sync::all::{self, TrieEntryVersion},
+    sync::all,
+    trie,
+    verify::body_only::{self, TrieEntryVersion},
 };
 use std::{
+    array,
+    borrow::Cow,
     iter, mem,
     num::NonZeroU64,
     sync::Arc,
@@ -53,6 +57,9 @@ use std::{
 pub struct Config {
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(future::BoxFuture<'static, ()>) + Send>,
+
+    /// Function called in order to notify of something.
+    pub log_callback: Arc<dyn LogCallback + Send + Sync>,
 
     /// Database to use to read and write information about the chain.
     pub database: Arc<database_thread::DatabaseThread>,
@@ -165,12 +172,20 @@ impl ConsensusService {
                         .to_chain_information(&finalized_block_hash)
                         .unwrap();
                     let finalized_code = database
-                        .block_storage_main_trie_get(&finalized_block_hash, b":code")
+                        .block_storage_get(
+                            &finalized_block_hash,
+                            iter::empty::<iter::Empty<_>>(),
+                            trie::bytes_to_nibbles(b":code".iter().copied()).map(u8::from),
+                        )
                         .unwrap()
                         .unwrap() // TODO: better error?
                         .0;
                     let finalized_heap_pages = database
-                        .block_storage_main_trie_get(&finalized_block_hash, b":heappages")
+                        .block_storage_get(
+                            &finalized_block_hash,
+                            iter::empty::<iter::Empty<_>>(),
+                            trie::bytes_to_nibbles(b":heappages".iter().copied()).map(u8::from),
+                        )
                         .unwrap() // TODO: better error?
                         .map(|(hp, _)| hp);
                     (
@@ -197,10 +212,12 @@ impl ConsensusService {
             ]
             && finalized_block_number <= 1500988
         {
-            log::warn!(
+            config.log_callback.log(
+                LogLevel::Warn,
                 "The Kusama chain is known to be borked at block #1491596. The official Polkadot \
                 client works around this issue by hardcoding a fork in its source code. Smoldot \
                 does not support this hardcoded fork and will thus fail to sync past this block."
+                    .to_string(),
             );
         }
 
@@ -261,6 +278,7 @@ impl ConsensusService {
             database: config.database,
             peers_source_id_map: Default::default(),
             tasks_executor: config.tasks_executor,
+            log_callback: config.log_callback,
             block_requests_finished_tx,
             block_requests_finished_rx,
             jaeger_service: config.jaeger_service,
@@ -366,6 +384,9 @@ struct SyncBackground {
 
     /// See [`Config::tasks_executor`].
     tasks_executor: Box<dyn FnMut(future::BoxFuture<'static, ()>) + Send>,
+
+    /// See [`Config::log_callback`].
+    log_callback: Arc<dyn LogCallback + Send + Sync>,
 
     /// Block requests that have been emitted on the networking service and that are still in
     /// progress. Each entry in this field also has an entry in [`SyncBackground::sync`].
@@ -687,10 +708,13 @@ impl SyncBackground {
         // TODO: it is possible that the current best block is already the same authoring slot as the slot we want to claim ; unclear how to solve this
 
         let parent_number = self.sync.best_block_number();
-        log::debug!(
-            "block-author-start; parent_hash={}; parent_number={}",
-            HashDisplay(&self.sync.best_block_hash()),
-            parent_number,
+        self.log_callback.log(
+            LogLevel::Debug,
+            format!(
+                "block-author-start; parent_hash={}; parent_number={}",
+                HashDisplay(&self.sync.best_block_hash()),
+                parent_number,
+            ),
         );
 
         // We would like to create a span for authoring the new block, but the trace id depends on
@@ -723,16 +747,18 @@ impl SyncBackground {
         // Actual block production now happening.
         let (new_block_header, new_block_body, authoring_logs) = {
             let parent_hash = self.sync.best_block_hash();
-            let parent_runtime_arc = if self.sync.best_block_number()
-                != self.sync.finalized_block_header().number
-            {
-                let NonFinalizedBlock::Verified {
-                    runtime: parent_runtime_arc,
-                } = &self.sync[(self.sync.best_block_number(), &self.sync.best_block_hash())] else { unreachable!() };
-                parent_runtime_arc.clone()
-            } else {
-                self.finalized_runtime.clone()
-            };
+            let parent_runtime_arc =
+                if self.sync.best_block_number() != self.sync.finalized_block_header().number {
+                    let NonFinalizedBlock::Verified {
+                        runtime: parent_runtime_arc,
+                    } = &self.sync[(self.sync.best_block_number(), &self.sync.best_block_hash())]
+                    else {
+                        unreachable!()
+                    };
+                    parent_runtime_arc.clone()
+                } else {
+                    self.finalized_runtime.clone()
+                };
             let parent_runtime = parent_runtime_arc.try_lock().unwrap().take().unwrap();
 
             // Start the block authoring process.
@@ -746,7 +772,6 @@ impl SyncBackground {
                         .unwrap(),
                     parent_runtime,
                     block_body_capacity: 0, // TODO: could be set to the size of the tx pool
-                    main_trie_root_calculation_cache: None, // TODO: pretty important for performances
                     max_log_level: 0,
                 })
             };
@@ -776,7 +801,10 @@ impl SyncBackground {
                                 // removed from the keystore in parallel of the block authoring
                                 // process, or the key is maybe no longer accessible because of
                                 // another issue.
-                                log::warn!("block-author-signing-error; error={}", error);
+                                self.log_callback.log(
+                                    LogLevel::Warn,
+                                    format!("block-author-signing-error; error={}", error),
+                                );
                                 self.block_authoring = None;
                                 return;
                             }
@@ -802,7 +830,10 @@ impl SyncBackground {
                         // the same state as if it had successfully generated a block.
                         self.block_authoring = Some((author::build::Builder::Idle, Vec::new()));
                         // TODO: log the runtime logs
-                        log::warn!("block-author-error; error={}", error);
+                        self.log_callback.log(
+                            LogLevel::Warn,
+                            format!("block-author-error; error={}", error),
+                        );
                         return;
                     }
 
@@ -811,26 +842,42 @@ impl SyncBackground {
                     author::build::BuilderAuthoring::ApplyExtrinsic(apply) => {
                         // TODO: actually implement including transactions in the blocks
                         block_authoring = apply.finish();
-                        continue;
                     }
                     author::build::BuilderAuthoring::ApplyExtrinsicResult { result, resume } => {
                         if let Err(error) = result {
                             // TODO: include transaction bytes or something?
-                            log::warn!("block-author-transaction-inclusion-error; error={}", error);
+                            self.log_callback.log(
+                                LogLevel::Warn,
+                                format!(
+                                    "block-author-transaction-inclusion-error; error={}",
+                                    error
+                                ),
+                            );
                         }
 
                         // TODO: actually implement including transactions in the blocks
                         block_authoring = resume.finish();
-                        continue;
                     }
 
                     // Access to the best block storage.
                     author::build::BuilderAuthoring::StorageGet(req) => {
-                        let key = req.key().as_ref().to_vec();
+                        let parent_paths = req.child_trie().map(|child_trie| {
+                            trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                                .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
+                                .map(u8::from)
+                                .collect::<Vec<_>>()
+                        });
+                        let key = trie::bytes_to_nibbles(req.key().as_ref().iter().copied())
+                            .map(u8::from)
+                            .collect::<Vec<_>>();
                         let value = self
                             .database
                             .with_database(move |db| {
-                                db.block_storage_main_trie_get(&parent_hash, &key)
+                                db.block_storage_get(
+                                    &parent_hash,
+                                    parent_paths.into_iter().map(|p| p.into_iter()),
+                                    key.iter().copied(),
+                                )
                             })
                             .await
                             .expect("database access error");
@@ -841,37 +888,64 @@ impl SyncBackground {
                                 TrieEntryVersion::try_from(*vers).expect("corrupted database"),
                             )
                         }));
-                        continue;
                     }
-                    author::build::BuilderAuthoring::NextKey(req) => {
-                        let key = req.key().as_ref().to_vec();
-                        let or_equal = req.or_equal();
-                        let next_key = self
-                            .database
-                            .with_database(move |db| {
-                                db.block_storage_main_trie_next_key(&parent_hash, &key, or_equal)
-                            })
-                            .await
-                            .expect("database access error")
-                            .filter(|k| k.starts_with(req.prefix().as_ref()));
+                    author::build::BuilderAuthoring::ClosestDescendantMerkleValue(req) => {
+                        let parent_paths = req.child_trie().map(|child_trie| {
+                            trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                                .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
+                                .map(u8::from)
+                                .collect::<Vec<_>>()
+                        });
+                        let key_nibbles = req.key().map(u8::from).collect::<Vec<_>>();
 
-                        debug_assert!(next_key
-                            .as_ref()
-                            .map_or(true, |k| &**k > req.key().as_ref()));
-                        block_authoring = req.inject_key(next_key);
-                        continue;
-                    }
-                    author::build::BuilderAuthoring::PrefixKeys(req) => {
-                        let prefix = req.prefix().as_ref().to_vec();
-                        let keys = self
+                        let merkle_value = self
                             .database
                             .with_database(move |db| {
-                                db.block_storage_main_trie_keys_ordered(&parent_hash, &prefix)
+                                db.block_storage_closest_descendant_merkle_value(
+                                    &parent_hash,
+                                    parent_paths.into_iter().map(|p| p.into_iter()),
+                                    key_nibbles.iter().copied(),
+                                )
                             })
                             .await
                             .expect("database access error");
-                        block_authoring = req.inject_keys_ordered(keys.into_iter());
-                        continue;
+
+                        block_authoring =
+                            req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
+                    }
+                    author::build::BuilderAuthoring::NextKey(req) => {
+                        let parent_paths = req.child_trie().map(|child_trie| {
+                            trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                                .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
+                                .map(u8::from)
+                                .collect::<Vec<_>>()
+                        });
+                        let key_nibbles = req
+                            .key()
+                            .map(u8::from)
+                            .chain(if req.or_equal() { None } else { Some(0u8) })
+                            .collect::<Vec<_>>();
+                        let prefix_nibbles = req.prefix().map(u8::from).collect::<Vec<_>>();
+
+                        let branch_nodes = req.branch_nodes();
+                        let next_key = self
+                            .database
+                            .with_database(move |db| {
+                                db.block_storage_next_key(
+                                    &parent_hash,
+                                    parent_paths.into_iter().map(|p| p.into_iter()),
+                                    key_nibbles.iter().copied(),
+                                    prefix_nibbles.iter().copied(),
+                                    branch_nodes,
+                                )
+                            })
+                            .await
+                            .expect("database access error");
+
+                        block_authoring = req
+                            .inject_key(next_key.map(|k| {
+                                k.into_iter().map(|b| trie::Nibble::try_from(b).unwrap())
+                            }));
                     }
                 }
             }
@@ -879,11 +953,14 @@ impl SyncBackground {
 
         // Block has now finished being generated.
         let new_block_hash = header::hash_from_scale_encoded_header(&new_block_header);
-        log::info!(
-            "block-generated; hash={}; body_len={}; runtime_logs={:?}",
-            HashDisplay(&new_block_hash),
-            new_block_body.len(),
-            authoring_logs
+        self.log_callback.log(
+            LogLevel::Info,
+            format!(
+                "block-generated; hash={}; body_len={}; runtime_logs={:?}",
+                HashDisplay(&new_block_hash),
+                new_block_body.len(),
+                authoring_logs
+            ),
         );
         let _jaeger_span = self
             .jaeger_service
@@ -897,9 +974,12 @@ impl SyncBackground {
         match authoring_end.elapsed() {
             Ok(now_minus_end) if now_minus_end < Duration::from_millis(500) => {}
             _ => {
-                log::warn!(
-                    "block-generation-too-long; hash={}",
-                    HashDisplay(&new_block_hash)
+                self.log_callback.log(
+                    LogLevel::Warn,
+                    format!(
+                        "block-generation-too-long; hash={}",
+                        HashDisplay(&new_block_hash)
+                    ),
                 );
             }
         }
@@ -992,7 +1072,10 @@ impl SyncBackground {
                 all::DesiredRequest::BlocksRequest { .. }
                     if source_id == self.block_author_sync_source =>
                 {
-                    log::debug!("queue-locally-authored-block-for-import");
+                    self.log_callback.log(
+                        LogLevel::Debug,
+                        "queue-locally-authored-block-for-import".to_string(),
+                    );
 
                     let (_, block_hash, scale_encoded_header, scale_encoded_extrinsics) =
                         self.authored_block.take().unwrap();
@@ -1093,6 +1176,9 @@ impl SyncBackground {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap();
 
+        // TODO: move this?
+        let block_number_bytes = self.sync.block_number_bytes();
+
         match self.sync.process_one() {
             all::ProcessOne::AllSync(idle) => {
                 self.sync = idle;
@@ -1102,14 +1188,42 @@ impl SyncBackground {
             | all::ProcessOne::WarpSyncBuildRuntime(_)
             | all::ProcessOne::WarpSyncBuildChainInformation(_)
             | all::ProcessOne::WarpSyncFinished { .. } => unreachable!(),
-            all::ProcessOne::VerifyBodyHeader(verify) => {
+            all::ProcessOne::VerifyBlock(verify) => {
+                let when_verification_started = Instant::now();
+                let mut database_accesses_duration = Duration::new(0, 0);
+                let mut runtime_build_duration = Duration::new(0, 0);
                 let hash_to_verify = verify.hash();
-                let height_to_verify = verify.height();
-                let parent_hash = verify.parent_hash();
-                let parent_info = verify.parent_user_data().map(|b| {
-                    let NonFinalizedBlock::Verified {
-                        runtime,
-                    } = b else { unreachable!() };
+
+                let _jaeger_span = self.jaeger_service.block_verify_span(&hash_to_verify);
+
+                let (is_new_best, header_verification_success) =
+                    match verify.verify_header(unix_time) {
+                        all::HeaderVerifyOutcome::Success {
+                            is_new_best,
+                            success,
+                        } => (is_new_best, success),
+                        all::HeaderVerifyOutcome::Error { sync, error } => {
+                            // Print a separate warning because it is important for the user
+                            // to be aware of the verification failure.
+                            // `error` is last because it's quite big.
+                            self.log_callback.log(
+                                LogLevel::Warn,
+                                format!(
+                                    "failed-block-verification; hash={}; error={}",
+                                    HashDisplay(&hash_to_verify),
+                                    error
+                                ),
+                            );
+                            self.sync = sync;
+                            return (self, true);
+                        }
+                    };
+
+                let parent_hash = *header_verification_success.parent_hash();
+                let parent_info = header_verification_success.parent_user_data().map(|b| {
+                    let NonFinalizedBlock::Verified { runtime } = b else {
+                        unreachable!()
+                    };
                     runtime.clone()
                 });
                 let parent_runtime_arc = parent_info
@@ -1117,71 +1231,168 @@ impl SyncBackground {
                     .map(|i| i.clone())
                     .unwrap_or_else(|| self.finalized_runtime.clone());
                 let parent_runtime = parent_runtime_arc.try_lock().unwrap().take().unwrap();
-                let scale_encoded_header_to_verify = verify.scale_encoded_header().to_owned(); // TODO: copy :-/
 
-                let _jaeger_span = self.jaeger_service.block_body_verify_span(&hash_to_verify);
-
-                let mut verify =
-                    verify.start(unix_time, parent_runtime, NonFinalizedBlock::NotVerified);
+                let parent_scale_encoded_header =
+                    header_verification_success.parent_scale_encoded_header();
+                let mut body_verification = body_only::verify(body_only::Config {
+                    parent_runtime,
+                    parent_block_header: header::decode(
+                        &parent_scale_encoded_header,
+                        block_number_bytes,
+                    )
+                    .unwrap(),
+                    now_from_unix_epoch: unix_time,
+                    // TODO: shouldn't have to decode here
+                    block_header: header::decode(
+                        header_verification_success.scale_encoded_header(),
+                        block_number_bytes,
+                    )
+                    .unwrap(),
+                    block_number_bytes,
+                    block_body: header_verification_success
+                        .scale_encoded_extrinsics()
+                        .unwrap(),
+                    max_log_level: 3,
+                });
 
                 // TODO: check this block against the chain spec's badBlocks
                 loop {
-                    match verify {
-                        all::BlockVerification::Error {
-                            sync: sync_out,
-                            parent_runtime,
-                            error,
-                            ..
-                        } => {
+                    match body_verification {
+                        body_only::Verify::Finished(Err((error, parent_runtime))) => {
                             // Print a separate warning because it is important for the user
                             // to be aware of the verification failure.
                             // `error` is last because it's quite big.
-                            log::warn!(
-                                "failed-block-verification; hash={}; height={}; error={}",
-                                HashDisplay(&hash_to_verify),
-                                height_to_verify,
-                                error
+                            self.log_callback.log(
+                                LogLevel::Warn,
+                                format!(
+                                    "failed-block-verification; hash={}; height={}; \
+                                total_duration={:?}; error={}",
+                                    HashDisplay(&hash_to_verify),
+                                    header_verification_success.height(),
+                                    when_verification_started.elapsed(),
+                                    error
+                                ),
                             );
                             *parent_runtime_arc.try_lock().unwrap() = Some(parent_runtime);
-                            self.sync = sync_out;
+                            self.sync = header_verification_success.reject_bad_block();
                             return (self, true);
                         }
-                        all::BlockVerification::Success {
-                            is_new_best,
-                            sync: mut sync_out,
-                            storage_main_trie_changes,
+                        body_only::Verify::Finished(Ok(body_only::Success {
+                            storage_changes,
                             state_trie_version,
                             parent_runtime,
                             new_runtime,
                             ..
-                        } => {
-                            log::debug!(
-                                "block-verification-success; hash={}; height={}; is_new_best={:?}",
-                                HashDisplay(&hash_to_verify),
-                                height_to_verify,
-                                is_new_best
+                        })) => {
+                            // Insert the block in the database.
+                            let when_database_access_started = Instant::now();
+                            self.database
+                                .with_database_detached({
+                                    let scale_encoded_header = header_verification_success.scale_encoded_header().to_vec();
+                                    move |database| {
+                                        // TODO: overhead for building the SCALE encoding of the header
+                                        let result = database.insert(
+                                            &scale_encoded_header,
+                                            is_new_best,
+                                            iter::empty::<Vec<u8>>(), // TODO:,no /!\
+                                            storage_changes.trie_changes_iter_ordered().filter_map(
+                                                |(_child_trie, key, change)| {
+                                                    let body_only::TrieChange::InsertUpdate {
+                                                        new_merkle_value,
+                                                        partial_key,
+                                                        children_merkle_values,
+                                                        new_storage_value
+                                                    } = &change
+                                                        else { return None };
+
+                                                    // TODO: this punches through abstraction layers; maybe add some code to runtime_host to indicate this?
+                                                    let references_merkle_value = key.iter().copied()
+                                                        .zip(trie::bytes_to_nibbles(b":child_storage:".iter().copied()))
+                                                        .all(|(a, b)| a == b);
+
+                                                    Some(full_sqlite::InsertTrieNode {
+                                                        merkle_value: (&new_merkle_value[..]).into(),
+                                                        children_merkle_values: array::from_fn(|n| {
+                                                            children_merkle_values[n]
+                                                                .as_ref()
+                                                                .map(|v| From::from(&v[..]))
+                                                        }),
+                                                        storage_value: match new_storage_value {
+                                                            body_only::TrieChangeStorageValue::Modified {
+                                                                new_value: Some(value),
+                                                            } => full_sqlite::InsertTrieNodeStorageValue::Value {
+                                                                value: Cow::Borrowed(value),
+                                                                references_merkle_value,
+                                                            },
+                                                            body_only::TrieChangeStorageValue::Modified {
+                                                                new_value: None,
+                                                            } => full_sqlite::InsertTrieNodeStorageValue::NoValue,
+                                                            body_only::TrieChangeStorageValue::Unmodified => {
+                                                                full_sqlite::InsertTrieNodeStorageValue::SameAsParent
+                                                            }
+                                                        },
+                                                        partial_key_nibbles: partial_key
+                                                            .iter()
+                                                            .map(|n| u8::from(*n))
+                                                            .collect::<Vec<_>>()
+                                                            .into(),
+                                                    })
+                                                },
+                                            ),
+                                            u8::from(state_trie_version),
+                                        );
+
+                                        match result {
+                                            Ok(()) => {}
+                                            Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
+                                            Err(err) => panic!("{}", err),
+                                        }
+                                    }
+                                })
+                                .await;
+                            database_accesses_duration += when_database_access_started.elapsed();
+
+                            let height = header_verification_success.height();
+                            let scale_encoded_header =
+                                header_verification_success.scale_encoded_header().to_vec();
+
+                            self.log_callback.log(
+                                LogLevel::Debug,
+                                format!(
+                                    "block-verification-success; hash={}; height={}; \
+                                total_duration={:?}; database_accesses_duration={:?}; \
+                                runtime_build_duration={:?}; is_new_best={:?}",
+                                    HashDisplay(&hash_to_verify),
+                                    height,
+                                    when_verification_started.elapsed(),
+                                    database_accesses_duration,
+                                    runtime_build_duration,
+                                    is_new_best
+                                ),
                             );
 
                             // Processing has made a step forward.
 
                             *parent_runtime_arc.try_lock().unwrap() = Some(parent_runtime);
 
+                            self.sync =
+                                header_verification_success.finish(NonFinalizedBlock::NotVerified);
+
                             // Store the storage of the children.
-                            sync_out[(height_to_verify, &hash_to_verify)] =
-                                NonFinalizedBlock::Verified {
-                                    runtime: if let Some(new_runtime) = new_runtime {
-                                        Arc::new(Mutex::new(Some(new_runtime)))
-                                    } else {
-                                        parent_runtime_arc
-                                    },
-                                };
+                            self.sync[(height, &hash_to_verify)] = NonFinalizedBlock::Verified {
+                                runtime: if let Some(new_runtime) = new_runtime {
+                                    Arc::new(Mutex::new(Some(new_runtime)))
+                                } else {
+                                    parent_runtime_arc
+                                },
+                            };
 
                             if is_new_best {
                                 // Update the networking.
                                 let fut = self.network_service.set_local_best_block(
                                     self.network_chain_index,
-                                    sync_out.best_block_hash(),
-                                    sync_out.best_block_number(),
+                                    self.sync.best_block_hash(),
+                                    self.sync.best_block_number(),
                                 );
                                 fut.await;
 
@@ -1189,8 +1400,6 @@ impl SyncBackground {
                                 // block on top of this new best.
                                 self.block_authoring = None;
                             }
-
-                            self.sync = sync_out;
 
                             // Announce the newly-verified block to all the sources that might
                             // not be aware of it. We can never be guaranteed that a certain
@@ -1208,9 +1417,8 @@ impl SyncBackground {
                                     self.sync
                                         .sources()
                                         .collect::<HashSet<_, fnv::FnvBuildHasher>>();
-                                for knows in self
-                                    .sync
-                                    .knows_non_finalized_block(height_to_verify, &hash_to_verify)
+                                for knows in
+                                    self.sync.knows_non_finalized_block(height, &hash_to_verify)
                                 {
                                     all_sources.remove(&knows);
                                 }
@@ -1229,7 +1437,7 @@ impl SyncBackground {
                                     .send_block_announce(
                                         peer_id.clone(),
                                         0,
-                                        scale_encoded_header_to_verify.clone(),
+                                        scale_encoded_header.clone(),
                                         is_new_best,
                                     )
                                     .await
@@ -1241,87 +1449,121 @@ impl SyncBackground {
                                     // politeness.
                                     self.sync.try_add_known_block_to_source(
                                         source_id,
-                                        height_to_verify,
+                                        height,
                                         hash_to_verify,
                                     );
                                 }
                             }
 
-                            self.database
-                                .with_database_detached(move |database| {
-                                    // TODO: overhead for building the SCALE encoding of the header
-                                    let result = database.insert(
-                                        &scale_encoded_header_to_verify,
-                                        is_new_best,
-                                        iter::empty::<Vec<u8>>(), // TODO:,no /!\
-                                        storage_main_trie_changes
-                                            .diff_iter_unordered()
-                                            .map(|(k, v, ())| (k, v)),
-                                        u8::from(state_trie_version),
-                                    );
-
-                                    match result {
-                                        Ok(()) => {}
-                                        Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
-                                        Err(err) => panic!("{}", err),
-                                    }
-                                })
-                                .await;
-
                             return (self, true);
                         }
 
-                        all::BlockVerification::ParentStorageGet(req) => {
-                            let key = req.key().as_ref().to_vec();
+                        body_only::Verify::StorageGet(req) => {
+                            let when_database_access_started = Instant::now();
+                            let parent_paths = req.child_trie().map(|child_trie| {
+                                trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                                    .chain(trie::bytes_to_nibbles(
+                                        child_trie.as_ref().iter().copied(),
+                                    ))
+                                    .map(u8::from)
+                                    .collect::<Vec<_>>()
+                            });
+                            let key = trie::bytes_to_nibbles(req.key().as_ref().iter().copied())
+                                .map(u8::from)
+                                .collect::<Vec<_>>();
                             let value = self
                                 .database
                                 .with_database(move |db| {
-                                    db.block_storage_main_trie_get(&parent_hash, &key)
-                                })
-                                .await
-                                .expect("database access error");
-
-                            verify = req.inject_value(value.as_ref().map(|(val, vers)| {
-                                (
-                                    &val[..],
-                                    TrieEntryVersion::try_from(*vers).expect("corrupted database"),
-                                )
-                            }));
-                        }
-                        all::BlockVerification::ParentStorageNextKey(req) => {
-                            let key = req.key().as_ref().to_vec();
-                            let or_equal = req.or_equal();
-                            let next_key = self
-                                .database
-                                .with_database(move |db| {
-                                    db.block_storage_main_trie_next_key(
+                                    db.block_storage_get(
                                         &parent_hash,
-                                        &key,
-                                        or_equal,
+                                        parent_paths.into_iter().map(|p| p.into_iter()),
+                                        key.iter().copied(),
                                     )
                                 })
                                 .await
-                                .expect("database access error")
-                                .filter(|k| k.starts_with(req.prefix().as_ref()));
+                                .expect("database access error");
+                            let value = value.as_ref().map(|(val, vers)| {
+                                (
+                                    iter::once(&val[..]),
+                                    TrieEntryVersion::try_from(*vers).expect("corrupted database"),
+                                )
+                            });
 
-                            debug_assert!(next_key
-                                .as_ref()
-                                .map_or(true, |k| &**k > req.key().as_ref()));
-                            verify = req.inject_key(next_key);
+                            database_accesses_duration += when_database_access_started.elapsed();
+                            body_verification = req.inject_value(value);
                         }
-                        all::BlockVerification::ParentStoragePrefixKeys(req) => {
-                            let prefix = req.prefix().as_ref().to_vec();
-                            let keys = self
+                        body_only::Verify::StorageClosestDescendantMerkleValue(req) => {
+                            let when_database_access_started = Instant::now();
+
+                            let parent_paths = req.child_trie().map(|child_trie| {
+                                trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                                    .chain(trie::bytes_to_nibbles(
+                                        child_trie.as_ref().iter().copied(),
+                                    ))
+                                    .map(u8::from)
+                                    .collect::<Vec<_>>()
+                            });
+                            let key_nibbles = req.key().map(u8::from).collect::<Vec<_>>();
+
+                            let merkle_value = self
                                 .database
                                 .with_database(move |db| {
-                                    db.block_storage_main_trie_keys_ordered(&parent_hash, &prefix)
+                                    db.block_storage_closest_descendant_merkle_value(
+                                        &parent_hash,
+                                        parent_paths.into_iter().map(|p| p.into_iter()),
+                                        key_nibbles.iter().copied(),
+                                    )
                                 })
                                 .await
                                 .expect("database access error");
-                            verify = req.inject_keys_ordered(keys.into_iter());
+
+                            database_accesses_duration += when_database_access_started.elapsed();
+                            body_verification =
+                                req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
                         }
-                        all::BlockVerification::RuntimeCompilation(rt) => {
-                            verify = rt.build();
+                        body_only::Verify::StorageNextKey(req) => {
+                            let when_database_access_started = Instant::now();
+
+                            let parent_paths = req.child_trie().map(|child_trie| {
+                                trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                                    .chain(trie::bytes_to_nibbles(
+                                        child_trie.as_ref().iter().copied(),
+                                    ))
+                                    .map(u8::from)
+                                    .collect::<Vec<_>>()
+                            });
+                            let key_nibbles = req
+                                .key()
+                                .map(u8::from)
+                                .chain(if req.or_equal() { None } else { Some(0u8) })
+                                .collect::<Vec<_>>();
+                            let prefix_nibbles = req.prefix().map(u8::from).collect::<Vec<_>>();
+
+                            let branch_nodes = req.branch_nodes();
+                            let next_key = self
+                                .database
+                                .with_database(move |db| {
+                                    db.block_storage_next_key(
+                                        &parent_hash,
+                                        parent_paths.into_iter().map(|p| p.into_iter()),
+                                        key_nibbles.iter().copied(),
+                                        prefix_nibbles.iter().copied(),
+                                        branch_nodes,
+                                    )
+                                })
+                                .await
+                                .expect("database access error");
+
+                            database_accesses_duration += when_database_access_started.elapsed();
+                            body_verification = req.inject_key(next_key.map(|k| {
+                                k.into_iter().map(|b| trie::Nibble::try_from(b).unwrap())
+                            }));
+                        }
+                        body_only::Verify::RuntimeCompilation(rt) => {
+                            let before_runtime_build = Instant::now();
+                            let outcome = rt.build();
+                            runtime_build_duration += before_runtime_build.elapsed();
+                            body_verification = outcome;
                         }
                     }
                 }
@@ -1336,7 +1578,10 @@ impl SyncBackground {
                             updates_best_block,
                         },
                     ) => {
-                        log::debug!("finality-proof-verification; outcome=success");
+                        self.log_callback.log(
+                            LogLevel::Debug,
+                            "finality-proof-verification; outcome=success".to_string(),
+                        );
                         self.sync = sync_out;
 
                         if updates_best_block {
@@ -1353,7 +1598,10 @@ impl SyncBackground {
                         }
 
                         let finalized_block = finalized_blocks.pop().unwrap();
-                        let NonFinalizedBlock::Verified { runtime } = finalized_block.user_data else { unreachable!() };
+                        let NonFinalizedBlock::Verified { runtime } = finalized_block.user_data
+                        else {
+                            unreachable!()
+                        };
                         self.finalized_runtime = runtime;
                         let new_finalized_hash =
                             finalized_block.header.hash(self.sync.block_number_bytes());
@@ -1366,56 +1614,33 @@ impl SyncBackground {
                         (self, true)
                     }
                     (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitPending) => {
-                        log::debug!("finality-proof-verification; outcome=pending");
-                        self.sync = sync_out;
-                        (self, true)
-                    }
-                    (sync_out, all::FinalityProofVerifyOutcome::AlreadyFinalized) => {
-                        log::debug!("finality-proof-verification; outcome=already-finalized");
-                        self.sync = sync_out;
-                        (self, true)
-                    }
-                    (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitError(error)) => {
-                        log::warn!("finality-proof-verification-failure; error={}", error);
-                        self.sync = sync_out;
-                        (self, true)
-                    }
-                    (sync_out, all::FinalityProofVerifyOutcome::JustificationError(error)) => {
-                        log::warn!("finality-proof-verification-failure; error={}", error);
-                        self.sync = sync_out;
-                        (self, true)
-                    }
-                }
-            }
-
-            all::ProcessOne::VerifyHeader(verify) => {
-                let hash_to_verify = verify.hash();
-                let height_to_verify = verify.height();
-
-                let _jaeger_span = self
-                    .jaeger_service
-                    .block_header_verify_span(&hash_to_verify);
-
-                match verify.perform(unix_time, NonFinalizedBlock::NotVerified) {
-                    all::HeaderVerifyOutcome::Success { sync: sync_out, .. } => {
-                        log::debug!(
-                            "header-verification; hash={}; height={}; outcome=success",
-                            HashDisplay(&hash_to_verify),
-                            height_to_verify
+                        self.log_callback.log(
+                            LogLevel::Debug,
+                            "finality-proof-verification; outcome=pending".to_string(),
                         );
                         self.sync = sync_out;
                         (self, true)
                     }
-                    all::HeaderVerifyOutcome::Error {
-                        sync: sync_out,
-                        error,
-                        ..
-                    } => {
-                        log::debug!(
-                            "header-verification; hash={}; height={}; outcome=failure; error={}",
-                            HashDisplay(&hash_to_verify),
-                            height_to_verify,
-                            error
+                    (sync_out, all::FinalityProofVerifyOutcome::AlreadyFinalized) => {
+                        self.log_callback.log(
+                            LogLevel::Debug,
+                            "finality-proof-verification; outcome=already-finalized".to_string(),
+                        );
+                        self.sync = sync_out;
+                        (self, true)
+                    }
+                    (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitError(error)) => {
+                        self.log_callback.log(
+                            LogLevel::Warn,
+                            format!("finality-proof-verification-failure; error={}", error),
+                        );
+                        self.sync = sync_out;
+                        (self, true)
+                    }
+                    (sync_out, all::FinalityProofVerifyOutcome::JustificationError(error)) => {
+                        self.log_callback.log(
+                            LogLevel::Warn,
+                            format!("finality-proof-verification-failure; error={}", error),
                         );
                         self.sync = sync_out;
                         (self, true)

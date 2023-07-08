@@ -116,10 +116,16 @@ pub struct Config {
     /// If `false`, blocks containing digest items with an unknown consensus engine will fail to
     /// verify.
     ///
-    /// Passing `true` can lead to blocks being considered as valid when they shouldn't. However,
-    /// even if `true` is passed, a recognized consensus engine must always be present.
-    /// Consequently, both `true` and `false` guarantee that the number of authorable blocks over
-    /// the network is bounded.
+    /// Note that blocks must always contain digest items that are relevant to the current
+    /// consensus algorithm. This option controls what happens when blocks contain additional
+    /// digest items that aren't recognized by the implementation.
+    ///
+    /// Passing `true` can lead to blocks being considered as valid when they shouldn't, as these
+    /// additional digest items could have some logic attached to them that restricts which blocks
+    /// are valid and which are not.
+    ///
+    /// However, since a recognized consensus engine must always be present, both `true` and
+    /// `false` guarantee that the number of authorable blocks over the network is bounded.
     pub allow_unknown_consensus_engines: bool,
 
     /// Pre-allocated capacity for the number of block sources.
@@ -1043,7 +1049,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         });
 
         if let Some(block) = block {
-            ProcessOne::HeaderVerify(HeaderVerify {
+            ProcessOne::BlockVerify(BlockVerify {
                 parent: self,
                 block_to_verify: block,
             })
@@ -1929,30 +1935,24 @@ impl<'a, TBl, TRq, TSrc> AddSourceUnknown<'a, TBl, TRq, TSrc> {
     }
 }
 
-/// Header verification to be performed.
+/// Block verification to be performed.
 ///
 /// Internally holds the [`AllForksSync`].
-pub struct HeaderVerify<TBl, TRq, TSrc> {
+pub struct BlockVerify<TBl, TRq, TSrc> {
     parent: AllForksSync<TBl, TRq, TSrc>,
     /// Block that can be verified.
     block_to_verify: pending_blocks::TreeRoot,
 }
 
-impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
-    /// Returns the height of the block to be verified.
-    pub fn height(&self) -> u64 {
-        self.block_to_verify.block_number
-    }
-
+impl<TBl, TRq, TSrc> BlockVerify<TBl, TRq, TSrc> {
     /// Returns the hash of the block to be verified.
     pub fn hash(&self) -> &[u8; 32] {
         &self.block_to_verify.block_hash
     }
 
-    /// Perform the verification.
-    pub fn perform(mut self, now_from_unix_epoch: Duration) -> HeaderVerifyOutcome<TBl, TRq, TSrc> {
-        let to_verify_scale_encoded_header = self
-            .parent
+    /// Returns the SCALE-encoded header of the block about to be verified.
+    pub fn scale_encoded_header(&self) -> Vec<u8> {
+        self.parent
             .inner
             .blocks
             .unverified_block_user_data(
@@ -1962,47 +1962,27 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
             .header
             .as_ref()
             .unwrap()
-            .scale_encoding_vec(self.parent.chain.block_number_bytes());
+            .scale_encoding_vec(self.parent.chain.block_number_bytes())
+    }
+
+    /// Perform the verification.
+    pub fn verify_header(
+        mut self,
+        now_from_unix_epoch: Duration,
+    ) -> HeaderVerifyOutcome<TBl, TRq, TSrc> {
+        let to_verify_scale_encoded_header = self.scale_encoded_header();
 
         let result = match self
             .parent
             .chain
             .verify_header(to_verify_scale_encoded_header, now_from_unix_epoch)
         {
-            Ok(blocks_tree::HeaderVerifySuccess::Insert {
-                insert,
+            Ok(blocks_tree::HeaderVerifySuccess::Verified {
+                verified_header,
                 is_new_best,
-                ..
             }) => {
                 // Block is valid!
-
-                // Remove the block from `pending_blocks`.
-                let pending_block = self.parent.inner.blocks.remove_unverified_block(
-                    self.block_to_verify.block_number,
-                    &self.block_to_verify.block_hash,
-                );
-
-                // Now insert the block in `chain`.
-                // TODO: cloning the header :-/
-                let block = Block {
-                    header: insert.header().into(),
-                    user_data: pending_block.user_data,
-                };
-                insert.insert(block);
-
-                // Because a new block is now in the chain, all the previously-unverifiable
-                // finality proofs might have now become verifiable.
-                // TODO: this way of doing it is correct but quite inefficient
-                for source in self.parent.inner.blocks.sources_user_data_iter_mut() {
-                    let pending = mem::replace(
-                        &mut source.pending_finality_proofs,
-                        SourcePendingJustificationProofs::None,
-                    );
-
-                    source.unverified_finality_proofs.merge(pending)
-                }
-
-                Ok(is_new_best)
+                Ok((verified_header, is_new_best))
             }
             Err(blocks_tree::HeaderVerifyError::VerificationFailed(error)) => {
                 // Remove the block from `pending_blocks`.
@@ -2039,9 +2019,13 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
         };
 
         match result {
-            Ok(is_new_best) => HeaderVerifyOutcome::Success {
+            Ok((verified_header, is_new_best)) => HeaderVerifyOutcome::Success {
                 is_new_best,
-                sync: self.parent,
+                success: HeaderVerifySuccess {
+                    parent: self.parent,
+                    block_to_verify: self.block_to_verify,
+                    verified_header,
+                },
             },
             Err(error) => HeaderVerifyOutcome::Error {
                 sync: self.parent,
@@ -2052,6 +2036,95 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
 
     /// Do not actually proceed with the verification.
     pub fn cancel(self) -> AllForksSync<TBl, TRq, TSrc> {
+        self.parent
+    }
+}
+
+/// Header verification successful.
+///
+/// Internally holds the [`AllForksSync`].
+pub struct HeaderVerifySuccess<TBl, TRq, TSrc> {
+    parent: AllForksSync<TBl, TRq, TSrc>,
+    block_to_verify: pending_blocks::TreeRoot,
+    verified_header: blocks_tree::VerifiedHeader,
+}
+
+impl<TBl, TRq, TSrc> HeaderVerifySuccess<TBl, TRq, TSrc> {
+    /// Returns the height of the block that was verified.
+    pub fn height(&self) -> u64 {
+        self.block_to_verify.block_number
+    }
+
+    /// Returns the hash of the block that was verified.
+    pub fn hash(&self) -> &[u8; 32] {
+        &self.block_to_verify.block_hash
+    }
+
+    /// Returns the hash of the parent of the block that was verified.
+    pub fn parent_hash(&self) -> &[u8; 32] {
+        &self.block_to_verify.parent_block_hash
+    }
+
+    /// Returns the user data of the parent of the block to be verified, or `None` if the parent
+    /// is the finalized block.
+    pub fn parent_user_data(&self) -> Option<&TBl> {
+        self.parent
+            .chain
+            .non_finalized_block_user_data(&self.block_to_verify.parent_block_hash)
+            .map(|ud| &ud.user_data)
+    }
+
+    /// Returns the SCALE-encoded header of the block that was verified.
+    pub fn scale_encoded_header(&self) -> &[u8] {
+        self.verified_header.scale_encoded_header()
+    }
+
+    /// Reject the block and mark it as bad.
+    pub fn reject_bad_block(mut self) -> AllForksSync<TBl, TRq, TSrc> {
+        // Remove the block from `pending_blocks`.
+        self.parent.inner.blocks.mark_unverified_block_as_bad(
+            self.block_to_verify.block_number,
+            &self.block_to_verify.block_hash,
+        );
+
+        self.parent
+    }
+
+    /// Finish inserting the block header.
+    pub fn finish(mut self) -> AllForksSync<TBl, TRq, TSrc> {
+        // Remove the block from `pending_blocks`.
+        let pending_block = self.parent.inner.blocks.remove_unverified_block(
+            self.block_to_verify.block_number,
+            &self.block_to_verify.block_hash,
+        );
+
+        // Now insert the block in `chain`.
+        // TODO: cloning the header :-/
+        let block = Block {
+            header: header::decode(
+                self.verified_header.scale_encoded_header(),
+                self.parent.chain.block_number_bytes(),
+            )
+            .unwrap()
+            .into(),
+            user_data: pending_block.user_data,
+        };
+        self.parent
+            .chain
+            .insert_verified_header(self.verified_header, block);
+
+        // Because a new block is now in the chain, all the previously-unverifiable
+        // finality proofs might have now become verifiable.
+        // TODO: this way of doing it is correct but quite inefficient
+        for source in self.parent.inner.blocks.sources_user_data_iter_mut() {
+            let pending = mem::replace(
+                &mut source.pending_finality_proofs,
+                SourcePendingJustificationProofs::None,
+            );
+
+            source.unverified_finality_proofs.merge(pending)
+        }
+
         self.parent
     }
 }
@@ -2201,21 +2274,20 @@ pub enum ProcessOne<TBl, TRq, TSrc> {
         sync: AllForksSync<TBl, TRq, TSrc>,
     },
 
-    /// A header is ready for verification.
-    HeaderVerify(HeaderVerify<TBl, TRq, TSrc>),
+    /// A block is ready for verification.
+    BlockVerify(BlockVerify<TBl, TRq, TSrc>),
 
     /// A justification is ready for verification.
     FinalityProofVerify(FinalityProofVerify<TBl, TRq, TSrc>),
 }
 
-/// Outcome of calling [`HeaderVerify::perform`].
+/// Outcome of calling [`BlockVerify::verify_header`].
 pub enum HeaderVerifyOutcome<TBl, TRq, TSrc> {
     /// Header has been successfully verified.
     Success {
         /// True if the newly-verified block is considered the new best block.
         is_new_best: bool,
-        /// State machine yielded back. Use to continue the processing.
-        sync: AllForksSync<TBl, TRq, TSrc>,
+        success: HeaderVerifySuccess<TBl, TRq, TSrc>,
     },
 
     /// Header verification failed.
@@ -2296,10 +2368,6 @@ pub enum BlockBodyVerify<TBl, TRq, TSrc> {
 
     /// Loading a storage value of the finalized block is required in order to continue.
     FinalizedStorageGet(StorageGet<TBl, TRq, TSrc>),
-
-    /// Fetching the list of keys of the finalized block with a given prefix is required in order
-    /// to continue.
-    FinalizedStoragePrefixKeys(StoragePrefixKeys<TBl, TRq, TSrc>),
 
     /// Fetching the key of the finalized block storage that follows a given one is required in
     /// order to continue.

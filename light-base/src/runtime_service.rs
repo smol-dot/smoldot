@@ -59,7 +59,7 @@ use crate::{platform::PlatformRef, sync_service};
 use alloc::{
     borrow::ToOwned as _,
     boxed::Box,
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     format,
     string::{String, ToString as _},
     sync::{Arc, Weak},
@@ -107,9 +107,6 @@ pub struct PinnedRuntimeId(Arc<Runtime>);
 
 /// See [the module-level documentation](..).
 pub struct RuntimeService<TPlat: PlatformRef> {
-    /// See [`Config::platform`].
-    platform: TPlat,
-
     /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService<TPlat>>,
 
@@ -177,7 +174,6 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         });
 
         RuntimeService {
-            platform: config.platform,
             sync_service: config.sync_service,
             guarded,
             background_task_abort,
@@ -531,12 +527,8 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             existing_runtime
         } else {
             // No identical runtime was found. Try compiling the new runtime.
-            let runtime = SuccessfulRuntime::from_storage::<TPlat>(
-                &self.platform,
-                &storage_code,
-                &storage_heap_pages,
-            )
-            .await;
+            let runtime =
+                SuccessfulRuntime::from_storage::<TPlat>(&storage_code, &storage_heap_pages).await;
             let runtime = Arc::new(Runtime {
                 heap_pages: storage_heap_pages,
                 runtime_code: storage_code,
@@ -807,7 +799,6 @@ impl<TPlat: PlatformRef> RuntimeAccess<TPlat> {
         let call_proof = call_proof.and_then(|call_proof| {
             proof_decode::decode_and_verify_proof(proof_decode::Config {
                 proof: call_proof.decode().to_owned(), // TODO: to_owned() inefficiency, need some help from the networking to obtain the owned data
-                trie_root_hash: &self.block_state_root_hash,
             })
             .map_err(RuntimeCallError::StorageRetrieval)
         });
@@ -849,11 +840,15 @@ impl<'a> RuntimeCall<'a> {
 
     /// Finds the given key in the call proof and returns the associated storage value.
     ///
+    /// If `child_trie` is `Some`, look for the key in the given child trie. If it is `None`, look
+    /// for the key in the main trie.
+    ///
     /// Returns an error if the key couldn't be found in the proof, meaning that the proof is
     /// invalid.
     // TODO: if proof is invalid, we should give the option to fetch another call proof
     pub fn storage_entry(
         &self,
+        child_trie: Option<&[u8]>,
         requested_key: &[u8],
     ) -> Result<Option<(&[u8], TrieEntryVersion)>, RuntimeCallError> {
         let call_proof = match &self.call_proof {
@@ -861,67 +856,100 @@ impl<'a> RuntimeCall<'a> {
             Err(err) => return Err(err.clone()),
         };
 
-        match call_proof.storage_value(requested_key) {
-            Some(v) => Ok(v),
-            None => Err(RuntimeCallError::MissingProofEntry),
+        let trie_root = match child_trie {
+            Some(child_trie) => {
+                match Self::child_trie_root(call_proof, &self.block_state_root_hash, child_trie)? {
+                    Some(h) => h,
+                    None => return Ok(None),
+                }
+            }
+            None => self.block_state_root_hash,
+        };
+
+        match call_proof.storage_value(&trie_root, requested_key) {
+            Ok(v) => Ok(v),
+            Err(err) => Err(RuntimeCallError::MissingProofEntry(err)),
         }
     }
 
-    /// Finds in the call proof the list of keys that match a certain prefix.
+    /// Find in the proof the trie node that follows `key_before` in lexicographic order.
     ///
-    /// Returns an error if not all the keys could be found in the proof, meaning that the proof
-    /// is invalid.
+    /// If `child_trie` is `Some`, look for the key in the given child trie. If it is `None`, look
+    /// for the key in the main trie.
     ///
-    /// The keys returned are ordered lexicographically.
-    // TODO: if proof is invalid, we should give the option to fetch another call proof
-    pub fn storage_prefix_keys_ordered(
+    /// If `or_equal` is `true`, then `key_before` is returned if it is equal to a node in the
+    /// trie. If `false`, then only keys that are strictly superior are returned.
+    ///
+    /// The returned value must always start with `prefix`. Note that the value of `prefix` is
+    /// important as it can be the difference between `None` and `Some(None)`.
+    ///
+    /// If `branch_nodes` is `false`, then trie nodes that don't have a storage value are skipped.
+    ///
+    /// Returns an error if the proof doesn't contain enough information, meaning that the proof is
+    /// invalid.
+    pub fn next_key(
         &'_ self,
-        prefix: &[u8],
-    ) -> Result<impl Iterator<Item = impl AsRef<[u8]> + '_>, RuntimeCallError> {
-        // TODO: this could be a function in the proof_decode module
-        let mut to_find = VecDeque::<Vec<_>>::new();
-        to_find.push_back(trie::bytes_to_nibbles(prefix.iter().copied()).collect::<Vec<_>>());
-
-        let mut output = Vec::new();
-
+        child_trie: Option<&[u8]>,
+        key_before: &[trie::Nibble],
+        or_equal: bool,
+        prefix: &[trie::Nibble],
+        branch_nodes: bool,
+    ) -> Result<Option<&'_ [trie::Nibble]>, RuntimeCallError> {
         let call_proof = match &self.call_proof {
             Ok(p) => p,
             Err(err) => return Err(err.clone()),
         };
 
-        while let Some(key) = to_find.pop_front() {
-            let node_info = call_proof
-                .trie_node_info(&key)
-                .ok_or(RuntimeCallError::MissingProofEntry)?;
-
-            if matches!(
-                node_info.storage_value,
-                proof_decode::StorageValue::Known { .. }
-                    | proof_decode::StorageValue::HashKnownValueMissing(_)
-            ) {
-                assert_eq!(key.len() % 2, 0);
-                let key_as_bytes =
-                    trie::nibbles_to_bytes_suffix_extend(key.iter().copied()).collect::<Vec<_>>();
-                debug_assert!(output.last().map_or(true, |last| *last < key_as_bytes));
-                output.push(key_as_bytes);
-            }
-
-            for child in node_info.children.children().rev() {
-                match child {
-                    proof_decode::Child::NoChild => continue,
-                    proof_decode::Child::AbsentFromProof => {
-                        return Err(RuntimeCallError::MissingProofEntry);
-                    }
-                    proof_decode::Child::InProof { child_key } => {
-                        debug_assert!(to_find.front().map_or(true, |f| child_key < f));
-                        to_find.push_front(child_key.to_owned());
-                    }
+        let trie_root = match child_trie {
+            Some(child_trie) => {
+                match Self::child_trie_root(call_proof, &self.block_state_root_hash, child_trie)? {
+                    Some(h) => h,
+                    None => return Ok(None),
                 }
             }
-        }
+            None => self.block_state_root_hash,
+        };
 
-        // TODO: debug_assert!(output.is_sorted()); // TODO: https://github.com/rust-lang/rust/issues/53485
-        Ok(output.into_iter())
+        match call_proof.next_key(&trie_root, key_before, or_equal, prefix, branch_nodes) {
+            Ok(v) => Ok(v),
+            Err(err) => Err(RuntimeCallError::MissingProofEntry(err)),
+        }
+    }
+
+    /// Find in the proof the closest trie node that descends from `key` and returns its Merkle
+    /// value.
+    ///
+    /// If `child_trie` is `Some`, look for the key in the given child trie. If it is `None`, look
+    /// for the key in the main trie.
+    ///
+    /// Returns an error if the proof doesn't contain enough information, meaning that the proof is
+    /// invalid.
+    ///
+    /// Returns `Ok(None)` if the child trie is known to not exist or if it is known that there is
+    /// no descendant.
+    pub fn closest_descendant_merkle_value(
+        &'_ self,
+        child_trie: Option<&[u8]>,
+        key: &[trie::Nibble],
+    ) -> Result<Option<&'_ [u8]>, RuntimeCallError> {
+        let call_proof = match &self.call_proof {
+            Ok(p) => p,
+            Err(err) => return Err(err.clone()),
+        };
+
+        let trie_root = match child_trie {
+            Some(child_trie) => {
+                match Self::child_trie_root(call_proof, &self.block_state_root_hash, child_trie)? {
+                    Some(h) => h,
+                    None => return Ok(None),
+                }
+            }
+            None => self.block_state_root_hash,
+        };
+
+        call_proof
+            .closest_descendant_merkle_value(&trie_root, key)
+            .map_err(RuntimeCallError::MissingProofEntry)
     }
 
     /// End the runtime call.
@@ -930,6 +958,27 @@ impl<'a> RuntimeCall<'a> {
     pub fn unlock(mut self, vm: executor::host::HostVmPrototype) {
         debug_assert!(self.guarded.is_none());
         *self.guarded = Some(vm);
+    }
+
+    fn child_trie_root(
+        proof: &proof_decode::DecodedTrieProof<Vec<u8>>,
+        main_trie_root: &[u8; 32],
+        child_trie: &[u8],
+    ) -> Result<Option<[u8; 32]>, RuntimeCallError> {
+        // TODO: allocation here, but probably not problematic
+        const PREFIX: &[u8] = b":child_storage:default:";
+        let mut key = Vec::with_capacity(PREFIX.len() + child_trie.as_ref().len());
+        key.extend_from_slice(PREFIX);
+        key.extend_from_slice(child_trie.as_ref());
+
+        match proof.storage_value(main_trie_root, &key) {
+            Err(err) => Err(RuntimeCallError::MissingProofEntry(err)),
+            Ok(None) => Ok(None),
+            Ok(Some((value, _))) => match <[u8; 32]>::try_from(value) {
+                Ok(hash) => Ok(Some(hash)),
+                Err(_) => Err(RuntimeCallError::InvalidChildTrieRoot),
+            },
+        }
     }
 }
 
@@ -954,7 +1003,10 @@ pub enum RuntimeCallError {
     #[display(fmt = "Error in call proof: {_0}")]
     StorageRetrieval(proof_decode::Error),
     /// One or more entries are missing from the call proof.
-    MissingProofEntry,
+    #[display(fmt = "One or more entries are missing from the call proof")]
+    MissingProofEntry(proof_decode::IncompleteProofError),
+    /// Call proof contains a reference to a child trie whose hash isn't 32 bytes.
+    InvalidChildTrieRoot,
     /// Error while retrieving the call proof from the network.
     #[display(fmt = "Error when retrieving the call proof: {_0}")]
     CallProof(sync_service::CallProofQueryError),
@@ -970,7 +1022,8 @@ impl RuntimeCallError {
         match self {
             RuntimeCallError::InvalidRuntime(_) => false,
             RuntimeCallError::StorageRetrieval(_) => false,
-            RuntimeCallError::MissingProofEntry => false,
+            RuntimeCallError::MissingProofEntry(_) => false,
+            RuntimeCallError::InvalidChildTrieRoot => false,
             RuntimeCallError::CallProof(err) => err.is_network_problem(),
             RuntimeCallError::StorageQuery(err) => err.is_network_problem(),
         }
@@ -1555,12 +1608,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let runtime = if let Some(existing_runtime) = existing_runtime {
             existing_runtime
         } else {
-            let runtime = SuccessfulRuntime::from_storage::<TPlat>(
-                &self.platform,
-                &storage_code,
-                &storage_heap_pages,
-            )
-            .await;
+            let runtime =
+                SuccessfulRuntime::from_storage::<TPlat>(&storage_code, &storage_heap_pages).await;
             match &runtime {
                 Ok(runtime) => {
                     log::info!(
@@ -1916,7 +1965,17 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                     block_number,
                                     &block_hash,
                                     &state_root,
-                                    iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
+                                    [
+                                        sync_service::StorageRequestItem {
+                                            key: b":code".to_vec(),
+                                            ty: sync_service::StorageRequestItemTy::Value,
+                                        },
+                                        sync_service::StorageRequestItem {
+                                            key: b":heappages".to_vec(),
+                                            ty: sync_service::StorageRequestItemTy::Value,
+                                        },
+                                    ]
+                                    .into_iter(),
                                     3,
                                     Duration::from_secs(20),
                                     NonZeroU32::new(3).unwrap(),
@@ -1924,9 +1983,31 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                 .await;
 
                             let result = match result {
-                                Ok(mut c) => {
-                                    let heap_pages = c.pop().unwrap();
-                                    let code = c.pop().unwrap();
+                                Ok(entries) => {
+                                    let heap_pages = entries
+                                        .iter()
+                                        .find_map(|entry| match entry {
+                                            sync_service::StorageResultItem::Value {
+                                                key,
+                                                value,
+                                            } if key == b":heappages" => {
+                                                Some(value.clone()) // TODO: overhead
+                                            }
+                                            _ => None,
+                                        })
+                                        .unwrap();
+                                    let code = entries
+                                        .iter()
+                                        .find_map(|entry| match entry {
+                                            sync_service::StorageResultItem::Value {
+                                                key,
+                                                value,
+                                            } if key == b":code" => {
+                                                Some(value.clone()) // TODO: overhead
+                                            }
+                                            _ => None,
+                                        })
+                                        .unwrap();
                                     Ok((code, heap_pages))
                                 }
                                 Err(error) => Err(RuntimeDownloadError::StorageQuery(error)),
@@ -2031,12 +2112,11 @@ struct SuccessfulRuntime {
 
 impl SuccessfulRuntime {
     async fn from_storage<TPlat: PlatformRef>(
-        platform: &TPlat,
         code: &Option<Vec<u8>>,
         heap_pages: &Option<Vec<u8>>,
     ) -> Result<Self, RuntimeError> {
         // Since compiling the runtime is a CPU-intensive operation, we yield once before.
-        platform.yield_after_cpu_intensive().await;
+        futures_lite::future::yield_now().await;
 
         // Parameters for `HostVmPrototype::new`.
         let module = code.as_ref().ok_or(RuntimeError::CodeNotFound)?;

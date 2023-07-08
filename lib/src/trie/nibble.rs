@@ -206,6 +206,52 @@ pub fn nibbles_to_bytes_prefix_extend<I: ExactSizeIterator<Item = Nibble>>(
     Iter(nibbles, has_prefix_nibble)
 }
 
+/// Turns an iterator of nibbles into an iterator of bytes.
+///
+/// If the number of nibbles is uneven, the last nibble is truncated.
+///
+/// # Examples
+///
+/// ```
+/// use smoldot::trie::{Nibble, nibbles_to_bytes_truncate};
+///
+/// let input = [Nibble::try_from(0x5).unwrap(), Nibble::try_from(0xa).unwrap()];
+/// assert_eq!(nibbles_to_bytes_truncate(input.into_iter()).collect::<Vec<_>>(), &[0x5a]);
+/// ```
+///
+/// ```
+/// use smoldot::trie::{Nibble, nibbles_to_bytes_truncate};
+///
+/// let input = [Nibble::try_from(0x5).unwrap(), Nibble::try_from(0xa).unwrap(), Nibble::try_from(0x9).unwrap()];
+/// assert_eq!(nibbles_to_bytes_truncate(input.into_iter()).collect::<Vec<_>>(), &[0x5a]);
+/// ```
+pub fn nibbles_to_bytes_truncate<I: Iterator<Item = Nibble>>(
+    nibbles: I,
+) -> impl Iterator<Item = u8> {
+    struct Iter<I>(I);
+
+    impl<I: Iterator<Item = Nibble>> Iterator for Iter<I> {
+        type Item = u8;
+
+        fn next(&mut self) -> Option<u8> {
+            let n1 = self.0.next()?;
+            let n2 = self.0.next()?;
+            let byte = (n1.0 << 4) | n2.0;
+            Some(byte)
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let (min, max) = self.0.size_hint();
+            fn conv(n: usize) -> usize {
+                n / 2
+            }
+            (conv(min), max.map(conv))
+        }
+    }
+
+    Iter(nibbles)
+}
+
 /// Turns an iterator of bytes into an iterator of nibbles corresponding to these bytes.
 ///
 /// For each byte, the iterator yields a nibble containing the 4 most significant bits then a

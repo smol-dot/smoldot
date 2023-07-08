@@ -125,3 +125,10 @@ import { compileBytecode } from 'smoldot/bytecode';
 compileBytecode().then((bytecode) => postMessage(bytecode))
 onmessage = (msg) => smoldot.run(msg.data);
 ```
+
+Note that importing sub-paths (for example importing `smoldot/worker`) relies on a relatively
+modern JavaScript feature. If you import a smoldot sub-path from a TypeScript file, you might have
+to configure TypeScript to use `"moduleResolution": "node16"`. [The official TypeScript
+documentation itself recommends setting this configuration option to
+`node`](https://www.typescriptlang.org/docs/handbook/module-resolution.html#module-resolution-strategies),
+and it is likely that `node16` becomes the go-to module resolution scheme in the future.

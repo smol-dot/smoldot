@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
+// Copyright (C) 2023  Pierre Krieger
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -15,23 +15,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-#![deny(rustdoc::broken_intra_doc_links)]
-#![deny(unused_crate_dependencies)]
+pub mod client_main_task;
+pub mod deliver_channel;
 
-mod cli;
-mod run;
-mod util;
-
-fn main() {
-    smol::block_on(async_main())
-}
-
-async fn async_main() {
-    match <cli::CliOptions as clap::Parser>::parse().command {
-        cli::CliOptionsCommand::Run(r) => run::run(*r).await,
-        cli::CliOptionsCommand::Blake264BitsHash(opt) => {
-            let hash = blake2_rfc::blake2b::blake2b(8, &[], opt.payload.as_bytes());
-            println!("0x{}", hex::encode(hash));
-        }
-    }
-}
+// TODO: import paths?
+pub use self::client_main_task::*;
+pub use self::deliver_channel::*;

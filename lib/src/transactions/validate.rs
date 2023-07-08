@@ -25,7 +25,7 @@ use crate::{
 use alloc::{borrow::ToOwned as _, vec::Vec};
 use core::{iter, num::NonZeroU64};
 
-pub use runtime_host::TrieEntryVersion;
+pub use runtime_host::{Nibble, TrieEntryVersion};
 
 /// Configuration for a transaction validation process.
 pub struct Config<'a, TTx> {
@@ -332,9 +332,8 @@ pub fn validate_transaction(
                     digest: header::DigestRef::empty(),
                 }
                 .scale_encoding(config.block_number_bytes),
-                main_trie_root_calculation_cache: None,
                 storage_main_trie_changes: storage_diff::TrieDiff::empty(),
-                offchain_storage_changes: storage_diff::TrieDiff::empty(),
+                offchain_storage_changes: Default::default(),
                 max_log_level: config.max_log_level,
             });
 
@@ -370,9 +369,8 @@ pub fn validate_transaction(
                     config.source,
                     &header::hash_from_scale_encoded_header(config.scale_encoded_header),
                 ),
-                main_trie_root_calculation_cache: None,
                 storage_main_trie_changes: storage_diff::TrieDiff::empty(),
-                offchain_storage_changes: storage_diff::TrieDiff::empty(),
+                offchain_storage_changes: Default::default(),
                 max_log_level: config.max_log_level,
             });
 
@@ -406,11 +404,11 @@ pub enum Query {
     },
     /// Loading a storage value is required in order to continue.
     StorageGet(StorageGet),
+    /// Obtaining the Merkle value of the closest descendant of a trie node is required in order
+    /// to continue.
+    ClosestDescendantMerkleValue(ClosestDescendantMerkleValue),
     /// Fetching the key that follows a given one is required in order to continue.
     NextKey(NextKey),
-    /// Fetching the list of keys with a given prefix from the storage is required in order to
-    /// continue.
-    PrefixKeys(PrefixKeys),
 }
 
 impl Query {
@@ -426,17 +424,17 @@ impl Query {
             Query::StorageGet(StorageGet(StorageGetInner::Stage2(inner, _))) => {
                 runtime_host::RuntimeHostVm::StorageGet(inner).into_prototype()
             }
+            Query::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue(
+                MerkleValueInner::Stage1(inner, _),
+            )) => runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(inner).into_prototype(),
+            Query::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue(
+                MerkleValueInner::Stage2(inner, _),
+            )) => runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(inner).into_prototype(),
             Query::NextKey(NextKey(NextKeyInner::Stage1(inner, _))) => {
                 runtime_host::RuntimeHostVm::NextKey(inner).into_prototype()
             }
             Query::NextKey(NextKey(NextKeyInner::Stage2(inner, _))) => {
                 runtime_host::RuntimeHostVm::NextKey(inner).into_prototype()
-            }
-            Query::PrefixKeys(PrefixKeys(PrefixKeysInner::Stage1(inner, _))) => {
-                runtime_host::RuntimeHostVm::PrefixKeys(inner).into_prototype()
-            }
-            Query::PrefixKeys(PrefixKeys(PrefixKeysInner::Stage2(inner, _))) => {
-                runtime_host::RuntimeHostVm::PrefixKeys(inner).into_prototype()
             }
         }
     }
@@ -460,11 +458,8 @@ impl Query {
                             iter::once(info.scale_encoded_transaction),
                             info.transaction_source,
                         ),
-                        storage_main_trie_changes: success.storage_main_trie_changes,
+                        storage_main_trie_changes: success.storage_changes.into_main_trie_diff(),
                         offchain_storage_changes: success.offchain_storage_changes,
-                        main_trie_root_calculation_cache: Some(
-                            success.main_trie_root_calculation_cache,
-                        ),
                         max_log_level: info.max_log_level,
                     });
 
@@ -483,8 +478,10 @@ impl Query {
                 runtime_host::RuntimeHostVm::StorageGet(i) => {
                     Query::StorageGet(StorageGet(StorageGetInner::Stage1(i, info)))
                 }
-                runtime_host::RuntimeHostVm::PrefixKeys(i) => {
-                    Query::PrefixKeys(PrefixKeys(PrefixKeysInner::Stage1(i, info)))
+                runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(inner) => {
+                    Query::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue(
+                        MerkleValueInner::Stage1(inner, info),
+                    ))
                 }
                 runtime_host::RuntimeHostVm::NextKey(inner) => {
                     Query::NextKey(NextKey(NextKeyInner::Stage1(inner, info)))
@@ -541,8 +538,10 @@ impl Query {
                 runtime_host::RuntimeHostVm::StorageGet(i) => {
                     Query::StorageGet(StorageGet(StorageGetInner::Stage2(i, info)))
                 }
-                runtime_host::RuntimeHostVm::PrefixKeys(i) => {
-                    Query::PrefixKeys(PrefixKeys(PrefixKeysInner::Stage2(i, info)))
+                runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(inner) => {
+                    Query::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue(
+                        MerkleValueInner::Stage2(inner, info),
+                    ))
                 }
                 runtime_host::RuntimeHostVm::NextKey(inner) => {
                     Query::NextKey(NextKey(NextKeyInner::Stage2(inner, info)))
@@ -585,6 +584,14 @@ impl StorageGet {
         }
     }
 
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        match &self.0 {
+            StorageGetInner::Stage1(inner, _) => inner.child_trie().map(either::Left),
+            StorageGetInner::Stage2(inner, _) => inner.child_trie().map(either::Right),
+        }
+    }
+
     /// Injects the corresponding storage value.
     pub fn inject_value(
         self,
@@ -601,6 +608,65 @@ impl StorageGet {
     }
 }
 
+/// Obtaining the Merkle value of the closest descendant of a trie node is required in order
+/// to continue.
+#[must_use]
+pub struct ClosestDescendantMerkleValue(MerkleValueInner);
+
+enum MerkleValueInner {
+    Stage1(runtime_host::ClosestDescendantMerkleValue, Stage1),
+    Stage2(runtime_host::ClosestDescendantMerkleValue, Stage2),
+}
+
+impl ClosestDescendantMerkleValue {
+    /// Returns the key whose closest descendant Merkle value must be passed to
+    /// [`ClosestDescendantMerkleValue::inject_merkle_value`].
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+        match &self.0 {
+            MerkleValueInner::Stage1(inner, _) => either::Left(inner.key()),
+            MerkleValueInner::Stage2(inner, _) => either::Right(inner.key()),
+        }
+    }
+
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        match &self.0 {
+            MerkleValueInner::Stage1(inner, _) => inner.child_trie().map(either::Left),
+            MerkleValueInner::Stage2(inner, _) => inner.child_trie().map(either::Right),
+        }
+    }
+
+    /// Indicate that the value is unknown and resume the calculation.
+    ///
+    /// This function be used if you are unaware of the Merkle value. The algorithm will perform
+    /// the calculation of this Merkle value manually, which takes more time.
+    pub fn resume_unknown(self) -> Query {
+        match self.0 {
+            MerkleValueInner::Stage1(inner, stage1) => {
+                Query::from_step1(inner.resume_unknown(), stage1)
+            }
+            MerkleValueInner::Stage2(inner, stage2) => {
+                Query::from_step2(inner.resume_unknown(), stage2)
+            }
+        }
+    }
+
+    /// Injects the corresponding Merkle value.
+    ///
+    /// `None` can be passed if there is no descendant or, in the case of a child trie read, in
+    /// order to indicate that the child trie does not exist.
+    pub fn inject_merkle_value(self, merkle_value: Option<&[u8]>) -> Query {
+        match self.0 {
+            MerkleValueInner::Stage1(inner, stage1) => {
+                Query::from_step1(inner.inject_merkle_value(merkle_value), stage1)
+            }
+            MerkleValueInner::Stage2(inner, stage2) => {
+                Query::from_step2(inner.inject_merkle_value(merkle_value), stage2)
+            }
+        }
+    }
+}
+
 /// Fetching the key that follows a given one is required in order to continue.
 #[must_use]
 pub struct NextKey(NextKeyInner);
@@ -612,10 +678,18 @@ enum NextKeyInner {
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         match &self.0 {
             NextKeyInner::Stage1(inner, _) => either::Left(inner.key()),
             NextKeyInner::Stage2(inner, _) => either::Right(inner.key()),
+        }
+    }
+
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        match &self.0 {
+            NextKeyInner::Stage1(inner, _) => inner.child_trie().map(either::Left),
+            NextKeyInner::Stage2(inner, _) => inner.child_trie().map(either::Right),
         }
     }
 
@@ -628,9 +702,18 @@ impl NextKey {
         }
     }
 
+    /// If `true`, then the search must include both branch nodes and storage nodes. If `false`,
+    /// the search only covers storage nodes.
+    pub fn branch_nodes(&self) -> bool {
+        match &self.0 {
+            NextKeyInner::Stage1(inner, _) => inner.branch_nodes(),
+            NextKeyInner::Stage2(inner, _) => inner.branch_nodes(),
+        }
+    }
+
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         match &self.0 {
             NextKeyInner::Stage1(inner, _) => either::Left(inner.prefix()),
             NextKeyInner::Stage2(inner, _) => either::Right(inner.prefix()),
@@ -643,42 +726,10 @@ impl NextKey {
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
-    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> Query {
+    pub fn inject_key(self, key: Option<impl Iterator<Item = Nibble>>) -> Query {
         match self.0 {
             NextKeyInner::Stage1(inner, stage1) => Query::from_step1(inner.inject_key(key), stage1),
             NextKeyInner::Stage2(inner, stage2) => Query::from_step2(inner.inject_key(key), stage2),
-        }
-    }
-}
-
-/// Fetching the list of keys with a given prefix from the parent storage is required in order to
-/// continue.
-#[must_use]
-pub struct PrefixKeys(PrefixKeysInner);
-
-enum PrefixKeysInner {
-    Stage1(runtime_host::PrefixKeys, Stage1),
-    Stage2(runtime_host::PrefixKeys, Stage2),
-}
-
-impl PrefixKeys {
-    /// Returns the prefix whose keys to load.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
-        match &self.0 {
-            PrefixKeysInner::Stage1(inner, _) => either::Left(inner.prefix()),
-            PrefixKeysInner::Stage2(inner, _) => either::Right(inner.prefix()),
-        }
-    }
-
-    /// Injects the list of keys ordered lexicographically.
-    pub fn inject_keys_ordered(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> Query {
-        match self.0 {
-            PrefixKeysInner::Stage1(inner, stage1) => {
-                Query::from_step1(inner.inject_keys_ordered(keys), stage1)
-            }
-            PrefixKeysInner::Stage2(inner, stage2) => {
-                Query::from_step2(inner.inject_keys_ordered(keys), stage2)
-            }
         }
     }
 }

@@ -15,6 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use crate::{LogCallback, LogLevel};
 use core::{future::Future, pin};
 use futures_util::{FutureExt as _, StreamExt as _};
 use smol::{
@@ -34,7 +35,8 @@ use std::{
     io,
     net::{IpAddr, SocketAddr},
     pin::Pin,
-    time::Instant,
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
 pub(super) trait AsyncReadWrite: AsyncRead + AsyncWrite {}
@@ -43,13 +45,17 @@ impl<T> AsyncReadWrite for T where T: AsyncRead + AsyncWrite {}
 /// Asynchronous task managing a specific connection, including the dialing process.
 pub(super) async fn opening_connection_task(
     start_connect: service::StartConnect<Instant>,
+    log_callback: Arc<dyn LogCallback + Send + Sync>,
 ) -> Result<impl AsyncReadWrite + Unpin, ()> {
     // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d`) into
     // a `Future<dyn Output = Result<TcpStream, ...>>`.
     let socket = match multiaddr_to_socket(&start_connect.multiaddr) {
         Ok(socket) => socket,
         Err(_) => {
-            log::debug!("not-tcp; address={}", start_connect.multiaddr);
+            log_callback.log(
+                LogLevel::Debug,
+                format!("not-tcp; address={}", start_connect.multiaddr),
+            );
             return Err(());
         }
     };
@@ -67,6 +73,7 @@ pub(super) async fn opening_connection_task(
 
 /// Asynchronous task managing a specific connection.
 pub(super) async fn established_connection_task(
+    log_callback: Arc<dyn LogCallback + Send + Sync>,
     socket: impl AsyncReadWrite + Unpin,
     connection_id: service::ConnectionId,
     mut connection_task: service::SingleStreamConnectionTask<Instant>,
@@ -102,7 +109,10 @@ pub(super) async fn established_connection_task(
             } = match socket.buffers() {
                 Ok(b) => b,
                 Err(error) => {
-                    log::debug!("connection-error; error={}", error);
+                    log_callback.log(
+                        LogLevel::Debug,
+                        format!("connection-error; error={}", error),
+                    );
                     connection_task.reset();
                     socket_container = None;
                     continue;
@@ -110,9 +120,10 @@ pub(super) async fn established_connection_task(
             };
 
             let outgoing_buffer_was_closed = write_buffer.is_none();
+            let now = Instant::now();
 
             let mut read_write = service::ReadWrite {
-                now: Instant::now(),
+                now,
                 incoming_buffer: read_buffer.map(|b| b.0),
                 outgoing_buffer: write_buffer,
                 read_bytes: 0,
@@ -126,13 +137,17 @@ pub(super) async fn established_connection_task(
                 || read_write.written_bytes != 0
                 || read_write.outgoing_buffer.is_none()
             {
-                // TODO: ugly display for wake-up
-                log::trace!(
-                    "connection-activity; read={}; written={}; wake_up={:?}; write_close={:?}",
-                    read_write.read_bytes,
-                    read_write.written_bytes,
-                    read_write.wake_up_after,
-                    read_write.outgoing_buffer.is_none(),
+                log_callback.log(
+                    LogLevel::Trace,
+                    format!(
+                        "connection-activity; read={}; written={}; wake_up={:?}; write_close={:?}",
+                        read_write.read_bytes,
+                        read_write.written_bytes,
+                        read_write
+                            .wake_up_after
+                            .map(|w| w.checked_duration_since(now).unwrap_or(Duration::new(0, 0))),
+                        read_write.outgoing_buffer.is_none(),
+                    ),
                 );
             }
 

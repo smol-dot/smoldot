@@ -50,6 +50,13 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         sync: all::AllSync::new(all::Config {
             chain_information,
             block_number_bytes,
+            // Since this module doesn't verify block bodies, any block (even invalid) is accepted
+            // as long as it comes from a legitimate validator. Consequently, validators could
+            // perform attacks by sending completely invalid blocks. Passing `false` to this
+            // option would tighten the definition of what a "legitimate" validator is, and thus
+            // reduce the feasibility of attacks, but not in a significant way. Passing `true`,
+            // on the other hand, allows supporting chains that use custom consensus engines,
+            // which is considered worth the trade-off.
             allow_unknown_consensus_engines: true,
             sources_capacity: 32,
             blocks_capacity: {
@@ -131,9 +138,8 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
             if has_done_verif {
                 queue_empty = false;
 
-                // As explained in the documentation of `yield_after_cpu_intensive`, we should
-                // yield after a CPU-intensive operation. This helps provide a better granularity.
-                task.platform.yield_after_cpu_intensive().await;
+                // Yield after a CPU-intensive operation. This helps provide a better granularity.
+                futures_lite::future::yield_now().await;
             }
 
             queue_empty
@@ -693,15 +699,17 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 }
             }
 
-            all::ProcessOne::VerifyHeader(verify) => {
+            all::ProcessOne::VerifyBlock(verify) => {
                 // Header to verify.
                 let verified_hash = verify.hash();
-                let verified_height = verify.height();
-                match verify.perform(self.platform.now_from_unix_epoch(), ()) {
+                match verify.verify_header(self.platform.now_from_unix_epoch()) {
                     all::HeaderVerifyOutcome::Success {
-                        sync, is_new_best, ..
+                        success,
+                        is_new_best,
+                        ..
                     } => {
-                        self.sync = sync;
+                        let verified_height = success.height();
+                        self.sync = success.finish(());
 
                         log::debug!(
                             target: &self.log_target,
@@ -921,9 +929,6 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     }
                 }
             }
-
-            // Can't verify header and body in non-full mode.
-            all::ProcessOne::VerifyBodyHeader(_) => unreachable!(),
         }
 
         (self, true)

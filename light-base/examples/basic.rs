@@ -25,15 +25,14 @@ fn main() {
 
     // Now initialize the client. This does nothing except allocate resources.
     // The `Client` struct requires a generic parameter that provides platform bindings. In this
-    // example, we provide `AsyncStdTcpWebSocket`, which are the "plug and play" default platform.
+    // example, we provide `DefaultPlatform`, which are the "plug and play" default platform.
     // Any advance usage, such as embedding a client in WebAssembly, will likely require a custom
     // implementation of these bindings.
-    let mut client = smoldot_light::Client::new(
-        smoldot_light::platform::async_std::AsyncStdTcpWebSocket::new(
+    let mut client =
+        smoldot_light::Client::new(smoldot_light::platform::default::DefaultPlatform::new(
             env!("CARGO_PKG_NAME").into(),
             env!("CARGO_PKG_VERSION").into(),
-        ),
-    );
+        ));
 
     // Ask the client to connect to a chain.
     let smoldot_light::AddChainSuccess {
@@ -104,7 +103,7 @@ fn main() {
 
     // Now block the execution forever and print the responses received on the channel of
     // JSON-RPC responses.
-    async_std::task::block_on(async move {
+    smol::block_on(async move {
         loop {
             let response = json_rpc_responses.next().await.unwrap();
             println!("JSON-RPC response: {response}");

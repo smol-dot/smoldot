@@ -43,12 +43,18 @@ pub struct Config<'a> {
     ///
     /// > **Note**: The Merkle value and node value are always the same for the root node.
     pub trie_root_hash: [u8; 32],
+
+    /// If `true`, then the final result will only contain [`StorageValue::Value`] entries and no
+    /// [`StorageValue::Hash`] entry. Proofs that only contain a storage value hash when they are
+    /// expected to contain the full value are considered as invalid.
+    pub full_storage_values_required: bool,
 }
 
 /// Start a new scanning process.
 pub fn prefix_scan(config: Config<'_>) -> PrefixScan {
     PrefixScan {
         trie_root_hash: config.trie_root_hash,
+        full_storage_values_required: config.full_storage_values_required,
         next_queries: vec![(
             nibble::bytes_to_nibbles(config.prefix.iter().copied()).collect(),
             QueryTy::Exact,
@@ -60,10 +66,11 @@ pub fn prefix_scan(config: Config<'_>) -> PrefixScan {
 /// Scan of a prefix in progress.
 pub struct PrefixScan {
     trie_root_hash: [u8; 32],
+    full_storage_values_required: bool,
     // TODO: we have lots of Vecs here; maybe find a way to optimize
     next_queries: Vec<(Vec<nibble::Nibble>, QueryTy)>,
     // TODO: we have lots of Vecs here; maybe find a way to optimize
-    final_result: Vec<Vec<u8>>,
+    final_result: Vec<(Vec<u8>, StorageValue)>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -86,17 +93,22 @@ impl PrefixScan {
         self.next_queries.iter().map(|(l, _)| l.iter().copied())
     }
 
+    /// Returns whether the storage proof must include the storage values of the requested keys.
+    ///
+    /// > **Note**: This is always equal to [`Config::full_storage_values_required`].
+    pub fn request_storage_values(&self) -> bool {
+        self.full_storage_values_required
+    }
+
     /// Injects the proof presumably containing the keys returned by [`PrefixScan::requested_keys`].
     ///
     /// Returns an error if the proof is invalid. In that case, `self` isn't modified.
     pub fn resume(mut self, proof: &[u8]) -> Result<ResumeOutcome, (Self, Error)> {
-        let decoded_proof = match proof_decode::decode_and_verify_proof(proof_decode::Config {
-            proof,
-            trie_root_hash: &self.trie_root_hash,
-        }) {
-            Ok(d) => d,
-            Err(err) => return Err((self, Error::InvalidProof(err))),
-        };
+        let decoded_proof =
+            match proof_decode::decode_and_verify_proof(proof_decode::Config { proof }) {
+                Ok(d) => d,
+                Err(err) => return Err((self, Error::InvalidProof(err))),
+            };
 
         let mut non_terminal_queries = mem::take(&mut self.next_queries);
 
@@ -118,18 +130,23 @@ impl PrefixScan {
                         QueryTy::Direction => &query_key[..query_key.len() - 1],
                     };
 
-                    match (decoded_proof.trie_node_info(info_of_node), query_ty) {
-                        (Some(info), QueryTy::Exact) => info,
-                        (Some(info), QueryTy::Direction) => {
+                    match (
+                        decoded_proof.trie_node_info(&self.trie_root_hash, info_of_node),
+                        query_ty,
+                    ) {
+                        (Ok(info), QueryTy::Exact) => info,
+                        (Ok(info), QueryTy::Direction) => {
                             match info.children.child(query_key[query_key.len() - 1]) {
-                                proof_decode::Child::InProof { child_key } => {
+                                proof_decode::Child::InProof { child_key, .. } => {
                                     // Rather than complicate this code, we just add the child to
                                     // `next` (this time an `Exact` query) and process it during
                                     // the next iteration.
                                     next.push((child_key.to_owned(), QueryTy::Exact));
                                     continue;
                                 }
-                                proof_decode::Child::AbsentFromProof if !is_first_iteration => {
+                                proof_decode::Child::AbsentFromProof { .. }
+                                    if !is_first_iteration =>
+                                {
                                     // Node not in the proof. There's no point in adding this node
                                     // to `next` as we will fail again if we try to verify the
                                     // proof again.
@@ -138,7 +155,7 @@ impl PrefixScan {
                                     self.next_queries.push((query_key, QueryTy::Direction));
                                     continue;
                                 }
-                                proof_decode::Child::AbsentFromProof => {
+                                proof_decode::Child::AbsentFromProof { .. } => {
                                     // Push all the non-processed queries back to `next_queries`
                                     // before returning the error, so that we can try again.
                                     self.next_queries.push((query_key, QueryTy::Direction));
@@ -153,14 +170,16 @@ impl PrefixScan {
                                 }
                             }
                         }
-                        (None, _) if !is_first_iteration => {
+                        (Err(proof_decode::IncompleteProofError { .. }), _)
+                            if !is_first_iteration =>
+                        {
                             // Node not in the proof. There's no point in adding this node to `next`
                             // as we will fail again if we try to verify the proof again.
                             // If `is_first_iteration`, it means that the proof is incorrect.
                             self.next_queries.push((query_key, query_ty));
                             continue;
                         }
-                        (None, _) => {
+                        (Err(proof_decode::IncompleteProofError { .. }), _) => {
                             // Push all the non-processed queries back to `next_queries` before
                             // returning the error, so that we can try again.
                             self.next_queries.push((query_key, query_ty));
@@ -175,6 +194,45 @@ impl PrefixScan {
                     proof_decode::StorageValue::Known { .. }
                         | proof_decode::StorageValue::HashKnownValueMissing(_)
                 ) {
+                    // Fetch the storage value of this node.
+                    let value = match info.storage_value {
+                        proof_decode::StorageValue::HashKnownValueMissing(_)
+                            if self.full_storage_values_required && is_first_iteration =>
+                        {
+                            // Storage values are being explicitly requested, yet the proof
+                            // doesn't include the desired storage value.
+
+                            // Push all the non-processed queries back to `next_queries` before
+                            // returning the error, so that we can try again.
+                            self.next_queries.push((query_key, query_ty));
+                            self.next_queries.extend(non_terminal_queries);
+                            return Err((self, Error::MissingProofEntry));
+                        }
+                        proof_decode::StorageValue::HashKnownValueMissing(_)
+                            if self.full_storage_values_required =>
+                        {
+                            // Proof doesn't contain the storage value, but since we're not at
+                            // the first iteration we know that the key wasn't explicitly
+                            // requested and thus this doesn't constitue an invalid proof.
+                            debug_assert!(!is_first_iteration);
+
+                            // Node not in the proof. There's no point in adding this node to `next`
+                            // as we will fail again if we try to verify the proof again.
+                            // If `is_first_iteration`, it means that the proof is incorrect.
+                            self.next_queries.push((query_key, query_ty));
+                            continue;
+                        }
+                        proof_decode::StorageValue::HashKnownValueMissing(hash) => {
+                            debug_assert!(!self.full_storage_values_required);
+                            StorageValue::Hash(*hash)
+                        }
+                        proof_decode::StorageValue::Known { value, .. } => {
+                            // TODO: considering storing the storage proofs instead of copying individual storage values?
+                            StorageValue::Value(value.to_vec())
+                        }
+                        proof_decode::StorageValue::None => unreachable!(),
+                    };
+
                     // Trie nodes with a value are always aligned to "bytes-keys". In other words,
                     // the number of nibbles is always even.
                     debug_assert_eq!(query_key.len() % 2, 0);
@@ -184,8 +242,8 @@ impl PrefixScan {
                         .collect::<Vec<_>>();
 
                     // Insert in final results, making sure we check for duplicates.
-                    debug_assert!(!self.final_result.iter().any(|n| *n == key));
-                    self.final_result.push(key);
+                    debug_assert!(!self.final_result.iter().any(|(n, _)| *n == key));
+                    self.final_result.push((key, value));
                 }
 
                 // For each child of the node, put into `next` the key that goes towards this
@@ -193,14 +251,14 @@ impl PrefixScan {
                 for (nibble, child) in info.children.children().enumerate() {
                     match child {
                         proof_decode::Child::NoChild => continue,
-                        proof_decode::Child::AbsentFromProof => {
+                        proof_decode::Child::AbsentFromProof { .. } => {
                             let mut direction = query_key.clone();
                             direction.push(
                                 nibble::Nibble::try_from(u8::try_from(nibble).unwrap()).unwrap(),
                             );
                             next.push((direction, QueryTy::Direction));
                         }
-                        proof_decode::Child::InProof { child_key } => {
+                        proof_decode::Child::InProof { child_key, .. } => {
                             next.push((child_key.to_owned(), QueryTy::Exact))
                         }
                     }
@@ -210,7 +268,8 @@ impl PrefixScan {
             // Finished when nothing more to request.
             if next.is_empty() && self.next_queries.is_empty() {
                 return Ok(ResumeOutcome::Success {
-                    keys: self.final_result,
+                    entries: self.final_result,
+                    full_storage_values_required: self.full_storage_values_required,
                 });
             }
 
@@ -243,9 +302,22 @@ pub enum ResumeOutcome {
     InProgress(PrefixScan),
     /// Scan has succeeded.
     Success {
-        /// List of keys with the requested prefix.
-        keys: Vec<Vec<u8>>,
+        /// List of entries who key starts with the requested prefix.
+        entries: Vec<(Vec<u8>, StorageValue)>,
+        /// Value that was passed as [`Config::full_storage_values_required`].
+        full_storage_values_required: bool,
     },
+}
+
+/// Storage value of a trie entry. See [`ResumeOutcome::Success::entries`].
+#[derive(Debug)]
+pub enum StorageValue {
+    /// Value was found in the proof.
+    Value(Vec<u8>),
+    /// Only the hash of the value was found in the proof.
+    ///
+    /// Never happens if [`Config::full_storage_values_required`] was `true`.
+    Hash([u8; 32]),
 }
 
 /// Possible error returned by [`PrefixScan::resume`].

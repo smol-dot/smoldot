@@ -35,8 +35,8 @@ mod init;
 mod platform;
 mod timers;
 
-static CLIENT: Mutex<init::Client<platform::Platform, ()>> = Mutex::new(init::Client {
-    smoldot: smoldot_light::Client::new(platform::Platform::new()),
+static CLIENT: Mutex<init::Client<platform::PlatformRef, ()>> = Mutex::new(init::Client {
+    smoldot: smoldot_light::Client::new(platform::PLATFORM_REF),
     chains: slab::Slab::new(),
 });
 
@@ -47,7 +47,8 @@ fn init(max_log_level: u32) {
 fn add_chain(
     chain_spec: Vec<u8>,
     database_content: Vec<u8>,
-    json_rpc_running: u32,
+    json_rpc_max_pending_requests: u32,
+    json_rpc_max_subscriptions: u32,
     potential_relay_chains: Vec<u8>,
 ) -> u32 {
     let mut client_lock = CLIENT.lock().unwrap();
@@ -97,14 +98,16 @@ fn add_chain(
                 .unwrap_or_else(|_| panic!("non-utf8 chain spec")),
             database_content: str::from_utf8(&database_content)
                 .unwrap_or_else(|_| panic!("non-utf8 database content")),
-            json_rpc: if json_rpc_running == 0 {
-                smoldot_light::AddChainConfigJsonRpc::Disabled
-            } else {
+            json_rpc: if let Some(json_rpc_max_pending_requests) =
+                NonZeroU32::new(json_rpc_max_pending_requests)
+            {
                 smoldot_light::AddChainConfigJsonRpc::Enabled {
-                    max_pending_requests: NonZeroU32::new(128).unwrap(),
+                    max_pending_requests: json_rpc_max_pending_requests,
                     // Note: the PolkadotJS UI is very heavy in terms of subscriptions.
-                    max_subscriptions: 1024,
+                    max_subscriptions: json_rpc_max_subscriptions,
                 }
+            } else {
+                smoldot_light::AddChainConfigJsonRpc::Disabled
             },
             potential_relay_chains: potential_relay_chains.into_iter(),
         }) {
@@ -243,7 +246,7 @@ fn json_rpc_send(json_rpc_request: Vec<u8>, chain_id: u32) -> u32 {
     {
         Ok(()) => 0,
         Err(HandleRpcError::MalformedJsonRpc(_)) => 1,
-        Err(HandleRpcError::Overloaded { .. }) => 2,
+        Err(HandleRpcError::TooManyPendingRequests { .. }) => 2,
     }
 }
 
@@ -398,8 +401,11 @@ fn advance_execution() {
             }
             ExecutionState::NotReady => return,
             ExecutionState::Ready(_) => {
-                let ExecutionState::Ready(runnable) = mem::replace(&mut *executor_execute_guard, ExecutionState::NotReady)
-                    else { unreachable!() };
+                let ExecutionState::Ready(runnable) =
+                    mem::replace(&mut *executor_execute_guard, ExecutionState::NotReady)
+                else {
+                    unreachable!()
+                };
                 runnable
             }
         }

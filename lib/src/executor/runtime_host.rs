@@ -38,16 +38,23 @@
 // TODO: more docs
 
 use crate::{
-    executor::{self, host, storage_diff, vm},
-    trie::{self, calculate_root},
-    util,
+    executor::{self, host, storage_diff, trie_root_calculator, vm},
+    trie, util,
 };
 
-use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
-use core::fmt;
-use hashbrown::HashSet;
+use alloc::{
+    borrow::ToOwned as _,
+    boxed::Box,
+    collections::BTreeMap,
+    format,
+    string::{String, ToString as _},
+    vec::Vec,
+};
+use core::{fmt, iter, ops};
 
-pub use trie::TrieEntryVersion;
+pub use trie::{Nibble, TrieEntryVersion};
+
+mod tests;
 
 /// Configuration for [`run`].
 pub struct Config<'a, TParams> {
@@ -61,17 +68,15 @@ pub struct Config<'a, TParams> {
     /// actual input.
     pub parameter: TParams,
 
-    /// Optional cache of the trie root calculation to use. Must match the state of the storage at
-    /// the start of the call, including [`Config::storage_main_trie_changes`].
-    pub main_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
-
-    /// Initial state of [`Success::storage_main_trie_changes`]. The changes made during this
+    /// Initial state of [`Success::storage_changes`]. The changes made during this
     /// execution will be pushed over the value in this field.
+    // TODO: consider accepting a different type
+    // TODO: accept also child trie modifications
     pub storage_main_trie_changes: storage_diff::TrieDiff,
 
     /// Initial state of [`Success::offchain_storage_changes`]. The changes made during this
     /// execution will be pushed over the value in this field.
-    pub offchain_storage_changes: storage_diff::TrieDiff,
+    pub offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
 
     /// Maximum log level of the runtime.
     ///
@@ -98,13 +103,21 @@ pub fn run(
             .virtual_machine
             .run_vectored(config.function_to_call, config.parameter)?
             .into(),
-        main_trie_changes: config.storage_main_trie_changes,
+        pending_storage_changes: PendingStorageChanges {
+            trie_diffs: {
+                let mut hm = hashbrown::HashMap::with_capacity_and_hasher(4, Default::default());
+                hm.insert(None, config.storage_main_trie_changes);
+                hm
+            },
+            stale_child_tries_root_hashes: hashbrown::HashSet::with_capacity_and_hasher(
+                4,
+                Default::default(),
+            ),
+            tries_changes: BTreeMap::new(),
+        },
         state_trie_version,
-        main_trie_transaction: Vec::new(),
+        transactions_stack: Vec::new(),
         offchain_storage_changes: config.offchain_storage_changes,
-        main_trie_root_calculation_cache: Some(
-            config.main_trie_root_calculation_cache.unwrap_or_default(),
-        ),
         root_calculation: None,
         logs: String::new(),
         max_log_level: config.max_log_level,
@@ -118,17 +131,225 @@ pub struct Success {
     /// Contains the output value of the runtime, and the virtual machine that was passed at
     /// initialization.
     pub virtual_machine: SuccessVirtualMachine,
-    /// List of changes to the storage main trie that the block performs.
-    pub storage_main_trie_changes: storage_diff::TrieDiff,
+    /// List of changes to the storage that the block performs.
+    pub storage_changes: StorageChanges,
     /// State trie version indicated by the runtime. All the storage changes indicated by
-    /// [`Success::storage_main_trie_changes`] should store this version alongside with them.
+    /// [`Success::storage_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
     /// List of changes to the off-chain storage that this block performs.
-    pub offchain_storage_changes: storage_diff::TrieDiff,
-    /// Cache used for calculating the main trie root.
-    pub main_trie_root_calculation_cache: calculate_root::CalculationCache,
+    pub offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
     /// Concatenation of all the log messages printed by the runtime.
     pub logs: String,
+}
+
+/// See [`Success::storage_changes`].
+pub struct StorageChanges {
+    /// The [`PendingStorageChanges`] that was built by the state machine. The changes are no
+    /// longer pending.
+    inner: PendingStorageChanges,
+}
+
+impl StorageChanges {
+    /// Returns the change, if any, at the given key of the main trie.
+    ///
+    /// Returns `None` if the runtime hasn't modified this entry in the main trie, and `Some(None)`
+    /// if the runtime has removed the storage item of this entry.
+    pub fn main_trie_diff_get(&self, key: &[u8]) -> Option<Option<&[u8]>> {
+        self.inner
+            .trie_diffs
+            .get(&None)
+            .and_then(|diff| diff.diff_get(key).map(|(v, _)| v))
+    }
+
+    /// Returns an iterator to all the entries of the main trie that are modified by this runtime
+    /// call.
+    ///
+    /// Each value is either `Some` if the runtime overwrites this value, or `None` if it erases
+    /// the underlying value.
+    pub fn main_trie_storage_changes_iter_unordered(
+        &'_ self,
+    ) -> impl Iterator<Item = (&'_ [u8], Option<&'_ [u8]>)> + Clone + '_ {
+        self.inner
+            .trie_diffs
+            .get(&None)
+            .into_iter()
+            .flat_map(|list| list.diff_iter_unordered().map(|(k, v, ())| (k, v)))
+    }
+
+    /// Returns an iterator over the list of all changes performed to the tries (main trie and
+    /// child tries included).
+    pub fn trie_changes_iter_ordered(
+        &'_ self,
+    ) -> impl Iterator<Item = (Option<&'_ [u8]>, &'_ [Nibble], TrieChange<'_>)> {
+        self.inner
+            .tries_changes
+            .iter()
+            .map(|((child_trie, key), change)| {
+                let change = match change {
+                    PendingStorageChangesTrieNode::Removed => TrieChange::Remove,
+                    PendingStorageChangesTrieNode::InsertUpdate {
+                        new_merkle_value,
+                        partial_key,
+                        children_merkle_values,
+                    } => {
+                        debug_assert!(key.ends_with(partial_key));
+
+                        let new_storage_value = if key.len() % 2 == 0 {
+                            let key_bytes = trie::nibbles_to_bytes_truncate(key.iter().copied())
+                                .collect::<Vec<_>>();
+                            match self
+                                .inner
+                                .trie_diffs
+                                .get(child_trie)
+                                .and_then(|diff| diff.diff_get(&key_bytes))
+                            {
+                                None => TrieChangeStorageValue::Unmodified,
+                                Some((new_value, ())) => {
+                                    TrieChangeStorageValue::Modified { new_value }
+                                }
+                            }
+                        } else {
+                            TrieChangeStorageValue::Unmodified
+                        };
+
+                        let children_merkle_values = <Box<[_; 16]>>::try_from(
+                            children_merkle_values
+                                .iter()
+                                .map(|child| child.as_ref().map(|mv| &mv[..]))
+                                .collect::<Box<[_]>>(),
+                        )
+                        .unwrap();
+
+                        TrieChange::InsertUpdate {
+                            new_merkle_value,
+                            partial_key,
+                            children_merkle_values,
+                            new_storage_value,
+                        }
+                    }
+                };
+
+                (child_trie.as_deref(), &key[..], change)
+            })
+    }
+
+    /// Returns a diff of the main trie.
+    // TODO: weird API, necessary to turn this object back to a value for Config::storage_changes
+    pub fn into_main_trie_diff(mut self) -> storage_diff::TrieDiff {
+        self.inner
+            .trie_diffs
+            .remove(&None)
+            .unwrap_or(storage_diff::TrieDiff::empty())
+    }
+}
+
+impl fmt::Debug for StorageChanges {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map()
+            .entries(
+                self.trie_changes_iter_ordered()
+                    .map(|(child_trie, key, change)| {
+                        let mut key_str = key
+                            .iter()
+                            .copied()
+                            .map(|n| format!("{:x}", n))
+                            .collect::<String>();
+                        if key_str.is_empty() {
+                            key_str = "∅".to_owned();
+                        }
+
+                        let key = match child_trie {
+                            Some(ct) => format!(
+                                "<{}>:{}",
+                                if ct.is_empty() {
+                                    "∅".to_string()
+                                } else {
+                                    hex::encode(ct)
+                                },
+                                key_str
+                            ),
+                            None => format!("<main>:{}", key_str),
+                        };
+
+                        (key, change)
+                    }),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub enum TrieChange<'a> {
+    /// Trie node is either newly-created, or already existed and has a new Merkle value.
+    InsertUpdate {
+        /// New Merkle value associated to this trie node. Always inferior or equal to 32 bytes.
+        new_merkle_value: &'a [u8],
+        partial_key: &'a [Nibble],
+        children_merkle_values: Box<[Option<&'a [u8]>; 16]>,
+        /// Change to the storage value of that trie node.
+        new_storage_value: TrieChangeStorageValue<'a>,
+    },
+    /// Trie node is removed.
+    Remove,
+}
+
+impl<'a> fmt::Debug for TrieChange<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TrieChange::Remove => f.debug_tuple("Remove").finish(),
+            TrieChange::InsertUpdate {
+                new_merkle_value,
+                partial_key,
+                children_merkle_values,
+                new_storage_value,
+            } => f
+                .debug_struct("InsertUpdate")
+                .field("new_merkle_value", &hex::encode(new_merkle_value))
+                .field(
+                    "partial_key",
+                    &partial_key
+                        .iter()
+                        .map(|n| format!("{:x}", n))
+                        .collect::<String>(),
+                )
+                .field(
+                    "children_merkle_values",
+                    &children_merkle_values
+                        .iter()
+                        .map(|child| match child {
+                            Some(child) => hex::encode(child),
+                            None => "∅".to_string(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )
+                .field("new_storage_value", new_storage_value)
+                .finish(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum TrieChangeStorageValue<'a> {
+    Unmodified,
+    Modified { new_value: Option<&'a [u8]> },
+}
+
+impl<'a> fmt::Debug for TrieChangeStorageValue<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TrieChangeStorageValue::Unmodified => f.debug_tuple("Unmodified").finish(),
+            TrieChangeStorageValue::Modified { new_value: None } => {
+                f.debug_tuple("Modified").field(&"<deleted>").finish()
+            }
+            TrieChangeStorageValue::Modified {
+                new_value: Some(new_value),
+            } => f
+                .debug_tuple("Modified")
+                .field(&hex::encode(new_value))
+                .finish(),
+        }
+    }
 }
 
 /// Function execution has succeeded. Contains the return value of the call.
@@ -184,8 +405,9 @@ pub enum RuntimeHostVm {
     Finished(Result<Success, Error>),
     /// Loading a storage value is required in order to continue.
     StorageGet(StorageGet),
-    /// Fetching the list of keys with a given prefix is required in order to continue.
-    PrefixKeys(PrefixKeys),
+    /// Obtaining the Merkle value of the closest descendant of a trie node is required in order
+    /// to continue.
+    ClosestDescendantMerkleValue(ClosestDescendantMerkleValue),
     /// Fetching the key that follows a given one is required in order to continue.
     NextKey(NextKey),
     /// Verifying whether a signature is correct is required in order to continue.
@@ -199,7 +421,7 @@ impl RuntimeHostVm {
             RuntimeHostVm::Finished(Ok(inner)) => inner.virtual_machine.into_prototype(),
             RuntimeHostVm::Finished(Err(inner)) => inner.prototype,
             RuntimeHostVm::StorageGet(inner) => inner.inner.vm.into_prototype(),
-            RuntimeHostVm::PrefixKeys(inner) => inner.inner.vm.into_prototype(),
+            RuntimeHostVm::ClosestDescendantMerkleValue(inner) => inner.inner.vm.into_prototype(),
             RuntimeHostVm::NextKey(inner) => inner.inner.vm.into_prototype(),
             RuntimeHostVm::SignatureVerification(inner) => inner.inner.vm.into_prototype(),
         }
@@ -231,28 +453,51 @@ impl StorageGet {
             }
         }
 
-        match &self.inner.vm {
-            host::HostVm::ExternalStorageGet(req) => Three::A(match req.key() {
-                // TODO: child tries are not implemented correctly
-                host::StorageKey::MainTrie { key } => key,
-                _ => unreachable!(),
-            }),
-            host::HostVm::ExternalStorageAppend(req) => Three::B(match req.key() {
-                // TODO: child tries are not implemented correctly
-                host::StorageKey::MainTrie { key } => key,
-                _ => unreachable!(),
-            }),
-            host::HostVm::ExternalStorageRoot(_) => {
-                if let calculate_root::RootMerkleValueCalculation::StorageValue(value_request) =
-                    self.inner.root_calculation.as_ref().unwrap()
-                {
-                    Three::C(value_request.key().collect::<Vec<_>>())
-                } else {
-                    // We only create a `StorageGet` if the state is `StorageValue`.
-                    panic!()
-                }
+        match (&self.inner.vm, self.inner.root_calculation.as_ref()) {
+            (host::HostVm::ExternalStorageGet(req), None) => Three::A(req.key()),
+            (host::HostVm::ExternalStorageAppend(req), None) => Three::B(req.key()),
+            (_, Some((_, trie_root_calculator::InProgress::StorageValue(value_request)))) => {
+                // TODO: optimize?
+                let key_nibbles = value_request.key().fold(Vec::new(), |mut a, b| {
+                    a.extend_from_slice(b.as_ref());
+                    a
+                });
+                debug_assert_eq!(key_nibbles.len() % 2, 0);
+                Three::C(
+                    trie::nibbles_to_bytes_suffix_extend(key_nibbles.into_iter())
+                        .collect::<Vec<_>>(),
+                )
             }
 
+            // We only create a `StorageGet` if the state is one of the above.
+            _ => unreachable!(),
+        }
+    }
+
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        enum Three<A, B, C> {
+            A(A),
+            B(B),
+            C(C),
+        }
+
+        impl<A: AsRef<[u8]>, B: AsRef<[u8]>, C: AsRef<[u8]>> AsRef<[u8]> for Three<A, B, C> {
+            fn as_ref(&self) -> &[u8] {
+                match self {
+                    Three::A(a) => a.as_ref(),
+                    Three::B(b) => b.as_ref(),
+                    Three::C(c) => c.as_ref(),
+                }
+            }
+        }
+
+        match (&self.inner.vm, self.inner.root_calculation.as_ref()) {
+            (host::HostVm::ExternalStorageGet(req), None) => req.child_trie().map(Three::A),
+            (host::HostVm::ExternalStorageAppend(req), None) => req.child_trie().map(Three::B),
+            (_, Some((child_trie, trie_root_calculator::InProgress::StorageValue(_)))) => {
+                child_trie.as_ref().map(Three::C)
+            }
             // We only create a `StorageGet` if the state is one of the above.
             _ => unreachable!(),
         }
@@ -272,103 +517,36 @@ impl StorageGet {
             (value, version)
         });
 
-        match self.inner.vm {
-            host::HostVm::ExternalStorageGet(req) => {
+        match (self.inner.vm, self.inner.root_calculation.take()) {
+            (host::HostVm::ExternalStorageGet(req), None) => {
                 // TODO: should actually report the offset and max_size in the API
                 self.inner.vm = req.resume_full_value(value.as_ref().map(|(v, _)| &v[..]));
             }
-            host::HostVm::ExternalStorageAppend(req) => {
-                match req.key() {
-                    host::StorageKey::MainTrie { key } => {
-                        // TODO: could be less overhead?
-                        let mut value = value.map(|(v, _)| v).unwrap_or_default();
-                        append_to_storage_value(&mut value, req.value().as_ref());
-                        self.inner
-                            .main_trie_changes
-                            .diff_insert(key.as_ref().to_vec(), value, ());
-                    }
-                    _ => unreachable!(),
-                }
+            (host::HostVm::ExternalStorageAppend(req), None) => {
+                // TODO: could be less overhead?
+                let trie = self
+                    .inner
+                    .pending_storage_changes
+                    .trie_diffs
+                    .entry(req.child_trie().map(|ct| ct.as_ref().to_vec()))
+                    .or_insert(storage_diff::TrieDiff::empty());
+
+                // TODO: could be less overhead?
+                let mut value = value.map(|(v, _)| v).unwrap_or_default();
+                append_to_storage_value(&mut value, req.value().as_ref());
+                trie.diff_insert(req.key().as_ref().to_vec(), value, ());
 
                 self.inner.vm = req.resume();
             }
-            host::HostVm::ExternalStorageRoot(_) => {
-                if let calculate_root::RootMerkleValueCalculation::StorageValue(value_request) =
-                    self.inner.root_calculation.take().unwrap()
-                {
-                    self.inner.root_calculation = Some(value_request.inject(value));
-                } else {
-                    // We only create a `StorageGet` if the state is `StorageValue`.
-                    panic!()
-                }
+            (vm, Some((trie, trie_root_calculator::InProgress::StorageValue(value_request)))) => {
+                self.inner.vm = vm;
+                self.inner.root_calculation = Some((
+                    trie,
+                    value_request.inject_value(value.as_ref().map(|(v, vers)| (&v[..], *vers))),
+                ));
             }
 
             // We only create a `StorageGet` if the state is one of the above.
-            _ => unreachable!(),
-        };
-
-        self.inner.run()
-    }
-}
-
-/// Fetching the list of keys with a given prefix is required in order to continue.
-#[must_use]
-pub struct PrefixKeys {
-    inner: Inner,
-}
-
-impl PrefixKeys {
-    /// Returns the prefix whose keys to load.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
-        match &self.inner.vm {
-            host::HostVm::ExternalStorageClearPrefix(req) => either::Left(match req.prefix() {
-                // TODO: child tries are not implemented correctly
-                host::StorageKey::MainTrie { key } => key,
-                _ => unreachable!(),
-            }),
-            host::HostVm::ExternalStorageRoot { .. } => either::Right(&[]),
-
-            // We only create a `PrefixKeys` if the state is one of the above.
-            _ => unreachable!(),
-        }
-    }
-
-    /// Injects the list of keys ordered lexicographically.
-    pub fn inject_keys_ordered(
-        mut self,
-        keys: impl Iterator<Item = impl AsRef<[u8]>>,
-    ) -> RuntimeHostVm {
-        match self.inner.vm {
-            host::HostVm::ExternalStorageRoot { .. } => {
-                if let calculate_root::RootMerkleValueCalculation::AllKeys(all_keys) =
-                    self.inner.root_calculation.take().unwrap()
-                {
-                    // TODO: overhead
-                    let mut list = keys
-                        .filter(|v| {
-                            self.inner
-                                .main_trie_changes
-                                .diff_get(v.as_ref())
-                                .map_or(true, |(v, _)| v.is_some())
-                        })
-                        .map(|v| v.as_ref().to_vec())
-                        .collect::<HashSet<_, fnv::FnvBuildHasher>>();
-                    // TODO: slow to iterate over everything?
-                    for (key, value, ()) in self.inner.main_trie_changes.diff_iter_unordered() {
-                        if value.is_none() {
-                            continue;
-                        }
-                        list.insert(key.to_owned());
-                    }
-                    self.inner.root_calculation =
-                        Some(all_keys.inject(list.into_iter().map(|k| k.into_iter())));
-                } else {
-                    // We only create a `PrefixKeys` if the state is `AllKeys`.
-                    panic!()
-                }
-            }
-
-            // We only create a `PrefixKeys` if the state is one of the above.
             _ => unreachable!(),
         };
 
@@ -390,20 +568,50 @@ pub struct NextKey {
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         if let Some(key_overwrite) = &self.key_overwrite {
-            return either::Left(key_overwrite);
+            return either::Left(trie::bytes_to_nibbles(key_overwrite.iter().copied()));
         }
 
-        match &self.inner.vm {
-            host::HostVm::ExternalStorageNextKey(req) => either::Right(match req.key() {
-                // TODO: child tries are not implemented correctly
-                host::StorageKey::MainTrie { key } => key,
-                _ => unreachable!(),
-            }),
+        either::Right(
+            match (&self.inner.vm, self.inner.root_calculation.as_ref()) {
+                (host::HostVm::ExternalStorageNextKey(req), _) => {
+                    either::Left(trie::bytes_to_nibbles(util::as_ref_iter(req.key())))
+                }
 
-            // Note that in the case `ExternalStorageClearPrefix`, `key_overwrite` is
-            // always `Some`.
+                (_, Some((_, trie_root_calculator::InProgress::ClosestDescendant(req)))) => {
+                    either::Right(req.key().flat_map(util::as_ref_iter))
+                }
+
+                // Note that in the case `ExternalStorageClearPrefix`, `key_overwrite` is
+                // always `Some`.
+                _ => unreachable!(),
+            },
+        )
+    }
+
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        enum Three<A, B, C> {
+            A(A),
+            B(B),
+            C(C),
+        }
+
+        impl<A: AsRef<[u8]>, B: AsRef<[u8]>, C: AsRef<[u8]>> AsRef<[u8]> for Three<A, B, C> {
+            fn as_ref(&self) -> &[u8] {
+                match self {
+                    Three::A(a) => a.as_ref(),
+                    Three::B(b) => b.as_ref(),
+                    Three::C(c) => c.as_ref(),
+                }
+            }
+        }
+
+        match (&self.inner.vm, self.inner.root_calculation.as_ref()) {
+            (host::HostVm::ExternalStorageNextKey(req), _) => req.child_trie().map(Three::A),
+            (_, Some((child_trie, _))) => child_trie.as_ref().map(Three::B),
+            (host::HostVm::ExternalStorageClearPrefix(req), _) => req.child_trie().map(Three::C),
             _ => unreachable!(),
         }
     }
@@ -411,16 +619,26 @@ impl NextKey {
     /// If `true`, then the provided value must the one superior or equal to the requested key.
     /// If `false`, then the provided value must be strictly superior to the requested key.
     pub fn or_equal(&self) -> bool {
-        matches!(self.inner.vm, host::HostVm::ExternalStorageClearPrefix(_))
-            && self.keys_removed_so_far == 0
+        (matches!(self.inner.vm, host::HostVm::ExternalStorageClearPrefix(_))
+            && self.keys_removed_so_far == 0)
+            || self.inner.root_calculation.is_some()
+    }
+
+    /// If `true`, then the search must include both branch nodes and storage nodes. If `false`,
+    /// the search only covers storage nodes.
+    pub fn branch_nodes(&self) -> bool {
+        self.inner.root_calculation.is_some()
     }
 
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
-        match &self.inner.vm {
-            host::HostVm::ExternalStorageClearPrefix(req) => either::Left(req.prefix().into_key()),
-            _ => either::Right(&[][..]),
+    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+        match (&self.inner.vm, self.inner.root_calculation.as_ref()) {
+            (host::HostVm::ExternalStorageClearPrefix(req), _) => {
+                either::Left(trie::bytes_to_nibbles(util::as_ref_iter(req.prefix())))
+            }
+            (_, Some(_)) => either::Right(either::Left(self.key())),
+            _ => either::Right(either::Right(iter::empty())),
         }
     }
 
@@ -431,24 +649,29 @@ impl NextKey {
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     /// Panics if the key passed as parameter doesn't start with the requested prefix.
     ///
-    pub fn inject_key(mut self, key: Option<impl AsRef<[u8]>>) -> RuntimeHostVm {
-        let key = key.as_ref().map(|k| k.as_ref());
+    pub fn inject_key(mut self, key: Option<impl Iterator<Item = Nibble>>) -> RuntimeHostVm {
+        match (self.inner.vm, self.inner.root_calculation.take()) {
+            (host::HostVm::ExternalStorageNextKey(req), None) => {
+                let key =
+                    key.map(|key| trie::nibbles_to_bytes_suffix_extend(key).collect::<Vec<_>>());
 
-        match self.inner.vm {
-            host::HostVm::ExternalStorageNextKey(req) => {
+                let trie = self
+                    .inner
+                    .pending_storage_changes
+                    .trie_diffs
+                    .get(&req.child_trie().map(|ct| ct.as_ref().to_owned())); // TODO: overhead
+
+                let empty = storage_diff::TrieDiff::empty(); // TODO: weird
                 let search = {
-                    let req_key = match req.key() {
-                        host::StorageKey::MainTrie { key } => key,
-                        _ => unreachable!(),
-                    };
+                    let req_key = req.key();
                     let requested_key = if let Some(key_overwrite) = &self.key_overwrite {
                         &key_overwrite[..]
                     } else {
                         req_key.as_ref()
                     };
-                    self.inner
-                        .main_trie_changes
-                        .storage_next_key(requested_key, key, false)
+                    // TODO: this code is a bit weird
+                    trie.unwrap_or(&empty)
+                        .storage_next_key(requested_key, key.as_deref(), false)
                 };
 
                 match search {
@@ -467,11 +690,12 @@ impl NextKey {
                 }
             }
 
-            host::HostVm::ExternalStorageClearPrefix(req) => {
+            (host::HostVm::ExternalStorageClearPrefix(req), None) => {
                 // TODO: there's some trickiness regarding the behavior w.r.t keys only in the overlay; figure out
 
                 if let Some(key) = key {
-                    assert!(key.starts_with(req.prefix().into_key().as_ref()));
+                    let key = trie::nibbles_to_bytes_suffix_extend(key).collect::<Vec<_>>();
+                    assert!(key.starts_with(req.prefix().as_ref()));
 
                     // TODO: /!\ must clear keys from overlay as well
 
@@ -481,14 +705,17 @@ impl NextKey {
                     {
                         self.inner.vm = req.resume(self.keys_removed_so_far, true);
                     } else {
-                        self.inner
-                            .main_trie_root_calculation_cache
-                            .as_mut()
-                            .unwrap()
-                            .storage_value_update(key, false);
-                        self.inner.main_trie_changes.diff_insert_erase(key, ());
+                        // TODO: overhead
+                        let trie = self
+                            .inner
+                            .pending_storage_changes
+                            .trie_diffs
+                            .entry(req.child_trie().map(|ct| ct.as_ref().to_vec()))
+                            .or_insert(storage_diff::TrieDiff::empty());
+
+                        trie.diff_insert_erase(key.clone(), ());
                         self.keys_removed_so_far += 1;
-                        self.key_overwrite = Some(key.to_owned()); // TODO: might be expensive if lots of keys
+                        self.key_overwrite = Some(key); // TODO: might be expensive if lots of keys
                         self.inner.vm = req.into();
 
                         return RuntimeHostVm::NextKey(self);
@@ -498,10 +725,85 @@ impl NextKey {
                 }
             }
 
+            (vm, Some((trie, trie_root_calculator::InProgress::ClosestDescendant(req)))) => {
+                self.inner.vm = vm;
+                self.inner.root_calculation = Some((trie, req.inject(key)));
+            }
+
             // We only create a `NextKey` if the state is one of the above.
             _ => unreachable!(),
         };
 
+        self.inner.run()
+    }
+}
+
+/// Obtaining the Merkle value of the closest descendant of a trie node is required in order to
+/// continue.
+#[must_use]
+pub struct ClosestDescendantMerkleValue {
+    inner: Inner,
+}
+
+impl ClosestDescendantMerkleValue {
+    /// Returns the key whose closest descendant Merkle value must be passed to
+    /// [`ClosestDescendantMerkleValue::inject_merkle_value`].
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+        let (_, trie_root_calculator::InProgress::ClosestDescendantMerkleValue(request)) =
+            self.inner.root_calculation.as_ref().unwrap()
+        else {
+            unreachable!()
+        };
+        request.key().flat_map(util::as_ref_iter)
+    }
+
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        let (trie, trie_root_calculator::InProgress::ClosestDescendantMerkleValue(_)) =
+            self.inner.root_calculation.as_ref().unwrap()
+        else {
+            unreachable!()
+        };
+        trie.as_ref()
+    }
+
+    /// Indicate that the value is unknown and resume the calculation.
+    ///
+    /// This function be used if you are unaware of the Merkle value. The algorithm will perform
+    /// the calculation of this Merkle value manually, which takes more time.
+    pub fn resume_unknown(mut self) -> RuntimeHostVm {
+        let (trie, trie_root_calculator::InProgress::ClosestDescendantMerkleValue(request)) =
+            self.inner.root_calculation.take().unwrap()
+        else {
+            unreachable!()
+        };
+
+        self.inner.root_calculation = Some((trie, request.resume_unknown()));
+        self.inner.run()
+    }
+
+    /// Injects the corresponding Merkle value.
+    ///
+    /// `None` can be passed if there is no descendant or, in the case of a child trie read, in
+    /// order to indicate that the child trie does not exist.
+    pub fn inject_merkle_value(mut self, merkle_value: Option<&[u8]>) -> RuntimeHostVm {
+        let (trie, trie_root_calculator::InProgress::ClosestDescendantMerkleValue(request)) =
+            self.inner.root_calculation.take().unwrap()
+        else {
+            unreachable!()
+        };
+
+        self.inner.root_calculation = Some((
+            trie,
+            match merkle_value {
+                Some(merkle_value) => request.inject_merkle_value(merkle_value),
+                None => {
+                    // We don't properly handle the situation where there's no descendant or no child
+                    // trie.
+                    request.resume_unknown()
+                }
+            },
+        ));
         self.inner.run()
     }
 }
@@ -596,31 +898,26 @@ struct Inner {
     /// Virtual machine running the call.
     vm: host::HostVm,
 
-    /// Pending changes to the top storage trie that this execution performs.
-    main_trie_changes: storage_diff::TrieDiff,
+    /// Pending changes to the storage that this execution performs.
+    pending_storage_changes: PendingStorageChanges,
 
-    /// Contains a copy of [`Inner::main_trie_changes`] and
-    /// [`Inner::main_trie_root_calculation_cache`] at the time when the transaction started.
-    /// When the storage transaction ends, either the entry is silently discarded (to commit),
-    /// or is written over [`Inner::main_trie_changes`] and
-    /// [`Inner::main_trie_root_calculation_cache`] (to rollback).
+    /// Contains a copy of [`Inner::pending_storage_changes`] at the time when the transaction
+    /// started. When the storage transaction ends, either the entry is silently discarded (to
+    /// commit), or is written over [`Inner::pending_storage_changes`] (to rollback).
     ///
     /// Contains a `Vec` in case transactions are stacked.
-    main_trie_transaction: Vec<(storage_diff::TrieDiff, calculate_root::CalculationCache)>,
+    transactions_stack: Vec<PendingStorageChanges>,
 
     /// State trie version indicated by the runtime. All the storage changes that are performed
     /// use this version.
     state_trie_version: TrieEntryVersion,
 
     /// Pending changes to the off-chain storage that this execution performs.
-    offchain_storage_changes: storage_diff::TrieDiff,
+    offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
 
-    /// Cache passed by the user. Always `Some` except when we are currently calculating the trie
-    /// state root.
-    main_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
-
-    /// Trie root calculation in progress.
-    root_calculation: Option<calculate_root::RootMerkleValueCalculation>,
+    /// Trie root calculation in progress. Contains the trie whose root is being calculated
+    /// (`Some` for a child trie or `None` for the main trie) and the calculation state machine.
+    root_calculation: Option<(Option<Vec<u8>>, trie_root_calculator::InProgress)>,
 
     /// Concatenation of all the log messages generated by the runtime.
     logs: String,
@@ -629,10 +926,249 @@ struct Inner {
     max_log_level: u32,
 }
 
+/// See [`Inner::pending_storage_changes`].
+#[derive(Clone)]
+struct PendingStorageChanges {
+    /// For each trie, the values that have been written to it.
+    trie_diffs: hashbrown::HashMap<Option<Vec<u8>>, storage_diff::TrieDiff, fnv::FnvBuildHasher>,
+
+    /// List of tries (`None` for the main trie and `Some` for child tries) whose root hash must
+    /// be recalculated (and for child tries stored into the main trie).
+    /// This is necessary in order to populate [`PendingStorageChanges::tries_changes`].
+    stale_child_tries_root_hashes: hashbrown::HashSet<Option<Vec<u8>>, fnv::FnvBuildHasher>,
+
+    /// Changes to the trie nodes of all the tries.
+    tries_changes: BTreeMap<(Option<Vec<u8>>, Vec<Nibble>), PendingStorageChangesTrieNode>,
+}
+
+/// See [`PendingStorageChanges::tries_changes`].
+#[derive(Clone)]
+enum PendingStorageChangesTrieNode {
+    Removed,
+    InsertUpdate {
+        new_merkle_value: Vec<u8>,
+        partial_key: Vec<Nibble>,
+        children_merkle_values: Box<[Option<Vec<u8>>; 16]>,
+    },
+}
+
+/// Writing and reading keys the main trie under this prefix obeys special rules.
+const CHILD_STORAGE_SPECIAL_PREFIX: &[u8] = b":child_storage:";
+/// Writing and reading keys the main trie under this prefix obeys special rules.
+const DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX: &[u8] = b":child_storage:default:";
+
 impl Inner {
     /// Continues the execution.
     fn run(mut self) -> RuntimeHostVm {
         loop {
+            match self.root_calculation.take() {
+                None => {}
+                Some((trie, trie_root_calculator::InProgress::ClosestDescendant(calc_req))) => {
+                    self.root_calculation = Some((
+                        trie,
+                        trie_root_calculator::InProgress::ClosestDescendant(calc_req),
+                    ));
+                    return RuntimeHostVm::NextKey(NextKey {
+                        inner: self,
+                        key_overwrite: None,
+                        keys_removed_so_far: 0,
+                    });
+                }
+                Some((trie, trie_root_calculator::InProgress::StorageValue(calc_req))) => {
+                    if calc_req
+                        .key()
+                        .fold(0, |count, slice| count + slice.as_ref().len())
+                        % 2
+                        == 0
+                    {
+                        self.root_calculation = Some((
+                            trie,
+                            trie_root_calculator::InProgress::StorageValue(calc_req),
+                        ));
+                        return RuntimeHostVm::StorageGet(StorageGet { inner: self });
+                    } else {
+                        // If the number of nibbles in the key is uneven, we are sure that
+                        // there exists no storage value.
+                        self.root_calculation = Some((trie, calc_req.inject_value(None)));
+                        continue;
+                    }
+                }
+                Some((
+                    trie,
+                    trie_root_calculator::InProgress::ClosestDescendantMerkleValue(calc_req),
+                )) => {
+                    self.root_calculation = Some((
+                        trie,
+                        trie_root_calculator::InProgress::ClosestDescendantMerkleValue(calc_req),
+                    ));
+                    return RuntimeHostVm::ClosestDescendantMerkleValue(
+                        ClosestDescendantMerkleValue { inner: self },
+                    );
+                }
+                Some((trie, trie_root_calculator::InProgress::TrieNodeInsertUpdateEvent(ev))) => {
+                    self.pending_storage_changes.tries_changes.insert(
+                        (trie.clone(), ev.key_as_vec()),
+                        PendingStorageChangesTrieNode::InsertUpdate {
+                            new_merkle_value: ev.merkle_value().to_owned(),
+                            partial_key: ev.partial_key().to_owned(),
+                            children_merkle_values: TryFrom::try_from(
+                                ev.children_merkle_values()
+                                    .map(|mv| mv.map(|mv| mv.to_owned()))
+                                    .collect::<Vec<_>>()
+                                    .into_boxed_slice(),
+                            )
+                            .unwrap(),
+                        },
+                    );
+
+                    self.root_calculation = Some((trie, ev.resume()));
+                    continue;
+                }
+                Some((trie, trie_root_calculator::InProgress::TrieNodeRemoveEvent(ev))) => {
+                    self.pending_storage_changes.tries_changes.insert(
+                        (trie.clone(), ev.key_as_vec()),
+                        PendingStorageChangesTrieNode::Removed,
+                    );
+
+                    self.root_calculation = Some((trie, ev.resume()));
+                    continue;
+                }
+                Some((trie, trie_root_calculator::InProgress::Finished { trie_root_hash })) => {
+                    self.pending_storage_changes
+                        .stale_child_tries_root_hashes
+                        .remove(&trie);
+
+                    // If we've finished calculating a child trie, update its entry in the
+                    // main trie.
+                    if let Some(child_trie) = &trie {
+                        let mut main_trie_key = Vec::with_capacity(
+                            DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX.len() + child_trie.len(),
+                        );
+                        main_trie_key.extend_from_slice(DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX);
+                        main_trie_key.extend_from_slice(child_trie);
+
+                        if trie_root_hash != trie::EMPTY_TRIE_MERKLE_VALUE {
+                            self.pending_storage_changes
+                                .trie_diffs
+                                .entry(None)
+                                .or_default()
+                                .diff_insert(main_trie_key, trie_root_hash.to_vec(), ());
+                        } else {
+                            self.pending_storage_changes
+                                .trie_diffs
+                                .entry(None)
+                                .or_default()
+                                .diff_insert_erase(main_trie_key, ());
+                        }
+
+                        self.pending_storage_changes
+                            .stale_child_tries_root_hashes
+                            .insert(None);
+                    }
+
+                    // Resume the VM execution only if the calculated trie is the one that was
+                    // requested by the runtime.
+                    if let host::HostVm::ExternalStorageRoot(req) = self.vm {
+                        // Code below is a bit convoluted due to borrow checker issues.
+                        let trie_match = match (req.child_trie(), trie) {
+                            (None, None) => true,
+                            (Some(a), Some(b)) if a.as_ref() == b => true,
+                            _ => false,
+                        };
+                        if trie_match {
+                            self.vm = req.resume(&trie_root_hash);
+                        } else {
+                            self.vm = host::HostVm::ExternalStorageRoot(req);
+                        }
+                    }
+
+                    continue;
+                }
+            }
+
+            // If the the runtime requests the trie root hash of the main trie, we must first
+            // recalculate the trie root hash of every single child trie that has been modified
+            // since the previous trie root hash calculation.
+            // This is also done if execution is finished, in order for the diff provided as
+            // output to be accurate.
+            {
+                let trie_to_flush: Option<Option<either::Either<_, &[u8]>>> = match &self.vm {
+                    host::HostVm::Finished(_) => self
+                        .pending_storage_changes
+                        .stale_child_tries_root_hashes
+                        .iter()
+                        .next()
+                        .as_ref()
+                        .map(|t| t.as_ref().map(|t| either::Right(&t[..]))),
+                    host::HostVm::ExternalStorageRoot(req) => Some({
+                        if let Some(child_trie) = req.child_trie() {
+                            Some(either::Left(child_trie))
+                        } else {
+                            // Find any child trie in `pending_storage_changes`. If `None` is
+                            // found, calculate the main trie.
+                            // It is important to calculate the child tries before the main tries.
+                            self.pending_storage_changes
+                                .stale_child_tries_root_hashes
+                                .iter()
+                                .find_map(|ct| ct.as_ref())
+                                .map(|t| either::Right(&t[..]))
+                        }
+                    }),
+                    _ => None,
+                };
+
+                if let Some(trie_to_flush) = trie_to_flush {
+                    // Remove from `tries_changes` all the changes concerning this trie.
+                    // TODO: O(n) and generally not optimized
+                    {
+                        let to_remove = self
+                            .pending_storage_changes
+                            .tries_changes
+                            .range((
+                                ops::Bound::Included((
+                                    trie_to_flush
+                                        .as_ref()
+                                        .map(|t| AsRef::<[u8]>::as_ref(t).to_owned()),
+                                    Vec::new(),
+                                )),
+                                ops::Bound::Unbounded,
+                            ))
+                            .take_while(|((ct, _), _)| {
+                                ct.as_ref().map(|ct| &ct[..])
+                                    == trie_to_flush.as_ref().map(AsRef::<[u8]>::as_ref)
+                            })
+                            .map(|(k, _)| k.clone())
+                            .collect::<Vec<_>>();
+                        for to_remove in to_remove {
+                            self.pending_storage_changes
+                                .tries_changes
+                                .remove(&to_remove);
+                        }
+                    }
+
+                    // TODO: don't clone?
+                    let diff = match self
+                        .pending_storage_changes
+                        .trie_diffs
+                        .get(&trie_to_flush.as_ref().map(|t| AsRef::<[u8]>::as_ref(&t).to_owned()))  // TODO: overhead
+                    {
+                        None => storage_diff::TrieDiff::empty(),
+                        Some(diff) => diff.clone(),
+                    };
+
+                    debug_assert!(self.root_calculation.is_none()); // `Some` handled above.
+                    self.root_calculation = Some((
+                        trie_to_flush.map(|t| AsRef::<[u8]>::as_ref(&t).to_owned()),
+                        trie_root_calculator::trie_root_calculator(trie_root_calculator::Config {
+                            diff,
+                            diff_trie_entries_version: self.state_trie_version,
+                            max_trie_recalculation_depth_hint: 16, // TODO: ?!
+                        }),
+                    ));
+                    continue;
+                }
+            }
+
             match self.vm {
                 host::HostVm::ReadyToRun(r) => self.vm = r.run(),
 
@@ -647,34 +1183,32 @@ impl Inner {
                 }
 
                 host::HostVm::Finished(finished) => {
+                    debug_assert!(self.transactions_stack.is_empty()); // Guaranteed by `host`.
+                    debug_assert!(self
+                        .pending_storage_changes
+                        .stale_child_tries_root_hashes
+                        .is_empty());
+
                     return RuntimeHostVm::Finished(Ok(Success {
                         virtual_machine: SuccessVirtualMachine(finished),
-                        storage_main_trie_changes: self.main_trie_changes,
+                        storage_changes: StorageChanges {
+                            inner: self.pending_storage_changes,
+                        },
                         state_trie_version: self.state_trie_version,
                         offchain_storage_changes: self.offchain_storage_changes,
-                        main_trie_root_calculation_cache: self
-                            .main_trie_root_calculation_cache
-                            .unwrap(),
                         logs: self.logs,
                     }));
                 }
 
                 host::HostVm::ExternalStorageGet(req) => {
-                    let search = {
-                        let key = match req.key() {
-                            host::StorageKey::MainTrie { key } => key,
-                            v => {
-                                drop(v);
-                                // TODO: this is a dummy implementation and child tries are not implemented properly
-                                self.vm = req.resume(None);
-                                continue;
-                            }
-                        };
-                        self.main_trie_changes.diff_get(key.as_ref())
-                    };
+                    let diff_search = self
+                        .pending_storage_changes
+                        .trie_diffs
+                        .get(&req.child_trie().map(|ct| ct.as_ref().to_vec()))
+                        .and_then(|diff| diff.diff_get(req.key().as_ref()));
 
-                    if let Some((overlay, _)) = search {
-                        self.vm = req.resume_full_value(overlay);
+                    if let Some((value_in_diff, _)) = diff_search {
+                        self.vm = req.resume_full_value(value_in_diff);
                     } else {
                         self.vm = req.into();
                         return RuntimeHostVm::StorageGet(StorageGet { inner: self });
@@ -682,161 +1216,113 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageSet(req) => {
-                    // TODO: this is a dummy implementation and child tries are not implemented properly
-                    if let host::StorageKey::MainTrie { key } = req.key() {
-                        self.main_trie_root_calculation_cache
-                            .as_mut()
-                            .unwrap()
-                            .storage_value_update(key.as_ref(), req.value().is_some());
-                        if let Some(value) = req.value() {
-                            self.main_trie_changes
-                                .diff_insert(key.as_ref(), value.as_ref(), ());
-                        } else {
-                            self.main_trie_changes.diff_insert_erase(key.as_ref(), ());
-                        }
+                    // Any attempt at writing a key that starts with `CHILD_STORAGE_SPECIAL_PREFIX`
+                    // is silently ignored, as per spec.
+                    if req.child_trie().is_none()
+                        && req.key().as_ref().starts_with(CHILD_STORAGE_SPECIAL_PREFIX)
+                    {
+                        self.vm = req.resume();
+                        continue;
+                    }
+
+                    // TOOD: to_owned overhead
+                    self.pending_storage_changes
+                        .stale_child_tries_root_hashes
+                        .insert(req.child_trie().map(|ct| ct.as_ref().to_owned()));
+
+                    let trie = self
+                        .pending_storage_changes
+                        .trie_diffs
+                        .entry(req.child_trie().map(|ct| ct.as_ref().to_vec()))
+                        .or_insert(storage_diff::TrieDiff::empty());
+
+                    if let Some(value) = req.value() {
+                        trie.diff_insert(req.key().as_ref(), value.as_ref(), ());
+                    } else {
+                        trie.diff_insert_erase(req.key().as_ref(), ());
                     }
 
                     self.vm = req.resume()
                 }
 
                 host::HostVm::ExternalStorageAppend(req) => {
-                    let key = match req.key() {
-                        host::StorageKey::MainTrie { key } => key,
-                        v => {
-                            drop(v);
-                            // TODO: this is a dummy implementation and child tries are not implemented properly
-                            self.vm = req.resume();
-                            continue;
-                        }
-                    };
+                    // Any attempt at writing a key that starts with `CHILD_STORAGE_SPECIAL_PREFIX`
+                    // is silently ignored, as per spec.
+                    if req.child_trie().is_none()
+                        && req.key().as_ref().starts_with(CHILD_STORAGE_SPECIAL_PREFIX)
+                    {
+                        self.vm = req.resume();
+                        continue;
+                    }
 
-                    self.main_trie_root_calculation_cache
-                        .as_mut()
-                        .unwrap()
-                        .storage_value_update(key.as_ref(), true);
+                    // TOOD: to_owned overhead
+                    self.pending_storage_changes
+                        .stale_child_tries_root_hashes
+                        .insert(req.child_trie().map(|ct| ct.as_ref().to_owned()));
 
-                    let current_value = self
-                        .main_trie_changes
-                        .diff_get(key.as_ref())
-                        .map(|(v, _)| v);
+                    let trie = self
+                        .pending_storage_changes
+                        .trie_diffs
+                        .entry(req.child_trie().map(|ct| ct.as_ref().to_vec()))
+                        .or_insert(storage_diff::TrieDiff::empty());
+
+                    let current_value = trie.diff_get(req.key().as_ref()).map(|(v, _)| v);
+
                     if let Some(current_value) = current_value {
                         let mut current_value = current_value.unwrap_or_default().to_vec();
                         append_to_storage_value(&mut current_value, req.value().as_ref());
-                        self.main_trie_changes.diff_insert(
-                            key.as_ref().to_vec(),
-                            current_value,
-                            (),
-                        );
-                        drop(key);
+                        trie.diff_insert(req.key().as_ref().to_vec(), current_value, ());
                         self.vm = req.resume();
                     } else {
-                        drop(key);
                         self.vm = req.into();
                         return RuntimeHostVm::StorageGet(StorageGet { inner: self });
                     }
                 }
 
                 host::HostVm::ExternalStorageClearPrefix(req) => {
-                    let prefix = match req.prefix() {
-                        host::StorageKey::MainTrie { key } => Some(key.as_ref().to_owned()),
-                        _ => None,
-                    };
-
-                    if let Some(prefix) = prefix {
-                        self.vm = req.into();
-                        return RuntimeHostVm::NextKey(NextKey {
-                            inner: self,
-                            key_overwrite: Some(prefix),
-                            keys_removed_so_far: 0,
-                        });
-                    } else {
-                        // TODO: this is a dummy implementation and child tries are not implemented properly
-                        self.vm = req.resume(0, false);
-                    }
-                }
-
-                host::HostVm::ExternalStorageRoot(req) => {
-                    let is_main_trie = matches!(req.trie(), host::Trie::MainTrie);
-                    if !is_main_trie {
-                        // TODO: this is a dummy implementation and child tries are not implemented properly
-                        self.vm = req.resume(None);
+                    // Any attempt at clear a prefix that "intersects" (see code) with
+                    // `CHILD_STORAGE_SPECIAL_PREFIX` is silently ignored, as per spec.
+                    if req.child_trie().is_none()
+                        && CHILD_STORAGE_SPECIAL_PREFIX.starts_with(req.prefix().as_ref())
+                    {
+                        self.vm = req.resume(0, false); // TODO: what's the correct return value for `some_keys_remain`?
                         continue;
                     }
 
-                    // For the main trie, whether the changes must be committed is a dummy value.
-                    debug_assert!(req.commit_changes());
+                    // TODO: consider doing this only if at least one key was actually removed
+                    // TOOD: to_owned overhead
+                    self.pending_storage_changes
+                        .stale_child_tries_root_hashes
+                        .insert(req.child_trie().map(|ct| ct.as_ref().to_owned()));
 
-                    if self.root_calculation.is_none() {
-                        self.root_calculation = Some(calculate_root::root_merkle_value(Some(
-                            self.main_trie_root_calculation_cache.take().unwrap(),
-                        )));
-                    }
+                    let prefix = req.prefix().as_ref().to_owned();
+                    self.vm = req.into();
+                    return RuntimeHostVm::NextKey(NextKey {
+                        inner: self,
+                        key_overwrite: Some(prefix),
+                        keys_removed_so_far: 0,
+                    });
+                }
 
-                    match self.root_calculation.take().unwrap() {
-                        calculate_root::RootMerkleValueCalculation::Finished { hash, cache } => {
-                            self.main_trie_root_calculation_cache = Some(cache);
-                            self.vm = req.resume(Some(&hash));
-                        }
-                        calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
-                            self.vm = req.into();
-                            self.root_calculation =
-                                Some(calculate_root::RootMerkleValueCalculation::AllKeys(keys));
-                            return RuntimeHostVm::PrefixKeys(PrefixKeys { inner: self });
-                        }
-                        calculate_root::RootMerkleValueCalculation::StorageValue(value_request) => {
-                            self.vm = req.into();
-                            // TODO: allocating a Vec, meh
-                            if let Some((overlay, ())) = self
-                                .main_trie_changes
-                                .diff_get(&value_request.key().collect::<Vec<_>>())
-                            {
-                                self.root_calculation = Some(
-                                    value_request
-                                        .inject(overlay.map(|v| (v, self.state_trie_version))),
-                                );
-                            } else {
-                                self.root_calculation =
-                                    Some(calculate_root::RootMerkleValueCalculation::StorageValue(
-                                        value_request,
-                                    ));
-                                return RuntimeHostVm::StorageGet(StorageGet { inner: self });
-                            }
-                        }
-                    }
+                host::HostVm::ExternalStorageRoot(_) => {
+                    // Handled above.
+                    unreachable!()
                 }
 
                 host::HostVm::ExternalStorageNextKey(req) => {
-                    let is_main_trie = matches!(req.key(), host::StorageKey::MainTrie { .. });
-                    if is_main_trie {
-                        self.vm = req.into();
-                        return RuntimeHostVm::NextKey(NextKey {
-                            inner: self,
-                            key_overwrite: None,
-                            keys_removed_so_far: 0,
-                        });
-                    } else {
-                        // TODO: this is a dummy implementation and child tries are not implemented properly
-                        self.vm = req.resume(None);
-                    }
-                }
-
-                host::HostVm::ExternalStorageNextChildTrie(req) => {
-                    // TODO: this is a dummy implementation and child tries are not implemented properly
-                    self.vm = req.resume(None);
+                    self.vm = req.into();
+                    return RuntimeHostVm::NextKey(NextKey {
+                        inner: self,
+                        key_overwrite: None,
+                        keys_removed_so_far: 0,
+                    });
                 }
 
                 host::HostVm::ExternalOffchainStorageSet(req) => {
-                    if let Some(value) = req.value() {
-                        self.offchain_storage_changes.diff_insert(
-                            req.key().as_ref().to_vec(),
-                            value.as_ref().to_vec(),
-                            (),
-                        );
-                    } else {
-                        self.offchain_storage_changes
-                            .diff_insert_erase(req.key().as_ref().to_vec(), ());
-                    }
-
+                    self.offchain_storage_changes.insert(
+                        req.key().as_ref().to_vec(),
+                        req.value().map(|v| v.as_ref().to_owned()),
+                    );
                     self.vm = req.resume();
                 }
 
@@ -874,26 +1360,19 @@ impl Inner {
 
                 host::HostVm::StartStorageTransaction(tx) => {
                     // TODO: this cloning is very expensive, but providing a more optimized implementation is very complicated
-                    self.main_trie_transaction.push((
-                        self.main_trie_changes.clone(),
-                        self.main_trie_root_calculation_cache
-                            .as_ref()
-                            .unwrap()
-                            .clone(),
-                    ));
-
+                    self.transactions_stack
+                        .push(self.pending_storage_changes.clone());
                     self.vm = tx.resume();
                 }
 
                 host::HostVm::EndStorageTransaction { resume, rollback } => {
                     // The inner implementation guarantees that a storage transaction can only
                     // end if it has earlier been started.
-                    debug_assert!(!self.main_trie_transaction.is_empty());
-                    let (rollback_diff, rollback_cache) = self.main_trie_transaction.pop().unwrap();
+                    debug_assert!(!self.transactions_stack.is_empty());
+                    let rollback_diff = self.transactions_stack.pop().unwrap();
 
                     if rollback {
-                        self.main_trie_changes = rollback_diff;
-                        self.main_trie_root_calculation_cache = Some(rollback_cache);
+                        self.pending_storage_changes = rollback_diff;
                     }
 
                     self.vm = resume.resume();

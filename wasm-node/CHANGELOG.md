@@ -4,12 +4,72 @@
 
 ### Changed
 
+- The `chainHead_unstable_storage` JSON-RPC function now supports a `type` equal to `closest-descendant-merkle-value` and no longer supports `closest-ancestor-merkle-value`, in accordance with the latest changes in the JSON-RPC API specification. ([#824](https://github.com/smol-dot/smoldot/pull/824))
+- Blocks are now reported to `chain_subscribeAllHeads` and `chain_subscribeNewHeads` subscribers only after they have been put in the cache, preventing race conditions where JSON-RPC clients suffer from a cache miss if they ask information about these blocks too quickly. ([#854](https://github.com/smol-dot/smoldot/pull/854))
+- Runtime updates are now always reported to `state_subscribeRuntimeVersion` subscribers immediately after the `chain_subscribeNewHeads` notification corresponding to the block containing the runtime update. They were previously reported in a pseudo-random order. ([#854](https://github.com/smol-dot/smoldot/pull/854))
+- All the storage subscriptions made using `state_subscribeStorage` are now queried together into a single networking request per block, instead of sending one networking query per storage key and per subscription. ([#854](https://github.com/smol-dot/smoldot/pull/854))
+
+## 1.0.11 - 2023-06-25
+
+### Changed
+
+- The runtime specification yielded by the `chainHead_unstable_follow` JSON-RPC function no longer includes the `authoringVersion` field, in accordance with the latest changes in the JSON-RPC API specification. ([#815](https://github.com/smol-dot/smoldot/pull/815))
+- The `chainHead_unstable_unpin` JSON-RPC function now accepts either a single hash or an array of hashes, in accordance with the latest changes in the JSON-RPC API specification. ([#814](https://github.com/smol-dot/smoldot/pull/814))
+- Add support for the `descendants-values`, `descendants-hashes`, and `closest-ancestor-merkle-value` types for the `chainHead_unstable_storage` JSON-RPC function. ([#813](https://github.com/smol-dot/smoldot/pull/813))
+- The `chainHead_unstable_storage` JSON-RPC function now accepts an array of `items` as parameter instead of a `key` and `type`, in accordance with the latest changes in the JSON-RPC API specification. ([#813](https://github.com/smol-dot/smoldot/pull/813))
+- The `chainHead_unstable_storage` JSON-RPC function now generates `items` notifications containin an array of multiple `items`, in accordance with the latest changes in the JSON-RPC API specification. ([#813](https://github.com/smol-dot/smoldot/pull/813))
+
+### Fixed
+
+- Fix not absorbing the JavaScript exception triggered by the browser when connecting to a `ws://` node when smoldot is embedded in a web page served over `https://`. ([#795](https://github.com/smol-dot/smoldot/pull/795), [#800](https://github.com/smol-dot/smoldot/pull/800))
+- Fix potential panic due to race condition when smoldot wants to abort connecting to a peer that we have just failed connecting to. ([#801](https://github.com/smol-dot/smoldot/pull/801))
+- Smoldot no longer calls `close()` on WebSockets that aren't fully established yet (even though it is legal to do so according to the WHATWG specification) in order to avoid browsers printing warnings in the console when you do so. ([#799](https://github.com/smol-dot/smoldot/pull/799))
+- Fix panic-inducing race condition when a networking event happens right when the warp syncing finishes. ([#808](https://github.com/smol-dot/smoldot/pull/808))
+
+## 1.0.10 - 2023-06-19
+
+### Changed
+
+- Multiaddresses that can't be parsed during the discovery process are now silently ignored instead of causing the entire list of discovered nodes to be discarded. ([#705](https://github.com/smol-dot/smoldot/pull/705))
+
+### Fixed
+
+- Smoldot no longer assumes that the runtime calls `ext_default_child_storage_root` in order to properly update the hashes of the child tries that have been modified. ([#743](https://github.com/smol-dot/smoldot/pull/743))
+- Fix various mishandlings of child tries. ([#763](https://github.com/smol-dot/smoldot/pull/763))
+- Fix panic when the `ext_default_child_storage_clear_prefix_version_1` and `ext_default_child_storage_clear_prefix_version_2` functions are called. ([#764](https://github.com/smol-dot/smoldot/pull/764))
+- Fix wrong trie root hash calculation with `state_version = 1`. ([#711](https://github.com/smol-dot/smoldot/pull/711))
+- Fix bug when decoding BABE configuration produced by runtimes using version 1 of the `BabeApi` API. In practice, this should concern only old Kusama blocks. ([#739](https://github.com/smol-dot/smoldot/pull/739))
+- No longer panic when `state_getKeysPaged` is called with a `prefix` parameter equal to `null`. ([#776](https://github.com/smol-dot/smoldot/pull/776))
+
+## 1.0.9 - 2023-06-08
+
+### Added
+
+- Add support for child tries, meaning that errors will no longer be returned when performing runtime calls on chains that use child tries. In practice, this typically concerns contracts chains. ([#680](https://github.com/smol-dot/smoldot/pull/680), [#684](https://github.com/smol-dot/smoldot/pull/684))
+- The checksum of the SS58 address passed to the `system_accountNextIndex` JSON-RPC function is now verified. Note that its prefix isn't compared against the one of the current chain, because there is no straight-forward way for smoldot to determine the SS58 prefix of the chain that it is running. ([#691](https://github.com/smol-dot/smoldot/pull/691))
+- Add `AddChainOptions.jsonRpcMaxPendingRequests` and `AddChainOptions.jsonRpcMaxSubscriptions`, allowing you to specify the maximum number of pending JSON-RPC requests and the maximum number of active JSON-RPC subscriptions. These two limits were previously implicitly set to respectively 128 and 1024. Not passing any value defaults to "infinity". You are strongly encouraged to specify a value for these two options if the source of the JSON-RPC requests is untrusted. ([#694](https://github.com/smol-dot/smoldot/pull/694))
+
+### Fixed
+
+- A `validated` event is now properly generated when watching a transaction using `transaction_unstable_submitAndWatch`. ([#676](https://github.com/smol-dot/smoldot/pull/676))
+- Fix `author_submitAndWatchExtrinsic` erroneously generating `transaction_unstable_watchEvent` notifications, and `transaction_unstable_submitAndWatch` erroneously generating `author_extrinsicUpdate` notifications. ([#677](https://github.com/smol-dot/smoldot/pull/677))
+
+### Changed
+
+- TCP NODELAY is now enabled on Deno. The minimum required Deno version is now v1.29.0, which was released on 2022-12-14. ([#665](https://github.com/smol-dot/smoldot/pull/665))
+
+## 1.0.8 - 2023-06-05
+
+### Changed
+
+- Instead of manually decompressing the WebAssembly bytecode in JavaScript, smoldot will now use the native `DecompressionStream` API within browsers and the native `zlib.inflate` function in NodeJS. This should speed up the initialization and reduce the size of the package. The new `DecompressionStream` API has been stable since February 2020 on Chrome and Edge, since March 2023 on Safari, and since May 2023 on Firefox. ([#640](https://github.com/smol-dot/smoldot/pull/640))
 - The parameter of `chainHead_unstable_follow` has been renamed from `runtimeUpdates` to `withRuntime` in accordance with the latest JSON-RPC specification changes. ([#624](https://github.com/smol-dot/smoldot/pull/624))
 - Errors while building the runtime and errors while building the consensus-related information that can happen during the warp syncing process are now printed in the logs. ([#644](https://github.com/smol-dot/smoldot/pull/644))
 - The `chainHead_unstable_storage` JSON-RPC method has been updated according to the latest changes to the JSON-RPC specification. These changes can be found [here](https://github.com/paritytech/json-rpc-interface-spec/pull/37). The `descendants-values`, `descendants-hashes`, and `closest-ancestor-merkle-value` types aren't implemented yet and produce an error. ([#647](https://github.com/smol-dot/smoldot/pull/647))
 
 ### Fixed
 
+- Smoldot will no longer produce errors when calling a runtime function (such as with `state_call` or `chainHead_unstable_call`) that calls the `ext_storage_root` host function. ([#670](https://github.com/smol-dot/smoldot/pull/670))
 - Fix panic when receiving a networking request of a protocol not supported by smoldot. ([#635](https://github.com/smol-dot/smoldot/pull/635))
 - Fix `chainHead_unstable_stopStorage` and `chainHead_unstable_stopBody` being mixed. In other words, storage requests were interrupted by `chainHead_unstable_stopBody` and body requests were interrupted by `chainHead_unstable_stopStorage` ([#648](https://github.com/smol-dot/smoldot/pull/648))
 

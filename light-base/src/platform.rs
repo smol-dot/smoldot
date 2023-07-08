@@ -19,7 +19,7 @@ use alloc::{borrow::Cow, string::String, vec::Vec};
 use core::{future::Future, ops, str, time::Duration};
 use futures_util::future;
 
-pub mod async_std;
+pub mod default;
 
 /// Access to a platform's capabilities.
 ///
@@ -28,7 +28,6 @@ pub mod async_std;
 /// then create a connection on one clone, then access this connection on the other clone.
 pub trait PlatformRef: Clone + Send + Sync + 'static {
     type Delay: Future<Output = ()> + Unpin + Send + 'static;
-    type Yield: Future<Output = ()> + Unpin + Send + 'static;
     type Instant: Clone
         + ops::Add<Duration, Output = Self::Instant>
         + ops::Sub<Self::Instant, Output = Duration>
@@ -43,9 +42,9 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// A multi-stream connection.
     ///
     /// This object is merely a handle. The underlying connection should be dropped only after
-    /// the `Connection` and all its associated substream objects ([`PlatformRef::Stream`]) have
+    /// the `MultiStream` and all its associated substream objects ([`PlatformRef::Stream`]) have
     /// been dropped.
-    type Connection: Send + Sync + 'static;
+    type MultiStream: Send + Sync + 'static;
     /// Opaque object representing either a single-stream connection or a substream in a
     /// multi-stream connection.
     ///
@@ -53,7 +52,7 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// should be abruptly dropped (i.e. RST) as well, unless its reading and writing sides
     /// have been gracefully closed in the past.
     type Stream: Send + 'static;
-    type ConnectFuture: Future<Output = Result<PlatformConnection<Self::Stream, Self::Connection>, ConnectError>>
+    type ConnectFuture: Future<Output = Result<PlatformConnection<Self::Stream, Self::MultiStream>, ConnectError>>
         + Unpin
         + Send
         + 'static;
@@ -87,8 +86,11 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// The first parameter is the name of the task, which can be useful for debugging purposes.
     ///
     /// The `Future` must be run until it yields a value.
-    // TODO: accept plain futures, not boxed
-    fn spawn_task(&self, task_name: Cow<str>, task: future::BoxFuture<'static, ()>);
+    fn spawn_task(
+        &self,
+        task_name: Cow<str>,
+        task: impl future::Future<Output = ()> + Send + 'static,
+    );
 
     /// Value returned when a JSON-RPC client requests the name of the client, or when a peer
     /// performs an identification request. Reasonable value is `env!("CARGO_PKG_NAME")`.
@@ -97,11 +99,6 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// Value returned when a JSON-RPC client requests the version of the client, or when a peer
     /// performs an identification request. Reasonable value is `env!("CARGO_PKG_VERSION")`.
     fn client_version(&self) -> Cow<str>;
-
-    /// Should be called after a CPU-intensive operation in order to yield back control.
-    ///
-    /// This function can be implemented as no-op on platforms where this is irrelevant.
-    fn yield_after_cpu_intensive(&self) -> Self::Yield;
 
     /// Starts a connection attempt to the given multiaddress.
     ///
@@ -120,7 +117,7 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// >           to open, as this is not supposed to happen. If you need to handle such a
     /// >           situation, either try again opening a substream again or reset the entire
     /// >           connection.
-    fn open_out_substream(&self, connection: &mut Self::Connection);
+    fn open_out_substream(&self, connection: &mut Self::MultiStream);
 
     /// Waits until a new incoming substream arrives on the connection.
     ///
@@ -128,11 +125,11 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// yielded once for every call to [`PlatformRef::open_out_substream`].
     ///
     /// The future can also return `None` if the connection has been killed by the remote. If
-    /// the future returns `None`, the user of the `PlatformRef` should drop the `Connection` and
+    /// the future returns `None`, the user of the `PlatformRef` should drop the `MultiStream` and
     /// all its associated `Stream`s as soon as possible.
     fn next_substream<'a>(
         &self,
-        connection: &'a mut Self::Connection,
+        connection: &'a mut Self::MultiStream,
     ) -> Self::NextSubstreamFuture<'a>;
 
     /// Synchronizes the stream with the "actual" stream.

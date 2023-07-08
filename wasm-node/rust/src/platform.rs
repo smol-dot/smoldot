@@ -31,34 +31,32 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-/// Total number of bytes that all the connections created through [`Platform`] combined have
+/// Total number of bytes that all the connections created through [`PlatformRef`] combined have
 /// received.
 pub static TOTAL_BYTES_RECEIVED: AtomicU64 = AtomicU64::new(0);
-/// Total number of bytes that all the connections created through [`Platform`] combined have
+/// Total number of bytes that all the connections created through [`PlatformRef`] combined have
 /// sent.
 pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Clone)]
-pub(crate) struct Platform {}
+pub(crate) const PLATFORM_REF: PlatformRef = PlatformRef {};
 
-impl Platform {
-    pub const fn new() -> Self {
-        Self {}
-    }
-}
+#[derive(Debug, Copy, Clone)]
+pub(crate) struct PlatformRef {}
 
 // TODO: this trait implementation was written before GATs were stable in Rust; now that the associated types have lifetimes, it should be possible to considerably simplify this code
-impl smoldot_light::platform::PlatformRef for Platform {
+impl smoldot_light::platform::PlatformRef for PlatformRef {
     type Delay = Delay;
-    type Yield = Yield;
     type Instant = Instant;
-    type Connection = ConnectionWrapper; // Entry in the ̀`CONNECTIONS` map.
+    type MultiStream = MultiStreamWrapper; // Entry in the ̀`CONNECTIONS` map.
     type Stream = StreamWrapper; // Entry in the ̀`STREAMS` map and a read buffer.
     type ConnectFuture = pin::Pin<
         Box<
             dyn future::Future<
                     Output = Result<
-                        smoldot_light::platform::PlatformConnection<Self::Stream, Self::Connection>,
+                        smoldot_light::platform::PlatformConnection<
+                            Self::Stream,
+                            Self::MultiStream,
+                        >,
                         ConnectError,
                     >,
                 > + Send,
@@ -100,7 +98,7 @@ impl smoldot_light::platform::PlatformRef for Platform {
     fn spawn_task(
         &self,
         task_name: Cow<str>,
-        task: pin::Pin<Box<dyn future::Future<Output = ()> + Send>>,
+        task: impl future::Future<Output = ()> + Send + 'static,
     ) {
         // The code below processes tasks that have names.
         #[pin_project::pin_project]
@@ -144,24 +142,20 @@ impl smoldot_light::platform::PlatformRef for Platform {
         env!("CARGO_PKG_VERSION").into()
     }
 
-    fn yield_after_cpu_intensive(&self) -> Self::Yield {
-        Yield { has_yielded: false }
-    }
-
     fn connect(&self, url: &str) -> Self::ConnectFuture {
         let mut lock = STATE.try_lock().unwrap();
 
         let connection_id = lock.next_connection_id;
         lock.next_connection_id += 1;
 
-        let mut error_buffer_index = [0u8; 5];
+        let mut error_buffer_index = [0u8; 4];
 
         let ret_code = unsafe {
             bindings::connection_new(
                 connection_id,
                 u32::try_from(url.as_bytes().as_ptr() as usize).unwrap(),
                 u32::try_from(url.as_bytes().len()).unwrap(),
-                u32::try_from(&mut error_buffer_index as *mut [u8; 5] as usize).unwrap(),
+                u32::try_from(&mut error_buffer_index as *mut [u8; 4] as usize).unwrap(),
             )
         };
 
@@ -171,7 +165,7 @@ impl smoldot_light::platform::PlatformRef for Platform {
             ));
             Err(ConnectError {
                 message: str::from_utf8(&error_message).unwrap().to_owned(),
-                is_bad_addr: error_buffer_index[4] != 0,
+                is_bad_addr: true,
             })
         } else {
             let _prev_value = lock.connections.insert(
@@ -231,7 +225,7 @@ impl smoldot_light::platform::PlatformRef for Platform {
                     *connection_handles_alive += 1;
                     Ok(
                         smoldot_light::platform::PlatformConnection::MultiStreamWebRtc {
-                            connection: ConnectionWrapper(connection_id),
+                            connection: MultiStreamWrapper(connection_id),
                             local_tls_certificate_multihash: local_tls_certificate_multihash
                                 .clone(),
                             remote_tls_certificate_multihash: remote_tls_certificate_multihash
@@ -260,7 +254,7 @@ impl smoldot_light::platform::PlatformRef for Platform {
 
     fn next_substream<'a>(
         &self,
-        ConnectionWrapper(connection_id): &'a mut Self::Connection,
+        MultiStreamWrapper(connection_id): &'a mut Self::MultiStream,
     ) -> Self::NextSubstreamFuture<'a> {
         let connection_id = *connection_id;
 
@@ -314,7 +308,7 @@ impl smoldot_light::platform::PlatformRef for Platform {
         })
     }
 
-    fn open_out_substream(&self, ConnectionWrapper(connection_id): &mut Self::Connection) {
+    fn open_out_substream(&self, MultiStreamWrapper(connection_id): &mut Self::MultiStream) {
         match STATE
             .try_lock()
             .unwrap()
@@ -507,24 +501,6 @@ impl smoldot_light::platform::PlatformRef for Platform {
     }
 }
 
-pub(crate) struct Yield {
-    has_yielded: bool,
-}
-
-impl future::Future for Yield {
-    type Output = ();
-
-    fn poll(mut self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
-        if !self.has_yielded {
-            self.has_yielded = true;
-            cx.waker().wake_by_ref();
-            task::Poll::Pending
-        } else {
-            task::Poll::Ready(())
-        }
-    }
-}
-
 pub(crate) struct StreamWrapper {
     connection_id: u32,
     stream_id: Option<u32>,
@@ -585,13 +561,7 @@ impl Drop for StreamWrapper {
                 ..
             } => {
                 *connection_handles_alive -= 1;
-                let remove_connection = *connection_handles_alive == 0;
-                if remove_connection {
-                    unsafe {
-                        bindings::reset_connection(self.connection_id);
-                    }
-                }
-                remove_connection
+                *connection_handles_alive == 0
             }
         };
 
@@ -601,9 +571,9 @@ impl Drop for StreamWrapper {
     }
 }
 
-pub(crate) struct ConnectionWrapper(u32);
+pub(crate) struct MultiStreamWrapper(u32);
 
-impl Drop for ConnectionWrapper {
+impl Drop for MultiStreamWrapper {
     fn drop(&mut self) {
         let mut lock = STATE.try_lock().unwrap();
 
@@ -634,12 +604,19 @@ impl Drop for ConnectionWrapper {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref STATE: Mutex<NetworkState> = Mutex::new(NetworkState {
-        next_connection_id: 0,
-        connections: hashbrown::HashMap::with_capacity_and_hasher(32, Default::default()),
-        streams: BTreeMap::new(),
-    });
+static STATE: Mutex<NetworkState> = Mutex::new(NetworkState {
+    next_connection_id: 0,
+    connections: hashbrown::HashMap::with_hasher(FnvBuildHasher),
+    streams: BTreeMap::new(),
+});
+
+// TODO: we use a custom `FnvBuildHasher` because it's not possible to create `fnv::FnvBuildHasher` in a `const` context
+struct FnvBuildHasher;
+impl core::hash::BuildHasher for FnvBuildHasher {
+    type Hasher = fnv::FnvHasher;
+    fn build_hasher(&self) -> fnv::FnvHasher {
+        fnv::FnvHasher::default()
+    }
 }
 
 /// All the connections and streams that are alive.
@@ -649,7 +626,7 @@ lazy_static::lazy_static! {
 /// Multi-stream connections have one entry in `connections` and zero or more entries in `streams`.
 struct NetworkState {
     next_connection_id: u32,
-    connections: hashbrown::HashMap<u32, Connection, fnv::FnvBuildHasher>,
+    connections: hashbrown::HashMap<u32, Connection, FnvBuildHasher>,
     streams: BTreeMap<(u32, Option<u32>), Stream>,
 }
 
@@ -671,7 +648,7 @@ enum ConnectionInner {
         /// but that haven't been reported through
         /// [`smoldot_light::platform::PlatformRef::next_substream`] yet.
         opened_substreams_to_pick_up: VecDeque<(u32, PlatformSubstreamDirection, u32)>,
-        /// Number of objects (connections and streams) in the [`Platform`] API that reference
+        /// Number of objects (connections and streams) in the [`PlatformRef`] API that reference
         /// this connection. If it switches from 1 to 0, the connection must be removed.
         connection_handles_alive: u32,
         /// Multihash encoding of the TLS certificate used by the local node at the DTLS layer.
@@ -683,7 +660,7 @@ enum ConnectionInner {
     Reset {
         /// Message given by the bindings to justify the closure.
         message: String,
-        /// Number of objects (connections and streams) in the [`Platform`] API that reference
+        /// Number of objects (connections and streams) in the [`PlatformRef`] API that reference
         /// this connection. If it switches from 1 to 0, the connection must be removed.
         connection_handles_alive: u32,
     },

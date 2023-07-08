@@ -34,30 +34,29 @@ use std::{
     net::{IpAddr, SocketAddr},
 };
 
-/// Implementation of the [`PlatformRef`] trait that uses the `async-std` library and provides TCP
-/// and WebSocket connections.
-#[derive(Clone)]
-pub struct AsyncStdTcpWebSocket {
-    client_name_version: Arc<(String, String)>,
+/// Implementation of the [`PlatformRef`] trait that leverages the operating system.
+pub struct DefaultPlatform {
+    client_name: String,
+    client_version: String,
 }
 
-impl AsyncStdTcpWebSocket {
-    pub fn new(client_name: String, client_version: String) -> Self {
-        AsyncStdTcpWebSocket {
-            client_name_version: Arc::new((client_name, client_version)),
-        }
+impl DefaultPlatform {
+    pub fn new(client_name: String, client_version: String) -> Arc<Self> {
+        Arc::new(DefaultPlatform {
+            client_name,
+            client_version,
+        })
     }
 }
 
-impl PlatformRef for AsyncStdTcpWebSocket {
+impl PlatformRef for Arc<DefaultPlatform> {
     type Delay = future::BoxFuture<'static, ()>;
-    type Yield = future::Ready<()>;
     type Instant = std::time::Instant;
-    type Connection = std::convert::Infallible;
+    type MultiStream = std::convert::Infallible;
     type Stream = Stream;
     type ConnectFuture = future::BoxFuture<
         'static,
-        Result<PlatformConnection<Self::Stream, Self::Connection>, ConnectError>,
+        Result<PlatformConnection<Self::Stream, Self::MultiStream>, ConnectError>,
     >;
     type StreamUpdateFuture<'a> = future::BoxFuture<'a, ()>;
     type NextSubstreamFuture<'a> =
@@ -73,7 +72,7 @@ impl PlatformRef for AsyncStdTcpWebSocket {
     }
 
     fn sleep(&self, duration: Duration) -> Self::Delay {
-        async_std::task::sleep(duration).boxed()
+        smol::Timer::after(duration).map(|_| ()).boxed()
     }
 
     fn sleep_until(&self, when: Self::Instant) -> Self::Delay {
@@ -81,21 +80,20 @@ impl PlatformRef for AsyncStdTcpWebSocket {
         self.sleep(duration)
     }
 
-    fn spawn_task(&self, _task_name: Cow<str>, task: future::BoxFuture<'static, ()>) {
-        async_std::task::spawn(task);
+    fn spawn_task(
+        &self,
+        _task_name: Cow<str>,
+        task: impl future::Future<Output = ()> + Send + 'static,
+    ) {
+        smol::spawn(task).detach();
     }
 
     fn client_name(&self) -> Cow<str> {
-        Cow::Borrowed(&self.client_name_version.0)
+        Cow::Borrowed(&self.client_name)
     }
 
     fn client_version(&self) -> Cow<str> {
-        Cow::Borrowed(&self.client_name_version.1)
-    }
-
-    fn yield_after_cpu_intensive(&self) -> Self::Yield {
-        // No-op.
-        future::ready(())
+        Cow::Borrowed(&self.client_version)
     }
 
     fn connect(&self, multiaddr: &str) -> Self::ConnectFuture {
@@ -172,10 +170,8 @@ impl PlatformRef for AsyncStdTcpWebSocket {
             };
 
             let tcp_socket = match addr {
-                either::Left(socket_addr) => async_std::net::TcpStream::connect(socket_addr).await,
-                either::Right((dns, port)) => {
-                    async_std::net::TcpStream::connect((&dns[..], port)).await
-                }
+                either::Left(socket_addr) => smol::net::TcpStream::connect(socket_addr).await,
+                either::Right((dns, port)) => smol::net::TcpStream::connect((&dns[..], port)).await,
             };
 
             if let Ok(tcp_socket) = &tcp_socket {
@@ -223,13 +219,13 @@ impl PlatformRef for AsyncStdTcpWebSocket {
         })
     }
 
-    fn open_out_substream(&self, c: &mut Self::Connection) {
+    fn open_out_substream(&self, c: &mut Self::MultiStream) {
         // This function can only be called with so-called "multi-stream" connections. We never
         // open such connection.
         match *c {}
     }
 
-    fn next_substream(&self, c: &'_ mut Self::Connection) -> Self::NextSubstreamFuture<'_> {
+    fn next_substream(&self, c: &'_ mut Self::MultiStream) -> Self::NextSubstreamFuture<'_> {
         // This function can only be called with so-called "multi-stream" connections. We never
         // open such connection.
         match *c {}
@@ -237,7 +233,9 @@ impl PlatformRef for AsyncStdTcpWebSocket {
 
     fn update_stream<'a>(&self, stream: &'a mut Self::Stream) -> Self::StreamUpdateFuture<'a> {
         Box::pin(future::poll_fn(|cx| {
-            let Some((read_buffer, write_buffer)) = stream.buffers.as_mut() else { return Poll::Pending };
+            let Some((read_buffer, write_buffer)) = stream.buffers.as_mut() else {
+                return Poll::Pending;
+            };
 
             // Whether the future returned by `update_stream` should return `Ready` or `Pending`.
             let mut update_stream_future_ready = false;
@@ -366,7 +364,7 @@ impl PlatformRef for AsyncStdTcpWebSocket {
             stream.buffers.as_mut().map(|(r, _)| r)
         else {
             assert_eq!(extra_bytes, 0);
-            return
+            return;
         };
 
         assert!(cursor.start + extra_bytes <= cursor.end);
@@ -374,8 +372,14 @@ impl PlatformRef for AsyncStdTcpWebSocket {
     }
 
     fn writable_bytes(&self, stream: &mut Self::Stream) -> usize {
-        let Some(StreamWriteBuffer::Open { ref mut buffer, must_close: false, ..}) =
-            stream.buffers.as_mut().map(|(_, w)| w) else { return 0 };
+        let Some(StreamWriteBuffer::Open {
+            ref mut buffer,
+            must_close: false,
+            ..
+        }) = stream.buffers.as_mut().map(|(_, w)| w)
+        else {
+            return 0;
+        };
         buffer.capacity() - buffer.len()
     }
 
@@ -385,15 +389,20 @@ impl PlatformRef for AsyncStdTcpWebSocket {
         // Because `writable_bytes` returns 0 if the writing side is closed, and because `data`
         // must always have a size inferior or equal to `writable_bytes`, we know for sure that
         // the writing side isn't closed.
-        let Some(StreamWriteBuffer::Open { ref mut buffer, .. } )=
-            stream.buffers.as_mut().map(|(_, w)| w) else { panic!() };
+        let Some(StreamWriteBuffer::Open { ref mut buffer, .. }) =
+            stream.buffers.as_mut().map(|(_, w)| w)
+        else {
+            panic!()
+        };
         buffer.reserve(data.len());
         buffer.extend(data.iter().copied());
     }
 
     fn close_send(&self, stream: &mut Self::Stream) {
         // It is not illegal to call this on an already-reset stream.
-        let Some((_, write_buffer)) = stream.buffers.as_mut() else { return };
+        let Some((_, write_buffer)) = stream.buffers.as_mut() else {
+            return;
+        };
 
         match write_buffer {
             StreamWriteBuffer::Open {
@@ -409,7 +418,7 @@ impl PlatformRef for AsyncStdTcpWebSocket {
     }
 }
 
-/// Implementation detail of [`AsyncStdTcpWebSocket`].
+/// Implementation detail of [`DefaultPlatform`].
 pub struct Stream {
     socket: TcpOrWs,
     /// Read and write buffers of the connection, or `None` if the socket has been reset.
@@ -433,5 +442,4 @@ enum StreamWriteBuffer {
     Closed,
 }
 
-type TcpOrWs =
-    future::Either<async_std::net::TcpStream, websocket::Connection<async_std::net::TcpStream>>;
+type TcpOrWs = future::Either<smol::net::TcpStream, websocket::Connection<smol::net::TcpStream>>;

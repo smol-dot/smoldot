@@ -962,7 +962,10 @@ impl<T> Yamux<T> {
                                 ..
                             },
                         ..
-                    }) = self.inner.substreams.get_mut(&substream_id.0) else { continue; };
+                    }) = self.inner.substreams.get_mut(&substream_id.0)
+                    else {
+                        continue;
+                    };
 
                     *remote_write_closed = true;
 
@@ -1067,8 +1070,7 @@ impl<T> Yamux<T> {
 
                     // Decode the header in `incoming_header`.
                     let decoded_header = {
-                        let Ok(full_header) = <&[u8; 12]>::try_from(&incoming_header[..])
-                        else {
+                        let Ok(full_header) = <&[u8; 12]>::try_from(&incoming_header[..]) else {
                             // Not enough data to finish receiving header. Nothing more can be
                             // done.
                             debug_assert!(data.is_empty());
@@ -1199,7 +1201,9 @@ impl<T> Yamux<T> {
                             // which we have sent a RST frame earlier. Considering that we don't
                             // always keep traces of old substreams, we have no way to know whether
                             // this is the case or not.
-                            let Some(s) = self.inner.substreams.get_mut(&stream_id) else { continue };
+                            let Some(s) = self.inner.substreams.get_mut(&stream_id) else {
+                                continue;
+                            };
                             if !matches!(s.state, SubstreamState::Healthy { .. }) {
                                 continue;
                             }
@@ -1682,7 +1686,10 @@ impl<T> Yamux<T> {
                             local_write_close: local_write,
                             allowed_window,
                             ..
-                        } = &mut sub.state else { unreachable!() };
+                        } = &mut sub.state
+                        else {
+                            unreachable!()
+                        };
 
                         let has_data_to_write = (*allowed_window != 0 && !write_queue.is_empty())
                             || matches!(local_write, SubstreamStateLocalWrite::FinDesired);

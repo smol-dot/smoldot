@@ -151,20 +151,20 @@ extern "C" {
     /// The `id` parameter is an identifier for this connection, as chosen by the Rust code. It
     /// must be passed on every interaction with this connection.
     ///
-    /// Returns 0 to indicate success, or 1 to indicate that an error happened. If an error is
-    /// returned, the `id` doesn't correspond to anything.
+    /// Returns 0 to indicate success, or 1 to indicate an error: the multiaddress couldn't be
+    /// parsed or that the protocol isn't supported. If an error is returned, the `id` doesn't
+    /// correspond to anything.
     ///
     /// > **Note**: If you implement this function using for example `new WebSocket()`, please
     /// >           keep in mind that exceptions should be caught and turned into an error code.
     ///
-    /// If an error happened, assign a so-called "buffer index" (a `u32`) representing the buffer
+    /// If 1 is returned, assign a so-called "buffer index" (a `u32`) representing the buffer
     /// containing the UTF-8 error message, then write this buffer index as little-endian to the
     /// memory of the WebAssembly indicated by `error_buffer_index_ptr`. The Rust code will call
     /// [`buffer_size`] and [`buffer_copy`] in order to obtain the content of this buffer. The
     /// buffer index should remain assigned and buffer alive until the next time the JavaScript
-    /// code retains control. Then, write at location `error_buffer_index_ptr + 4` a `1` if the
-    /// error is caused by the address being forbidden or unsupported, and `0` otherwise. If no
-    /// error happens, nothing should be written to `error_buffer_index_ptr`.
+    /// code retains control. If no error happens, nothing should be written to
+    /// `error_buffer_index_ptr`.
     ///
     /// At any time, a connection can be in one of the three following states:
     ///
@@ -317,8 +317,13 @@ pub extern "C" fn advance_execution() {
 /// ids. If the chain specification refer to a parachain, these chain ids are the ones that will be
 /// looked up to find the corresponding relay chain.
 ///
-/// If `json_rpc_running` is 0, then no JSON-RPC service will be started and it is forbidden to
-/// send JSON-RPC requests targeting this chain. This can be used to save up resources.
+/// `json_rpc_max_pending_requests` indicates the size of the queue of JSON-RPC requests that
+/// haven't been answered yet.
+/// If `json_rpc_max_pending_requests` is 0, then no JSON-RPC service will be started and it is
+/// forbidden to send JSON-RPC requests targeting this chain. This can be used to save up
+/// resources.
+/// If `json_rpc_max_pending_requests` is 0, then the value of `json_rpc_max_subscriptions` is
+/// ignored.
 ///
 /// If an error happens during the creation of the chain, a chain id will be allocated
 /// nonetheless, and must later be de-allocated by calling [`remove_chain`]. This allocated chain,
@@ -329,13 +334,15 @@ pub extern "C" fn advance_execution() {
 pub extern "C" fn add_chain(
     chain_spec_buffer_index: u32,
     database_content_buffer_index: u32,
-    json_rpc_running: u32,
+    json_rpc_max_pending_requests: u32,
+    json_rpc_max_subscriptions: u32,
     potential_relay_chains_buffer_index: u32,
 ) -> u32 {
     super::add_chain(
         get_buffer(chain_spec_buffer_index),
         get_buffer(database_content_buffer_index),
-        json_rpc_running,
+        json_rpc_max_pending_requests,
+        json_rpc_max_subscriptions,
         get_buffer(potential_relay_chains_buffer_index),
     )
 }
@@ -400,8 +407,7 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 /// This function returns:
 /// - 0 on success.
 /// - 1 if the request couldn't be parsed as a valid JSON-RPC request.
-/// - 2 if the chain is currently overloaded with JSON-RPC requests and refuses to queue another
-/// one.
+/// - 2 if the chain has too many pending JSON-RPC requests and refuses to queue another one.
 ///
 #[no_mangle]
 pub extern "C" fn json_rpc_send(text_buffer_index: u32, chain_id: u32) -> u32 {

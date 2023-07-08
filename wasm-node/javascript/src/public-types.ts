@@ -423,4 +423,27 @@ export interface AddChainOptions {
      * this chain.
      */
     disableJsonRpc?: boolean,
+
+    /**
+     * Maximum number of JSON-RPC requests that haven't been answered yet. Any further request will
+     * be rejected.
+     *
+     * This field is ignored if {@link AddChainOptions.disableJsonRpc} is `true`.
+     *
+     * A zero, negative or NaN value is invalid.
+     *
+     * If this value is not set, it means that there is no maximum.
+     */
+    jsonRpcMaxPendingRequests?: number,
+
+    /**
+     * Maximum number of active JSON-RPC subscriptions. Any further subscription will be rejected.
+     *
+     * This field is ignored if {@link AddChainOptions.disableJsonRpc} is `true`.
+     *
+     * A negative or NaN value is invalid.
+     *
+     * If this value is not set, it means that there is no maximum.
+     */
+    jsonRpcMaxSubscriptions?: number
 }

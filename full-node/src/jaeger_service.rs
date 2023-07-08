@@ -85,7 +85,9 @@ impl JaegerService {
                         async { Some(traces_out.next().await) },
                     )
                     .await
-                    else { break };
+                    else {
+                        break;
+                    };
 
                     // UDP sending errors happen only either if the API is misused (in which case
                     // panicking is desirable) or in case of missing priviledge, in which case a
@@ -130,12 +132,8 @@ impl JaegerService {
             .with_start_time_override(start_time)
     }
 
-    pub fn block_body_verify_span(&self, block_hash: &[u8; 32]) -> mick_jaeger::Span {
-        self.block_span(block_hash, "body-verify")
-    }
-
-    pub fn block_header_verify_span(&self, block_hash: &[u8; 32]) -> mick_jaeger::Span {
-        self.block_span(block_hash, "header-verify")
+    pub fn block_verify_span(&self, block_hash: &[u8; 32]) -> mick_jaeger::Span {
+        self.block_span(block_hash, "block-verify")
     }
 
     pub fn block_import_queue_span(&self, block_hash: &[u8; 32]) -> mick_jaeger::Span {

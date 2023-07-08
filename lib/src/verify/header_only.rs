@@ -47,10 +47,16 @@ pub struct Config<'a> {
 
     /// If `false`, digest items with an unknown consensus engine lead to an error.
     ///
-    /// Passing `true` can lead to blocks being considered as valid when they shouldn't. However,
-    /// even if `true` is passed, a recognized consensus engine must always be present.
-    /// Consequently, both `true` and `false` guarantee that the number of authorable blocks over
-    /// the network is bounded.
+    /// Note that blocks must always contain digest items that are relevant to the current
+    /// consensus algorithm. This option controls what happens when blocks contain additional
+    /// digest items that aren't recognized by the implementation.
+    ///
+    /// Passing `true` can lead to blocks being considered as valid when they shouldn't, as these
+    /// additional digest items could have some logic attached to them that restricts which blocks
+    /// are valid and which are not.
+    ///
+    /// However, since a recognized consensus engine must always be present, both `true` and
+    /// `false` guarantee that the number of authorable blocks over the network is bounded.
     pub allow_unknown_consensus_engines: bool,
 }
 
@@ -119,6 +125,9 @@ pub enum Success {
         /// > **Note**: This is a simple reminder. The value can also be found in the header of the
         /// >           block.
         slot_number: u64,
+
+        /// `true` if the claimed slot is a primary slot. `false` if it is a secondary slot.
+        is_primary_slot: bool,
 
         /// If `Some`, the verified block contains an epoch transition describing the new
         /// "next epoch". When verifying blocks that are children of this one, the value in this
@@ -254,6 +263,7 @@ pub fn verify(config: Config) -> Result<Success, Error> {
             match result {
                 Ok(s) => Ok(Success::Babe {
                     epoch_transition_target: s.epoch_transition_target,
+                    is_primary_slot: s.is_primary_slot,
                     slot_number: s.slot_number,
                 }),
                 Err(err) => Err(Error::BabeVerification(err)),

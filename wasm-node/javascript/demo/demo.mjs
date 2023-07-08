@@ -79,16 +79,35 @@ const client = smoldot.start({
     }
 });
 
+// Try to open a database, expecting it to fail in most situations.
+let defaultChainDb = "";
+try {
+    defaultChainDb = fs.readFileSync('database.json', { encoding: 'utf-8' });
+} catch(error) {}
+
 // Note that We call `addChain` again with the same chain spec again every time a new WebSocket
 // connection is established, but smoldot will de-duplicate them and only connect to the chain
 // once. By calling it now, we let smoldot start syncing that chain in the background even before
 // a WebSocket connection has been established.
-client
-    .addChain({ chainSpec: chainSpecsById[firstChainSpecId].chainSpec })
+const defaultChain = client
+    .addChain({
+        chainSpec: chainSpecsById[firstChainSpecId].chainSpec,
+        databaseContent: defaultChainDb
+    })
     .catch((error) => {
         console.error("Error while adding chain: " + error);
         process.exit(1);
     });
+
+// Uncomment if you want to test the database.
+/*defaultChain.then(async (chain) => {
+    while (true) {
+        chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"chainHead_unstable_finalizedDatabase","params":[]}');
+        const jsonResponse = JSON.parse(await chain.nextJsonRpcResponse());
+        fs.writeFileSync('database.json', jsonResponse.result);
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+    }
+});*/
 
 // Start the WebSocket server listening on port 9944.
 let wsServer = new WebSocketServer({

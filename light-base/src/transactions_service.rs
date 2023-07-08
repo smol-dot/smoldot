@@ -234,6 +234,10 @@ pub enum TransactionStatus {
     /// Transaction has been broadcasted to the given peers.
     Broadcast(Vec<PeerId>),
 
+    /// Transaction is now known to be valid. If it ever becomes invalid in the future, a
+    /// [`TransactionStatus::Dropped`] will be generated.
+    Validated,
+
     /// The block in which a block is included has changed.
     IncludedBlockUpdate {
         /// If `Some`, the transaction is included in the block of the best chain with the given
@@ -280,9 +284,6 @@ pub enum ValidateTransactionError {
     /// Error during the validation runtime call.
     #[display(fmt = "{_0}")]
     Validation(validate::Error),
-    /// Tried to access the next key of a storage key. This isn't possible through a call request
-    /// at the moment.
-    NextKeyForbidden,
 }
 
 #[derive(Debug, Clone)]
@@ -835,6 +836,11 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                                 HashDisplay(&tx_hash)
                             );
 
+                            worker
+                                .pending_transactions
+                                .transaction_user_data_mut(maybe_validated_tx_id).unwrap_or_else(|| unreachable!())
+                                .update_status(TransactionStatus::Validated);
+
                             // Schedule this transaction for announcement.
                             worker.next_reannounce.push(async move {
                                 maybe_validated_tx_id
@@ -1213,7 +1219,11 @@ async fn validate_transaction<TPlat: PlatformRef>(
                 ));
             }
             validate::Query::StorageGet(get) => {
-                let storage_value = runtime_call_lock.storage_entry(get.key().as_ref());
+                let storage_value = {
+                    let child_trie = get.child_trie();
+                    runtime_call_lock
+                        .storage_entry(child_trie.as_ref().map(|c| c.as_ref()), get.key().as_ref())
+                };
                 let storage_value = match storage_value {
                     Ok(v) => v,
                     Err(err) => {
@@ -1226,29 +1236,48 @@ async fn validate_transaction<TPlat: PlatformRef>(
                 validation_in_progress =
                     get.inject_value(storage_value.map(|(val, vers)| (iter::once(val), vers)));
             }
-            validate::Query::NextKey(nk) => {
-                // TODO:
-                runtime_call_lock.unlock(validate::Query::NextKey(nk).into_prototype());
-                break Err(ValidationError::InvalidOrError(
-                    InvalidOrError::ValidateError(ValidateTransactionError::NextKeyForbidden),
-                ));
-            }
-            validate::Query::PrefixKeys(prefix) => {
-                // TODO: lots of allocations because I couldn't figure how to make this annoying borrow checker happy
-                let rq_prefix = prefix.prefix().as_ref().to_owned();
-                let result = runtime_call_lock
-                    .storage_prefix_keys_ordered(&rq_prefix)
-                    .map(|i| i.map(|v| v.as_ref().to_owned()).collect::<Vec<_>>());
-                match result {
-                    Ok(v) => validation_in_progress = prefix.inject_keys_ordered(v.into_iter()),
+            validate::Query::ClosestDescendantMerkleValue(mv) => {
+                let merkle_value = {
+                    let child_trie = mv.child_trie();
+                    runtime_call_lock.closest_descendant_merkle_value(
+                        child_trie.as_ref().map(|c| c.as_ref()),
+                        &mv.key().collect::<Vec<_>>(),
+                    )
+                };
+                let merkle_value = match merkle_value {
+                    Ok(v) => v,
                     Err(err) => {
-                        runtime_call_lock
-                            .unlock(validate::Query::PrefixKeys(prefix).into_prototype());
+                        runtime_call_lock.unlock(
+                            validate::Query::ClosestDescendantMerkleValue(mv).into_prototype(),
+                        );
                         return Err(ValidationError::InvalidOrError(
                             InvalidOrError::ValidateError(ValidateTransactionError::Call(err)),
                         ));
                     }
-                }
+                };
+                validation_in_progress = mv.inject_merkle_value(merkle_value);
+            }
+            validate::Query::NextKey(nk) => {
+                let next_key = {
+                    let child_trie = nk.child_trie();
+                    runtime_call_lock.next_key(
+                        child_trie.as_ref().map(|c| c.as_ref()),
+                        &nk.key().collect::<Vec<_>>(),
+                        nk.or_equal(),
+                        &nk.prefix().collect::<Vec<_>>(),
+                        nk.branch_nodes(),
+                    )
+                };
+                let next_key = match next_key {
+                    Ok(v) => v,
+                    Err(err) => {
+                        runtime_call_lock.unlock(validate::Query::NextKey(nk).into_prototype());
+                        return Err(ValidationError::InvalidOrError(
+                            InvalidOrError::ValidateError(ValidateTransactionError::Call(err)),
+                        ));
+                    }
+                };
+                validation_in_progress = nk.inject_key(next_key.map(|k| k.iter().copied()));
             }
         }
     }

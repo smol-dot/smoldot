@@ -17,17 +17,17 @@
 
 use crate::{
     chain::chain_information,
-    executor::{self, host, runtime_host, storage_diff, vm},
-    header,
-    trie::calculate_root,
-    util,
+    executor::{self, host, runtime_host, vm},
+    header, util,
     verify::{aura, babe, inherents},
 };
 
 use alloc::{string::String, vec::Vec};
 use core::{iter, num::NonZeroU64, time::Duration};
 
-pub use runtime_host::TrieEntryVersion;
+pub use runtime_host::{
+    Nibble, StorageChanges, TrieChange, TrieChangeStorageValue, TrieEntryVersion,
+};
 
 /// Configuration for a block verification.
 pub struct Config<'a, TBody> {
@@ -39,17 +39,6 @@ pub struct Config<'a, TBody> {
     ///
     /// The hash of this header must be the one referenced in [`Config::block_header`].
     pub parent_block_header: header::HeaderRef<'a>,
-
-    /// Configuration items related to the consensus engine.
-    pub consensus: ConfigConsensus<'a>,
-
-    /// If `false`, digest items with an unknown consensus engine lead to an error.
-    ///
-    /// Passing `true` can lead to blocks being considered as valid when they shouldn't. However,
-    /// even if `true` is passed, a recognized consensus engine must always be present.
-    /// Consequently, both `true` and `false` guarantee that the number of authorable blocks over
-    /// the network is bounded.
-    pub allow_unknown_consensus_engines: bool,
 
     /// Time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time) (i.e.
     /// 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
@@ -66,10 +55,6 @@ pub struct Config<'a, TBody> {
 
     /// Body of the block to verify.
     pub block_body: TBody,
-
-    /// Optional cache corresponding to the storage trie root hash calculation of the parent
-    /// block.
-    pub main_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
 
     /// Maximum log level of the runtime.
     ///
@@ -114,26 +99,20 @@ pub struct Success {
     /// Runtime that was passed by [`Config`].
     pub parent_runtime: host::HostVmPrototype,
 
-    /// Contains `Some` if and only if [`Success::storage_main_trie_changes`] contains a change in
+    /// Contains `Some` if and only if [`Success::storage_changes`] contains a change in
     /// the `:code` or `:heappages` keys, indicating that the runtime has been modified. Contains
     /// the new runtime.
     pub new_runtime: Option<host::HostVmPrototype>,
 
-    /// Extra items in [`Success`] relevant to the consensus engine.
-    pub consensus: SuccessConsensus,
-
     /// List of changes to the storage main trie that the block performs.
-    pub storage_main_trie_changes: storage_diff::TrieDiff,
+    pub storage_changes: StorageChanges,
 
     /// State trie version indicated by the runtime. All the storage changes indicated by
-    /// [`Success::storage_main_trie_changes`] should store this version alongside with them.
+    /// [`Success::storage_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
 
     /// List of changes to the off-chain storage that this block performs.
-    pub offchain_storage_changes: storage_diff::TrieDiff,
-
-    /// Cache used for calculating the main trie root.
-    pub main_trie_root_calculation_cache: calculate_root::CalculationCache,
+    pub offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
 
     /// Concatenation of all the log messages printed by the runtime.
     pub logs: String,
@@ -216,102 +195,11 @@ pub enum Error {
     HeapPagesParseError(executor::InvalidHeapPagesError),
 }
 
-/// Verifies whether a block is valid.
+/// Verifies whether a block body is valid.
 pub fn verify(
     config: Config<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone>,
 ) -> Verify {
-    // Fail verification if there is any digest log item with an unrecognized consensus engine.
-    if !config.allow_unknown_consensus_engines {
-        if let Some(engine) = config
-            .block_header
-            .digest
-            .logs()
-            .find_map(|item| match item {
-                header::DigestItemRef::UnknownConsensus { engine, .. }
-                | header::DigestItemRef::UnknownSeal { engine, .. }
-                | header::DigestItemRef::UnknownPreRuntime { engine, .. } => Some(engine),
-                _ => None,
-            })
-        {
-            return Verify::Finished(Err((
-                Error::UnknownConsensusEngine { engine },
-                config.parent_runtime,
-            )));
-        }
-    }
-
-    // Start the consensus engine verification process.
-    let consensus_success = match &config.consensus {
-        ConfigConsensus::Aura {
-            current_authorities,
-            slot_duration,
-        } => {
-            if config.block_header.digest.has_any_babe() {
-                return Verify::Finished(Err((
-                    Error::MultipleConsensusEngines,
-                    config.parent_runtime,
-                )));
-            }
-
-            let result = aura::verify_header(aura::VerifyConfig {
-                header: config.block_header.clone(),
-                block_number_bytes: config.block_number_bytes,
-                parent_block_header: config.parent_block_header,
-                now_from_unix_epoch: config.now_from_unix_epoch,
-                current_authorities: current_authorities.clone(),
-                slot_duration: *slot_duration,
-            });
-
-            match result {
-                Ok(s) => SuccessConsensus::Aura {
-                    authorities_change: s.authorities_change,
-                },
-                Err(err) => {
-                    return Verify::Finished(Err((
-                        Error::AuraVerification(err),
-                        config.parent_runtime,
-                    )))
-                }
-            }
-        }
-        ConfigConsensus::Babe {
-            parent_block_epoch,
-            parent_block_next_epoch,
-            slots_per_epoch,
-        } => {
-            if config.block_header.digest.has_any_aura() {
-                return Verify::Finished(Err((
-                    Error::MultipleConsensusEngines,
-                    config.parent_runtime,
-                )));
-            }
-
-            let result = babe::verify_header(babe::VerifyConfig {
-                header: config.block_header.clone(),
-                block_number_bytes: config.block_number_bytes,
-                parent_block_header: config.parent_block_header,
-                parent_block_next_epoch: parent_block_next_epoch.clone(),
-                parent_block_epoch: parent_block_epoch.clone(),
-                slots_per_epoch: *slots_per_epoch,
-                now_from_unix_epoch: config.now_from_unix_epoch,
-            });
-
-            match result {
-                Ok(s) => SuccessConsensus::Babe {
-                    epoch_transition_target: s.epoch_transition_target,
-                    slot_number: s.slot_number,
-                },
-                Err(err) => {
-                    return Verify::Finished(Err((
-                        Error::BabeVerification(err),
-                        config.parent_runtime,
-                    )))
-                }
-            }
-        }
-    };
-
-    // Now that we have verified the header, we need to call two runtime functions:
+    // We need to call two runtime functions:
     //
     // - `BlockBuilder_check_inherents`, which does some basic verification of the inherents
     //   contained in the block.
@@ -372,7 +260,6 @@ pub fn verify(
                     .map(either::Left)
                     .chain(encoded_list.map(either::Right))
             },
-            main_trie_root_calculation_cache: config.main_trie_root_calculation_cache,
             storage_main_trie_changes: Default::default(),
             offchain_storage_changes: Default::default(),
             max_log_level: config.max_log_level,
@@ -391,7 +278,6 @@ pub fn verify(
         phase: VerifyInnerPhase::CheckInherents {
             execute_block_parameters,
         },
-        consensus_success,
     }
     .run()
 }
@@ -411,8 +297,9 @@ pub enum Verify {
     RuntimeCompilation(RuntimeCompilation),
     /// Loading a storage value is required in order to continue.
     StorageGet(StorageGet),
-    /// Fetching the list of keys with a given prefix is required in order to continue.
-    StoragePrefixKeys(StoragePrefixKeys),
+    /// Obtaining the Merkle value of the closest descendant of a trie node is required in order
+    /// to continue.
+    StorageClosestDescendantMerkleValue(StorageClosestDescendantMerkleValue),
     /// Fetching the key that follows a given one is required in order to continue.
     StorageNextKey(StorageNextKey),
 }
@@ -420,7 +307,6 @@ pub enum Verify {
 struct VerifyInner {
     inner: runtime_host::RuntimeHostVm,
     phase: VerifyInnerPhase,
-    consensus_success: SuccessConsensus,
 }
 
 enum VerifyInnerPhase {
@@ -465,10 +351,9 @@ impl VerifyInner {
                             virtual_machine: success.virtual_machine.into_prototype(),
                             function_to_call: "Core_execute_block",
                             parameter: iter::once(&execute_block_parameters),
-                            main_trie_root_calculation_cache: Some(
-                                success.main_trie_root_calculation_cache,
-                            ),
-                            storage_main_trie_changes: success.storage_main_trie_changes,
+                            storage_main_trie_changes: success
+                                .storage_changes
+                                .into_main_trie_diff(),
                             offchain_storage_changes: success.offchain_storage_changes,
                             max_log_level: 0,
                         });
@@ -482,7 +367,6 @@ impl VerifyInner {
                     };
 
                     self = VerifyInner {
-                        consensus_success: self.consensus_success,
                         phase: VerifyInnerPhase::ExecuteBlock { parent_code: None },
                         inner: import_process,
                     };
@@ -500,14 +384,14 @@ impl VerifyInner {
                     }
 
                     match (
-                        success.storage_main_trie_changes.diff_get(&b":code"[..]),
+                        success.storage_changes.main_trie_diff_get(&b":code"[..]),
                         parent_code,
                         success
-                            .storage_main_trie_changes
-                            .diff_get(&b":heappages"[..]),
+                            .storage_changes
+                            .main_trie_diff_get(&b":heappages"[..]),
                     ) {
                         (None, _, None) => {}
-                        (Some((None, ())), _, _) => {
+                        (Some(None), _, _) => {
                             return Verify::Finished(Err((
                                 Error::CodeKeyErased,
                                 success.virtual_machine.into_prototype(),
@@ -516,7 +400,6 @@ impl VerifyInner {
                         (None, None, Some(_)) => {
                             break Verify::StorageGet(StorageGet {
                                 inner: StorageGetInner::ParentCode { success },
-                                consensus_success: self.consensus_success,
                             })
                         }
                         (None, Some(None), _) => {
@@ -525,12 +408,12 @@ impl VerifyInner {
                                 success.virtual_machine.into_prototype(),
                             )))
                         }
-                        (Some((Some(_), ())), parent_code, heap_pages)
+                        (Some(Some(_)), parent_code, heap_pages)
                         | (_, parent_code @ Some(Some(_)), heap_pages) => {
                             let parent_runtime = success.virtual_machine.into_prototype();
 
                             let heap_pages = match heap_pages {
-                                Some((heap_pages, ())) => {
+                                Some(heap_pages) => {
                                     match executor::storage_heap_pages_to_value(heap_pages) {
                                         Ok(hp) => hp,
                                         Err(err) => {
@@ -545,16 +428,13 @@ impl VerifyInner {
                             };
 
                             return Verify::RuntimeCompilation(RuntimeCompilation {
-                                consensus_success: self.consensus_success,
                                 parent_runtime,
                                 heap_pages,
                                 parent_code,
                                 logs: success.logs,
                                 offchain_storage_changes: success.offchain_storage_changes,
-                                storage_main_trie_changes: success.storage_main_trie_changes,
+                                storage_changes: success.storage_changes,
                                 state_trie_version: success.state_trie_version,
-                                main_trie_root_calculation_cache: success
-                                    .main_trie_root_calculation_cache,
                             });
                         }
                     }
@@ -562,11 +442,9 @@ impl VerifyInner {
                     break Verify::Finished(Ok(Success {
                         parent_runtime: success.virtual_machine.into_prototype(),
                         new_runtime: None,
-                        consensus: self.consensus_success,
-                        storage_main_trie_changes: success.storage_main_trie_changes,
+                        storage_changes: success.storage_changes,
                         state_trie_version: success.state_trie_version,
                         offchain_storage_changes: success.offchain_storage_changes,
-                        main_trie_root_calculation_cache: success.main_trie_root_calculation_cache,
                         logs: success.logs,
                     }));
                 }
@@ -574,22 +452,15 @@ impl VerifyInner {
                 (runtime_host::RuntimeHostVm::StorageGet(inner), phase) => {
                     break Verify::StorageGet(StorageGet {
                         inner: StorageGetInner::Execution { inner, phase },
-                        consensus_success: self.consensus_success,
                     })
                 }
-                (runtime_host::RuntimeHostVm::PrefixKeys(inner), phase) => {
-                    break Verify::StoragePrefixKeys(StoragePrefixKeys {
-                        inner,
-                        phase,
-                        consensus_success: self.consensus_success,
-                    })
+                (runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(inner), phase) => {
+                    break Verify::StorageClosestDescendantMerkleValue(
+                        StorageClosestDescendantMerkleValue { inner, phase },
+                    )
                 }
                 (runtime_host::RuntimeHostVm::NextKey(inner), phase) => {
-                    break Verify::StorageNextKey(StorageNextKey {
-                        inner,
-                        phase,
-                        consensus_success: self.consensus_success,
-                    })
+                    break Verify::StorageNextKey(StorageNextKey { inner, phase })
                 }
                 (runtime_host::RuntimeHostVm::SignatureVerification(sig), phase) => {
                     self.inner = sig.verify_and_resume();
@@ -604,7 +475,6 @@ impl VerifyInner {
 #[must_use]
 pub struct StorageGet {
     inner: StorageGetInner,
-    consensus_success: SuccessConsensus,
 }
 
 enum StorageGetInner {
@@ -627,6 +497,14 @@ impl StorageGet {
         }
     }
 
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        match &self.inner {
+            StorageGetInner::Execution { inner, .. } => inner.child_trie(),
+            StorageGetInner::ParentCode { .. } => None,
+        }
+    }
+
     /// Injects the corresponding storage value.
     pub fn inject_value(
         self,
@@ -636,7 +514,6 @@ impl StorageGet {
             StorageGetInner::Execution { inner, phase } => VerifyInner {
                 inner: inner.inject_value(value),
                 phase,
-                consensus_success: self.consensus_success,
             }
             .run(),
             StorageGetInner::ParentCode { success } => VerifyInner {
@@ -649,34 +526,52 @@ impl StorageGet {
                         })
                     })),
                 },
-                consensus_success: self.consensus_success,
             }
             .run(),
         }
     }
 }
 
-/// Fetching the list of keys with a given prefix is required in order to continue.
+/// Obtaining the Merkle value of the closest descendant of a trie node is required in order
+/// to continue.
 #[must_use]
-pub struct StoragePrefixKeys {
-    inner: runtime_host::PrefixKeys,
+pub struct StorageClosestDescendantMerkleValue {
+    inner: runtime_host::ClosestDescendantMerkleValue,
     /// See [`VerifyInner::phase`].
     phase: VerifyInnerPhase,
-    consensus_success: SuccessConsensus,
 }
 
-impl StoragePrefixKeys {
-    /// Returns the prefix whose keys to load.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.inner.prefix()
+impl StorageClosestDescendantMerkleValue {
+    /// Returns the key whose closest descendant Merkle value must be passed back.
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+        self.inner.key()
     }
 
-    /// Injects the list of keys ordered lexicographically.
-    pub fn inject_keys_ordered(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> Verify {
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.inner.child_trie()
+    }
+
+    /// Indicate that the value is unknown and resume the calculation.
+    ///
+    /// This function be used if you are unaware of the Merkle value. The algorithm will perform
+    /// the calculation of this Merkle value manually, which takes more time.
+    pub fn resume_unknown(self) -> Verify {
         VerifyInner {
-            inner: self.inner.inject_keys_ordered(keys),
+            inner: self.inner.resume_unknown(),
             phase: self.phase,
-            consensus_success: self.consensus_success,
+        }
+        .run()
+    }
+
+    /// Injects the corresponding Merkle value.
+    ///
+    /// `None` can be passed if there is no descendant or, in the case of a child trie read, in
+    /// order to indicate that the child trie does not exist.
+    pub fn inject_merkle_value(self, merkle_value: Option<&[u8]>) -> Verify {
+        VerifyInner {
+            inner: self.inner.inject_merkle_value(merkle_value),
+            phase: self.phase,
         }
         .run()
     }
@@ -688,13 +583,17 @@ pub struct StorageNextKey {
     inner: runtime_host::NextKey,
     /// See [`VerifyInner::phase`].
     phase: VerifyInnerPhase,
-    consensus_success: SuccessConsensus,
 }
 
 impl StorageNextKey {
     /// Returns the key whose next key must be passed back.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.key()
+    }
+
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.inner.child_trie()
     }
 
     /// If `true`, then the provided value must the one superior or equal to the requested key.
@@ -703,9 +602,15 @@ impl StorageNextKey {
         self.inner.or_equal()
     }
 
+    /// If `true`, then the search must include both branch nodes and storage nodes. If `false`,
+    /// the search only covers storage nodes.
+    pub fn branch_nodes(&self) -> bool {
+        self.inner.branch_nodes()
+    }
+
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.inner.prefix()
     }
 
@@ -715,11 +620,10 @@ impl StorageNextKey {
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
-    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> Verify {
+    pub fn inject_key(self, key: Option<impl Iterator<Item = Nibble>>) -> Verify {
         VerifyInner {
             inner: self.inner.inject_key(key),
             phase: self.phase,
-            consensus_success: self.consensus_success,
         }
         .run()
     }
@@ -732,14 +636,12 @@ impl StorageNextKey {
 #[must_use]
 pub struct RuntimeCompilation {
     parent_runtime: host::HostVmPrototype,
-    storage_main_trie_changes: storage_diff::TrieDiff,
+    storage_changes: StorageChanges,
     state_trie_version: TrieEntryVersion,
-    offchain_storage_changes: storage_diff::TrieDiff,
-    main_trie_root_calculation_cache: calculate_root::CalculationCache,
+    offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
     logs: String,
     heap_pages: vm::HeapPages,
     parent_code: Option<Option<Vec<u8>>>,
-    consensus_success: SuccessConsensus,
 }
 
 impl RuntimeCompilation {
@@ -747,9 +649,8 @@ impl RuntimeCompilation {
     pub fn build(self) -> Verify {
         // A `RuntimeCompilation` object is built only if `:code` is available.
         let code = self
-            .storage_main_trie_changes
-            .diff_get(&b":code"[..])
-            .map(|(value, _)| value)
+            .storage_changes
+            .main_trie_diff_get(&b":code"[..])
             .or(self.parent_code.as_ref().map(|v| v.as_deref()))
             .unwrap()
             .unwrap();
@@ -772,11 +673,9 @@ impl RuntimeCompilation {
         Verify::Finished(Ok(Success {
             parent_runtime: self.parent_runtime,
             new_runtime: Some(new_runtime),
-            consensus: self.consensus_success,
-            storage_main_trie_changes: self.storage_main_trie_changes,
+            storage_changes: self.storage_changes,
             state_trie_version: self.state_trie_version,
             offchain_storage_changes: self.offchain_storage_changes,
-            main_trie_root_calculation_cache: self.main_trie_root_calculation_cache,
             logs: self.logs,
         }))
     }

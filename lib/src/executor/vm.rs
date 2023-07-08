@@ -75,7 +75,7 @@ mod interpreter;
         all(target_arch = "aarch64", target_os = "linux"),
         all(target_arch = "s390x", target_os = "linux")
     ),
-    feature = "std"
+    feature = "wasmtime"
 ))]
 mod jit;
 
@@ -119,7 +119,7 @@ enum VirtualMachinePrototypeInner {
             all(target_arch = "aarch64", target_os = "linux"),
             all(target_arch = "s390x", target_os = "linux")
         ),
-        feature = "std"
+        feature = "wasmtime"
     ))]
     Jit(jit::JitPrototype),
     Interpreter(interpreter::InterpreterPrototype),
@@ -143,7 +143,7 @@ impl VirtualMachinePrototype {
                         all(target_arch = "aarch64", target_os = "linux"),
                         all(target_arch = "s390x", target_os = "linux")
                     ),
-                    feature = "std"
+                    feature = "wasmtime"
                 ))]
                 ExecHint::CompileAheadOfTime => VirtualMachinePrototypeInner::Jit(
                     jit::JitPrototype::new(config.module_bytes, config.symbols)?,
@@ -157,7 +157,7 @@ impl VirtualMachinePrototype {
                         all(target_arch = "aarch64", target_os = "linux"),
                         all(target_arch = "s390x", target_os = "linux")
                     ),
-                    feature = "std"
+                    feature = "wasmtime"
                 )))]
                 ExecHint::CompileAheadOfTime => VirtualMachinePrototypeInner::Interpreter(
                     interpreter::InterpreterPrototype::new(config.module_bytes, config.symbols)?,
@@ -180,7 +180,7 @@ impl VirtualMachinePrototype {
                         all(target_arch = "aarch64", target_os = "linux"),
                         all(target_arch = "s390x", target_os = "linux")
                     ),
-                    feature = "std"
+                    feature = "wasmtime"
                 ))]
                 ExecHint::ForceWasmtime => VirtualMachinePrototypeInner::Jit(
                     jit::JitPrototype::new(config.module_bytes, config.symbols)?,
@@ -191,7 +191,8 @@ impl VirtualMachinePrototype {
 
     /// Returns the value of a global that the module exports.
     ///
-    /// The global variable must be a `u32`, otherwise an error is returned.
+    /// The global variable must be a `i32`, otherwise an error is returned. Negative values are
+    /// silently reinterpreted as an unsigned integer.
     pub fn global_value(&mut self, name: &str) -> Result<u32, GlobalValueErr> {
         match &mut self.inner {
             #[cfg(all(
@@ -203,7 +204,7 @@ impl VirtualMachinePrototype {
                     all(target_arch = "aarch64", target_os = "linux"),
                     all(target_arch = "s390x", target_os = "linux")
                 ),
-                feature = "std"
+                feature = "wasmtime"
             ))]
             VirtualMachinePrototypeInner::Jit(inner) => inner.global_value(name),
             VirtualMachinePrototypeInner::Interpreter(inner) => inner.global_value(name),
@@ -224,7 +225,7 @@ impl VirtualMachinePrototype {
                     all(target_arch = "aarch64", target_os = "linux"),
                     all(target_arch = "s390x", target_os = "linux")
                 ),
-                feature = "std"
+                feature = "wasmtime"
             ))]
             VirtualMachinePrototypeInner::Jit(inner) => inner.memory_max_pages(),
             VirtualMachinePrototypeInner::Interpreter(inner) => inner.memory_max_pages(),
@@ -246,7 +247,7 @@ impl VirtualMachinePrototype {
                     all(target_arch = "aarch64", target_os = "linux"),
                     all(target_arch = "s390x", target_os = "linux")
                 ),
-                feature = "std"
+                feature = "wasmtime"
             ))]
             VirtualMachinePrototypeInner::Jit(inner) => Prepare {
                 inner: PrepareInner::Jit(inner.prepare()),
@@ -270,7 +271,7 @@ impl fmt::Debug for VirtualMachinePrototype {
                     all(target_arch = "aarch64", target_os = "linux"),
                     all(target_arch = "s390x", target_os = "linux")
                 ),
-                feature = "std"
+                feature = "wasmtime"
             ))]
             VirtualMachinePrototypeInner::Jit(inner) => fmt::Debug::fmt(inner, f),
             VirtualMachinePrototypeInner::Interpreter(inner) => fmt::Debug::fmt(inner, f),
@@ -292,7 +293,7 @@ enum PrepareInner {
             all(target_arch = "aarch64", target_os = "linux"),
             all(target_arch = "s390x", target_os = "linux")
         ),
-        feature = "std"
+        feature = "wasmtime"
     ))]
     Jit(jit::Prepare),
     Interpreter(interpreter::Prepare),
@@ -312,7 +313,7 @@ impl Prepare {
                         all(target_arch = "aarch64", target_os = "linux"),
                         all(target_arch = "s390x", target_os = "linux")
                     ),
-                    feature = "std"
+                    feature = "wasmtime"
                 ))]
                 PrepareInner::Jit(inner) => {
                     VirtualMachinePrototypeInner::Jit(inner.into_prototype())
@@ -336,7 +337,7 @@ impl Prepare {
                     all(target_arch = "aarch64", target_os = "linux"),
                     all(target_arch = "s390x", target_os = "linux")
                 ),
-                feature = "std"
+                feature = "wasmtime"
             ))]
             PrepareInner::Jit(inner) => inner.memory_size(),
             PrepareInner::Interpreter(inner) => inner.memory_size(),
@@ -361,7 +362,7 @@ impl Prepare {
                     all(target_arch = "aarch64", target_os = "linux"),
                     all(target_arch = "s390x", target_os = "linux")
                 ),
-                feature = "std"
+                feature = "wasmtime"
             ))]
             PrepareInner::Jit(inner) => either::Left(inner.read_memory(offset, size)?),
             #[cfg(all(
@@ -373,7 +374,7 @@ impl Prepare {
                     all(target_arch = "aarch64", target_os = "linux"),
                     all(target_arch = "s390x", target_os = "linux")
                 ),
-                feature = "std"
+                feature = "wasmtime"
             ))]
             PrepareInner::Interpreter(inner) => either::Right(inner.read_memory(offset, size)?),
             #[cfg(not(all(
@@ -385,7 +386,7 @@ impl Prepare {
                     all(target_arch = "aarch64", target_os = "linux"),
                     all(target_arch = "s390x", target_os = "linux")
                 ),
-                feature = "std"
+                feature = "wasmtime"
             )))]
             PrepareInner::Interpreter(inner) => inner.read_memory(offset, size)?,
         })
@@ -405,7 +406,7 @@ impl Prepare {
                     all(target_arch = "aarch64", target_os = "linux"),
                     all(target_arch = "s390x", target_os = "linux")
                 ),
-                feature = "std"
+                feature = "wasmtime"
             ))]
             PrepareInner::Jit(inner) => inner.write_memory(offset, value),
             PrepareInner::Interpreter(inner) => inner.write_memory(offset, value),
@@ -427,7 +428,7 @@ impl Prepare {
                     all(target_arch = "aarch64", target_os = "linux"),
                     all(target_arch = "s390x", target_os = "linux")
                 ),
-                feature = "std"
+                feature = "wasmtime"
             ))]
             PrepareInner::Jit(inner) => inner.grow_memory(additional),
             PrepareInner::Interpreter(inner) => inner.grow_memory(additional),
@@ -452,7 +453,7 @@ impl Prepare {
                         all(target_arch = "aarch64", target_os = "linux"),
                         all(target_arch = "s390x", target_os = "linux")
                     ),
-                    feature = "std"
+                    feature = "wasmtime"
                 ))]
                 PrepareInner::Jit(inner) => match inner.start(function_name, params) {
                     Ok(vm) => VirtualMachineInner::Jit(vm),
@@ -493,7 +494,7 @@ impl fmt::Debug for Prepare {
                     all(target_arch = "aarch64", target_os = "linux"),
                     all(target_arch = "s390x", target_os = "linux")
                 ),
-                feature = "std"
+                feature = "wasmtime"
             ))]
             PrepareInner::Jit(inner) => fmt::Debug::fmt(inner, f),
             PrepareInner::Interpreter(inner) => fmt::Debug::fmt(inner, f),
@@ -515,7 +516,7 @@ enum VirtualMachineInner {
             all(target_arch = "aarch64", target_os = "linux"),
             all(target_arch = "s390x", target_os = "linux")
         ),
-        feature = "std"
+        feature = "wasmtime"
     ))]
     Jit(jit::Jit),
     Interpreter(interpreter::Interpreter),
@@ -540,7 +541,7 @@ impl VirtualMachine {
                     all(target_arch = "aarch64", target_os = "linux"),
                     all(target_arch = "s390x", target_os = "linux")
                 ),
-                feature = "std"
+                feature = "wasmtime"
             ))]
             VirtualMachineInner::Jit(inner) => inner.run(value),
             VirtualMachineInner::Interpreter(inner) => inner.run(value),
@@ -561,7 +562,7 @@ impl VirtualMachine {
                     all(target_arch = "aarch64", target_os = "linux"),
                     all(target_arch = "s390x", target_os = "linux")
                 ),
-                feature = "std"
+                feature = "wasmtime"
             ))]
             VirtualMachineInner::Jit(inner) => inner.memory_size(),
             VirtualMachineInner::Interpreter(inner) => inner.memory_size(),
@@ -586,7 +587,7 @@ impl VirtualMachine {
                     all(target_arch = "aarch64", target_os = "linux"),
                     all(target_arch = "s390x", target_os = "linux")
                 ),
-                feature = "std"
+                feature = "wasmtime"
             ))]
             VirtualMachineInner::Jit(inner) => either::Left(inner.read_memory(offset, size)?),
             #[cfg(all(
@@ -598,7 +599,7 @@ impl VirtualMachine {
                     all(target_arch = "aarch64", target_os = "linux"),
                     all(target_arch = "s390x", target_os = "linux")
                 ),
-                feature = "std"
+                feature = "wasmtime"
             ))]
             VirtualMachineInner::Interpreter(inner) => {
                 either::Right(inner.read_memory(offset, size)?)
@@ -612,7 +613,7 @@ impl VirtualMachine {
                     all(target_arch = "aarch64", target_os = "linux"),
                     all(target_arch = "s390x", target_os = "linux")
                 ),
-                feature = "std"
+                feature = "wasmtime"
             )))]
             VirtualMachineInner::Interpreter(inner) => inner.read_memory(offset, size)?,
         })
@@ -632,7 +633,7 @@ impl VirtualMachine {
                     all(target_arch = "aarch64", target_os = "linux"),
                     all(target_arch = "s390x", target_os = "linux")
                 ),
-                feature = "std"
+                feature = "wasmtime"
             ))]
             VirtualMachineInner::Jit(inner) => inner.write_memory(offset, value),
             VirtualMachineInner::Interpreter(inner) => inner.write_memory(offset, value),
@@ -654,7 +655,7 @@ impl VirtualMachine {
                     all(target_arch = "aarch64", target_os = "linux"),
                     all(target_arch = "s390x", target_os = "linux")
                 ),
-                feature = "std"
+                feature = "wasmtime"
             ))]
             VirtualMachineInner::Jit(inner) => inner.grow_memory(additional),
             VirtualMachineInner::Interpreter(inner) => inner.grow_memory(additional),
@@ -674,7 +675,7 @@ impl VirtualMachine {
                         all(target_arch = "aarch64", target_os = "linux"),
                         all(target_arch = "s390x", target_os = "linux")
                     ),
-                    feature = "std"
+                    feature = "wasmtime"
                 ))]
                 VirtualMachineInner::Jit(inner) => {
                     VirtualMachinePrototypeInner::Jit(inner.into_prototype())
@@ -699,7 +700,7 @@ impl fmt::Debug for VirtualMachine {
                     all(target_arch = "aarch64", target_os = "linux"),
                     all(target_arch = "s390x", target_os = "linux")
                 ),
-                feature = "std"
+                feature = "wasmtime"
             ))]
             VirtualMachineInner::Jit(inner) => fmt::Debug::fmt(inner, f),
             VirtualMachineInner::Interpreter(inner) => fmt::Debug::fmt(inner, f),
@@ -736,7 +737,7 @@ pub enum ExecHint {
             all(target_arch = "aarch64", target_os = "linux"),
             all(target_arch = "s390x", target_os = "linux")
         ),
-        feature = "std"
+        feature = "wasmtime"
     ))]
     #[cfg_attr(
         docsrs,
@@ -749,7 +750,7 @@ pub enum ExecHint {
                 all(target_arch = "aarch64", target_os = "linux"),
                 all(target_arch = "s390x", target_os = "linux")
             ),
-            feature = "std"
+            feature = "wasmtime"
         )))
     )]
     ForceWasmtime,
@@ -774,7 +775,7 @@ impl ExecHint {
                 all(target_arch = "aarch64", target_os = "linux"),
                 all(target_arch = "s390x", target_os = "linux")
             ),
-            feature = "std"
+            feature = "wasmtime"
         ))]
         fn value() -> Option<ExecHint> {
             Some(ExecHint::ForceWasmtime)
@@ -788,7 +789,7 @@ impl ExecHint {
                 all(target_arch = "aarch64", target_os = "linux"),
                 all(target_arch = "s390x", target_os = "linux")
             ),
-            feature = "std"
+            feature = "wasmtime"
         )))]
         fn value() -> Option<ExecHint> {
             None
@@ -926,7 +927,7 @@ impl<'a> TryFrom<&'a wasmi::FuncType> for Signature {
         all(target_arch = "aarch64", target_os = "linux"),
         all(target_arch = "s390x", target_os = "linux")
     ),
-    feature = "std"
+    feature = "wasmtime"
 ))]
 impl<'a> TryFrom<&'a wasmtime::FuncType> for Signature {
     type Error = UnsupportedTypeError;
@@ -1044,7 +1045,7 @@ impl From<WasmValue> for wasmi::Value {
         all(target_arch = "aarch64", target_os = "linux"),
         all(target_arch = "s390x", target_os = "linux")
     ),
-    feature = "std"
+    feature = "wasmtime"
 ))]
 impl From<WasmValue> for wasmtime::Val {
     fn from(val: WasmValue) -> Self {
@@ -1064,7 +1065,7 @@ impl From<WasmValue> for wasmtime::Val {
         all(target_arch = "aarch64", target_os = "linux"),
         all(target_arch = "s390x", target_os = "linux")
     ),
-    feature = "std"
+    feature = "wasmtime"
 ))]
 impl<'a> TryFrom<&'a wasmtime::Val> for WasmValue {
     type Error = UnsupportedTypeError;
@@ -1108,7 +1109,7 @@ impl TryFrom<wasmi::core::ValueType> for ValueType {
         all(target_arch = "aarch64", target_os = "linux"),
         all(target_arch = "s390x", target_os = "linux")
     ),
-    feature = "std"
+    feature = "wasmtime"
 ))]
 impl TryFrom<wasmtime::ValType> for ValueType {
     type Error = UnsupportedTypeError;
@@ -1204,8 +1205,8 @@ pub enum NewErr {
 }
 
 // TODO: an implementation of the `Error` trait is required in order to interact with wasmtime, but it's not possible to implement this trait on non-std yet
-#[cfg(feature = "std")]
-#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
+#[cfg(feature = "wasmtime")]
+#[cfg_attr(docsrs, doc(cfg(feature = "wasmtime")))]
 impl std::error::Error for NewErr {}
 
 /// Error that can happen when calling [`Prepare::start`].

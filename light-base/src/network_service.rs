@@ -1177,11 +1177,26 @@ async fn update_round<TPlat: PlatformRef>(
                             );
 
                             for (peer_id, addrs) in nodes {
+                                let mut valid_addrs = Vec::with_capacity(addrs.len());
+                                for addr in addrs {
+                                    match Multiaddr::try_from(addr) {
+                                        Ok(a) => valid_addrs.push(a),
+                                        Err(err) => {
+                                            log::debug!(
+                                                target: "connections",
+                                                "Discovery => InvalidAddress({})",
+                                                hex::encode(&err.addr)
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                }
+
                                 guarded.network.discover(
                                     &shared.platform.now(),
                                     chain_index,
                                     peer_id,
-                                    addrs,
+                                    valid_addrs,
                                 );
                             }
                         }
@@ -1202,6 +1217,21 @@ async fn update_round<TPlat: PlatformRef>(
                                 service::DiscoveryError::FindNode(
                                     service::KademliaFindNodeError::RequestFailed(err),
                                 ) if !err.is_protocol_error() => {}
+                                service::DiscoveryError::FindNode(
+                                    service::KademliaFindNodeError::RequestFailed(
+                                        peers::RequestError::Substream(connection::established::RequestError::ProtocolNotAvailable)
+                                    ))
+                                => {
+                                    // TODO: remove this warning in a long time
+                                    log::warn!(
+                                        target: "connections",
+                                        "Problem during discovery on {}: protocol not available. \
+                                        This might indicate that the version of Substrate used by \
+                                        the chain doesn't include \
+                                        <https://github.com/paritytech/substrate/pull/12545>.",
+                                        &shared.log_chain_names[chain_index]
+                                    );
+                                }
                                 _ => {
                                     log::warn!(
                                         target: "connections",

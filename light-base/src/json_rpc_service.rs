@@ -19,7 +19,7 @@
 //!
 //! # Usage
 //!
-//! Create a new JSON-RPC service by calling [`service`] then [`ServicePrototype::start`].
+//! Create a new JSON-RPC service by calling [`service()`] then [`ServicePrototype::start`].
 //! Creating a JSON-RPC service spawns a background task (through [`PlatformRef::spawn_task`])
 //! dedicated to processing JSON-RPC requests.
 //!
@@ -43,16 +43,19 @@ use crate::{
     network_service, platform::PlatformRef, runtime_service, sync_service, transactions_service,
 };
 
-use alloc::{format, string::String, sync::Arc, vec::Vec};
-use core::num::NonZeroU32;
-use futures_util::future;
+use alloc::{
+    format,
+    string::{String, ToString as _},
+    sync::Arc,
+};
+use core::num::{NonZeroU32, NonZeroUsize};
 use smoldot::{
     chain_spec,
-    json_rpc::{self, requests_subscriptions},
+    json_rpc::{self, service},
     libp2p::PeerId,
 };
 
-/// Configuration for [`service`].
+/// Configuration for [`service()`].
 pub struct Config {
     /// Name of the chain, for logging purposes.
     ///
@@ -79,12 +82,6 @@ pub struct Config {
     /// This parameter is necessary in order to prevent users from using up too much memory within
     /// the client.
     pub max_parallel_requests: NonZeroU32,
-
-    /// Maximum number of subscriptions that can be processed simultaneously.
-    ///
-    /// In combination with [`Config::max_parallel_requests`], this can increase or decrease
-    /// the priority of updating subscriptions compared to answering requests.
-    pub max_parallel_subscription_updates: NonZeroU32,
 }
 
 /// Creates a new JSON-RPC service with the given configuration.
@@ -94,47 +91,24 @@ pub struct Config {
 ///
 /// Destroying the [`Frontend`] automatically shuts down the service.
 pub fn service(config: Config) -> (Frontend, ServicePrototype) {
-    let mut requests_subscriptions =
-        requests_subscriptions::RequestsSubscriptions::new(requests_subscriptions::Config {
-            max_clients: 1,
-            max_requests_per_client: config.max_pending_requests,
-            max_subscriptions_per_client: config.max_subscriptions,
-        });
-
-    let client_id = requests_subscriptions.add_client_mut().unwrap(); // Adding a client can fail only if the limit is reached.
-    let requests_subscriptions = Arc::new(requests_subscriptions);
-
     let log_target = format!("json-rpc-{}", config.log_name);
 
-    // We are later going to spawn a bunch of tasks. Each task is associated with an "abort
-    // handle" that makes it possible to later abort it. We calculate here the number of handles
-    // that are necessary.
-    // This calculation must be in sync with the part of the code that spawns the tasks. Assertions
-    // are there in order to make sure that this is the case.
-    let num_handles =
-        config.max_parallel_requests.get() + config.max_parallel_subscription_updates.get() + 1;
-
-    let mut background_aborts = Vec::with_capacity(usize::try_from(num_handles).unwrap());
-    let mut background_abort_registrations = Vec::with_capacity(background_aborts.capacity());
-    for _ in 0..num_handles {
-        let (abort, reg) = future::AbortHandle::new_pair();
-        background_aborts.push(abort);
-        background_abort_registrations.push(reg);
-    }
+    let (requests_processing_task, requests_responses_io) =
+        service::client_main_task(service::Config {
+            max_active_subscriptions: config.max_subscriptions,
+            max_pending_requests: config.max_pending_requests,
+            serialized_requests_io_channel_size_hint: NonZeroUsize::new(4).unwrap(),
+        });
 
     let frontend = Frontend {
         log_target: log_target.clone(),
-        requests_subscriptions: requests_subscriptions.clone(),
-        client_id,
-        background_aborts: Arc::from(background_aborts),
+        requests_responses_io: Arc::new(requests_responses_io),
     };
 
     let prototype = ServicePrototype {
-        background_abort_registrations,
         log_target,
-        requests_subscriptions,
+        requests_processing_task,
         max_parallel_requests: config.max_parallel_requests,
-        max_parallel_subscription_updates: config.max_parallel_subscription_updates,
     };
 
     (frontend, prototype)
@@ -148,21 +122,13 @@ pub fn service(config: Config) -> (Frontend, ServicePrototype) {
 /// Destroying all the [`Frontend`]s automatically shuts down the associated service.
 #[derive(Clone)]
 pub struct Frontend {
-    /// State machine holding all the clients, requests, and subscriptions.
+    /// Sending requests and receiving responses.
     ///
-    /// Shared with the [`background`].
-    requests_subscriptions:
-        Arc<requests_subscriptions::RequestsSubscriptions<background::SubscriptionMessage>>,
-
-    /// Identifier of the unique client within the [`Frontend::requests_subscriptions`].
-    client_id: requests_subscriptions::ClientId,
+    /// Connected to the [`background`].
+    requests_responses_io: Arc<service::SerializedRequestsIo>,
 
     /// Target to use when emitting logs.
     log_target: String,
-
-    /// Handles to abort the background tasks that hold and process the
-    /// [`Frontend::requests_subscriptions`].
-    background_aborts: Arc<[future::AbortHandle]>,
 }
 
 impl Frontend {
@@ -173,42 +139,44 @@ impl Frontend {
     /// isn't called often enough. Use [`HandleRpcError::into_json_rpc_error`] to build the
     /// JSON-RPC response to immediately send back to the user.
     pub fn queue_rpc_request(&self, json_rpc_request: String) -> Result<(), HandleRpcError> {
-        // If the request isn't even a valid JSON-RPC request, we can't even send back a response.
-        // We have no choice but to immediately refuse the request.
-        if let Err(error) = json_rpc::parse::parse_call(&json_rpc_request) {
-            log::warn!(
-                target: &self.log_target,
-                "Refused malformed JSON-RPC request: {}", error
-            );
-            return Err(HandleRpcError::MalformedJsonRpc(error));
-        }
-
-        // Logging the request before it is queued.
-        log::debug!(
-            target: &self.log_target,
-            "PendingRequestsQueue <= {}",
-            crate::util::truncated_str(
-                json_rpc_request.chars().filter(|c| !c.is_control()),
-                100,
-            )
-        );
+        let log_friendly_request =
+            crate::util::truncated_str(json_rpc_request.chars().filter(|c| !c.is_control()), 100)
+                .to_string();
 
         match self
-            .requests_subscriptions
-            .try_queue_client_request(&self.client_id, json_rpc_request)
+            .requests_responses_io
+            .try_send_request(json_rpc_request)
         {
-            Ok(()) => Ok(()),
-            Err(err) => {
+            Ok(()) => {
+                log::debug!(
+                    target: &self.log_target,
+                    "JSON-RPC => {}",
+                    log_friendly_request
+                );
+                Ok(())
+            }
+            Err(service::TrySendRequestError {
+                cause: service::TrySendRequestErrorCause::TooManyPendingRequests,
+                request,
+            }) => Err(HandleRpcError::TooManyPendingRequests {
+                json_rpc_request: request,
+            }),
+            Err(service::TrySendRequestError {
+                cause: service::TrySendRequestErrorCause::MalformedJson(error),
+                ..
+            }) => {
+                // If the request isn't even a valid JSON-RPC request, we can't even send back a
+                // response. We have no choice but to immediately refuse the request.
                 log::warn!(
                     target: &self.log_target,
-                    "Request denied due to JSON-RPC service being overloaded. This will likely \
-                    cause the JSON-RPC client to malfunction."
+                    "Refused malformed JSON-RPC request: {}", error
                 );
-
-                Err(HandleRpcError::Overloaded {
-                    json_rpc_request: err.request,
-                })
+                Err(HandleRpcError::MalformedJsonRpc(error))
             }
+            Err(service::TrySendRequestError {
+                cause: service::TrySendRequestErrorCause::ClientMainTaskDestroyed,
+                ..
+            }) => unreachable!(),
         }
     }
 
@@ -217,10 +185,10 @@ impl Frontend {
     /// If this function is called multiple times in parallel, the order in which the calls are
     /// responded to is unspecified.
     pub async fn next_json_rpc_response(&self) -> String {
-        let message = self
-            .requests_subscriptions
-            .next_response(&self.client_id)
-            .await;
+        let message = match self.requests_responses_io.wait_next_response().await {
+            Ok(m) => m,
+            Err(service::WaitNextResponseError::ClientMainTaskDestroyed) => unreachable!(),
+        };
 
         log::debug!(
             target: &self.log_target,
@@ -235,38 +203,18 @@ impl Frontend {
     }
 }
 
-impl Drop for Frontend {
-    fn drop(&mut self) {
-        // Call `abort()` if this was the last instance of the `Arc<AbortHandle>` (and thus the
-        // last instance of `Frontend`).
-        if let Some(background_aborts) = Arc::get_mut(&mut self.background_aborts) {
-            for background_abort in background_aborts {
-                background_abort.abort();
-            }
-        }
-    }
-}
-
 /// Prototype for a JSON-RPC service. Must be initialized using [`ServicePrototype::start`].
 pub struct ServicePrototype {
-    /// State machine holding all the clients, requests, and subscriptions.
+    /// Task processing the requests.
     ///
-    /// Shared with the [`background`].
-    requests_subscriptions:
-        Arc<requests_subscriptions::RequestsSubscriptions<background::SubscriptionMessage>>,
+    /// Later sent to the [`background`].
+    requests_processing_task: service::ClientMainTask,
 
     /// Target to use when emitting logs.
     log_target: String,
 
     /// Value obtained through [`Config::max_parallel_requests`].
     max_parallel_requests: NonZeroU32,
-
-    /// Value obtained through [`Config::max_parallel_subscription_updates`].
-    max_parallel_subscription_updates: NonZeroU32,
-
-    /// List of abort handles. When tasks are spawned, each handle is associated with a task, so
-    /// that they can all be aborted. See [`Frontend::background_aborts`].
-    background_abort_registrations: Vec<future::AbortRegistration>,
 }
 
 /// Configuration for a JSON-RPC service.
@@ -325,11 +273,9 @@ impl ServicePrototype {
     pub fn start<TPlat: PlatformRef>(self, config: StartConfig<'_, TPlat>) {
         background::start(
             self.log_target.clone(),
-            self.requests_subscriptions.clone(),
             config,
+            self.requests_processing_task,
             self.max_parallel_requests,
-            self.max_parallel_subscription_updates,
-            self.background_abort_registrations,
         )
     }
 }
@@ -337,11 +283,12 @@ impl ServicePrototype {
 /// Error potentially returned when queuing a JSON-RPC request.
 #[derive(Debug, derive_more::Display)]
 pub enum HandleRpcError {
-    /// The JSON-RPC service cannot process this request, as it is already too busy.
+    /// The JSON-RPC service cannot process this request, as too many requests are already being
+    /// processed.
     #[display(
-        fmt = "The JSON-RPC service cannot process this request, as it is already too busy."
+        fmt = "The JSON-RPC service cannot process this request, as too many requests are already being processed."
     )]
-    Overloaded {
+    TooManyPendingRequests {
         /// Request that was being queued.
         json_rpc_request: String,
     },
@@ -357,7 +304,7 @@ impl HandleRpcError {
     /// notification.
     pub fn into_json_rpc_error(self) -> Option<String> {
         let json_rpc_request = match self {
-            HandleRpcError::Overloaded { json_rpc_request } => json_rpc_request,
+            HandleRpcError::TooManyPendingRequests { json_rpc_request } => json_rpc_request,
             HandleRpcError::MalformedJsonRpc(_) => return None,
         };
 

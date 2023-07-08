@@ -41,27 +41,27 @@ jobs:
       # This `if` adds an additional safety against accidental pushes.
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       with:
-        registry: docker.pkg.github.com
+        registry: ghcr.io
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-    - uses: docker/build-push-action@v4.0.0
+    - uses: docker/build-push-action@v4.1.1
       with:
         context: .
         file: ./full-node/Dockerfile
         load: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        tags: docker.pkg.github.com/smol-dot/smoldot/node:main
-    - run: docker push docker.pkg.github.com/smol-dot/smoldot/node:main
+        tags: ghcr.io/smol-dot/full-node:main
+    - run: docker push ghcr.io/smol-dot/full-node:main
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
   build-js-doc:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.69
+      image: rust:1.70
     steps:
       - uses: actions/checkout@v3
         with:
           path: repo
-      - uses: actions/setup-node@v3.6.0
+      - uses: actions/setup-node@v3.7.0
         with:
           node-version: current
       - run: npm install
@@ -82,7 +82,7 @@ jobs:
   build-rust-doc:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.69
+      image: rust:1.70
     steps:
       - uses: actions/checkout@v3
         with:
@@ -103,7 +103,7 @@ jobs:
   build-tests-coverage:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.69
+      image: rust:1.70
     steps:
       - run: apt update && apt install -y jq
       - run: rustup component add llvm-tools-preview
@@ -173,14 +173,13 @@ jobs:
   npm-publish:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.69
+      image: rust:1.70
     steps:
       - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3.6.0
+      - uses: actions/setup-node@v3.7.0
         with:
           # Set the oldest version still maintained, in order to ensure compatibility. See <https://nodejs.dev/en/about/releases/>
           node-version: 16
-      - run: apt-get update && apt install -y binaryen # For `wasm-opt`
       - uses: actions-rs/toolchain@v1
         with:
           # Ideally we don't want to install any toolchain, but the GH action doesn't support this.
@@ -210,13 +209,12 @@ jobs:
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0   # Necessary below for checking if the tag exists.
-      - uses: actions/setup-node@v3.6.0
+      - uses: actions/setup-node@v3.7.0
         with:
           node-version: 16
       - uses: denoland/setup-deno@v1
         with:
           deno-version: v1.x
-      - run: sudo apt-get update && sudo apt install -y binaryen # For `wasm-opt`
       - uses: actions-rs/toolchain@v1
         with:
           # Ideally we don't want to install any toolchain, but the GH action doesn't support this.

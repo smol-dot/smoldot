@@ -1171,7 +1171,11 @@ async fn parahead<TPlat: PlatformRef>(
                 return Err(ParaheadError::ReadOnlyRuntime(error.detail));
             }
             read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
-                let storage_value = runtime_call_lock.storage_entry(get.key().as_ref());
+                let storage_value = {
+                    let child_trie = get.child_trie();
+                    runtime_call_lock
+                        .storage_entry(child_trie.as_ref().map(|c| c.as_ref()), get.key().as_ref())
+                };
                 let storage_value = match storage_value {
                     Ok(v) => v.map(|(v, _)| v),
                     Err(err) => {
