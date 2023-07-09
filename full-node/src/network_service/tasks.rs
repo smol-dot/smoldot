@@ -17,10 +17,11 @@
 
 use crate::{LogCallback, LogLevel};
 use core::{future::Future, pin};
+use futures_lite::future;
 use futures_util::{FutureExt as _, StreamExt as _};
 use smol::{
     channel,
-    future::{self, FutureExt as _},
+    future::FutureExt as _,
     io::{AsyncRead, AsyncWrite},
 };
 use smoldot::{
@@ -232,36 +233,42 @@ pub(super) async fn established_connection_task(
         // Starting from here, we block the current task until more processing needs to happen.
 
         // Future ready when the timeout indicated by the connection state machine is reached.
-        let poll_after = if let Some(wake_up) = wake_up_after {
+        let poll_after = {
             let now = Instant::now();
-            if wake_up > now {
-                futures_util::future::Either::Left(smol::Timer::at(wake_up))
-            } else {
+            if wake_up_after
+                .as_ref()
+                .map_or(false, |wake_up_after| *wake_up_after <= now)
+            {
                 // "Wake up" immediately.
                 continue;
+            } else {
+                async {
+                    if let Some(wake_up_after) = wake_up_after {
+                        smol::Timer::at(wake_up_after).await;
+                    } else {
+                        future::pending().await
+                    }
+                }
             }
-        } else {
-            futures_util::future::Either::Right(future::pending())
-        }
-        .fuse();
-
+        };
         // Future that is woken up when new data is ready on the socket.
-        let connection_ready = pin::pin!(if let Some(socket) = socket_container.as_mut() {
-            futures_util::future::Either::Left(Pin::new(socket).process())
-        } else {
-            futures_util::future::Either::Right(future::pending())
-        });
-
+        let connection_ready = async {
+            if let Some(socket) = socket_container.as_mut() {
+                Pin::new(socket).process().await;
+            } else {
+                future::pending().await
+            }
+        };
         // Future that is woken up when a new message is coming from the coordinator.
-        let message_from_coordinator = Pin::new(&mut coordinator_to_connection).peek();
+        let message_from_coordinator = async {
+            pin::Pin::new(&mut coordinator_to_connection).peek().await;
+        };
 
-        // Wait until either some data is ready on the socket, or the connection state machine
-        // has requested to be polled again, or a message is coming from the coordinator.
-        futures_util::future::select(
-            futures_util::future::select(connection_ready, message_from_coordinator),
-            poll_after,
-        )
-        .await;
+        // Combine all futures into one.
+        poll_after
+            .or(connection_ready)
+            .or(message_from_coordinator)
+            .await;
     }
 }
 
