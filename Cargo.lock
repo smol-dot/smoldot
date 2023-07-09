@@ -2361,7 +2361,6 @@ dependencies = [
  "siphasher",
  "slab",
  "smallvec",
- "smol",
  "soketto",
  "tempfile",
  "tiny-keccak",
