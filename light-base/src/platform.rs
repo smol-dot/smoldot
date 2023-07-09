@@ -375,9 +375,6 @@ pub enum IpAddr {
 pub struct ConnectError {
     /// Human-readable error message.
     pub message: String,
-
-    /// `true` if the error is caused by the address to connect to being forbidden or unsupported.
-    pub is_bad_addr: bool,
 }
 
 /// State of the read buffer, as returned by [`PlatformRef::read_buffer`].

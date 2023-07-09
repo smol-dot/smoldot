@@ -24,6 +24,7 @@ use crate::platform::{
 use alloc::{sync::Arc, vec, vec::Vec};
 use core::{cmp, iter, pin};
 use futures_channel::mpsc;
+use futures_lite::FutureExt as _;
 use futures_util::{future, FutureExt as _, StreamExt as _};
 use smoldot::{
     libp2p::{collection::SubstreamFate, read_write::ReadWrite},
@@ -57,45 +58,34 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
         let socket = address.map(|addr| shared.platform.connect(addr));
         async move {
             if let Some(socket) = socket {
-                socket.await
+                socket.await.map_err(|err| (err, false))
             } else {
-                Err(ConnectError {
-                    message: "Invalid multiaddr".into(),
-                    is_bad_addr: true,
-                })
+                Err((
+                    ConnectError {
+                        message: "Invalid multiaddr".into(),
+                    },
+                    true,
+                ))
             }
         }
     };
 
     let socket = {
-        let mut socket = pin::pin!(socket.fuse());
-        let mut timeout = shared.platform.sleep_until(start_connect.timeout).fuse();
-
-        let result = futures_util::select! {
-            _ = timeout => Err(None),
-            result = socket => result.map_err(Some),
+        let timeout = async {
+            shared.platform.sleep_until(start_connect.timeout).await;
+            Err((
+                ConnectError {
+                    message: "Timeout reached".into(),
+                },
+                false,
+            ))
         };
+
+        let result = socket.or(timeout).await;
 
         match (&result, is_important) {
             (Ok(_), _) => {}
-            (Err(None), true) => {
-                log::warn!(
-                    target: "connections",
-                    "Timeout when trying to reach bootnode {} through {}. Because bootnodes \
-                    constitue the access point of a chain, they are expected to be online at all \
-                    time.",
-                    start_connect.expected_peer_id, start_connect.multiaddr
-                );
-            }
-            (Err(None), false) => {
-                log::debug!(
-                    target: "connections",
-                    "Pending({:?}, {}) => Timeout({})",
-                    start_connect.id, start_connect.expected_peer_id,
-                    start_connect.multiaddr
-                );
-            }
-            (Err(Some(err)), true) if !err.is_bad_addr => {
+            (Err((err, false)), true) => {
                 log::warn!(
                     target: "connections",
                     "Failed to reach bootnode {} through {}: {}. Because bootnodes constitue the \
@@ -104,24 +94,23 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
                     err.message
                 );
             }
-            (Err(Some(err)), _) => {
+            (Err((err, is_bad_addr)), _) => {
                 log::debug!(
                     target: "connections",
                     "Pending({:?}, {}) => ReachFailed(addr={}, known-unreachable={:?}, error={:?})",
                     start_connect.id, start_connect.expected_peer_id,
-                    start_connect.multiaddr, err.is_bad_addr, err.message
+                    start_connect.multiaddr, is_bad_addr, err.message
                 );
             }
         }
 
         match result {
             Ok(connection) => connection,
-            Err(err) => {
+            Err((_, is_bad_addr)) => {
                 let mut guarded = shared.guarded.lock().await;
-                guarded.network.pending_outcome_err(
-                    start_connect.id,
-                    err.map_or(false, |err| err.is_bad_addr),
-                );
+                guarded
+                    .network
+                    .pending_outcome_err(start_connect.id, is_bad_addr);
 
                 for chain_index in 0..guarded.network.num_chains() {
                     guarded.unassign_slot_and_ban(

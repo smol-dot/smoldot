@@ -163,13 +163,11 @@ impl PlatformRef for Arc<DefaultPlatform> {
                     .await
                     .map_err(|err| ConnectError {
                         message: format!("Failed to negotiate WebSocket: {err}"),
-                        is_bad_addr: false,
                     })?,
                 ),
                 (Ok(tcp_socket), None) => future::Either::Left(tcp_socket),
                 (Err(err), _) => {
                     return Err(ConnectError {
-                        is_bad_addr: false,
                         message: format!("Failed to reach peer: {err}"),
                     })
                 }

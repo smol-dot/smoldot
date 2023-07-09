@@ -308,10 +308,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                     debug_assert_eq!(*connection_handles_alive, 0);
                     let message = mem::take(message);
                     lock.connections.remove(&connection_id).unwrap();
-                    Err(ConnectError {
-                        message,
-                        is_bad_addr: false,
-                    })
+                    Err(ConnectError { message })
                 }
             }
         })
