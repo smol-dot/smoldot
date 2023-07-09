@@ -53,7 +53,11 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// should be abruptly dropped (i.e. RST) as well, unless its reading and writing sides
     /// have been gracefully closed in the past.
     type Stream: Send + 'static;
-    type ConnectFuture: Future<Output = Result<PlatformConnection<Self::Stream, Self::MultiStream>, ConnectError>>
+    type StreamConnectFuture: Future<Output = Result<Self::Stream, ConnectError>>
+        + Unpin
+        + Send
+        + 'static;
+    type MultiStreamConnectFuture: Future<Output = Result<MultiStreamWebRtcConnection<Self::MultiStream>, ConnectError>>
         + Unpin
         + Send
         + 'static;
@@ -115,7 +119,16 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// The function implementation panics if [`Address`] is of a type for which
     /// [`Platform::supports_connection_type`] returns `false`.
     ///
-    fn connect(&self, address: Address) -> Self::ConnectFuture;
+    fn connect_stream(&self, address: Address) -> Self::StreamConnectFuture;
+
+    /// Starts a connection attempt to the given multiaddress.
+    ///
+    /// # Panic
+    ///
+    /// The function implementation panics if [`MultiStreamAddress`] is of a type for which
+    /// [`Platform::supports_connection_type`] returns `false`.
+    ///
+    fn connect_multistream(&self, address: MultiStreamAddress) -> Self::MultiStreamConnectFuture;
 
     /// Queues the opening of an additional outbound substream.
     ///
@@ -194,7 +207,7 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
 
     /// Queues the given bytes to be sent out on the given stream.
     ///
-    /// > **Note**: In the case of [`PlatformConnection::MultiStreamWebRtc`], be aware that there
+    /// > **Note**: In the case of [`MultiStreamAddress::WebRtc`], be aware that there
     /// >           exists a limit to the amount of data to send in a single packet. The `data`
     /// >           parameter is guaranteed to fit within that limit. Due to the existence of this
     /// >           limit, the implementation of this function shouldn't attempt to save function
@@ -220,19 +233,7 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     fn close_send(&self, stream: &mut Self::Stream);
 }
 
-/// Type of opened connection. See [`PlatformRef::connect`].
-#[derive(Debug)]
-pub enum PlatformConnection<TStream, TConnection> {
-    /// The connection is a single stream on top of which Noise encryption and Yamux multiplexing
-    /// should be negotiated. The division in multiple substreams is handled internally.
-    SingleStreamMultistreamSelectNoiseYamux(TStream),
-    /// The connection is made of multiple substreams. The encryption and multiplexing are handled
-    /// externally. The reading and writing sides of substreams must never close, and substreams
-    /// can only be abruptly closed by either side.
-    MultiStreamWebRtc(MultiStreamWebRtcConnection<TConnection>),
-}
-
-/// Type of opened connection. See [`PlatformConnection::MultiStreamWebRtc`].
+/// Type of opened connection. See [`MultiStreamAddress::WebRtc`].
 #[derive(Debug)]
 pub struct MultiStreamWebRtcConnection<TConnection> {
     /// Object representing the WebRTC connection.
@@ -293,12 +294,19 @@ impl<'a> From<&'a Address<'a>> for ConnectionType {
                 secure: *secure,
                 remote_is_localhost: *hostname == "localhost", // TODO: ASCII compare?
             },
-            Address::WebRtc { .. } => ConnectionType::WebRtc,
         }
     }
 }
 
-/// Connection type passed to [`PlatformRef::supports_connection_type`].
+impl<'a> From<&'a MultiStreamAddress> for ConnectionType {
+    fn from(address: &'a MultiStreamAddress) -> ConnectionType {
+        match address {
+            MultiStreamAddress::WebRtc { .. } => ConnectionType::WebRtc,
+        }
+    }
+}
+
+/// Address passed to [`PlatformRef::connect_single_stream`].
 // TODO: we don't differentiate between Dns4 and Dns6
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Address<'a> {
@@ -349,7 +357,12 @@ pub enum Address<'a> {
         /// `true` for WebSocket secure connections.
         secure: bool,
     },
+}
 
+/// Address passed to [`PlatformRef::connect_multistream`].
+// TODO: we don't differentiate between Dns4 and Dns6
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum MultiStreamAddress {
     /// Libp2p-specific WebRTC flavour.
     ///
     /// The implementation the [`PlatformRef`] trait is responsible for opening the SCTP
@@ -390,7 +403,7 @@ pub enum ReadBuffer<'a> {
     /// The reading side of the stream has been closed by the remote.
     ///
     /// Note that this is forbidden for connections of
-    /// type [`PlatformConnection::MultiStreamWebRtc`].
+    /// type [`MultiStreamAddress::WebRtc`].
     Closed,
 
     /// The stream has been abruptly closed by the remote.

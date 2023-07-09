@@ -91,7 +91,7 @@ export interface Instance {
      * all connections.
      */
     shutdownExecutor: () => void,
-    connectionOpened: (connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number, writeClosable: boolean } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateSha256: Uint8Array, remoteTlsCertificateSha256: Uint8Array }) => void,
+    connectionOpened: (connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateSha256: Uint8Array, remoteTlsCertificateSha256: Uint8Array }) => void,
     connectionReset: (connectionId: number, message: string) => void,
     streamWritableBytes: (connectionId: number, numExtra: number, streamId?: number) => void,
     streamMessage: (connectionId: number, message: Uint8Array, streamId?: number) => void,
@@ -705,12 +705,12 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             cb();
         },
 
-        connectionOpened: (connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number, writeClosable: boolean } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateSha256: Uint8Array, remoteTlsCertificateSha256: Uint8Array }) => {
+        connectionOpened: (connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateSha256: Uint8Array, remoteTlsCertificateSha256: Uint8Array }) => {
             if (!state.instance)
                 return;
             switch (info.type) {
                 case 'single-stream': {
-                    state.instance.exports.connection_open_single_stream(connectionId, 0, info.initialWritableBytes, info.writeClosable ? 1 : 0);
+                    state.instance.exports.connection_open_single_stream(connectionId, info.initialWritableBytes);
                     break
                 }
                 case 'multi-stream': {
@@ -790,7 +790,7 @@ interface SmoldotWasmExports extends WebAssembly.Exports {
     json_rpc_responses_peek: (chainId: number) => number,
     json_rpc_responses_pop: (chainId: number) => void,
     timer_finished: () => void,
-    connection_open_single_stream: (connectionId: number, handshakeTy: number, initialWritableBytes: number, writeClosable: number) => void,
+    connection_open_single_stream: (connectionId: number, initialWritableBytes: number) => void,
     connection_open_multi_stream: (connectionId: number, handshakeTyBufferIndex: number) => void,
     stream_writable_bytes: (connectionId: number, streamId: number, numBytes: number) => void,
     stream_message: (connectionId: number, streamId: number, bufferIndex: number) => void,

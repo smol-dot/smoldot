@@ -17,7 +17,7 @@
 
 use super::Shared;
 use crate::platform::{
-    address_parse, ConnectError, MultiStreamWebRtcConnection, PlatformConnection, PlatformRef,
+    address_parse, ConnectError, MultiStreamWebRtcConnection, PlatformRef,
     PlatformSubstreamDirection, ReadBuffer,
 };
 
@@ -54,8 +54,28 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
     let socket = {
         let address = address_parse::multiaddr_to_address(&start_connect.multiaddr)
             .ok()
-            .filter(|addr| shared.platform.supports_connection_type(From::from(addr)));
-        let socket = address.map(|addr| shared.platform.connect(addr));
+            .filter(|addr| {
+                shared.platform.supports_connection_type(match &addr {
+                    address_parse::AddressOrMultiStreamAddress::Address(addr) => From::from(addr),
+                    address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(addr) => {
+                        From::from(addr)
+                    }
+                })
+            });
+        let socket = address.map(|addr| match addr {
+            address_parse::AddressOrMultiStreamAddress::Address(addr) => either::Left(
+                shared
+                    .platform
+                    .connect_stream(addr)
+                    .map(|res| res.map(either::Left)),
+            ),
+            address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(addr) => either::Right(
+                shared
+                    .platform
+                    .connect_multistream(addr)
+                    .map(|res| res.map(either::Right)),
+            ),
+        });
         async move {
             if let Some(socket) = socket {
                 socket.await.map_err(|err| (err, false))
@@ -136,14 +156,14 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
     // is done by the user of the smoldot crate rather than by the smoldot crate itself.
     let mut guarded = shared.guarded.lock().await;
     let (connection_id, socket_and_task) = match socket {
-        PlatformConnection::SingleStreamMultistreamSelectNoiseYamux(socket) => {
+        either::Left(socket) => {
             let (id, task) = guarded.network.pending_outcome_ok_single_stream(
                 start_connect.id,
                 service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
             );
             (id, either::Left((socket, task)))
         }
-        PlatformConnection::MultiStreamWebRtc(MultiStreamWebRtcConnection {
+        either::Right(MultiStreamWebRtcConnection {
             connection,
             local_tls_certificate_sha256,
             remote_tls_certificate_sha256,

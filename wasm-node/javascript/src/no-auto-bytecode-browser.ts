@@ -124,7 +124,7 @@ function connect(config: ConnectionConfig): Connection {
             connection.onopen = () => {
                 config.onOpen({
                     type: 'single-stream', handshake: 'multistream-select-noise-yamux',
-                    initialWritableBytes: 1024 * 1024, writeClosable: false,
+                    initialWritableBytes: 1024 * 1024
                 });
             };
             connection.onclose = (event) => {

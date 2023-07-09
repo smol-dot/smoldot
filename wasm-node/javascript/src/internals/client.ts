@@ -146,7 +146,7 @@ export interface ConnectionConfig {
     onOpen: (info:
         {
             type: 'single-stream', handshake: 'multistream-select-noise-yamux',
-            initialWritableBytes: number, writeClosable: boolean
+            initialWritableBytes: number
         } |
         {
             type: 'multi-stream', handshake: 'webrtc',

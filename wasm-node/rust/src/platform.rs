@@ -49,14 +49,13 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
     type Instant = Instant;
     type MultiStream = MultiStreamWrapper; // Entry in the ̀`CONNECTIONS` map.
     type Stream = StreamWrapper; // Entry in the ̀`STREAMS` map and a read buffer.
-    type ConnectFuture = pin::Pin<
+    type StreamConnectFuture =
+        pin::Pin<Box<dyn future::Future<Output = Result<Self::Stream, ConnectError>> + Send>>;
+    type MultiStreamConnectFuture = pin::Pin<
         Box<
             dyn future::Future<
                     Output = Result<
-                        smoldot_light::platform::PlatformConnection<
-                            Self::Stream,
-                            Self::MultiStream,
-                        >,
+                        smoldot_light::platform::MultiStreamWebRtcConnection<Self::MultiStream>,
                         ConnectError,
                     >,
                 > + Send,
@@ -157,7 +156,10 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         }
     }
 
-    fn connect(&self, address: smoldot_light::platform::Address) -> Self::ConnectFuture {
+    fn connect_stream(
+        &self,
+        address: smoldot_light::platform::Address,
+    ) -> Self::StreamConnectFuture {
         let mut lock = STATE.try_lock().unwrap();
 
         let connection_id = lock.next_connection_id;
@@ -212,7 +214,101 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                 .chain(port.to_be_bytes())
                 .chain(hostname.as_bytes().iter().copied())
                 .collect(),
-            smoldot_light::platform::Address::WebRtc {
+        };
+
+        let write_closable = match address {
+            smoldot_light::platform::Address::TcpIp { .. }
+            | smoldot_light::platform::Address::TcpDns { .. } => true,
+            smoldot_light::platform::Address::WebSocketIp { .. }
+            | smoldot_light::platform::Address::WebSocketDns { .. } => false,
+        };
+
+        unsafe {
+            bindings::connection_new(
+                connection_id,
+                u32::try_from(encoded_address.as_ptr() as usize).unwrap(),
+                u32::try_from(encoded_address.len()).unwrap(),
+            )
+        }
+
+        let _prev_value = lock.connections.insert(
+            connection_id,
+            Connection {
+                inner: ConnectionInner::NotOpen,
+                something_happened: event_listener::Event::new(),
+            },
+        );
+        debug_assert!(_prev_value.is_none());
+
+        Box::pin(async move {
+            // Wait until the connection state is no longer `ConnectionInner::NotOpen`.
+            let mut lock = loop {
+                let something_happened = {
+                    let mut lock = STATE.try_lock().unwrap();
+                    let connection = lock.connections.get_mut(&connection_id).unwrap();
+
+                    if !matches!(connection.inner, ConnectionInner::NotOpen) {
+                        break lock;
+                    }
+
+                    connection.something_happened.listen()
+                };
+
+                something_happened.await
+            };
+            let lock = &mut *lock;
+
+            let connection = lock.connections.get_mut(&connection_id).unwrap();
+
+            match &mut connection.inner {
+                ConnectionInner::NotOpen | ConnectionInner::MultiStreamWebRtc { .. } => {
+                    unreachable!()
+                }
+                ConnectionInner::SingleStreamMsNoiseYamux => {
+                    debug_assert!(lock.streams.contains_key(&(connection_id, None)));
+
+                    let read_buffer = ReadBuffer {
+                        buffer: Vec::new().into(),
+                        buffer_first_offset: 0,
+                    };
+
+                    Ok(StreamWrapper {
+                        connection_id,
+                        stream_id: None,
+                        read_buffer,
+                        is_reset: false,
+                        writable_bytes: 0,
+                        write_closable,
+                        write_closed: false,
+                    })
+                }
+                ConnectionInner::Reset {
+                    message,
+                    connection_handles_alive,
+                } => {
+                    // Note that it is possible for the state to have transitionned to (for
+                    // example) `ConnectionInner::SingleStreamMsNoiseYamux` and then immediately
+                    // to `Reset`, but we don't really care about that corner case.
+                    debug_assert_eq!(*connection_handles_alive, 0);
+                    let message = mem::take(message);
+                    lock.connections.remove(&connection_id).unwrap();
+                    Err(ConnectError { message })
+                }
+            }
+        })
+    }
+
+    fn connect_multistream(
+        &self,
+        address: smoldot_light::platform::MultiStreamAddress,
+    ) -> Self::MultiStreamConnectFuture {
+        let mut lock = STATE.try_lock().unwrap();
+
+        let connection_id = lock.next_connection_id;
+        lock.next_connection_id += 1;
+
+        let encoded_address: Vec<u8> = match address {
+            smoldot_light::platform::MultiStreamAddress::WebRtc {
                 ip: smoldot_light::platform::IpAddr::V4(ip),
                 port,
                 remote_certificate_sha256,
@@ -221,7 +317,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                 .chain(remote_certificate_sha256.iter().copied())
                 .chain(no_std_net::Ipv4Addr::from(ip).to_string().bytes())
                 .collect(),
-            smoldot_light::platform::Address::WebRtc {
+            smoldot_light::platform::MultiStreamAddress::WebRtc {
                 ip: smoldot_light::platform::IpAddr::V6(ip),
                 port,
                 remote_certificate_sha256,
@@ -270,18 +366,8 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
             let connection = lock.connections.get_mut(&connection_id).unwrap();
 
             match &mut connection.inner {
-                ConnectionInner::NotOpen => unreachable!(),
-                ConnectionInner::SingleStreamMsNoiseYamux { write_closable } => {
-                    debug_assert!(lock.streams.contains_key(&(connection_id, None)));
-
-                    let read_buffer = ReadBuffer {
-                        buffer: Vec::new().into(),
-                        buffer_first_offset: 0,
-                    };
-
-                    Ok(smoldot_light::platform::PlatformConnection::SingleStreamMultistreamSelectNoiseYamux(
-                        StreamWrapper { connection_id, stream_id: None, read_buffer, is_reset: false, writable_bytes: 0, write_closable: *write_closable, write_closed: false },
-                    ))
+                ConnectionInner::NotOpen | ConnectionInner::SingleStreamMsNoiseYamux { .. } => {
+                    unreachable!()
                 }
                 ConnectionInner::MultiStreamWebRtc {
                     connection_handles_alive,
@@ -290,15 +376,11 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                     ..
                 } => {
                     *connection_handles_alive += 1;
-                    Ok(
-                        smoldot_light::platform::PlatformConnection::MultiStreamWebRtc(
-                            smoldot_light::platform::MultiStreamWebRtcConnection {
-                                connection: MultiStreamWrapper(connection_id),
-                                local_tls_certificate_sha256: *local_tls_certificate_sha256,
-                                remote_tls_certificate_sha256: *remote_tls_certificate_sha256,
-                            },
-                        ),
-                    )
+                    Ok(smoldot_light::platform::MultiStreamWebRtcConnection {
+                        connection: MultiStreamWrapper(connection_id),
+                        local_tls_certificate_sha256: *local_tls_certificate_sha256,
+                        remote_tls_certificate_sha256: *remote_tls_certificate_sha256,
+                    })
                 }
                 ConnectionInner::Reset {
                     message,
@@ -703,10 +785,7 @@ struct Connection {
 
 enum ConnectionInner {
     NotOpen,
-    SingleStreamMsNoiseYamux {
-        /// True if the stream can be closed.
-        write_closable: bool,
-    },
+    SingleStreamMsNoiseYamux,
     MultiStreamWebRtc {
         /// List of substreams that the host (i.e. JavaScript side) has reported have been opened,
         /// but that haven't been reported through
@@ -756,23 +835,14 @@ struct ReadBuffer {
     buffer_first_offset: usize,
 }
 
-pub(crate) fn connection_open_single_stream(
-    connection_id: u32,
-    handshake_ty: u32,
-    initial_writable_bytes: u32,
-    write_closable: u32,
-) {
-    assert_eq!(handshake_ty, 0);
-
+pub(crate) fn connection_open_single_stream(connection_id: u32, initial_writable_bytes: u32) {
     let mut lock = STATE.try_lock().unwrap();
     let lock = &mut *lock;
 
     let connection = lock.connections.get_mut(&connection_id).unwrap();
 
     debug_assert!(matches!(connection.inner, ConnectionInner::NotOpen));
-    connection.inner = ConnectionInner::SingleStreamMsNoiseYamux {
-        write_closable: write_closable != 0,
-    };
+    connection.inner = ConnectionInner::SingleStreamMsNoiseYamux;
 
     let _prev_value = lock.streams.insert(
         (connection_id, None),

@@ -200,7 +200,7 @@ extern "C" {
     ///
     /// Initially in the `Opening` state, the connection can transition to the `Open` state if the
     /// remote accepts the connection. When that happens, [`connection_open_single_stream`] or
-    /// [`connection_open_multi_stream`] must be called.
+    /// [`connection_open_multi_stream`] must be called depending on the type of connection.
     ///
     /// There exists two kind of connections: single-stream and multi-stream. Single-stream
     /// connections are assumed to have a single stream open at all time and the encryption and
@@ -492,24 +492,14 @@ pub extern "C" fn timer_finished() {
 ///
 /// When in the `Open` state, the connection can receive messages. Use [`stream_message`] in order
 /// to provide to the Rust code the messages received by the connection.
-///
-/// The `handshake_ty` parameter indicates the type of handshake. It must always be 0 at the
-/// moment, indicating a multistream-select+Noise+Yamux handshake.
-///
-/// `write_closable` must be non-zero if and only if it makes sense to call [`stream_send_close`]
-/// on this connection. If zero, then [`stream_send_close`] will never be called.
 #[no_mangle]
 pub extern "C" fn connection_open_single_stream(
     connection_id: u32,
-    handshake_ty: u32,
     initial_writable_bytes: u32,
-    write_closable: u32,
 ) {
     crate::platform::connection_open_single_stream(
         connection_id,
-        handshake_ty,
         initial_writable_bytes,
-        write_closable,
     );
 }
 

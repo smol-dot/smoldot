@@ -19,8 +19,8 @@
 #![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
 use super::{
-    Address, ConnectError, ConnectionType, IpAddr, PlatformConnection, PlatformRef,
-    PlatformSubstreamDirection, ReadBuffer,
+    Address, ConnectError, ConnectionType, IpAddr, MultiStreamAddress, MultiStreamWebRtcConnection,
+    PlatformRef, PlatformSubstreamDirection, ReadBuffer,
 };
 
 use alloc::{borrow::Cow, collections::VecDeque, sync::Arc};
@@ -49,9 +49,10 @@ impl PlatformRef for Arc<DefaultPlatform> {
     type Instant = std::time::Instant;
     type MultiStream = std::convert::Infallible;
     type Stream = Stream;
-    type ConnectFuture = future::BoxFuture<
+    type StreamConnectFuture = future::BoxFuture<'static, Result<Self::Stream, ConnectError>>;
+    type MultiStreamConnectFuture = future::BoxFuture<
         'static,
-        Result<PlatformConnection<Self::Stream, Self::MultiStream>, ConnectError>,
+        Result<MultiStreamWebRtcConnection<Self::MultiStream>, ConnectError>,
     >;
     type StreamUpdateFuture<'a> = future::BoxFuture<'a, ()>;
     type NextSubstreamFuture<'a> =
@@ -99,7 +100,7 @@ impl PlatformRef for Arc<DefaultPlatform> {
         )
     }
 
-    fn connect(&self, multiaddr: Address) -> Self::ConnectFuture {
+    fn connect_stream(&self, multiaddr: Address) -> Self::StreamConnectFuture {
         let (tcp_socket_addr, host_if_websocket): (
             either::Either<SocketAddr, (String, u16)>,
             Option<String>,
@@ -173,23 +174,25 @@ impl PlatformRef for Arc<DefaultPlatform> {
                 }
             };
 
-            Ok(PlatformConnection::SingleStreamMultistreamSelectNoiseYamux(
-                Stream {
-                    socket,
-                    buffers: Some((
-                        StreamReadBuffer::Open {
-                            buffer: vec![0; 16384],
-                            cursor: 0..0,
-                        },
-                        StreamWriteBuffer::Open {
-                            buffer: VecDeque::with_capacity(16384),
-                            must_close: false,
-                            must_flush: false,
-                        },
-                    )),
-                },
-            ))
+            Ok(Stream {
+                socket,
+                buffers: Some((
+                    StreamReadBuffer::Open {
+                        buffer: vec![0; 16384],
+                        cursor: 0..0,
+                    },
+                    StreamWriteBuffer::Open {
+                        buffer: VecDeque::with_capacity(16384),
+                        must_close: false,
+                        must_flush: false,
+                    },
+                )),
+            })
         })
+    }
+
+    fn connect_multistream(&self, _address: MultiStreamAddress) -> Self::MultiStreamConnectFuture {
+        panic!()
     }
 
     fn open_out_substream(&self, c: &mut Self::MultiStream) {
