@@ -105,7 +105,8 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// performs an identification request. Reasonable value is `env!("CARGO_PKG_VERSION")`.
     fn client_version(&self) -> Cow<str>;
 
-    /// Returns `true` if [`PlatformRef::connect`] accepts a connection of the corresponding type.
+    /// Returns `true` if [`PlatformRef::connect_stream`] or [`PlatformRef::connect_multistream`]
+    /// accepts a connection of the corresponding type.
     ///
     /// > **Note**: This function is meant to be pure. Implementations are expected to always
     /// >           return the same value for the same [`ConnectionType`] input. Enabling or
