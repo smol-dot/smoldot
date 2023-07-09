@@ -105,7 +105,7 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// performs an identification request. Reasonable value is `env!("CARGO_PKG_VERSION")`.
     fn client_version(&self) -> Cow<str>;
 
-    /// Returns `true` if [`Platform::connect`] accepts a connection of the corresponding type.
+    /// Returns `true` if [`PlatformRef::connect`] accepts a connection of the corresponding type.
     ///
     /// > **Note**: This function is meant to be pure. Implementations are expected to always
     /// >           return the same value for the same [`ConnectionType`] input. Enabling or
@@ -117,7 +117,7 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// # Panic
     ///
     /// The function implementation panics if [`Address`] is of a type for which
-    /// [`Platform::supports_connection_type`] returns `false`.
+    /// [`PlatformRef::supports_connection_type`] returns `false`.
     ///
     fn connect_stream(&self, address: Address) -> Self::StreamConnectFuture;
 
@@ -126,7 +126,7 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// # Panic
     ///
     /// The function implementation panics if [`MultiStreamAddress`] is of a type for which
-    /// [`Platform::supports_connection_type`] returns `false`.
+    /// [`PlatformRef::supports_connection_type`] returns `false`.
     ///
     fn connect_multistream(&self, address: MultiStreamAddress) -> Self::MultiStreamConnectFuture;
 
@@ -308,7 +308,7 @@ impl<'a> From<&'a MultiStreamAddress> for ConnectionType {
     }
 }
 
-/// Address passed to [`PlatformRef::connect_single_stream`].
+/// Address passed to [`PlatformRef::connect_stream`].
 // TODO: we don't differentiate between Dns4 and Dns6
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Address<'a> {
@@ -390,7 +390,8 @@ pub enum IpAddr {
     V6([u8; 16]),
 }
 
-/// Error potentially returned by [`PlatformRef::connect`].
+/// Error potentially returned by [`PlatformRef::connect_stream`] or
+/// [`PlatformRef::connect_multistream`].
 pub struct ConnectError {
     /// Human-readable error message.
     pub message: String,
