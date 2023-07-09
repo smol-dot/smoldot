@@ -22,8 +22,8 @@ use super::{Background, PlatformRef};
 use crate::transactions_service;
 
 use alloc::{borrow::ToOwned as _, format, string::ToString as _, sync::Arc, vec::Vec};
-use core::pin;
-use futures_util::{future, StreamExt as _};
+use futures_lite::future;
+use futures_util::StreamExt as _;
 use smoldot::json_rpc::{methods, service};
 
 impl<TPlat: PlatformRef> Background<TPlat> {
@@ -104,22 +104,17 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     let mut num_broadcasted_peers = 0;
 
                     loop {
-                        let event = {
-                            let unsubscribed = pin::pin!(subscription.wait_until_stale());
-                            match future::select(transaction_updates.next(), unsubscribed).await {
-                                future::Either::Left((v, _)) => either::Left(v),
-                                future::Either::Right((v, _)) => either::Right(v),
-                            }
-                        };
-
-                        let status_update = match event {
-                            either::Left(Some(status)) => status,
-                            either::Left(None) if !is_legacy => {
+                        let status_update = match future::or(
+                            async { Some(transaction_updates.next().await) },
+                            async { subscription.wait_until_stale().await; None }
+                        ).await {
+                            Some(Some(status)) => status,
+                            Some(None) if !is_legacy => {
                                 // Channel from the transactions service has been closed.
                                 // Stop the task.
                                 break;
                             }
-                            either::Left(None) => {
+                            Some(None) => {
                                 // Channel from the transactions service has been closed.
                                 // Stop the task.
                                 // There is nothing more that can be done except hope that the
@@ -128,9 +123,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                 subscription.wait_until_stale().await;
                                 break;
                             }
-                            either::Right(()) => {
-                                break;
-                            }
+                            None => break,
                         };
 
                         match (status_update, is_legacy) {
