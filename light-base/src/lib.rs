@@ -74,7 +74,6 @@ extern crate alloc;
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 use core::{num::NonZeroU32, ops, pin};
-use futures_channel::oneshot;
 use futures_util::{future, FutureExt as _};
 use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
@@ -226,9 +225,9 @@ struct PublicApiChain<TChain> {
     /// [`AddChainConfig::json_rpc`] was [`AddChainConfigJsonRpc::Disabled`] when adding the chain.
     json_rpc_frontend: Option<json_rpc_service::Frontend>,
 
-    /// Dummy channel. Nothing is ever sent on it, but the receiving side is stored in the
-    /// [`JsonRpcResponses`] in order to detect when the chain has been removed.
-    _public_api_chain_destroyed_tx: oneshot::Sender<()>,
+    /// Notified when the [`PublicApiChain`] is destroyed, in order for the [`JsonRpcResponses`]
+    /// to detect when the chain has been removed.
+    public_api_chain_destroyed_event: event_listener::Event,
 }
 
 /// Identifies a chain, so that multiple identical chains are de-duplicated.
@@ -311,21 +310,25 @@ pub struct JsonRpcResponses {
     /// the sender.
     inner: Option<json_rpc_service::Frontend>,
 
-    /// Dummy channel. Nothing is ever sent on it, but the sending side is stored in the
-    /// [`PublicApiChain`] in order to detect when the chain has been removed.
-    public_api_chain_destroyed_rx: oneshot::Receiver<()>,
+    /// Notified when the [`PublicApiChain`] is destroyed.
+    public_api_chain_destroyed: event_listener::EventListener,
 }
 
 impl JsonRpcResponses {
     /// Returns the next response or notification, or `None` if the chain has been removed.
     pub async fn next(&mut self) -> Option<String> {
         if let Some(frontend) = self.inner.as_mut() {
-            let response_fut = pin::pin!(frontend.next_json_rpc_response());
-            match future::select(response_fut, &mut self.public_api_chain_destroyed_rx).await {
-                future::Either::Left((response, _)) => return Some(response),
-                future::Either::Right((_result, _)) => {
-                    debug_assert!(_result.is_err());
-                }
+            match futures_lite::future::or(
+                async { Some(frontend.next_json_rpc_response().await) },
+                async {
+                    (&mut self.public_api_chain_destroyed).await;
+                    None
+                },
+            )
+            .await
+            {
+                Some(response) => return Some(response),
+                None => {}
             }
         }
 
@@ -914,19 +917,20 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         };
 
         // Success!
-        let (public_api_chain_destroyed_tx, public_api_chain_destroyed_rx) = oneshot::channel();
+        let public_api_chain_destroyed_event = event_listener::Event::new();
+        let public_api_chain_destroyed = public_api_chain_destroyed_event.listen();
         public_api_chains_entry.insert(PublicApiChain {
             user_data: config.user_data,
             key: new_chain_key,
             chain_spec_chain_id,
             json_rpc_frontend: json_rpc_frontend.clone(),
-            _public_api_chain_destroyed_tx: public_api_chain_destroyed_tx,
+            public_api_chain_destroyed_event,
         });
         Ok(AddChainSuccess {
             chain_id: new_chain_id,
             json_rpc_responses: json_rpc_frontend.map(|f| JsonRpcResponses {
                 inner: Some(f),
-                public_api_chain_destroyed_rx,
+                public_api_chain_destroyed,
             }),
         })
     }
@@ -946,6 +950,10 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
     #[must_use]
     pub fn remove_chain(&mut self, id: ChainId) -> TChain {
         let removed_chain = self.public_api_chains.remove(id.0);
+
+        removed_chain
+            .public_api_chain_destroyed_event
+            .notify(usize::max_value());
 
         // `chains_by_key` is created lazily when `add_chain` is called.
         // Since we're removing a chain that has been added with `add_chain`, it is guaranteed
