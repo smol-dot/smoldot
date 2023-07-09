@@ -31,12 +31,11 @@ use alloc::{
 use core::{
     cmp, iter,
     num::{NonZeroU32, NonZeroUsize},
-    pin,
     time::Duration,
 };
 use futures_channel::mpsc;
 use futures_lite::FutureExt as _;
-use futures_util::{future, FutureExt as _, StreamExt as _};
+use futures_util::{FutureExt as _, StreamExt as _};
 use hashbrown::HashMap;
 use smoldot::{
     chain::fork_tree,
@@ -527,25 +526,27 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
     ) {
         loop {
             let outcome = {
-                let next_block = pin::pin!(match &mut self.subscription {
-                    Subscription::WithRuntime { notifications, .. } => {
-                        future::Either::Left(notifications.next().map(either::Left))
+                let next_block = async {
+                    match &mut self.subscription {
+                        Subscription::WithRuntime { notifications, .. } => {
+                            Some(either::Left(either::Left(notifications.next().await)))
+                        }
+                        Subscription::WithoutRuntime(notifications) => {
+                            Some(either::Left(either::Right(notifications.next().await)))
+                        }
                     }
-                    Subscription::WithoutRuntime(notifications) => {
-                        future::Either::Right(notifications.next().map(either::Right))
-                    }
-                });
-                let next_message = pin::pin!(messages_rx.next());
+                };
 
-                match future::select(
-                    future::select(next_block, next_message),
-                    pin::pin!(subscription.wait_until_stale()),
-                )
-                .await
+                match next_block
+                    .or(async { Some(either::Right(messages_rx.next().await)) })
+                    .or(async {
+                        subscription.wait_until_stale().await;
+                        None
+                    })
+                    .await
                 {
-                    future::Either::Left((future::Either::Left((v, _)), _)) => either::Left(v),
-                    future::Either::Left((future::Either::Right((v, _)), _)) => either::Right(v),
-                    future::Either::Right(((), _)) => return,
+                    Some(outcome) => outcome,
+                    None => return,
                 }
             };
 
