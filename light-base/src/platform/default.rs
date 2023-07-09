@@ -20,7 +20,7 @@
 
 use super::{
     Address, ConnectError, ConnectionType, IpAddr, MultiStreamAddress, MultiStreamWebRtcConnection,
-    PlatformRef, SubstreamDirection, ReadBuffer,
+    PlatformRef, ReadBuffer, SubstreamDirection,
 };
 
 use alloc::{borrow::Cow, collections::VecDeque, sync::Arc};
@@ -55,8 +55,7 @@ impl PlatformRef for Arc<DefaultPlatform> {
         Result<MultiStreamWebRtcConnection<Self::MultiStream>, ConnectError>,
     >;
     type StreamUpdateFuture<'a> = future::BoxFuture<'a, ()>;
-    type NextSubstreamFuture<'a> =
-        future::Pending<Option<(Self::Stream, SubstreamDirection)>>;
+    type NextSubstreamFuture<'a> = future::Pending<Option<(Self::Stream, SubstreamDirection)>>;
 
     fn now_from_unix_epoch(&self) -> Duration {
         // Intentionally panic if the time is configured earlier than the UNIX EPOCH.

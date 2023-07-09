@@ -17,8 +17,8 @@
 
 use super::Shared;
 use crate::platform::{
-    address_parse, ConnectError, MultiStreamWebRtcConnection, PlatformRef,
-    SubstreamDirection, ReadBuffer,
+    address_parse, ConnectError, MultiStreamWebRtcConnection, PlatformRef, ReadBuffer,
+    SubstreamDirection,
 };
 
 use alloc::{sync::Arc, vec, vec::Vec};

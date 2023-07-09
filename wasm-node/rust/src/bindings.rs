@@ -207,11 +207,7 @@ extern "C" {
     /// multiplexing are handled internally by smoldot. Multi-stream connections open and close
     /// streams over time using [`connection_stream_opened`] and [`stream_reset`], and the
     /// encryption and multiplexing are handled by the user of these bindings.
-    pub fn connection_new(
-        id: u32,
-        addr_ptr: u32,
-        addr_len: u32,
-    );
+    pub fn connection_new(id: u32, addr_ptr: u32, addr_len: u32);
 
     /// Abruptly close a connection previously initialized with [`connection_new`].
     ///
@@ -493,14 +489,8 @@ pub extern "C" fn timer_finished() {
 /// When in the `Open` state, the connection can receive messages. Use [`stream_message`] in order
 /// to provide to the Rust code the messages received by the connection.
 #[no_mangle]
-pub extern "C" fn connection_open_single_stream(
-    connection_id: u32,
-    initial_writable_bytes: u32,
-) {
-    crate::platform::connection_open_single_stream(
-        connection_id,
-        initial_writable_bytes,
-    );
+pub extern "C" fn connection_open_single_stream(connection_id: u32, initial_writable_bytes: u32) {
+    crate::platform::connection_open_single_stream(connection_id, initial_writable_bytes);
 }
 
 /// Called by the JavaScript code if the connection switches to the `Open` state. The connection

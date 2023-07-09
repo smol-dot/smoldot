@@ -65,10 +65,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
     type NextSubstreamFuture<'a> = pin::Pin<
         Box<
             dyn future::Future<
-                    Output = Option<(
-                        Self::Stream,
-                        smoldot_light::platform::SubstreamDirection,
-                    )>,
+                    Output = Option<(Self::Stream, smoldot_light::platform::SubstreamDirection)>,
                 > + Send
                 + 'a,
         >,
