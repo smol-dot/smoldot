@@ -142,6 +142,21 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         env!("CARGO_PKG_VERSION").into()
     }
 
+    fn supports_connection_type(
+        &self,
+        connection_type: smoldot_light::platform::ConnectionType,
+    ) -> bool {
+        // TODO: no, should ask the JS code what it supports
+        match connection_type {
+            smoldot_light::platform::ConnectionType::WebRtc => true,
+            smoldot_light::platform::ConnectionType::WebSocket {
+                secure,
+                remote_is_localhost,
+            } => secure || remote_is_localhost,
+            smoldot_light::platform::ConnectionType::Tcp => false,
+        }
+    }
+
     fn connect(&self, url: &str) -> Self::ConnectFuture {
         let mut lock = STATE.try_lock().unwrap();
 

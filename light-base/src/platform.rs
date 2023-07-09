@@ -100,6 +100,13 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// performs an identification request. Reasonable value is `env!("CARGO_PKG_VERSION")`.
     fn client_version(&self) -> Cow<str>;
 
+    /// Returns `true` if [`Platform::connect`] accepts a connection of the corresponding type.
+    ///
+    /// > **Note**: This function is meant to be pure. Implementations are expected to always
+    /// >           return the same value for the same [`ConnectionType`] input. Enabling or
+    /// >           disabling certain connection types after start-up is not supported.
+    fn supports_connection_type(&self, connection_type: ConnectionType) -> bool;
+
     /// Starts a connection attempt to the given multiaddress.
     ///
     /// The multiaddress is passed as a string. If the string can't be parsed, an error should be
@@ -235,6 +242,25 @@ pub enum PlatformSubstreamDirection {
     Inbound,
     /// Substream has been opened locally in response to [`PlatformRef::open_out_substream`].
     Outbound,
+}
+
+/// Connection type passed to [`PlatformRef::supports_connection_type`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ConnectionType {
+    /// TCP/IP connections.
+    Tcp,
+    /// WebSocket connections.
+    WebSocket {
+        /// `true` for WebSocket secure connections.
+        secure: bool,
+        /// `true` if the target of the connection is `localhost`.
+        ///
+        /// > **Note**: Some platforms (namely browsers) sometimes only accept non-secure WebSocket
+        /// >           connections only towards `localhost`.
+        remote_is_localhost: bool,
+    },
+    /// Libp2p-specific WebRTC flavour.
+    WebRtc,
 }
 
 /// Error potentially returned by [`PlatformRef::connect`].

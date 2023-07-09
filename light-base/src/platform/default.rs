@@ -19,7 +19,8 @@
 #![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
 use super::{
-    ConnectError, PlatformConnection, PlatformRef, PlatformSubstreamDirection, ReadBuffer,
+    ConnectError, ConnectionType, PlatformConnection, PlatformRef, PlatformSubstreamDirection,
+    ReadBuffer,
 };
 
 use alloc::{borrow::Cow, collections::VecDeque, sync::Arc};
@@ -94,6 +95,14 @@ impl PlatformRef for Arc<DefaultPlatform> {
 
     fn client_version(&self) -> Cow<str> {
         Cow::Borrowed(&self.client_version)
+    }
+
+    fn supports_connection_type(&self, connection_type: ConnectionType) -> bool {
+        // TODO: support WebSocket secure
+        matches!(
+            connection_type,
+            ConnectionType::Tcp | ConnectionType::WebSocket { secure: false, .. }
+        )
     }
 
     fn connect(&self, multiaddr: &str) -> Self::ConnectFuture {
