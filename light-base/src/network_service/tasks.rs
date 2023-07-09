@@ -21,6 +21,7 @@ use crate::platform::{PlatformConnection, PlatformRef, PlatformSubstreamDirectio
 use alloc::{string::ToString as _, sync::Arc, vec, vec::Vec};
 use core::{cmp, iter, pin};
 use futures_channel::mpsc;
+use futures_lite::FutureExt as _;
 use futures_util::{future, FutureExt as _, StreamExt as _};
 use smoldot::{
     libp2p::{collection::SubstreamFate, read_write::ReadWrite},
@@ -369,29 +370,33 @@ async fn single_stream_connection_task<TPlat: PlatformRef>(
         // Starting from here, we block the current task until more processing needs to happen.
 
         // Future ready when the timeout indicated by the connection state machine is reached.
-        let poll_after = if let Some(wake_up) = wake_up_after {
-            if wake_up > now {
-                let dur = wake_up - now;
-                future::Either::Left(shared.platform.sleep(dur))
-            } else {
-                // "Wake up" immediately.
-                continue;
-            }
+        let poll_after = if wake_up_after
+            .as_ref()
+            .map_or(false, |wake_up_after| *wake_up_after <= now)
+        {
+            // "Wake up" immediately.
+            continue;
         } else {
-            future::Either::Right(future::pending())
-        }
-        .fuse();
+            async {
+                if let Some(wake_up_after) = wake_up_after {
+                    shared.platform.sleep_until(wake_up_after).await
+                } else {
+                    future::pending().await
+                }
+            }
+        };
         // Future that is woken up when new data is ready on the socket or more data is writable.
-        let stream_update = pin::pin!(shared.platform.update_stream(&mut connection));
+        let stream_update = shared.platform.update_stream(&mut connection);
         // Future that is woken up when a new message is coming from the coordinator.
-        let message_from_coordinator = pin::Pin::new(&mut coordinator_to_connection).peek();
+        let message_from_coordinator = async {
+            pin::Pin::new(&mut coordinator_to_connection).peek().await;
+        };
 
         // Combines the three futures above into one.
-        future::select(
-            future::select(stream_update, message_from_coordinator),
-            poll_after,
-        )
-        .await;
+        stream_update
+            .or(message_from_coordinator)
+            .or(poll_after)
+            .await;
     }
 }
 
@@ -617,45 +622,66 @@ async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
         // Starting from here, we block the current task until more processing needs to happen.
 
         // Future ready when the timeout indicated by the connection state machine is reached.
-        let mut poll_after = if let Some(wake_up) = wake_up_after.clone() {
-            if wake_up > now {
-                let dur = wake_up - now;
-                future::Either::Left(shared.platform.sleep(dur))
-            } else {
-                // "Wake up" immediately.
-                continue;
-            }
+        let poll_after = if wake_up_after
+            .as_ref()
+            .map_or(false, |wake_up_after| *wake_up_after <= now)
+        {
+            // "Wake up" immediately.
+            continue;
         } else {
-            future::Either::Right(future::pending())
-        }
-        .fuse();
+            async {
+                if let Some(wake_up_after) = wake_up_after {
+                    shared.platform.sleep_until(wake_up_after).await
+                } else {
+                    future::pending().await
+                }
+                None
+            }
+        };
 
         // Future that is woken up when new data is ready on any of the streams.
-        let streams_updated = iter::once(future::Either::Right(future::pending()))
-            .chain(open_substreams.iter_mut().map(|(_, (stream, _))| {
-                future::Either::Left(shared.platform.update_stream(stream))
-            }))
-            .collect::<future::SelectAll<_>>();
+        let streams_updated = {
+            let list = iter::once(future::Either::Right(future::pending()))
+                .chain(open_substreams.iter_mut().map(|(_, (stream, _))| {
+                    future::Either::Left(shared.platform.update_stream(stream))
+                }))
+                .collect::<future::SelectAll<_>>();
+            async move {
+                list.await;
+                None
+            }
+        };
 
         // Future that is woken up when a new message is coming from the coordinator.
-        let mut message_from_coordinator = pin::Pin::new(&mut coordinator_to_connection).peek();
+        let message_from_coordinator = async {
+            pin::Pin::new(&mut coordinator_to_connection).peek().await;
+            None
+        };
+
+        // Future that is woken up when a new substream is available.
+        let next_substream = async {
+            if remote_has_reset {
+                future::pending().await
+            } else {
+                Some(shared.platform.next_substream(&mut connection).await)
+            }
+        };
 
         // Do the actual waiting.
         debug_assert!(newly_open_substream.is_none());
-        futures_util::select! {
-            _ = message_from_coordinator => {}
-            substream = if remote_has_reset { either::Right(future::pending()) } else { either::Left(shared.platform.next_substream(&mut connection)) }.fuse() => {
-                match substream {
-                    Some(s) => newly_open_substream = Some(s),
-                    None => {
-                        // `None` is returned if the remote has force-closed the connection.
-                        connection_task.reset();
-                        remote_has_reset = true;
-                    }
-                }
+        match poll_after
+            .or(message_from_coordinator)
+            .or(streams_updated)
+            .or(next_substream)
+            .await
+        {
+            None => {}
+            Some(Some(s)) => newly_open_substream = Some(s),
+            Some(None) => {
+                // `None` is returned if the remote has force-closed the connection.
+                connection_task.reset();
+                remote_has_reset = true;
             }
-            _ = poll_after => {}
-            _ = streams_updated.fuse() => {}
         }
     }
 }
