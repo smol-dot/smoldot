@@ -62,7 +62,7 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
         + Send
         + 'static;
     type StreamUpdateFuture<'a>: Future<Output = ()> + Unpin + Send + 'a;
-    type NextSubstreamFuture<'a>: Future<Output = Option<(Self::Stream, PlatformSubstreamDirection)>>
+    type NextSubstreamFuture<'a>: Future<Output = Option<(Self::Stream, SubstreamDirection)>>
         + Unpin
         + Send
         + 'a;
@@ -248,7 +248,7 @@ pub struct MultiStreamWebRtcConnection<TConnection> {
 
 /// Direction in which a substream has been opened. See [`PlatformRef::next_substream`].
 #[derive(Debug)]
-pub enum PlatformSubstreamDirection {
+pub enum SubstreamDirection {
     /// Substream has been opened by the remote.
     Inbound,
     /// Substream has been opened locally in response to [`PlatformRef::open_out_substream`].

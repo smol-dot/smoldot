@@ -17,7 +17,7 @@
 
 use crate::{bindings, timers::Delay};
 
-use smoldot_light::platform::{ConnectError, PlatformSubstreamDirection};
+use smoldot_light::platform::{ConnectError, SubstreamDirection};
 
 use core::{future, mem, pin, str, task, time::Duration};
 use std::{
@@ -67,7 +67,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
             dyn future::Future<
                     Output = Option<(
                         Self::Stream,
-                        smoldot_light::platform::PlatformSubstreamDirection,
+                        smoldot_light::platform::SubstreamDirection,
                     )>,
                 > + Send
                 + 'a,
@@ -790,7 +790,7 @@ enum ConnectionInner {
         /// List of substreams that the host (i.e. JavaScript side) has reported have been opened,
         /// but that haven't been reported through
         /// [`smoldot_light::platform::PlatformRef::next_substream`] yet.
-        opened_substreams_to_pick_up: VecDeque<(u32, PlatformSubstreamDirection, u32)>,
+        opened_substreams_to_pick_up: VecDeque<(u32, SubstreamDirection, u32)>,
         /// Number of objects (connections and streams) in the [`PlatformRef`] API that reference
         /// this connection. If it switches from 1 to 0, the connection must be removed.
         connection_handles_alive: u32,
@@ -997,9 +997,9 @@ pub(crate) fn connection_stream_opened(
         opened_substreams_to_pick_up.push_back((
             stream_id,
             if outbound != 0 {
-                PlatformSubstreamDirection::Outbound
+                SubstreamDirection::Outbound
             } else {
-                PlatformSubstreamDirection::Inbound
+                SubstreamDirection::Inbound
             },
             initial_writable_bytes,
         ));

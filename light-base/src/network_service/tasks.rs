@@ -18,7 +18,7 @@
 use super::Shared;
 use crate::platform::{
     address_parse, ConnectError, MultiStreamWebRtcConnection, PlatformRef,
-    PlatformSubstreamDirection, ReadBuffer,
+    SubstreamDirection, ReadBuffer,
 };
 
 use alloc::{sync::Arc, vec, vec::Vec};
@@ -483,8 +483,8 @@ async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
         // substream. Notify the `connection_task` state machine.
         if let Some((stream, direction)) = newly_open_substream.take() {
             let outbound = match direction {
-                PlatformSubstreamDirection::Outbound => true,
-                PlatformSubstreamDirection::Inbound => false,
+                SubstreamDirection::Outbound => true,
+                SubstreamDirection::Inbound => false,
             };
             let id = open_substreams.insert((stream, true));
             connection_task.add_substream(id, outbound);
