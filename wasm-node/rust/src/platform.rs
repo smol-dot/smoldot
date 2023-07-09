@@ -291,11 +291,13 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                 } => {
                     *connection_handles_alive += 1;
                     Ok(
-                        smoldot_light::platform::PlatformConnection::MultiStreamWebRtc {
-                            connection: MultiStreamWrapper(connection_id),
-                            local_tls_certificate_sha256: *local_tls_certificate_sha256,
-                            remote_tls_certificate_sha256: *remote_tls_certificate_sha256,
-                        },
+                        smoldot_light::platform::PlatformConnection::MultiStreamWebRtc(
+                            smoldot_light::platform::MultiStreamWebRtcConnection {
+                                connection: MultiStreamWrapper(connection_id),
+                                local_tls_certificate_sha256: *local_tls_certificate_sha256,
+                                remote_tls_certificate_sha256: *remote_tls_certificate_sha256,
+                            },
+                        ),
                     )
                 }
                 ConnectionInner::Reset {

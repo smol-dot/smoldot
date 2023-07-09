@@ -17,8 +17,8 @@
 
 use super::Shared;
 use crate::platform::{
-    address_parse, ConnectError, PlatformConnection, PlatformRef, PlatformSubstreamDirection,
-    ReadBuffer,
+    address_parse, ConnectError, MultiStreamWebRtcConnection, PlatformConnection, PlatformRef,
+    PlatformSubstreamDirection, ReadBuffer,
 };
 
 use alloc::{sync::Arc, vec, vec::Vec};
@@ -143,11 +143,11 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
             );
             (id, either::Left((socket, task)))
         }
-        PlatformConnection::MultiStreamWebRtc {
+        PlatformConnection::MultiStreamWebRtc(MultiStreamWebRtcConnection {
             connection,
             local_tls_certificate_sha256,
             remote_tls_certificate_sha256,
-        } => {
+        }) => {
             // Convert the SHA256 hashes into multihashes.
             let local_tls_certificate_multihash = [12u8, 32]
                 .into_iter()

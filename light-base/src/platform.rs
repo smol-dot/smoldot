@@ -229,14 +229,18 @@ pub enum PlatformConnection<TStream, TConnection> {
     /// The connection is made of multiple substreams. The encryption and multiplexing are handled
     /// externally. The reading and writing sides of substreams must never close, and substreams
     /// can only be abruptly closed by either side.
-    MultiStreamWebRtc {
-        /// Object representing the WebRTC connection.
-        connection: TConnection,
-        /// SHA256 hash of the TLS certificate used by the local node at the DTLS layer.
-        local_tls_certificate_sha256: [u8; 32],
-        /// SHA256 hash of the TLS certificate used by the remote node at the DTLS layer.
-        remote_tls_certificate_sha256: [u8; 32],
-    },
+    MultiStreamWebRtc(MultiStreamWebRtcConnection<TConnection>),
+}
+
+/// Type of opened connection. See [`PlatformConnection::MultiStreamWebRtc`].
+#[derive(Debug)]
+pub struct MultiStreamWebRtcConnection<TConnection> {
+    /// Object representing the WebRTC connection.
+    pub connection: TConnection,
+    /// SHA256 hash of the TLS certificate used by the local node at the DTLS layer.
+    pub local_tls_certificate_sha256: [u8; 32],
+    /// SHA256 hash of the TLS certificate used by the remote node at the DTLS layer.
+    pub remote_tls_certificate_sha256: [u8; 32],
 }
 
 /// Direction in which a substream has been opened. See [`PlatformRef::next_substream`].
