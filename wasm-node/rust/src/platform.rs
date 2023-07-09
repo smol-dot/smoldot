@@ -17,13 +17,13 @@
 
 use crate::{bindings, timers::Delay};
 
-use smoldot::libp2p::multihash;
 use smoldot_light::platform::{ConnectError, PlatformSubstreamDirection};
 
 use core::{future, mem, pin, str, task, time::Duration};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, VecDeque},
+    iter,
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex,
@@ -157,47 +157,99 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         }
     }
 
-    fn connect(&self, url: &str) -> Self::ConnectFuture {
+    fn connect(&self, address: smoldot_light::platform::Address) -> Self::ConnectFuture {
         let mut lock = STATE.try_lock().unwrap();
 
         let connection_id = lock.next_connection_id;
         lock.next_connection_id += 1;
 
-        let mut error_buffer_index = [0u8; 4];
+        let encoded_address: Vec<u8> = match address {
+            smoldot_light::platform::Address::TcpIp {
+                ip: smoldot_light::platform::IpAddr::V4(ip),
+                port,
+            } => iter::once(0u8)
+                .chain(port.to_be_bytes())
+                .chain(no_std_net::Ipv4Addr::from(ip).to_string().bytes())
+                .collect(),
+            smoldot_light::platform::Address::TcpIp {
+                ip: smoldot_light::platform::IpAddr::V6(ip),
+                port,
+            } => iter::once(1u8)
+                .chain(port.to_be_bytes())
+                .chain(no_std_net::Ipv6Addr::from(ip).to_string().bytes())
+                .collect(),
+            smoldot_light::platform::Address::TcpDns { hostname, port } => iter::once(2u8)
+                .chain(port.to_be_bytes())
+                .chain(hostname.as_bytes().iter().copied())
+                .collect(),
+            smoldot_light::platform::Address::WebSocketIp {
+                ip: smoldot_light::platform::IpAddr::V4(ip),
+                port,
+            } => iter::once(4u8)
+                .chain(port.to_be_bytes())
+                .chain(no_std_net::Ipv4Addr::from(ip).to_string().bytes())
+                .collect(),
+            smoldot_light::platform::Address::WebSocketIp {
+                ip: smoldot_light::platform::IpAddr::V6(ip),
+                port,
+            } => iter::once(5u8)
+                .chain(port.to_be_bytes())
+                .chain(no_std_net::Ipv6Addr::from(ip).to_string().bytes())
+                .collect(),
+            smoldot_light::platform::Address::WebSocketDns {
+                hostname,
+                port,
+                secure: false,
+            } => iter::once(6u8)
+                .chain(port.to_be_bytes())
+                .chain(hostname.as_bytes().iter().copied())
+                .collect(),
+            smoldot_light::platform::Address::WebSocketDns {
+                hostname,
+                port,
+                secure: true,
+            } => iter::once(14u8)
+                .chain(port.to_be_bytes())
+                .chain(hostname.as_bytes().iter().copied())
+                .collect(),
+            smoldot_light::platform::Address::WebRtc {
+                ip: smoldot_light::platform::IpAddr::V4(ip),
+                port,
+                remote_certificate_sha256,
+            } => iter::once(16u8)
+                .chain(port.to_be_bytes())
+                .chain(remote_certificate_sha256.iter().copied())
+                .chain(no_std_net::Ipv4Addr::from(ip).to_string().bytes())
+                .collect(),
+            smoldot_light::platform::Address::WebRtc {
+                ip: smoldot_light::platform::IpAddr::V6(ip),
+                port,
+                remote_certificate_sha256,
+            } => iter::once(17u8)
+                .chain(port.to_be_bytes())
+                .chain(remote_certificate_sha256.iter().copied())
+                .chain(no_std_net::Ipv6Addr::from(ip).to_string().bytes())
+                .collect(),
+        };
 
-        let ret_code = unsafe {
+        unsafe {
             bindings::connection_new(
                 connection_id,
-                u32::try_from(url.as_bytes().as_ptr() as usize).unwrap(),
-                u32::try_from(url.as_bytes().len()).unwrap(),
-                u32::try_from(&mut error_buffer_index as *mut [u8; 4] as usize).unwrap(),
+                u32::try_from(encoded_address.as_ptr() as usize).unwrap(),
+                u32::try_from(encoded_address.len()).unwrap(),
             )
-        };
+        }
 
-        let result = if ret_code != 0 {
-            let error_message = bindings::get_buffer(u32::from_le_bytes(
-                <[u8; 4]>::try_from(&error_buffer_index[0..4]).unwrap(),
-            ));
-            Err(ConnectError {
-                message: str::from_utf8(&error_message).unwrap().to_owned(),
-                is_bad_addr: true,
-            })
-        } else {
-            let _prev_value = lock.connections.insert(
-                connection_id,
-                Connection {
-                    inner: ConnectionInner::NotOpen,
-                    something_happened: event_listener::Event::new(),
-                },
-            );
-            debug_assert!(_prev_value.is_none());
-
-            Ok(())
-        };
+        let _prev_value = lock.connections.insert(
+            connection_id,
+            Connection {
+                inner: ConnectionInner::NotOpen,
+                something_happened: event_listener::Event::new(),
+            },
+        );
+        debug_assert!(_prev_value.is_none());
 
         Box::pin(async move {
-            result?;
-
             // Wait until the connection state is no longer `ConnectionInner::NotOpen`.
             let mut lock = loop {
                 let something_happened = {
@@ -233,18 +285,16 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                 }
                 ConnectionInner::MultiStreamWebRtc {
                     connection_handles_alive,
-                    local_tls_certificate_multihash,
-                    remote_tls_certificate_multihash,
+                    local_tls_certificate_sha256,
+                    remote_tls_certificate_sha256,
                     ..
                 } => {
                     *connection_handles_alive += 1;
                     Ok(
                         smoldot_light::platform::PlatformConnection::MultiStreamWebRtc {
                             connection: MultiStreamWrapper(connection_id),
-                            local_tls_certificate_multihash: local_tls_certificate_multihash
-                                .clone(),
-                            remote_tls_certificate_multihash: remote_tls_certificate_multihash
-                                .clone(),
+                            local_tls_certificate_sha256: *local_tls_certificate_sha256,
+                            remote_tls_certificate_sha256: *remote_tls_certificate_sha256,
                         },
                     )
                 }
@@ -666,10 +716,10 @@ enum ConnectionInner {
         /// Number of objects (connections and streams) in the [`PlatformRef`] API that reference
         /// this connection. If it switches from 1 to 0, the connection must be removed.
         connection_handles_alive: u32,
-        /// Multihash encoding of the TLS certificate used by the local node at the DTLS layer.
-        local_tls_certificate_multihash: Vec<u8>,
-        /// Multihash encoding of the TLS certificate used by the remote node at the DTLS layer.
-        remote_tls_certificate_multihash: Vec<u8>,
+        /// SHA256 hash of the TLS certificate used by the local node at the DTLS layer.
+        local_tls_certificate_sha256: [u8; 32],
+        /// SHA256 hash of the TLS certificate used by the remote node at the DTLS layer.
+        remote_tls_certificate_sha256: [u8; 32],
     },
     /// [`bindings::connection_reset`] has been called
     Reset {
@@ -741,30 +791,16 @@ pub(crate) fn connection_open_single_stream(
 }
 
 pub(crate) fn connection_open_multi_stream(connection_id: u32, handshake_ty: Vec<u8>) {
-    let (_, (local_tls_certificate_multihash, remote_tls_certificate_multihash)) =
+    let (_, (local_tls_certificate_sha256, remote_tls_certificate_sha256)) =
         nom::sequence::preceded(
             nom::bytes::complete::tag::<_, _, nom::error::Error<&[u8]>>(&[0]),
             nom::sequence::tuple((
-                move |b| {
-                    multihash::MultihashRef::from_bytes_partial(b)
-                        .map(|(a, b)| (b, a))
-                        .map_err(|_| {
-                            nom::Err::Failure(nom::error::make_error(
-                                b,
-                                nom::error::ErrorKind::Verify,
-                            ))
-                        })
-                },
-                move |b| {
-                    multihash::MultihashRef::from_bytes_partial(b)
-                        .map(|(a, b)| (b, a))
-                        .map_err(|_| {
-                            nom::Err::Failure(nom::error::make_error(
-                                b,
-                                nom::error::ErrorKind::Verify,
-                            ))
-                        })
-                },
+                nom::combinator::map(nom::bytes::complete::take(32u32), |b| {
+                    <&[u8; 32]>::try_from(b).unwrap()
+                }),
+                nom::combinator::map(nom::bytes::complete::take(32u32), |b| {
+                    <&[u8; 32]>::try_from(b).unwrap()
+                }),
             )),
         )(&handshake_ty[..])
         .expect("invalid handshake type provided to connection_open_multi_stream");
@@ -777,8 +813,8 @@ pub(crate) fn connection_open_multi_stream(connection_id: u32, handshake_ty: Vec
     connection.inner = ConnectionInner::MultiStreamWebRtc {
         opened_substreams_to_pick_up: VecDeque::with_capacity(8),
         connection_handles_alive: 0,
-        local_tls_certificate_multihash: local_tls_certificate_multihash.to_vec(),
-        remote_tls_certificate_multihash: remote_tls_certificate_multihash.to_vec(),
+        local_tls_certificate_sha256: *local_tls_certificate_sha256,
+        remote_tls_certificate_sha256: *remote_tls_certificate_sha256,
     };
     connection.something_happened.notify(usize::max_value());
 }

@@ -19,21 +19,15 @@
 #![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
 use super::{
-    ConnectError, ConnectionType, PlatformConnection, PlatformRef, PlatformSubstreamDirection,
-    ReadBuffer,
+    Address, ConnectError, ConnectionType, IpAddr, PlatformConnection, PlatformRef,
+    PlatformSubstreamDirection, ReadBuffer,
 };
 
 use alloc::{borrow::Cow, collections::VecDeque, sync::Arc};
 use core::{ops, pin::Pin, str, task::Poll, time::Duration};
 use futures_util::{future, AsyncRead, AsyncWrite, FutureExt as _};
-use smoldot::libp2p::{
-    multiaddr::{Multiaddr, ProtocolRef},
-    websocket,
-};
-use std::{
-    io::IoSlice,
-    net::{IpAddr, SocketAddr},
-};
+use smoldot::libp2p::websocket;
+use std::{io::IoSlice, net::SocketAddr};
 
 /// Implementation of the [`PlatformRef`] trait that leverages the operating system.
 pub struct DefaultPlatform {
@@ -105,80 +99,52 @@ impl PlatformRef for Arc<DefaultPlatform> {
         )
     }
 
-    fn connect(&self, multiaddr: &str) -> Self::ConnectFuture {
-        // We simply copy the address to own it. We could be more zero-cost here, but doing so
-        // would considerably complicate the implementation.
-        let multiaddr = multiaddr.to_owned();
-
-        Box::pin(async move {
-            let addr = multiaddr.parse::<Multiaddr>().map_err(|_| ConnectError {
-                is_bad_addr: true,
-                message: "Failed to parse address".to_string(),
-            })?;
-
-            let mut iter = addr.iter().fuse();
-            let proto1 = iter.next().ok_or(ConnectError {
-                is_bad_addr: true,
-                message: "Unknown protocols combination".to_string(),
-            })?;
-            let proto2 = iter.next().ok_or(ConnectError {
-                is_bad_addr: true,
-                message: "Unknown protocols combination".to_string(),
-            })?;
-            let proto3 = iter.next();
-
-            if iter.next().is_some() {
-                return Err(ConnectError {
-                    is_bad_addr: true,
-                    message: "Unknown protocols combination".to_string(),
-                });
+    fn connect(&self, multiaddr: Address) -> Self::ConnectFuture {
+        let (tcp_socket_addr, host_if_websocket): (
+            either::Either<SocketAddr, (String, u16)>,
+            Option<String>,
+        ) = match multiaddr {
+            Address::TcpDns { hostname, port } => {
+                (either::Right((hostname.to_string(), port)), None)
+            }
+            Address::TcpIp {
+                ip: IpAddr::V4(ip),
+                port,
+            } => (either::Left(SocketAddr::from((ip, port))), None),
+            Address::TcpIp {
+                ip: IpAddr::V6(ip),
+                port,
+            } => (either::Left(SocketAddr::from((ip, port))), None),
+            Address::WebSocketDns {
+                hostname,
+                port,
+                secure: false,
+            } => (
+                either::Right((hostname.to_string(), port)),
+                Some(format!("{}:{}", hostname, port)),
+            ),
+            Address::WebSocketIp {
+                ip: IpAddr::V4(ip),
+                port,
+            } => {
+                let addr = SocketAddr::from((ip, port));
+                (either::Left(addr), Some(addr.to_string()))
+            }
+            Address::WebSocketIp {
+                ip: IpAddr::V6(ip),
+                port,
+            } => {
+                let addr = SocketAddr::from((ip, port));
+                (either::Left(addr), Some(addr.to_string()))
             }
 
-            // TODO: doesn't support WebSocket secure connections
+            // The API user of the `PlatformRef` trait is never supposed to open connections of
+            // a type that isn't supported.
+            _ => unreachable!(),
+        };
 
-            // Ensure ahead of time that the multiaddress is supported.
-            let (addr, host_if_websocket) = match (&proto1, &proto2, &proto3) {
-                (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port), None) => (
-                    either::Left(SocketAddr::new(IpAddr::V4((*ip).into()), *port)),
-                    None,
-                ),
-                (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port), None) => (
-                    either::Left(SocketAddr::new(IpAddr::V6((*ip).into()), *port)),
-                    None,
-                ),
-                (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port), Some(ProtocolRef::Ws)) => {
-                    let addr = SocketAddr::new(IpAddr::V4((*ip).into()), *port);
-                    (either::Left(addr), Some(addr.to_string()))
-                }
-                (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port), Some(ProtocolRef::Ws)) => {
-                    let addr = SocketAddr::new(IpAddr::V6((*ip).into()), *port);
-                    (either::Left(addr), Some(addr.to_string()))
-                }
-
-                // TODO: we don't care about the differences between Dns, Dns4, and Dns6
-                (
-                    ProtocolRef::Dns(addr) | ProtocolRef::Dns4(addr) | ProtocolRef::Dns6(addr),
-                    ProtocolRef::Tcp(port),
-                    None,
-                ) => (either::Right((addr.to_string(), *port)), None),
-                (
-                    ProtocolRef::Dns(addr) | ProtocolRef::Dns4(addr) | ProtocolRef::Dns6(addr),
-                    ProtocolRef::Tcp(port),
-                    Some(ProtocolRef::Ws),
-                ) => (
-                    either::Right((addr.to_string(), *port)),
-                    Some(format!("{}:{}", addr, *port)),
-                ),
-
-                _ => {
-                    return Err(ConnectError {
-                        is_bad_addr: true,
-                        message: "Unknown protocols combination".to_string(),
-                    })
-                }
-            };
-
-            let tcp_socket = match addr {
+        Box::pin(async move {
+            let tcp_socket = match tcp_socket_addr {
                 either::Left(socket_addr) => smol::net::TcpStream::connect(socket_addr).await,
                 either::Right((dns, port)) => smol::net::TcpStream::connect((&dns[..], port)).await,
             };

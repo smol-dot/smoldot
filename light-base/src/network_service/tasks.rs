@@ -16,9 +16,12 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::Shared;
-use crate::platform::{PlatformConnection, PlatformRef, PlatformSubstreamDirection, ReadBuffer};
+use crate::platform::{
+    address_parse, ConnectError, PlatformConnection, PlatformRef, PlatformSubstreamDirection,
+    ReadBuffer,
+};
 
-use alloc::{string::ToString as _, sync::Arc, vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::{cmp, iter, pin};
 use futures_channel::mpsc;
 use futures_util::{future, FutureExt as _, StreamExt as _};
@@ -38,18 +41,30 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
     )>,
     is_important: bool,
 ) {
-    // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d/ws`)
-    // into a `Future<dyn Output = Result<TcpStream, ...>>`.
+    log::debug!(
+        target: "connections",
+        "Pending({:?}, {}) started: {}",
+        start_connect.id, start_connect.expected_peer_id,
+        start_connect.multiaddr
+    );
+
+    // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d/ws`) into a future.
+    // The future returns an error if the multiaddr isn't supported.
     let socket = {
-        log::debug!(
-            target: "connections",
-            "Pending({:?}, {}) started: {}",
-            start_connect.id, start_connect.expected_peer_id,
-            start_connect.multiaddr
-        );
-        shared
-            .platform
-            .connect(&start_connect.multiaddr.to_string())
+        let address = address_parse::multiaddr_to_address(&start_connect.multiaddr)
+            .ok()
+            .filter(|addr| shared.platform.supports_connection_type(From::from(addr)));
+        let socket = address.map(|addr| shared.platform.connect(addr));
+        async move {
+            if let Some(socket) = socket {
+                socket.await
+            } else {
+                Err(ConnectError {
+                    message: "Invalid multiaddr".into(),
+                    is_bad_addr: true,
+                })
+            }
+        }
     };
 
     let socket = {
@@ -141,9 +156,18 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
         }
         PlatformConnection::MultiStreamWebRtc {
             connection,
-            local_tls_certificate_multihash,
-            remote_tls_certificate_multihash,
+            local_tls_certificate_sha256,
+            remote_tls_certificate_sha256,
         } => {
+            // Convert the SHA256 hashes into multihashes.
+            let local_tls_certificate_multihash = [12u8, 32]
+                .into_iter()
+                .chain(local_tls_certificate_sha256.into_iter())
+                .collect();
+            let remote_tls_certificate_multihash = [12u8, 32]
+                .into_iter()
+                .chain(remote_tls_certificate_sha256.into_iter())
+                .collect();
             let (id, task) = guarded.network.pending_outcome_ok_multi_stream(
                 start_connect.id,
                 service::MultiStreamHandshakeKind::WebRtc {

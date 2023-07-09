@@ -23,6 +23,16 @@ export function utf8BytesToString(buffer: Uint8Array, offset: number, length: nu
     return new TextDecoder().decode(buffer.slice(offset, offset + length))
 }
 
+export function readUInt8(buffer: Uint8Array, offset: number): number {
+    checkRange(buffer, offset, 1)
+    return buffer[offset]!
+}
+
+export function readUInt16BE(buffer: Uint8Array, offset: number): number {
+    checkRange(buffer, offset, 2)
+    return ((buffer[offset]! << 8) | buffer[offset + 1]!)
+}
+
 export function readUInt32LE(buffer: Uint8Array, offset: number): number {
     checkRange(buffer, offset, 4)
     return (buffer[offset]! | (buffer[offset + 1]! << 8) | (buffer[offset + 2]! << 16)) + (buffer[offset + 3]! * 0x1000000)

@@ -150,8 +150,8 @@ export interface ConnectionConfig {
         } |
         {
             type: 'multi-stream', handshake: 'webrtc',
-            localTlsCertificateMultihash: Uint8Array,
-            remoteTlsCertificateMultihash: Uint8Array,
+            localTlsCertificateSha256: Uint8Array,
+            remoteTlsCertificateSha256: Uint8Array,
         }
     ) => void;
 

@@ -15,10 +15,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use alloc::{borrow::Cow, string::String, vec::Vec};
+use alloc::{borrow::Cow, string::String};
 use core::{future::Future, ops, str, time::Duration};
 use futures_util::future;
 
+pub mod address_parse;
 pub mod default;
 
 /// Access to a platform's capabilities.
@@ -109,9 +110,12 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
 
     /// Starts a connection attempt to the given multiaddress.
     ///
-    /// The multiaddress is passed as a string. If the string can't be parsed, an error should be
-    /// returned where [`ConnectError::is_bad_addr`] is `true`.
-    fn connect(&self, url: &str) -> Self::ConnectFuture;
+    /// # Panic
+    ///
+    /// The function implementation panics if [`Address`] is of a type for which
+    /// [`Platform::supports_connection_type`] returns `false`.
+    ///
+    fn connect(&self, address: Address) -> Self::ConnectFuture;
 
     /// Queues the opening of an additional outbound substream.
     ///
@@ -228,10 +232,10 @@ pub enum PlatformConnection<TStream, TConnection> {
     MultiStreamWebRtc {
         /// Object representing the WebRTC connection.
         connection: TConnection,
-        /// Multihash encoding of the TLS certificate used by the local node at the DTLS layer.
-        local_tls_certificate_multihash: Vec<u8>,
-        /// Multihash encoding of the TLS certificate used by the remote node at the DTLS layer.
-        remote_tls_certificate_multihash: Vec<u8>,
+        /// SHA256 hash of the TLS certificate used by the local node at the DTLS layer.
+        local_tls_certificate_sha256: [u8; 32],
+        /// SHA256 hash of the TLS certificate used by the remote node at the DTLS layer.
+        remote_tls_certificate_sha256: [u8; 32],
     },
 }
 
@@ -261,6 +265,110 @@ pub enum ConnectionType {
     },
     /// Libp2p-specific WebRTC flavour.
     WebRtc,
+}
+
+impl<'a> From<&'a Address<'a>> for ConnectionType {
+    fn from(address: &'a Address<'a>) -> ConnectionType {
+        match address {
+            Address::TcpDns { .. } | Address::TcpIp { .. } => ConnectionType::Tcp,
+            Address::WebSocketIp {
+                ip: IpAddr::V4(ip), ..
+            } => ConnectionType::WebSocket {
+                secure: false,
+                remote_is_localhost: no_std_net::Ipv4Addr::from(*ip).is_loopback(),
+            },
+            Address::WebSocketIp {
+                ip: IpAddr::V6(ip), ..
+            } => ConnectionType::WebSocket {
+                secure: false,
+                remote_is_localhost: no_std_net::Ipv6Addr::from(*ip).is_loopback(),
+            },
+            Address::WebSocketDns {
+                hostname, secure, ..
+            } => ConnectionType::WebSocket {
+                secure: *secure,
+                remote_is_localhost: *hostname == "localhost", // TODO: ASCII compare?
+            },
+            Address::WebRtc { .. } => ConnectionType::WebRtc,
+        }
+    }
+}
+
+/// Connection type passed to [`PlatformRef::supports_connection_type`].
+// TODO: we don't differentiate between Dns4 and Dns6
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum Address<'a> {
+    /// TCP/IP connection with a domain name.
+    TcpDns {
+        /// DNS hostname to connect to.
+        ///
+        /// > **Note**: According to RFC2181 section 11, a domain name is not necessarily an UTF-8
+        /// >           string. Any binary data can be used as a domain name, provided it follows
+        /// >           a few restrictions (notably its length). However, in the context of the
+        /// >           [`PlatformRef`] trait, we automatically consider as non-supported a
+        /// >           multiaddress that contains a non-UTF-8 domain name, for the sake of
+        /// >           simplicity.
+        hostname: &'a str,
+        /// TCP port to connect to.
+        port: u16,
+    },
+
+    /// TCP/IP connection with an IP address.
+    TcpIp {
+        /// IP address to connect to.
+        ip: IpAddr,
+        /// TCP port to connect to.
+        port: u16,
+    },
+
+    /// WebSocket connection with an IP address.
+    WebSocketIp {
+        /// IP address to connect to.
+        ip: IpAddr,
+        /// TCP port to connect to.
+        port: u16,
+    },
+
+    /// WebSocket connection with a domain name.
+    WebSocketDns {
+        /// DNS hostname to connect to.
+        ///
+        /// > **Note**: According to RFC2181 section 11, a domain name is not necessarily an UTF-8
+        /// >           string. Any binary data can be used as a domain name, provided it follows
+        /// >           a few restrictions (notably its length). However, in the context of the
+        /// >           [`PlatformRef`] trait, we automatically consider as non-supported a
+        /// >           multiaddress that contains a non-UTF-8 domain name, for the sake of
+        /// >           simplicity.
+        hostname: &'a str,
+        /// TCP port to connect to.
+        port: u16,
+        /// `true` for WebSocket secure connections.
+        secure: bool,
+    },
+
+    /// Libp2p-specific WebRTC flavour.
+    ///
+    /// The implementation the [`PlatformRef`] trait is responsible for opening the SCTP
+    /// connection. The API user of the [`PlatformRef`] trait is responsible for opening the first
+    /// data channel and performing the Noise handshake.
+    // TODO: maybe explain more what the implementation is supposed to do?
+    WebRtc {
+        /// IP address to connect to.
+        ip: IpAddr,
+        /// UDP port to connect to.
+        port: u16,
+        /// SHA-256 hash of the target's WebRTC certificate.
+        // TODO: consider providing a reference here; right now there's some issues with multiaddr preventing that
+        remote_certificate_sha256: [u8; 32],
+    },
+}
+
+/// Either an IPv4 or IPv6 address.
+// TODO: replace this with `core::net::IpAddr` once it's stable: https://github.com/rust-lang/rust/issues/108443
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum IpAddr {
+    V4([u8; 4]),
+    V6([u8; 16]),
 }
 
 /// Error potentially returned by [`PlatformRef::connect`].
