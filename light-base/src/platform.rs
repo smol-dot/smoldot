@@ -230,10 +230,11 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     ///
     /// Panics if [`PlatformRef::close_send`] has already been called on this stream.
     ///
+    // TODO: consider not calling this function at all for WebSocket
     fn close_send(&self, stream: &mut Self::Stream);
 }
 
-/// Type of opened connection. See [`MultiStreamAddress::WebRtc`].
+/// Established multistream connection information. See [`PlatformRef::connect_multistream`].
 #[derive(Debug)]
 pub struct MultiStreamWebRtcConnection<TConnection> {
     /// Object representing the WebRTC connection.
@@ -241,6 +242,7 @@ pub struct MultiStreamWebRtcConnection<TConnection> {
     /// SHA256 hash of the TLS certificate used by the local node at the DTLS layer.
     pub local_tls_certificate_sha256: [u8; 32],
     /// SHA256 hash of the TLS certificate used by the remote node at the DTLS layer.
+    // TODO: consider caching the information that was passed in the address instead of passing it back
     pub remote_tls_certificate_sha256: [u8; 32],
 }
 
@@ -292,7 +294,7 @@ impl<'a> From<&'a Address<'a>> for ConnectionType {
                 hostname, secure, ..
             } => ConnectionType::WebSocket {
                 secure: *secure,
-                remote_is_localhost: *hostname == "localhost", // TODO: ASCII compare?
+                remote_is_localhost: hostname.eq_ignore_ascii_case("localhost"),
             },
         }
     }
