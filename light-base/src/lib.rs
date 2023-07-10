@@ -306,7 +306,7 @@ pub struct JsonRpcResponses {
     ///
     /// As long as this object is alive, the JSON-RPC service will continue running. In order
     /// to prevent that from happening, we destroy it as soon as the
-    /// [`JsonRpcResponses::public_api_chain_destroyed_rx`] is notified of the destruction of
+    /// [`JsonRpcResponses::public_api_chain_destroyed`] is notified of the destruction of
     /// the sender.
     inner: Option<json_rpc_service::Frontend>,
 
