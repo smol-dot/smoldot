@@ -14,6 +14,7 @@
 ### Fixed
 
 - Fix downloading the runtime code twice during the warp syncing process. ([#863](https://github.com/smol-dot/smoldot/pull/863))
+- Fix a "One or more entries are missing from the call proof" error when validating some transactions.
 
 ## 1.0.11 - 2023-06-25
 
