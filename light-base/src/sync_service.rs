@@ -33,7 +33,6 @@ use async_lock::Mutex;
 use core::{fmt, mem, num::NonZeroU32, time::Duration};
 use futures_channel::{mpsc, oneshot};
 use futures_util::{stream, SinkExt as _};
-use rand::seq::IteratorRandom as _;
 use smoldot::{
     chain,
     executor::host,
