@@ -36,6 +36,6 @@ serde_json = { version = "1.0.100", default-features = false, features = ["std"]
 siphasher = { version = "0.3.10", default-features = false }
 soketto = { version = "0.7.1", features = ["deflate"] }
 smol = "1.3.0"
-smoldot = { version = "0.8.0", path = "../lib", default-features = false, features = ["database-sqlite", "std", "wasmtime"] }
+smoldot = { version = "0.9.0", path = "../lib", default-features = false, features = ["database-sqlite", "std", "wasmtime"] }
 terminal_size = "0.2.6"
 zeroize = { version = "1.6.0", default-features = false, features = ["alloc"] }
