@@ -96,6 +96,7 @@ fn execute_blocks() {
             function_to_call: "Core_execute_block",
             max_log_level: 3,
             storage_main_trie_changes: Default::default(),
+            calculate_trie_changes: false,
             parameter: {
                 // Block header + number of extrinsics + extrinsics
                 let encoded_body_len =

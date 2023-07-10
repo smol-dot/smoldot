@@ -1055,6 +1055,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             parameter: call_parameters,
             storage_main_trie_changes: Default::default(),
             max_log_level: 0,
+            calculate_trie_changes: false,
         }) {
             Ok(vm) => vm,
             Err((err, prototype)) => {
