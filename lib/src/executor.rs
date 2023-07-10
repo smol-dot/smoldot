@@ -33,6 +33,7 @@ pub mod host;
 pub mod read_only_runtime_host;
 pub mod runtime_host;
 pub mod storage_diff;
+pub mod trie_root_calculator;
 pub mod vm;
 
 pub use host::{CoreVersion, CoreVersionError, CoreVersionRef};

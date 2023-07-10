@@ -16,7 +16,8 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-    network_service, platform::Platform, runtime_service, sync_service, transactions_service,
+    network_service, platform::PlatformRef, runtime_service, sync_service, transactions_service,
+    util,
 };
 
 use super::StartConfig;
@@ -28,6 +29,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use async_lock::Mutex;
 use core::{
     iter,
     num::{NonZeroU32, NonZeroUsize},
@@ -35,32 +37,26 @@ use core::{
     sync::atomic,
     time::Duration,
 };
-use futures::{lock::Mutex, prelude::*};
-use hashbrown::HashMap;
+use futures_channel::oneshot;
 use smoldot::{
-    chain::fork_tree,
     executor::{host, runtime_host},
-    header,
-    json_rpc::{self, methods, requests_subscriptions},
+    json_rpc::{self, methods, service},
     libp2p::{multiaddr, PeerId},
-    network::protocol,
 };
 
 mod chain_head;
 mod getters;
+mod legacy_state_sub;
 mod state_chain;
 mod transactions;
 
 /// Fields used to process JSON-RPC requests in the background.
-struct Background<TPlat: Platform> {
+struct Background<TPlat: PlatformRef> {
     /// Target to use for all the logs.
     log_target: String,
 
-    /// State machine holding all the clients, requests, and subscriptions.
-    ///
-    /// Only requests that are valid JSON-RPC are insert into the state machine. However, requests
-    /// can try to call an unknown method, or have invalid parameters.
-    requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>>,
+    /// Access to the platform's capabilities.
+    platform: TPlat,
 
     /// Name of the chain, as found in the chain specification.
     chain_name: String,
@@ -87,9 +83,16 @@ struct Background<TPlat: Platform> {
     /// See [`StartConfig::transactions_service`].
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
 
-    /// Various information caches about blocks, to potentially reduce the number of network
-    /// requests to perform.
-    cache: Mutex<Cache>,
+    /// Channel where to send requests that concern the legacy JSON-RPC API that are handled by
+    /// a dedicated task.
+    to_legacy: Mutex<async_channel::Sender<legacy_state_sub::Message<TPlat>>>,
+
+    /// When `state_getKeysPaged` is called and the response is truncated, the response is
+    /// inserted in this cache. The API user is likely to call `state_getKeysPaged` again with
+    /// the same parameters, in which case we hit the cache and avoid the networking requests.
+    /// The values are list of keys.
+    state_get_keys_paged_cache:
+        Mutex<lru::LruCache<GetKeysPagedCacheKey, Vec<Vec<u8>>, util::SipHasherBuild>>,
 
     /// Hash of the genesis block.
     /// Keeping the genesis block is important, as the genesis block hash is included in
@@ -99,135 +102,45 @@ struct Background<TPlat: Platform> {
     /// If `true`, we have already printed a warning about usage of the legacy JSON-RPC API. This
     /// flag prevents printing this message multiple times.
     printed_legacy_json_rpc_warning: atomic::AtomicBool,
-}
 
-struct FollowSubscription {
-    /// Tree of hashes of all the current non-finalized blocks. This includes unpinned blocks.
-    non_finalized_blocks: fork_tree::ForkTree<[u8; 32]>,
-
-    /// For each pinned block hash, the SCALE-encoded header of the block.
-    pinned_blocks_headers: HashMap<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
-
-    runtime_subscribe_all: Option<runtime_service::SubscriptionId>,
-}
-
-pub(super) enum SubscriptionMessage {
-    StopIfAllHeads {
-        stop_request_id: (String, requests_subscriptions::RequestId),
-    },
-    StopIfNewHeads {
-        stop_request_id: (String, requests_subscriptions::RequestId),
-    },
-    StopIfFinalizedHeads {
-        stop_request_id: (String, requests_subscriptions::RequestId),
-    },
-    StopIfStorage {
-        stop_request_id: (String, requests_subscriptions::RequestId),
-    },
-    StopIfTransactionLegacy {
-        stop_request_id: (String, requests_subscriptions::RequestId),
-    },
-    StopIfTransaction {
-        stop_request_id: (String, requests_subscriptions::RequestId),
-    },
-    StopIfRuntimeSpec {
-        stop_request_id: (String, requests_subscriptions::RequestId),
-    },
-    StopIfChainHeadBody {
-        stop_request_id: (String, requests_subscriptions::RequestId),
-    },
-    StopIfChainHeadCall {
-        stop_request_id: (String, requests_subscriptions::RequestId),
-    },
-    StopIfChainHeadStorage {
-        stop_request_id: (String, requests_subscriptions::RequestId),
-    },
-    StopIfChainHeadFollow {
-        stop_request_id: (String, requests_subscriptions::RequestId),
-    },
-    ChainHeadFollowUnpin {
-        hash: methods::HashHexString,
-        unpin_request_id: (String, requests_subscriptions::RequestId),
-    },
-    ChainHeadHeader {
-        hash: methods::HashHexString,
-        get_request_id: (String, requests_subscriptions::RequestId),
-    },
-    ChainHeadCall {
-        hash: methods::HashHexString,
-        get_request_id: (String, requests_subscriptions::RequestId),
-        function_to_call: String,
-        call_parameters: methods::HexString,
-        network_config: methods::NetworkConfig,
-    },
-    ChainHeadStorage {
-        hash: methods::HashHexString,
-        get_request_id: (String, requests_subscriptions::RequestId),
-        network_config: methods::NetworkConfig,
-        key: methods::HexString,
-        child_key: Option<methods::HexString>,
-    },
-    ChainHeadBody {
-        hash: methods::HashHexString,
-        get_request_id: (String, requests_subscriptions::RequestId),
-        network_config: methods::NetworkConfig,
-    },
-}
-
-struct Cache {
-    /// When the runtime service reports a new block, it is kept pinned and inserted in this LRU
-    /// cache. When an entry in removed from the cache, it is unpinned.
-    ///
-    /// JSON-RPC clients are more likely to ask for information about recent blocks and perform
-    /// calls on them, hence a cache of recent blocks.
-    recent_pinned_blocks: lru::LruCache<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
-
-    /// Subscription on the runtime service under which the blocks of
-    /// [`Cache::recent_pinned_blocks`] are pinned.
-    ///
-    /// Contains `None` only at initialization, in which case [`Cache::recent_pinned_blocks`]
-    /// is guaranteed to be empty. In other words, if a block is found in
-    /// [`Cache::recent_pinned_blocks`] then this field is guaranteed to be `Some`.
-    subscription_id: Option<runtime_service::SubscriptionId>,
-
-    /// State trie root hashes and numbers of blocks that were not in
-    /// [`Cache::recent_pinned_blocks`].
-    ///
-    /// The state trie root hash can also be an `Err` if the network request failed or if the
-    /// header is of an invalid format.
-    ///
-    /// The state trie root hash and number are wrapped in a `Shared` future. When multiple
-    /// requests need the state trie root hash and number of the same block, they are only queried
-    /// once and the query is inserted in the cache while in progress. This way, the multiple
-    /// requests can all wait on that single future.
-    ///
-    /// Most of the time, the JSON-RPC client will query blocks that are found in
-    /// [`Cache::recent_pinned_blocks`], but occasionally it will query older blocks. When the
-    /// storage of an older block is queried, it is common for the JSON-RPC client to make several
-    /// storage requests to that same old block. In order to avoid having to retrieve the state
-    /// trie root hash multiple, we store these hashes in this LRU cache.
-    block_state_root_hashes_numbers: lru::LruCache<
-        [u8; 32],
-        future::MaybeDone<
-            future::Shared<
-                future::BoxFuture<'static, Result<([u8; 32], u64), StateTrieRootHashError>>,
+    /// For each `chainHead_follow` subscription ID, a channel to the task dedicated to processing
+    /// this subscription.
+    chain_head_follow_tasks: Mutex<
+        hashbrown::HashMap<
+            String,
+            service::DeliverSender<
+                either::Either<service::RequestProcess, service::SubscriptionStartProcess>,
             >,
+            fnv::FnvBuildHasher,
         >,
-        fnv::FnvBuildHasher,
     >,
 }
 
-pub(super) fn start<TPlat: Platform>(
+/// See [`Background::state_get_keys_paged_cache`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct GetKeysPagedCacheKey {
+    /// Value of the `hash` parameter of the call to `state_getKeysPaged`.
+    hash: [u8; 32],
+    /// Value of the `prefix` parameter of the call to `state_getKeysPaged`.
+    prefix: Vec<u8>,
+}
+
+pub(super) fn start<TPlat: PlatformRef>(
     log_target: String,
-    requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions<SubscriptionMessage>>,
-    mut config: StartConfig<'_, TPlat>,
+    config: StartConfig<'_, TPlat>,
+    mut requests_processing_task: service::ClientMainTask,
     max_parallel_requests: NonZeroU32,
-    max_parallel_subscription_updates: NonZeroU32,
-    background_abort_registrations: Vec<future::AbortRegistration>,
 ) {
+    let to_legacy_tx = legacy_state_sub::start_task(legacy_state_sub::Config {
+        platform: config.platform.clone(),
+        log_target: log_target.clone(),
+        sync_service: config.sync_service.clone(),
+        runtime_service: config.runtime_service.clone(),
+    });
+
     let me = Arc::new(Background {
         log_target,
-        requests_subscriptions,
+        platform: config.platform,
         chain_name: config.chain_spec.name().to_owned(),
         chain_ty: config.chain_spec.chain_type().to_owned(),
         chain_is_live: config.chain_spec.has_live_network(),
@@ -239,197 +152,116 @@ pub(super) fn start<TPlat: Platform>(
         sync_service: config.sync_service.clone(),
         runtime_service: config.runtime_service.clone(),
         transactions_service: config.transactions_service.clone(),
-        cache: Mutex::new(Cache {
-            recent_pinned_blocks: lru::LruCache::with_hasher(
-                NonZeroUsize::new(32).unwrap(),
-                Default::default(),
-            ),
-            subscription_id: None,
-            block_state_root_hashes_numbers: lru::LruCache::with_hasher(
-                NonZeroUsize::new(32).unwrap(),
-                Default::default(),
-            ),
-        }),
+        to_legacy: Mutex::new(to_legacy_tx.clone()),
+        state_get_keys_paged_cache: Mutex::new(lru::LruCache::with_hasher(
+            NonZeroUsize::new(2).unwrap(),
+            util::SipHasherBuild::new(rand::random()),
+        )),
         genesis_block_hash: config.genesis_block_hash,
         printed_legacy_json_rpc_warning: atomic::AtomicBool::new(false),
+        chain_head_follow_tasks: Mutex::new(hashbrown::HashMap::with_hasher(Default::default())),
     });
 
-    let mut background_abort_registrations = background_abort_registrations.into_iter();
+    let (tx, rx) = async_channel::bounded(
+        usize::try_from(max_parallel_requests.get()).unwrap_or(usize::max_value()),
+    );
 
-    // A certain number of tasks (`max_parallel_requests`) are dedicated to pulling requests
-    // from the inner state machine and processing them.
-    // Each task can only process one request at a time, which is why we spawn one task per
-    // desired level of parallelism.
-    for n in 0..max_parallel_requests.get() {
-        let me = me.clone();
-        (config.tasks_executor)(
-            format!("{}-requests-{}", me.log_target, n),
-            future::Abortable::new(
-                async move {
-                    loop {
-                        me.handle_request().await;
-
-                        // We yield once between each request in order to politely let other tasks
-                        // do some work and not monopolize the CPU.
-                        TPlat::yield_after_cpu_intensive().await;
-                    }
-                },
-                background_abort_registrations.next().unwrap(),
-            )
-            .map(|_: Result<(), _>| ())
-            .boxed(),
-        );
-    }
-
-    // A certain number of tasks (`max_parallel_subscription_updates`) are dedicated to
-    // processing subscriptions-related tasks after they wake up.
-    for n in 0..max_parallel_subscription_updates.get() {
-        let me = me.clone();
-        (config.tasks_executor)(
-            format!("{}-subscriptions-{}", me.log_target, n),
-            future::Abortable::new(
-                async move {
-                    loop {
-                        me.requests_subscriptions.run_subscription_task().await;
-
-                        // We yield once between each request in order to politely let other tasks
-                        // do some work and not monopolize the CPU.
-                        TPlat::yield_after_cpu_intensive().await;
-                    }
-                },
-                background_abort_registrations.next().unwrap(),
-            )
-            .map(|_: Result<(), _>| ())
-            .boxed(),
-        );
-    }
-
-    // Spawn one task dedicated to filling the `Cache` with new blocks from the runtime
-    // service.
-    // TODO: this is actually racy, as a block subscription task could report a new block to a client, and then client can query it, before this block has been been added to the cache
-    // TODO: extract to separate function
-    (config.tasks_executor)(format!("{}-cache-populate", me.log_target), {
-        let me = me.clone();
-        future::Abortable::new(
+    // Spawn a task that is dedicated to receiving the raw JSON-RPC requests, decode them, and
+    // send them to the request processing tasks.
+    me.platform
+        .clone()
+        .spawn_task(format!("{}-main-task", me.log_target).into(), {
+            let me = me.clone();
             async move {
                 loop {
-                    let mut cache = me.cache.lock().await;
-
-                    // Subscribe to new runtime service blocks in order to push them in the
-                    // cache as soon as they are available.
-                    // The buffer size should be large enough so that, if the CPU is busy, it
-                    // doesn't become full before the execution of this task resumes.
-                    // The maximum number of pinned block is ignored, as this maximum is a way to
-                    // avoid malicious behaviors. This code is by definition not considered
-                    // malicious.
-                    let mut subscribe_all = me
-                        .runtime_service
-                        .subscribe_all(
-                            "json-rpc-blocks-cache",
-                            32,
-                            NonZeroUsize::new(usize::max_value()).unwrap(),
-                        )
-                        .await;
-
-                    cache.subscription_id = Some(subscribe_all.new_blocks.id());
-                    cache.recent_pinned_blocks.clear();
-                    debug_assert!(cache.recent_pinned_blocks.cap().get() >= 1);
-
-                    let finalized_block_hash = header::hash_from_scale_encoded_header(
-                        &subscribe_all.finalized_block_scale_encoded_header,
-                    );
-                    cache.recent_pinned_blocks.put(
-                        finalized_block_hash,
-                        subscribe_all.finalized_block_scale_encoded_header,
-                    );
-
-                    for block in subscribe_all.non_finalized_blocks_ancestry_order {
-                        if cache.recent_pinned_blocks.len()
-                            == cache.recent_pinned_blocks.cap().get()
-                        {
-                            let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
-                            subscribe_all.new_blocks.unpin_block(&hash).await;
+                    match requests_processing_task.run_until_event().await {
+                        service::Event::HandleRequest {
+                            task,
+                            request_process,
+                        } => {
+                            requests_processing_task = task;
+                            tx.send(either::Left(request_process)).await.unwrap();
                         }
-
-                        let hash =
-                            header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                        cache
-                            .recent_pinned_blocks
-                            .put(hash, block.scale_encoded_header);
-                    }
-
-                    drop(cache);
-
-                    loop {
-                        let notification = subscribe_all.new_blocks.next().await;
-                        match notification {
-                            Some(runtime_service::Notification::Block(block)) => {
-                                let mut cache = me.cache.lock().await;
-
-                                if cache.recent_pinned_blocks.len()
-                                    == cache.recent_pinned_blocks.cap().get()
-                                {
-                                    let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
-                                    subscribe_all.new_blocks.unpin_block(&hash).await;
+                        service::Event::HandleSubscriptionStart {
+                            task,
+                            subscription_start,
+                        } => {
+                            requests_processing_task = task;
+                            match subscription_start.request() {
+                                methods::MethodCall::chain_subscribeAllHeads {}
+                                | methods::MethodCall::chain_subscribeNewHeads {}
+                                | methods::MethodCall::chain_subscribeFinalizedHeads {}
+                                | methods::MethodCall::state_subscribeRuntimeVersion {}
+                                | methods::MethodCall::state_subscribeStorage { .. } => {
+                                    me.to_legacy
+                                        .lock()
+                                        .await
+                                        .send(legacy_state_sub::Message::SubscriptionStart(
+                                            subscription_start,
+                                        ))
+                                        .await
+                                        .unwrap();
                                 }
-
-                                let hash = header::hash_from_scale_encoded_header(
-                                    &block.scale_encoded_header,
-                                );
-                                cache
-                                    .recent_pinned_blocks
-                                    .put(hash, block.scale_encoded_header);
+                                _ => tx.send(either::Right(subscription_start)).await.unwrap(),
                             }
-                            Some(runtime_service::Notification::Finalized { .. })
-                            | Some(runtime_service::Notification::BestBlockChanged { .. }) => {}
-                            None => break,
+                        }
+                        service::Event::SubscriptionDestroyed {
+                            task,
+                            subscription_id,
+                        } => {
+                            requests_processing_task = task;
+                            let _ = me
+                                .chain_head_follow_tasks
+                                .lock()
+                                .await
+                                .remove(&subscription_id);
+                            me.to_legacy
+                                .lock()
+                                .await
+                                .send(legacy_state_sub::Message::SubscriptionDestroyed {
+                                    subscription_id,
+                                })
+                                .await
+                                .unwrap();
+                        }
+                        service::Event::SerializedRequestsIoClosed => {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+    // Spawn tasks dedicated to effectively process the JSON-RPC requests.
+    for task_num in 0..max_parallel_requests.get() {
+        me.platform.clone().spawn_task(
+            format!("{}-requests-{}", me.log_target, task_num).into(),
+            {
+                let me = me.clone();
+                let rx = rx.clone();
+                async move {
+                    loop {
+                        match rx.recv().await {
+                            Ok(either::Left(request_process)) => {
+                                me.handle_request(request_process).await;
+                            }
+                            Ok(either::Right(subscription_start)) => {
+                                me.handle_subscription_start(subscription_start).await;
+                            }
+                            Err(_) => break,
                         }
                     }
                 }
             },
-            background_abort_registrations.next().unwrap(),
-        )
-        .map(|_: Result<(), _>| ())
-        .boxed()
-    });
-
-    debug_assert!(background_abort_registrations.next().is_none());
+        );
+    }
 }
 
-impl<TPlat: Platform> Background<TPlat> {
+impl<TPlat: PlatformRef> Background<TPlat> {
     /// Pulls one request from the inner state machine, and processes it.
-    async fn handle_request(self: &Arc<Self>) {
-        let (json_rpc_request, state_machine_request_id) =
-            self.requests_subscriptions.next_request().await;
-        log::debug!(target: &self.log_target, "PendingRequestsQueue => {}",
-            crate::util::truncated_str(
-                json_rpc_request.chars().filter(|c| !c.is_control()),
-                100,
-            )
-        );
-
-        // Check whether the JSON-RPC request is correct, and bail out if it isn't.
-        let (request_id, call) = match methods::parse_json_call(&json_rpc_request) {
-            Ok((request_id, call)) => (request_id, call),
-            Err(methods::ParseError::Method { request_id, error }) => {
-                log::warn!(
-                    target: &self.log_target,
-                    "Error in JSON-RPC method call with id {:?}: {}", request_id, error
-                );
-                self.requests_subscriptions
-                    .respond(&state_machine_request_id, error.to_json_error(request_id))
-                    .await;
-                return;
-            }
-            Err(_) => {
-                // We make sure to not insert in the state machine requests that are not valid
-                // JSON-RPC requests.
-                unreachable!()
-            }
-        };
-
+    async fn handle_request(self: &Arc<Self>, request: service::RequestProcess) {
         // Print a warning for legacy JSON-RPC functions.
-        match call {
+        match request.request() {
             methods::MethodCall::account_nextIndex { .. }
             | methods::MethodCall::author_hasKey { .. }
             | methods::MethodCall::author_hasSessionKeys { .. }
@@ -503,7 +335,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         <https://github.com/paritytech/json-rpc-interface-spec/> instead. The \
                         legacy JSON-RPC API functions will be deprecated and removed in the \
                         distant future.",
-                        call.name()
+                        request.request().name()
                     )
                 }
             }
@@ -516,6 +348,7 @@ impl<TPlat: Platform> Background<TPlat> {
             | methods::MethodCall::chainHead_unstable_stopCall { .. }
             | methods::MethodCall::chainHead_unstable_stopStorage { .. }
             | methods::MethodCall::chainHead_unstable_storage { .. }
+            | methods::MethodCall::chainHead_unstable_storageContinue { .. }
             | methods::MethodCall::chainHead_unstable_unfollow { .. }
             | methods::MethodCall::chainHead_unstable_unpin { .. }
             | methods::MethodCall::chainSpec_unstable_chainName { .. }
@@ -532,360 +365,115 @@ impl<TPlat: Platform> Background<TPlat> {
         }
 
         // Each call is handled in a separate method.
-        match call {
+        match request.request() {
             methods::MethodCall::author_pendingExtrinsics {} => {
-                self.author_pending_extrinsics((request_id, &state_machine_request_id))
-                    .await;
+                self.author_pending_extrinsics(request).await;
             }
-            methods::MethodCall::author_submitExtrinsic { transaction } => {
-                self.author_submit_extrinsic((request_id, &state_machine_request_id), transaction)
-                    .await;
+            methods::MethodCall::author_submitExtrinsic { .. } => {
+                self.author_submit_extrinsic(request).await;
             }
-            methods::MethodCall::author_submitAndWatchExtrinsic { transaction } => {
-                self.submit_and_watch_transaction(
-                    (request_id, &state_machine_request_id),
-                    transaction,
-                    true,
-                )
-                .await
+            methods::MethodCall::chain_getBlock { .. } => {
+                self.chain_get_block(request).await;
             }
-            methods::MethodCall::author_unwatchExtrinsic { subscription } => {
-                self.author_unwatch_extrinsic(
-                    (request_id, &state_machine_request_id),
-                    &subscription,
-                )
-                .await;
-            }
-            methods::MethodCall::chain_getBlock { hash } => {
-                self.chain_get_block((request_id, &state_machine_request_id), hash)
-                    .await;
-            }
-            methods::MethodCall::chain_getBlockHash { height } => {
-                self.chain_get_block_hash((request_id, &state_machine_request_id), height)
-                    .await;
+            methods::MethodCall::chain_getBlockHash { .. } => {
+                self.chain_get_block_hash(request).await;
             }
             methods::MethodCall::chain_getFinalizedHead {} => {
-                self.chain_get_finalized_head((request_id, &state_machine_request_id))
-                    .await;
+                self.chain_get_finalized_head(request).await;
             }
-            methods::MethodCall::chain_getHeader { hash } => {
-                self.chain_get_header((request_id, &state_machine_request_id), hash)
-                    .await;
+            methods::MethodCall::chain_getHeader { .. } => {
+                self.chain_get_header(request).await;
             }
-            methods::MethodCall::chain_subscribeAllHeads {} => {
-                self.chain_subscribe_all_heads((request_id, &state_machine_request_id))
-                    .await;
-            }
-            methods::MethodCall::chain_subscribeFinalizedHeads {} => {
-                self.chain_subscribe_finalized_heads((request_id, &state_machine_request_id))
-                    .await;
-            }
-            methods::MethodCall::chain_subscribeNewHeads {} => {
-                self.chain_subscribe_new_heads((request_id, &state_machine_request_id))
-                    .await;
-            }
-            methods::MethodCall::chain_unsubscribeAllHeads { subscription } => {
-                self.chain_unsubscribe_all_heads(
-                    (request_id, &state_machine_request_id),
-                    subscription,
-                )
-                .await;
-            }
-            methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription } => {
-                self.chain_unsubscribe_finalized_heads(
-                    (request_id, &state_machine_request_id),
-                    subscription,
-                )
-                .await;
-            }
-            methods::MethodCall::chain_unsubscribeNewHeads { subscription } => {
-                self.chain_unsubscribe_new_heads(
-                    (request_id, &state_machine_request_id),
-                    subscription,
-                )
-                .await;
-            }
-            methods::MethodCall::payment_queryInfo { extrinsic, hash } => {
-                self.payment_query_info(
-                    (request_id, &state_machine_request_id),
-                    &extrinsic.0,
-                    hash.as_ref().map(|h| &h.0),
-                )
-                .await;
+            methods::MethodCall::payment_queryInfo { .. } => {
+                self.payment_query_info(request).await;
             }
             methods::MethodCall::rpc_methods {} => {
-                self.rpc_methods((request_id, &state_machine_request_id))
-                    .await;
+                self.rpc_methods(request).await;
             }
-            methods::MethodCall::state_call {
-                name,
-                parameters,
-                hash,
-            } => {
-                self.state_call(
-                    (request_id, &state_machine_request_id),
-                    &name,
-                    parameters,
-                    hash,
-                )
-                .await;
+            methods::MethodCall::state_call { .. } => {
+                self.state_call(request).await;
             }
-            methods::MethodCall::state_getKeys { prefix, hash } => {
-                self.state_get_keys((request_id, &state_machine_request_id), prefix, hash)
-                    .await;
+            methods::MethodCall::state_getKeys { .. } => {
+                self.state_get_keys(request).await;
             }
-            methods::MethodCall::state_getKeysPaged {
-                prefix,
-                count,
-                start_key,
-                hash,
-            } => {
-                self.state_get_keys_paged(
-                    (request_id, &state_machine_request_id),
-                    prefix,
-                    count,
-                    start_key,
-                    hash,
-                )
-                .await;
+            methods::MethodCall::state_getKeysPaged { .. } => {
+                self.state_get_keys_paged(request).await;
             }
-            methods::MethodCall::state_queryStorageAt { keys, at } => {
-                self.state_query_storage_at((request_id, &state_machine_request_id), keys, at)
-                    .await;
+            methods::MethodCall::state_queryStorageAt { .. } => {
+                self.state_query_storage_at(request).await;
             }
-            methods::MethodCall::state_getMetadata { hash } => {
-                self.state_get_metadata((request_id, &state_machine_request_id), hash)
-                    .await;
+            methods::MethodCall::state_getMetadata { .. } => {
+                self.state_get_metadata(request).await;
             }
-            methods::MethodCall::state_getStorage { key, hash } => {
-                self.state_get_storage((request_id, &state_machine_request_id), key, hash)
-                    .await;
+            methods::MethodCall::state_getStorage { .. } => {
+                self.state_get_storage(request).await;
             }
-            methods::MethodCall::state_subscribeRuntimeVersion {} => {
-                self.state_subscribe_runtime_version((request_id, &state_machine_request_id))
-                    .await;
+            methods::MethodCall::state_getRuntimeVersion { .. } => {
+                self.state_get_runtime_version(request).await;
             }
-            methods::MethodCall::state_unsubscribeRuntimeVersion { subscription } => {
-                self.state_unsubscribe_runtime_version(
-                    (request_id, &state_machine_request_id),
-                    &subscription,
-                )
-                .await;
-            }
-            methods::MethodCall::state_subscribeStorage { list } => {
-                self.state_subscribe_storage((request_id, &state_machine_request_id), list)
-                    .await;
-            }
-            methods::MethodCall::state_unsubscribeStorage { subscription } => {
-                self.state_unsubscribe_storage(
-                    (request_id, &state_machine_request_id),
-                    &subscription,
-                )
-                .await;
-            }
-            methods::MethodCall::state_getRuntimeVersion { at } => {
-                self.state_get_runtime_version(
-                    (request_id, &state_machine_request_id),
-                    at.as_ref().map(|h| &h.0),
-                )
-                .await;
-            }
-            methods::MethodCall::system_accountNextIndex { account } => {
-                self.account_next_index((request_id, &state_machine_request_id), account)
-                    .await;
+            methods::MethodCall::system_accountNextIndex { .. } => {
+                self.account_next_index(request).await;
             }
             methods::MethodCall::system_chain {} => {
-                self.system_chain((request_id, &state_machine_request_id))
-                    .await;
+                self.system_chain(request).await;
             }
             methods::MethodCall::system_chainType {} => {
-                self.system_chain_type((request_id, &state_machine_request_id))
-                    .await;
+                self.system_chain_type(request).await;
             }
             methods::MethodCall::system_health {} => {
-                self.system_health((request_id, &state_machine_request_id))
-                    .await;
+                self.system_health(request).await;
             }
             methods::MethodCall::system_localListenAddresses {} => {
-                self.system_local_listen_addresses((request_id, &state_machine_request_id))
-                    .await;
+                self.system_local_listen_addresses(request).await;
             }
             methods::MethodCall::system_localPeerId {} => {
-                self.system_local_peer_id((request_id, &state_machine_request_id))
-                    .await;
+                self.system_local_peer_id(request).await;
             }
             methods::MethodCall::system_name {} => {
-                self.system_name((request_id, &state_machine_request_id))
-                    .await;
+                self.system_name(request).await;
             }
             methods::MethodCall::system_nodeRoles {} => {
-                self.system_node_roles((request_id, &state_machine_request_id))
-                    .await;
+                self.system_node_roles(request).await;
             }
             methods::MethodCall::system_peers {} => {
-                self.system_peers((request_id, &state_machine_request_id))
-                    .await;
+                self.system_peers(request).await;
             }
             methods::MethodCall::system_properties {} => {
-                self.system_properties((request_id, &state_machine_request_id))
-                    .await;
+                self.system_properties(request).await;
             }
             methods::MethodCall::system_version {} => {
-                self.system_version((request_id, &state_machine_request_id))
-                    .await;
+                self.system_version(request).await;
             }
 
-            methods::MethodCall::chainHead_unstable_stopBody { subscription } => {
-                self.chain_head_unstable_stop_body(
-                    (request_id, &state_machine_request_id),
-                    &subscription,
-                )
-                .await;
-            }
-            methods::MethodCall::chainHead_unstable_body {
-                follow_subscription,
-                hash,
-                network_config,
-            } => {
-                self.chain_head_unstable_body(
-                    (request_id, &state_machine_request_id),
-                    &follow_subscription,
-                    hash,
-                    network_config,
-                )
-                .await;
-            }
-            methods::MethodCall::chainHead_unstable_call {
-                follow_subscription,
-                hash,
-                function,
-                call_parameters,
-                network_config,
-            } => {
-                self.chain_head_call(
-                    (request_id, &state_machine_request_id),
-                    &follow_subscription,
-                    hash,
-                    function.into_owned(),
-                    call_parameters,
-                    network_config,
-                )
-                .await;
-            }
-            methods::MethodCall::chainHead_unstable_stopCall { subscription } => {
-                self.chain_head_unstable_stop_call(
-                    (request_id, &state_machine_request_id),
-                    &subscription,
-                )
-                .await;
-            }
-            methods::MethodCall::chainHead_unstable_stopStorage { subscription } => {
-                self.chain_head_unstable_stop_storage(
-                    (request_id, &state_machine_request_id),
-                    &subscription,
-                )
-                .await;
-            }
-            methods::MethodCall::chainHead_unstable_storage {
-                follow_subscription,
-                hash,
-                key,
-                child_key,
-                network_config,
-            } => {
-                self.chain_head_storage(
-                    (request_id, &state_machine_request_id),
-                    &follow_subscription,
-                    hash,
-                    key,
-                    child_key,
-                    network_config,
-                )
-                .await;
-            }
-            methods::MethodCall::chainHead_unstable_follow { runtime_updates } => {
-                self.chain_head_follow((request_id, &state_machine_request_id), runtime_updates)
-                    .await;
+            methods::MethodCall::chainHead_unstable_storageContinue { .. } => {
+                self.chain_head_storage_continue(request).await;
             }
             methods::MethodCall::chainHead_unstable_genesisHash {} => {
-                self.chain_head_unstable_genesis_hash((request_id, &state_machine_request_id))
-                    .await;
+                self.chain_head_unstable_genesis_hash(request).await;
             }
-            methods::MethodCall::chainHead_unstable_header {
-                follow_subscription,
-                hash,
-            } => {
-                self.chain_head_unstable_header(
-                    (request_id, &state_machine_request_id),
-                    &follow_subscription,
-                    hash,
-                )
-                .await;
+            methods::MethodCall::chainHead_unstable_header { .. } => {
+                self.chain_head_unstable_header(request).await;
             }
-            methods::MethodCall::chainHead_unstable_unpin {
-                follow_subscription,
-                hash,
-            } => {
-                self.chain_head_unstable_unpin(
-                    (request_id, &state_machine_request_id),
-                    &follow_subscription,
-                    hash,
-                )
-                .await;
+            methods::MethodCall::chainHead_unstable_unpin { .. } => {
+                self.chain_head_unstable_unpin(request).await;
             }
-            methods::MethodCall::chainHead_unstable_unfollow {
-                follow_subscription,
-            } => {
-                self.chain_head_unstable_unfollow(
-                    (request_id, &state_machine_request_id),
-                    &follow_subscription,
-                )
-                .await;
-            }
-            methods::MethodCall::chainHead_unstable_finalizedDatabase { max_size_bytes } => {
-                self.chain_head_unstable_finalized_database(
-                    (request_id, &state_machine_request_id),
-                    max_size_bytes,
-                )
-                .await;
+            methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {
+                self.chain_head_unstable_finalized_database(request).await;
             }
             methods::MethodCall::chainSpec_unstable_chainName {} => {
-                self.chain_spec_unstable_chain_name((request_id, &state_machine_request_id))
-                    .await;
+                self.chain_spec_unstable_chain_name(request).await;
             }
             methods::MethodCall::chainSpec_unstable_genesisHash {} => {
-                self.chain_spec_unstable_genesis_hash((request_id, &state_machine_request_id))
-                    .await;
+                self.chain_spec_unstable_genesis_hash(request).await;
             }
             methods::MethodCall::chainSpec_unstable_properties {} => {
-                self.chain_spec_unstable_properties((request_id, &state_machine_request_id))
-                    .await;
+                self.chain_spec_unstable_properties(request).await;
             }
-            methods::MethodCall::sudo_unstable_p2pDiscover { multiaddr } => {
-                self.sudo_unstable_p2p_discover(
-                    (request_id, &state_machine_request_id),
-                    &multiaddr,
-                )
-                .await;
+            methods::MethodCall::sudo_unstable_p2pDiscover { .. } => {
+                self.sudo_unstable_p2p_discover(request).await;
             }
             methods::MethodCall::sudo_unstable_version {} => {
-                self.sudo_unstable_version((request_id, &state_machine_request_id))
-                    .await;
-            }
-            methods::MethodCall::transaction_unstable_submitAndWatch { transaction } => {
-                self.submit_and_watch_transaction(
-                    (request_id, &state_machine_request_id),
-                    transaction,
-                    false,
-                )
-                .await
-            }
-            methods::MethodCall::transaction_unstable_unwatch { subscription } => {
-                self.transaction_unstable_unwatch(
-                    (request_id, &state_machine_request_id),
-                    &subscription,
-                )
-                .await;
+                self.sudo_unstable_version(request).await;
             }
 
             _method @ (methods::MethodCall::account_nextIndex { .. }
@@ -910,35 +498,185 @@ impl<TPlat: Platform> Background<TPlat> {
             | methods::MethodCall::system_addReservedPeer { .. }
             | methods::MethodCall::system_dryRun { .. }
             | methods::MethodCall::system_networkState { .. }
-            | methods::MethodCall::system_removeReservedPeer { .. }
-            | methods::MethodCall::network_unstable_subscribeEvents { .. }
-            | methods::MethodCall::network_unstable_unsubscribeEvents { .. }) => {
+            | methods::MethodCall::system_removeReservedPeer { .. }) => {
                 // TODO: implement the ones that make sense to implement ^
                 log::error!(target: &self.log_target, "JSON-RPC call not supported yet: {:?}", _method);
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        json_rpc::parse::build_error_response(
-                            request_id,
-                            json_rpc::parse::ErrorResponse::ServerError(
-                                -32000,
-                                "Not implemented in smoldot yet",
-                            ),
-                            None,
-                        ),
-                    )
-                    .await;
+                request.fail(json_rpc::parse::ErrorResponse::ServerError(
+                    -32000,
+                    "Not implemented in smoldot yet",
+                ));
             }
+
+            _ => unreachable!(),
+        }
+    }
+
+    /// Pulls one request from the inner state machine, and processes it.
+    async fn handle_subscription_start(
+        self: &Arc<Self>,
+        request: service::SubscriptionStartProcess,
+    ) {
+        // TODO: restore some form of logging
+        /*log::debug!(target: &self.log_target, "PendingRequestsQueue => {}",
+            crate::util::truncated_str(
+                json_rpc_request.chars().filter(|c| !c.is_control()),
+                100,
+            )
+        );*/
+
+        // Print a warning for legacy JSON-RPC functions.
+        match request.request() {
+            methods::MethodCall::account_nextIndex { .. }
+            | methods::MethodCall::author_hasKey { .. }
+            | methods::MethodCall::author_hasSessionKeys { .. }
+            | methods::MethodCall::author_insertKey { .. }
+            | methods::MethodCall::author_pendingExtrinsics { .. }
+            | methods::MethodCall::author_removeExtrinsic { .. }
+            | methods::MethodCall::author_rotateKeys { .. }
+            | methods::MethodCall::author_submitAndWatchExtrinsic { .. }
+            | methods::MethodCall::author_submitExtrinsic { .. }
+            | methods::MethodCall::author_unwatchExtrinsic { .. }
+            | methods::MethodCall::babe_epochAuthorship { .. }
+            | methods::MethodCall::chain_getBlock { .. }
+            | methods::MethodCall::chain_getBlockHash { .. }
+            | methods::MethodCall::chain_getFinalizedHead { .. }
+            | methods::MethodCall::chain_getHeader { .. }
+            | methods::MethodCall::chain_subscribeAllHeads { .. }
+            | methods::MethodCall::chain_subscribeFinalizedHeads { .. }
+            | methods::MethodCall::chain_subscribeNewHeads { .. }
+            | methods::MethodCall::chain_unsubscribeAllHeads { .. }
+            | methods::MethodCall::chain_unsubscribeFinalizedHeads { .. }
+            | methods::MethodCall::chain_unsubscribeNewHeads { .. }
+            | methods::MethodCall::childstate_getKeys { .. }
+            | methods::MethodCall::childstate_getStorage { .. }
+            | methods::MethodCall::childstate_getStorageHash { .. }
+            | methods::MethodCall::childstate_getStorageSize { .. }
+            | methods::MethodCall::grandpa_roundState { .. }
+            | methods::MethodCall::offchain_localStorageGet { .. }
+            | methods::MethodCall::offchain_localStorageSet { .. }
+            | methods::MethodCall::payment_queryInfo { .. }
+            | methods::MethodCall::state_call { .. }
+            | methods::MethodCall::state_getKeys { .. }
+            | methods::MethodCall::state_getKeysPaged { .. }
+            | methods::MethodCall::state_getMetadata { .. }
+            | methods::MethodCall::state_getPairs { .. }
+            | methods::MethodCall::state_getReadProof { .. }
+            | methods::MethodCall::state_getRuntimeVersion { .. }
+            | methods::MethodCall::state_getStorage { .. }
+            | methods::MethodCall::state_getStorageHash { .. }
+            | methods::MethodCall::state_getStorageSize { .. }
+            | methods::MethodCall::state_queryStorage { .. }
+            | methods::MethodCall::state_queryStorageAt { .. }
+            | methods::MethodCall::state_subscribeRuntimeVersion { .. }
+            | methods::MethodCall::state_subscribeStorage { .. }
+            | methods::MethodCall::state_unsubscribeRuntimeVersion { .. }
+            | methods::MethodCall::state_unsubscribeStorage { .. }
+            | methods::MethodCall::system_accountNextIndex { .. }
+            | methods::MethodCall::system_addReservedPeer { .. }
+            | methods::MethodCall::system_chain { .. }
+            | methods::MethodCall::system_chainType { .. }
+            | methods::MethodCall::system_dryRun { .. }
+            | methods::MethodCall::system_health { .. }
+            | methods::MethodCall::system_localListenAddresses { .. }
+            | methods::MethodCall::system_localPeerId { .. }
+            | methods::MethodCall::system_name { .. }
+            | methods::MethodCall::system_networkState { .. }
+            | methods::MethodCall::system_nodeRoles { .. }
+            | methods::MethodCall::system_peers { .. }
+            | methods::MethodCall::system_properties { .. }
+            | methods::MethodCall::system_removeReservedPeer { .. }
+            | methods::MethodCall::system_version { .. } => {
+                if !self
+                    .printed_legacy_json_rpc_warning
+                    .swap(true, atomic::Ordering::Relaxed)
+                {
+                    log::warn!(
+                        target: &self.log_target,
+                        "The JSON-RPC client has just called a JSON-RPC function from the legacy \
+                        JSON-RPC API ({}). Legacy JSON-RPC functions have loose semantics and \
+                        cannot be properly implemented on a light client. You are encouraged to \
+                        use the new JSON-RPC API \
+                        <https://github.com/paritytech/json-rpc-interface-spec/> instead. The \
+                        legacy JSON-RPC API functions will be deprecated and removed in the \
+                        distant future.",
+                        request.request().name()
+                    )
+                }
+            }
+            methods::MethodCall::chainHead_unstable_body { .. }
+            | methods::MethodCall::chainHead_unstable_call { .. }
+            | methods::MethodCall::chainHead_unstable_follow { .. }
+            | methods::MethodCall::chainHead_unstable_genesisHash { .. }
+            | methods::MethodCall::chainHead_unstable_header { .. }
+            | methods::MethodCall::chainHead_unstable_stopBody { .. }
+            | methods::MethodCall::chainHead_unstable_stopCall { .. }
+            | methods::MethodCall::chainHead_unstable_stopStorage { .. }
+            | methods::MethodCall::chainHead_unstable_storage { .. }
+            | methods::MethodCall::chainHead_unstable_storageContinue { .. }
+            | methods::MethodCall::chainHead_unstable_unfollow { .. }
+            | methods::MethodCall::chainHead_unstable_unpin { .. }
+            | methods::MethodCall::chainSpec_unstable_chainName { .. }
+            | methods::MethodCall::chainSpec_unstable_genesisHash { .. }
+            | methods::MethodCall::chainSpec_unstable_properties { .. }
+            | methods::MethodCall::rpc_methods { .. }
+            | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
+            | methods::MethodCall::sudo_unstable_version { .. }
+            | methods::MethodCall::transaction_unstable_submitAndWatch { .. }
+            | methods::MethodCall::transaction_unstable_unwatch { .. }
+            | methods::MethodCall::network_unstable_subscribeEvents { .. }
+            | methods::MethodCall::network_unstable_unsubscribeEvents { .. }
+            | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {}
+        }
+
+        // Each call is handled in a separate method.
+        match request.request() {
+            methods::MethodCall::author_submitAndWatchExtrinsic { .. } => {
+                self.submit_and_watch_transaction(request).await
+            }
+            methods::MethodCall::chain_subscribeAllHeads {}
+            | methods::MethodCall::chain_subscribeFinalizedHeads {}
+            | methods::MethodCall::chain_subscribeNewHeads {}
+            | methods::MethodCall::state_subscribeRuntimeVersion {}
+            | methods::MethodCall::state_subscribeStorage { .. } => {
+                unreachable!()
+            }
+
+            methods::MethodCall::chainHead_unstable_body { .. } => {
+                self.chain_head_unstable_body(request).await;
+            }
+            methods::MethodCall::chainHead_unstable_call { .. } => {
+                self.chain_head_call(request).await;
+            }
+            methods::MethodCall::chainHead_unstable_storage { .. } => {
+                self.chain_head_storage(request).await;
+            }
+            methods::MethodCall::chainHead_unstable_follow { .. } => {
+                self.chain_head_follow(request).await;
+            }
+            methods::MethodCall::transaction_unstable_submitAndWatch { .. } => {
+                self.submit_and_watch_transaction(request).await
+            }
+
+            _method @ methods::MethodCall::network_unstable_subscribeEvents { .. } => {
+                // TODO: implement the ones that make sense to implement ^
+                log::error!(target: &self.log_target, "JSON-RPC call not supported yet: {:?}", _method);
+                request.fail(json_rpc::parse::ErrorResponse::ServerError(
+                    -32000,
+                    "Not implemented in smoldot yet",
+                ));
+            }
+
+            _ => unreachable!(),
         }
     }
 
     /// Handles a call to [`methods::MethodCall::sudo_unstable_p2pDiscover`].
-    async fn sudo_unstable_p2p_discover(
-        self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
-        multiaddr: &str,
-    ) {
-        let response = match multiaddr.parse::<multiaddr::Multiaddr>() {
+    async fn sudo_unstable_p2p_discover(self: &Arc<Self>, request: service::RequestProcess) {
+        let methods::MethodCall::sudo_unstable_p2pDiscover { multiaddr } = request.request() else {
+            unreachable!()
+        };
+
+        match multiaddr.parse::<multiaddr::Multiaddr>() {
             Ok(mut addr) if matches!(addr.iter().last(), Some(multiaddr::ProtocolRef::P2p(_))) => {
                 let peer_id_bytes = match addr.iter().last() {
                     Some(multiaddr::ProtocolRef::P2p(peer_id)) => peer_id.into_owned(),
@@ -951,128 +689,29 @@ impl<TPlat: Platform> Background<TPlat> {
                         self.network_service
                             .0
                             .discover(
-                                &TPlat::now(),
+                                &self.platform.now(),
                                 self.network_service.1,
                                 iter::once((peer_id, iter::once(addr))),
                                 false,
                             )
                             .await;
-                        methods::Response::sudo_unstable_p2pDiscover(())
-                            .to_json_response(request_id.0)
+                        request.respond(methods::Response::sudo_unstable_p2pDiscover(()));
                     }
-                    Err(_) => json_rpc::parse::build_error_response(
-                        request_id.0,
+                    Err(_) => request.fail_with_attached_json(
                         json_rpc::parse::ErrorResponse::InvalidParams,
-                        Some(&serde_json::to_string("multiaddr doesn't end with /p2p").unwrap()),
+                        &serde_json::to_string("multiaddr doesn't end with /p2p").unwrap(),
                     ),
                 }
             }
-            Ok(_) => json_rpc::parse::build_error_response(
-                request_id.0,
+            Ok(_) => request.fail_with_attached_json(
                 json_rpc::parse::ErrorResponse::InvalidParams,
-                Some(&serde_json::to_string("multiaddr doesn't end with /p2p").unwrap()),
+                &serde_json::to_string("multiaddr doesn't end with /p2p").unwrap(),
             ),
-            Err(err) => json_rpc::parse::build_error_response(
-                request_id.0,
+            Err(err) => request.fail_with_attached_json(
                 json_rpc::parse::ErrorResponse::InvalidParams,
-                Some(&serde_json::to_string(&err.to_string()).unwrap()),
+                &serde_json::to_string(&err.to_string()).unwrap(),
             ),
-        };
-
-        self.requests_subscriptions
-            .respond(request_id.1, response)
-            .await;
-    }
-
-    /// Obtain the state trie root hash and number of the given block, and make sure to put it
-    /// in cache.
-    async fn state_trie_root_hash(
-        &self,
-        hash: &[u8; 32],
-    ) -> Result<([u8; 32], u64), StateTrieRootHashError> {
-        let fetch = {
-            // Try to find an existing entry in cache, and if not create one.
-            let mut cache_lock = self.cache.lock().await;
-
-            // Look in `recent_pinned_blocks`.
-            match cache_lock
-                .recent_pinned_blocks
-                .get(hash)
-                .map(|h| header::decode(h, self.sync_service.block_number_bytes()))
-            {
-                Some(Ok(header)) => return Ok((*header.state_root, header.number)),
-                Some(Err(err)) => return Err(StateTrieRootHashError::HeaderDecodeError(err)), // TODO: can this actually happen? unclear
-                None => {}
-            }
-
-            // Look in `block_state_root_hashes`.
-            match cache_lock.block_state_root_hashes_numbers.get(hash) {
-                Some(future::MaybeDone::Done(Ok(val))) => return Ok(*val),
-                Some(future::MaybeDone::Future(f)) => f.clone(),
-                Some(future::MaybeDone::Gone) => unreachable!(), // We never use `Gone`.
-                Some(future::MaybeDone::Done(Err(
-                    err @ StateTrieRootHashError::HeaderDecodeError(_),
-                ))) => {
-                    // In case of a fatal error, return immediately.
-                    return Err(err.clone());
-                }
-                Some(future::MaybeDone::Done(Err(StateTrieRootHashError::NetworkQueryError)))
-                | None => {
-                    // No existing cache entry. Create the future that will perform the fetch
-                    // but do not actually start doing anything now.
-                    let fetch = {
-                        let sync_service = self.sync_service.clone();
-                        let hash = *hash;
-                        async move {
-                            // The sync service knows which peers are potentially aware of
-                            // this block.
-                            let result = sync_service
-                                .clone()
-                                .block_query_unknown_number(
-                                    hash,
-                                    protocol::BlocksRequestFields {
-                                        header: true,
-                                        body: false,
-                                        justifications: false,
-                                    },
-                                    4,
-                                    Duration::from_secs(8),
-                                    NonZeroU32::new(2).unwrap(),
-                                )
-                                .await;
-
-                            if let Ok(block) = result {
-                                // If successful, the `block_query` function guarantees that the
-                                // header is present and valid.
-                                let header = block.header.unwrap();
-                                debug_assert_eq!(
-                                    header::hash_from_scale_encoded_header(&header),
-                                    hash
-                                );
-                                let decoded =
-                                    header::decode(&header, sync_service.block_number_bytes())
-                                        .unwrap();
-                                Ok((*decoded.state_root, decoded.number))
-                            } else {
-                                // TODO: better error details?
-                                Err(StateTrieRootHashError::NetworkQueryError)
-                            }
-                        }
-                    };
-
-                    // Insert the future in the cache, so that any other call will use the same
-                    // future.
-                    let wrapped = fetch.boxed().shared();
-                    cache_lock
-                        .block_state_root_hashes_numbers
-                        .put(*hash, future::maybe_done(wrapped.clone()));
-                    wrapped
-                }
-            }
-        };
-
-        // We await separately to be certain that the lock isn't held anymore.
-        fetch.await
+        }
     }
 
     async fn storage_query(
@@ -1083,10 +722,25 @@ impl<TPlat: Platform> Background<TPlat> {
         timeout_per_request: Duration,
         max_parallel: NonZeroU32,
     ) -> Result<Vec<Option<Vec<u8>>>, StorageQueryError> {
-        let (state_trie_root_hash, block_number) = self
-            .state_trie_root_hash(hash)
-            .await
-            .map_err(StorageQueryError::FindStorageRootHashError)?;
+        let (state_trie_root_hash, block_number) = {
+            let (tx, rx) = oneshot::channel();
+            self.to_legacy
+                .lock()
+                .await
+                .send(legacy_state_sub::Message::BlockStateRootAndNumber {
+                    block_hash: *hash,
+                    result_tx: tx,
+                })
+                .await
+                .unwrap();
+
+            match rx.await.unwrap() {
+                Ok(v) => v,
+                Err(err) => {
+                    return Err(StorageQueryError::FindStorageRootHashError(err));
+                }
+            }
+        };
 
         let result = self
             .sync_service
@@ -1095,7 +749,10 @@ impl<TPlat: Platform> Background<TPlat> {
                 block_number,
                 hash,
                 &state_trie_root_hash,
-                keys,
+                keys.clone().map(|key| sync_service::StorageRequestItem {
+                    key: key.as_ref().to_vec(), // TODO: overhead
+                    ty: sync_service::StorageRequestItemTy::Value,
+                }),
                 total_attempts,
                 timeout_per_request,
                 max_parallel,
@@ -1103,92 +760,184 @@ impl<TPlat: Platform> Background<TPlat> {
             .await
             .map_err(StorageQueryError::StorageRetrieval)?;
 
+        let result = keys
+            .map(|key| {
+                result
+                    .iter()
+                    .find_map(|entry| match entry {
+                        sync_service::StorageResultItem::Value { key: k, value }
+                            if k == key.as_ref() =>
+                        {
+                            Some(value.clone()) // TODO: overhead
+                        }
+                        _ => None,
+                    })
+                    .unwrap()
+            })
+            .collect();
+
         Ok(result)
     }
 
     /// Obtain a lock to the runtime of the given block against the runtime service.
     // TODO: return better error?
-    async fn runtime_lock(
+    async fn runtime_access(
         self: &Arc<Self>,
         block_hash: &[u8; 32],
-    ) -> Result<runtime_service::RuntimeLock<TPlat>, RuntimeCallError> {
-        let cache_lock = self.cache.lock().await;
-
+    ) -> Result<runtime_service::RuntimeAccess<TPlat>, RuntimeCallError> {
         // Try to find the block in the cache of recent blocks. Most of the time, the call target
         // should be in there.
-        let lock = if cache_lock.recent_pinned_blocks.contains(block_hash) {
-            // The runtime service has the block pinned, meaning that we can ask the runtime
-            // service to perform the call.
-            self.runtime_service
-                .pinned_block_runtime_lock(cache_lock.subscription_id.unwrap(), block_hash)
+        if let Some(runtime_access) = {
+            let (tx, rx) = oneshot::channel();
+            self.to_legacy
+                .lock()
                 .await
-                .ok()
-        } else {
-            None
+                .send(legacy_state_sub::Message::RecentBlockRuntimeAccess {
+                    block_hash: *block_hash,
+                    result_tx: tx,
+                })
+                .await
+                .unwrap();
+            rx.await.unwrap()
+        } {
+            return Ok(runtime_access);
         };
 
-        Ok(if let Some(lock) = lock {
-            lock
-        } else {
-            // Second situation: the block is not in the cache of recent blocks. This isn't great.
-            drop::<futures::lock::MutexGuard<_>>(cache_lock);
+        // Second situation: the block is not in the cache of recent blocks. This isn't great.
+        // The only solution is to download the runtime of the block in question from the network.
 
-            // The only solution is to download the runtime of the block in question from the network.
+        // TODO: considering caching the runtime code the same way as the state trie root hash
 
-            // TODO: considering caching the runtime code the same way as the state trie root hash
-
-            // In order to grab the runtime code and perform the call network request, we need
-            // to know the state trie root hash and the height of the block.
-            let (state_trie_root_hash, block_number) = self
-                .state_trie_root_hash(block_hash)
+        // In order to grab the runtime code and perform the call network request, we need
+        // to know the state trie root hash and the height of the block.
+        let (state_trie_root_hash, block_number) = {
+            let (tx, rx) = oneshot::channel();
+            self.to_legacy
+                .lock()
                 .await
-                .map_err(RuntimeCallError::FindStorageRootHashError)?;
+                .send(legacy_state_sub::Message::BlockStateRootAndNumber {
+                    block_hash: *block_hash,
+                    result_tx: tx,
+                })
+                .await
+                .unwrap();
 
-            // Download the runtime of this block. This takes a long time as the runtime is rather
-            // big (around 1MiB in general).
-            let (storage_code, storage_heap_pages) = {
-                let mut code_query_result = self
-                    .sync_service
-                    .clone()
-                    .storage_query(
-                        block_number,
-                        block_hash,
-                        &state_trie_root_hash,
-                        iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
-                        3,
-                        Duration::from_secs(20),
-                        NonZeroU32::new(1).unwrap(),
-                    )
-                    .await
-                    .map_err(runtime_service::RuntimeCallError::StorageQuery)
-                    .map_err(RuntimeCallError::Call)?;
-                let heap_pages = code_query_result.pop().unwrap();
-                let code = code_query_result.pop().unwrap();
-                (code, heap_pages)
+            match rx.await.unwrap() {
+                Ok(v) => v,
+                Err(err) => {
+                    return Err(RuntimeCallError::FindStorageRootHashError(err));
+                }
+            }
+        };
+
+        // Download the runtime of this block. This takes a long time as the runtime is rather
+        // big (around 1MiB in general).
+        let (storage_code, storage_heap_pages, code_merkle_value, code_closest_ancestor_excluding) = {
+            let entries = self
+                .sync_service
+                .clone()
+                .storage_query(
+                    block_number,
+                    block_hash,
+                    &state_trie_root_hash,
+                    [
+                        sync_service::StorageRequestItem {
+                            key: b":code".to_vec(),
+                            ty: sync_service::StorageRequestItemTy::ClosestDescendantMerkleValue,
+                        },
+                        sync_service::StorageRequestItem {
+                            key: b":code".to_vec(),
+                            ty: sync_service::StorageRequestItemTy::Value,
+                        },
+                        sync_service::StorageRequestItem {
+                            key: b":heappages".to_vec(),
+                            ty: sync_service::StorageRequestItemTy::Value,
+                        },
+                    ]
+                    .into_iter(),
+                    3,
+                    Duration::from_secs(20),
+                    NonZeroU32::new(1).unwrap(),
+                )
+                .await
+                .map_err(runtime_service::RuntimeCallError::StorageQuery)
+                .map_err(RuntimeCallError::Call)?;
+            // TODO: not elegant
+            let heap_pages = entries
+                .iter()
+                .find_map(|entry| match entry {
+                    sync_service::StorageResultItem::Value { key, value }
+                        if key == b":heappages" =>
+                    {
+                        Some(value.clone()) // TODO: overhead
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let code = entries
+                .iter()
+                .find_map(|entry| match entry {
+                    sync_service::StorageResultItem::Value { key, value } if key == b":code" => {
+                        Some(value.clone()) // TODO: overhead
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let (code_merkle_value, code_closest_ancestor_excluding) = if code.is_some() {
+                entries
+                    .iter()
+                    .find_map(|entry| match entry {
+                        sync_service::StorageResultItem::ClosestDescendantMerkleValue {
+                            requested_key,
+                            closest_descendant_merkle_value,
+                            found_closest_ancestor_excluding,
+                        } if requested_key == b":code" => {
+                            Some((
+                                closest_descendant_merkle_value.clone(),
+                                found_closest_ancestor_excluding.clone(),
+                            )) // TODO overhead
+                        }
+                        _ => None,
+                    })
+                    .unwrap()
+            } else {
+                (None, None)
             };
 
-            // Give the code and heap pages to the runtime service. The runtime service will
-            // try to find any similar runtime it might have, and if not will compile it.
-            let pinned_runtime_id = self
-                .runtime_service
-                .compile_and_pin_runtime(storage_code, storage_heap_pages)
-                .await;
+            (
+                code,
+                heap_pages,
+                code_merkle_value,
+                code_closest_ancestor_excluding,
+            )
+        };
 
-            let precall = self
-                .runtime_service
-                .pinned_runtime_lock(
-                    pinned_runtime_id.clone(),
-                    *block_hash,
-                    block_number,
-                    state_trie_root_hash,
-                )
-                .await;
+        // Give the code and heap pages to the runtime service. The runtime service will
+        // try to find any similar runtime it might have, and if not will compile it.
+        let pinned_runtime_id = self
+            .runtime_service
+            .compile_and_pin_runtime(
+                storage_code,
+                storage_heap_pages,
+                code_merkle_value,
+                code_closest_ancestor_excluding,
+            )
+            .await;
 
-            // TODO: consider keeping pinned runtimes in a cache instead
-            self.runtime_service.unpin_runtime(pinned_runtime_id).await;
+        let precall = self
+            .runtime_service
+            .pinned_runtime_access(
+                pinned_runtime_id.clone(),
+                *block_hash,
+                block_number,
+                state_trie_root_hash,
+            )
+            .await;
 
-            precall
-        })
+        // TODO: consider keeping pinned runtimes in a cache instead
+        self.runtime_service.unpin_runtime(pinned_runtime_id).await;
+
+        Ok(precall)
     }
 
     /// Performs a runtime call to a random block.
@@ -1260,7 +1009,7 @@ impl<TPlat: Platform> Background<TPlat> {
     ) -> Result<(Vec<u8>, Option<u32>), RuntimeCallError> {
         // This function contains two steps: obtaining the runtime of the block in question,
         // then performing the actual call. The first step is the longest and most difficult.
-        let precall = self.runtime_lock(block_hash).await?;
+        let precall = self.runtime_access(block_hash).await?;
 
         let (runtime_call_lock, virtual_machine) = precall
             .start(
@@ -1281,9 +1030,15 @@ impl<TPlat: Platform> Background<TPlat> {
                 .apis
                 .find_version(api_name);
             match version {
-                None => return Err(RuntimeCallError::ApiNotFound),
+                None => {
+                    runtime_call_lock.unlock(virtual_machine);
+                    return Err(RuntimeCallError::ApiNotFound);
+                }
                 Some(v) if version_range.contains(&v) => Some(v),
-                Some(v) => return Err(RuntimeCallError::ApiVersionUnknown { actual_version: v }),
+                Some(v) => {
+                    runtime_call_lock.unlock(virtual_machine);
+                    return Err(RuntimeCallError::ApiVersionUnknown { actual_version: v });
+                }
             }
         } else {
             None
@@ -1298,9 +1053,7 @@ impl<TPlat: Platform> Background<TPlat> {
             virtual_machine,
             function_to_call,
             parameter: call_parameters,
-            main_trie_root_calculation_cache: None,
             storage_main_trie_changes: Default::default(),
-            offchain_storage_changes: Default::default(),
             max_log_level: 0,
         }) {
             Ok(vm) => vm,
@@ -1322,7 +1075,13 @@ impl<TPlat: Platform> Background<TPlat> {
                     break Err(RuntimeCallError::RuntimeError(error.detail));
                 }
                 runtime_host::RuntimeHostVm::StorageGet(get) => {
-                    let storage_value = runtime_call_lock.storage_entry(get.key().as_ref());
+                    let storage_value = {
+                        let child_trie = get.child_trie();
+                        runtime_call_lock.storage_entry(
+                            child_trie.as_ref().map(|c| c.as_ref()),
+                            get.key().as_ref(),
+                        )
+                    };
                     let storage_value = match storage_value {
                         Ok(v) => v,
                         Err(err) => {
@@ -1335,20 +1094,57 @@ impl<TPlat: Platform> Background<TPlat> {
                     runtime_call =
                         get.inject_value(storage_value.map(|(val, vers)| (iter::once(val), vers)));
                 }
+                runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv) => {
+                    let merkle_value = {
+                        let child_trie = mv.child_trie();
+                        runtime_call_lock.closest_descendant_merkle_value(
+                            child_trie.as_ref().map(|c| c.as_ref()),
+                            &mv.key().collect::<Vec<_>>(),
+                        )
+                    };
+                    let merkle_value = match merkle_value {
+                        Ok(v) => v,
+                        Err(err) => {
+                            runtime_call_lock.unlock(
+                                runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv)
+                                    .into_prototype(),
+                            );
+                            break Err(RuntimeCallError::Call(err));
+                        }
+                    };
+                    runtime_call = mv.inject_merkle_value(merkle_value);
+                }
                 runtime_host::RuntimeHostVm::NextKey(nk) => {
-                    // TODO:
-                    runtime_call_lock
-                        .unlock(runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
-                    break Err(RuntimeCallError::NextKeyForbidden);
+                    let next_key = {
+                        let child_trie = nk.child_trie();
+                        runtime_call_lock.next_key(
+                            child_trie.as_ref().map(|c| c.as_ref()),
+                            &nk.key().collect::<Vec<_>>(),
+                            nk.or_equal(),
+                            &nk.prefix().collect::<Vec<_>>(),
+                            nk.branch_nodes(),
+                        )
+                    };
+                    let next_key = match next_key {
+                        Ok(v) => v,
+                        Err(err) => {
+                            runtime_call_lock
+                                .unlock(runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
+                            break Err(RuntimeCallError::Call(err));
+                        }
+                    };
+                    runtime_call = nk.inject_key(next_key.map(|k| k.iter().copied()));
+                }
+                runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
+                    runtime_call = req.resume();
                 }
                 runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
                     runtime_call = sig.verify_and_resume();
                 }
-                runtime_host::RuntimeHostVm::PrefixKeys(pk) => {
-                    // TODO:
+                runtime_host::RuntimeHostVm::Offchain(ctx) => {
                     runtime_call_lock
-                        .unlock(runtime_host::RuntimeHostVm::PrefixKeys(pk).into_prototype());
-                    break Err(RuntimeCallError::PrefixKeysForbidden);
+                        .unlock(runtime_host::RuntimeHostVm::Offchain(ctx).into_prototype());
+                    break Err(RuntimeCallError::ForbiddenHostCall);
                 }
             }
         }
@@ -1359,7 +1155,7 @@ impl<TPlat: Platform> Background<TPlat> {
 enum StorageQueryError {
     /// Error while finding the storage root hash of the requested block.
     #[display(fmt = "Failed to obtain block state trie root: {_0}")]
-    FindStorageRootHashError(StateTrieRootHashError),
+    FindStorageRootHashError(legacy_state_sub::StateTrieRootHashError),
     /// Error while retrieving the storage item from other nodes.
     #[display(fmt = "{_0}")]
     StorageRetrieval(sync_service::StorageQueryError),
@@ -1370,28 +1166,24 @@ enum StorageQueryError {
 enum RuntimeCallError {
     /// Error while finding the storage root hash of the requested block.
     #[display(fmt = "Failed to obtain block state trie root: {_0}")]
-    FindStorageRootHashError(StateTrieRootHashError),
+    FindStorageRootHashError(legacy_state_sub::StateTrieRootHashError),
+    #[display(fmt = "{_0}")]
     Call(runtime_service::RuntimeCallError),
+    #[display(fmt = "{_0}")]
     StartError(host::StartErr),
+    #[display(fmt = "{_0}")]
     RuntimeError(runtime_host::ErrorDetail),
-    NextKeyForbidden,
-    PrefixKeysForbidden,
     /// Required runtime API isn't supported by the runtime.
+    #[display(fmt = "Required runtime API isn't supported by the runtime")]
     ApiNotFound,
     /// Version requirement of runtime API isn't supported.
+    #[display(fmt = "Version {actual_version} of the runtime API not supported")]
     ApiVersionUnknown {
         /// Version that the runtime supports.
         actual_version: u32,
     },
-}
-
-/// Error potentially returned by [`Background::state_trie_root_hash`].
-#[derive(Debug, derive_more::Display, Clone)]
-enum StateTrieRootHashError {
-    /// Failed to decode block header.
-    HeaderDecodeError(header::Error),
-    /// Error while fetching block header from network.
-    NetworkQueryError,
+    /// Runtime called a forbidden host function.
+    ForbiddenHostCall,
 }
 
 #[derive(Debug)]

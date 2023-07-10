@@ -21,6 +21,43 @@ use core::fmt;
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Nibble(u8);
 
+impl Nibble {
+    /// Returns the equivalent of `Nibble::try_from(0).unwrap()`.
+    pub fn zero() -> Self {
+        Nibble(0)
+    }
+
+    /// Returns the equivalent of `Nibble::try_from(15).unwrap()`. It is the maximum possible value
+    /// for a nibble.
+    pub fn max() -> Self {
+        Nibble(15)
+    }
+
+    /// Add the given number to the nibble. Returns `None` on overflow.
+    pub fn checked_add(self, val: u8) -> Option<Self> {
+        let new_nibble = self.0.checked_add(val)?;
+        if new_nibble >= 16 {
+            return None;
+        }
+        Some(Nibble(new_nibble))
+    }
+
+    /// Converts an ASCII headecimal digit (i.e. `0..9`, `a..f`, `A..F`) into a nibble.
+    ///
+    /// Returns `None` if `digit` is out of range.
+    pub fn from_ascii_hex_digit(digit: u8) -> Option<Self> {
+        if digit.is_ascii_digit() {
+            Some(Nibble(digit - b'0'))
+        } else if (b'a'..=b'f').contains(&digit) {
+            Some(Nibble(10 + digit - b'a'))
+        } else if (b'A'..=b'F').contains(&digit) {
+            Some(Nibble(10 + digit - b'A'))
+        } else {
+            None
+        }
+    }
+}
+
 impl TryFrom<u8> for Nibble {
     type Error = NibbleFromU8Error;
 
@@ -65,7 +102,16 @@ pub enum NibbleFromU8Error {
     TooLarge,
 }
 
-/// Returns an iterator of all possible nibble values.
+/// Returns an iterator of all possible nibble values, in ascending order.
+///
+/// # Example
+///
+/// ```
+/// assert_eq!(
+///     smoldot::trie::all_nibbles().map(u8::from).collect::<Vec<_>>(),
+///     &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+/// );
+/// ```
 pub fn all_nibbles() -> impl ExactSizeIterator<Item = Nibble> {
     (0..16).map(Nibble)
 }
@@ -73,6 +119,22 @@ pub fn all_nibbles() -> impl ExactSizeIterator<Item = Nibble> {
 /// Turns an iterator of nibbles into an iterator of bytes.
 ///
 /// If the number of nibbles is uneven, adds a `0` nibble at the end.
+///
+/// # Examples
+///
+/// ```
+/// use smoldot::trie::{Nibble, nibbles_to_bytes_suffix_extend};
+///
+/// let input = [Nibble::try_from(0x5).unwrap(), Nibble::try_from(0xa).unwrap()];
+/// assert_eq!(nibbles_to_bytes_suffix_extend(input.into_iter()).collect::<Vec<_>>(), &[0x5a]);
+/// ```
+///
+/// ```
+/// use smoldot::trie::{Nibble, nibbles_to_bytes_suffix_extend};
+///
+/// let input = [Nibble::try_from(0x5).unwrap(), Nibble::try_from(0xa).unwrap(), Nibble::try_from(0x9).unwrap()];
+/// assert_eq!(nibbles_to_bytes_suffix_extend(input.into_iter()).collect::<Vec<_>>(), &[0x5a, 0x90]);
+/// ```
 pub fn nibbles_to_bytes_suffix_extend<I: Iterator<Item = Nibble>>(
     nibbles: I,
 ) -> impl Iterator<Item = u8> {
@@ -104,6 +166,22 @@ pub fn nibbles_to_bytes_suffix_extend<I: Iterator<Item = Nibble>>(
 /// Turns an iterator of nibbles into an iterator of bytes.
 ///
 /// If the number of nibbles is uneven, adds a `0` nibble at the beginning.
+///
+/// # Examples
+///
+/// ```
+/// use smoldot::trie::{Nibble, nibbles_to_bytes_prefix_extend};
+///
+/// let input = [Nibble::try_from(0x5).unwrap(), Nibble::try_from(0xa).unwrap()];
+/// assert_eq!(nibbles_to_bytes_prefix_extend(input.into_iter()).collect::<Vec<_>>(), &[0x5a]);
+/// ```
+///
+/// ```
+/// use smoldot::trie::{Nibble, nibbles_to_bytes_prefix_extend};
+///
+/// let input = [Nibble::try_from(0x5).unwrap(), Nibble::try_from(0xa).unwrap(), Nibble::try_from(0x9).unwrap()];
+/// assert_eq!(nibbles_to_bytes_prefix_extend(input.into_iter()).collect::<Vec<_>>(), &[0x05, 0xa9]);
+/// ```
 pub fn nibbles_to_bytes_prefix_extend<I: ExactSizeIterator<Item = Nibble>>(
     nibbles: I,
 ) -> impl ExactSizeIterator<Item = u8> {
@@ -141,6 +219,52 @@ pub fn nibbles_to_bytes_prefix_extend<I: ExactSizeIterator<Item = Nibble>>(
 
     let has_prefix_nibble = (nibbles.len() % 2) != 0;
     Iter(nibbles, has_prefix_nibble)
+}
+
+/// Turns an iterator of nibbles into an iterator of bytes.
+///
+/// If the number of nibbles is uneven, the last nibble is truncated.
+///
+/// # Examples
+///
+/// ```
+/// use smoldot::trie::{Nibble, nibbles_to_bytes_truncate};
+///
+/// let input = [Nibble::try_from(0x5).unwrap(), Nibble::try_from(0xa).unwrap()];
+/// assert_eq!(nibbles_to_bytes_truncate(input.into_iter()).collect::<Vec<_>>(), &[0x5a]);
+/// ```
+///
+/// ```
+/// use smoldot::trie::{Nibble, nibbles_to_bytes_truncate};
+///
+/// let input = [Nibble::try_from(0x5).unwrap(), Nibble::try_from(0xa).unwrap(), Nibble::try_from(0x9).unwrap()];
+/// assert_eq!(nibbles_to_bytes_truncate(input.into_iter()).collect::<Vec<_>>(), &[0x5a]);
+/// ```
+pub fn nibbles_to_bytes_truncate<I: Iterator<Item = Nibble>>(
+    nibbles: I,
+) -> impl Iterator<Item = u8> {
+    struct Iter<I>(I);
+
+    impl<I: Iterator<Item = Nibble>> Iterator for Iter<I> {
+        type Item = u8;
+
+        fn next(&mut self) -> Option<u8> {
+            let n1 = self.0.next()?;
+            let n2 = self.0.next()?;
+            let byte = (n1.0 << 4) | n2.0;
+            Some(byte)
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let (min, max) = self.0.size_hint();
+            fn conv(n: usize) -> usize {
+                n / 2
+            }
+            (conv(min), max.map(conv))
+        }
+    }
+
+    Iter(nibbles)
 }
 
 /// Turns an iterator of bytes into an iterator of nibbles corresponding to these bytes.
@@ -212,6 +336,20 @@ mod tests {
             Nibble::try_from(255),
             Err(NibbleFromU8Error::TooLarge)
         ));
+    }
+
+    #[test]
+    fn from_ascii_hex_digit_works() {
+        assert_eq!(u8::from(Nibble::from_ascii_hex_digit(b'0').unwrap()), 0);
+        assert_eq!(u8::from(Nibble::from_ascii_hex_digit(b'9').unwrap()), 9);
+        assert_eq!(u8::from(Nibble::from_ascii_hex_digit(b'a').unwrap()), 10);
+        assert_eq!(u8::from(Nibble::from_ascii_hex_digit(b'f').unwrap()), 15);
+        assert_eq!(u8::from(Nibble::from_ascii_hex_digit(b'A').unwrap()), 10);
+        assert_eq!(u8::from(Nibble::from_ascii_hex_digit(b'F').unwrap()), 15);
+        assert!(Nibble::from_ascii_hex_digit(b'j').is_none());
+        assert!(Nibble::from_ascii_hex_digit(b' ').is_none());
+        assert!(Nibble::from_ascii_hex_digit(0).is_none());
+        assert!(Nibble::from_ascii_hex_digit(255).is_none());
     }
 
     #[test]

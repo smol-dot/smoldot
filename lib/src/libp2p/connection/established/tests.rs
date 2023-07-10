@@ -18,15 +18,14 @@
 #![cfg(test)]
 
 use super::{
-    Config, ConfigNotifications, ConfigRequestResponse, ConfigRequestResponseIn, Event,
-    InboundError, NotificationsOutErr, RequestError, SingleStream,
+    Config, Event, InboundError, InboundTy, NotificationsOutErr, RequestError, SingleStream,
 };
 use crate::libp2p::read_write::ReadWrite;
 use std::time::Duration;
 
 struct TwoEstablished {
-    alice: SingleStream<Duration, (), ()>,
-    bob: SingleStream<Duration, (), ()>,
+    alice: SingleStream<Duration, ()>,
+    bob: SingleStream<Duration, ()>,
     alice_to_bob_buffer: Vec<u8>,
     bob_to_alice_buffer: Vec<u8>,
 
@@ -49,11 +48,11 @@ fn perform_handshake(
     assert_ne!(alice_to_bob_buffer_size, 0);
     assert_ne!(bob_to_alice_buffer_size, 0);
 
-    let mut alice = single_stream_handshake::Handshake::noise_yamux(true);
-    let mut bob = single_stream_handshake::Handshake::noise_yamux(false);
-
     let alice_key = NoiseKey::new(&rand::random());
     let bob_key = NoiseKey::new(&rand::random());
+
+    let mut alice = single_stream_handshake::Handshake::noise_yamux(&alice_key, true);
+    let mut bob = single_stream_handshake::Handshake::noise_yamux(&bob_key, false);
 
     let mut alice_to_bob_buffer = Vec::with_capacity(alice_to_bob_buffer_size);
     let mut bob_to_alice_buffer = Vec::with_capacity(bob_to_alice_buffer_size);
@@ -67,9 +66,6 @@ fn perform_handshake(
     ) {
         match alice {
             single_stream_handshake::Handshake::Success { .. } => {}
-            single_stream_handshake::Handshake::NoiseKeyRequired(key_req) => {
-                alice = key_req.resume(&alice_key).into()
-            }
             single_stream_handshake::Handshake::Healthy(nego) => {
                 let alice_to_bob_buffer_len = alice_to_bob_buffer.len();
                 if alice_to_bob_buffer_len < alice_to_bob_buffer.capacity() {
@@ -99,9 +95,6 @@ fn perform_handshake(
 
         match bob {
             single_stream_handshake::Handshake::Success { .. } => {}
-            single_stream_handshake::Handshake::NoiseKeyRequired(key_req) => {
-                bob = key_req.resume(&bob_key).into()
-            }
             single_stream_handshake::Handshake::Healthy(nego) => {
                 let bob_to_alice_buffer_len = bob_to_alice_buffer.len();
                 if bob_to_alice_buffer_len < bob_to_alice_buffer.capacity() {
@@ -130,7 +123,7 @@ fn perform_handshake(
         }
     }
 
-    TwoEstablished {
+    let mut connections = TwoEstablished {
         alice: match alice {
             single_stream_handshake::Handshake::Success { connection, .. } => {
                 connection.into_connection(alice_config)
@@ -147,7 +140,23 @@ fn perform_handshake(
         bob_to_alice_buffer,
         now: Duration::new(0, 0),
         wake_up_after: None,
+    };
+
+    for _ in 0..2 {
+        let (connections_update, event) = connections.run_until_event();
+        connections = connections_update;
+        match event {
+            either::Left(Event::InboundNegotiated { id, .. }) => {
+                connections.alice.accept_inbound(id, InboundTy::Ping, ());
+            }
+            either::Right(Event::InboundNegotiated { id, .. }) => {
+                connections.bob.accept_inbound(id, InboundTy::Ping, ());
+            }
+            _ev => unreachable!("{:?}", _ev),
+        }
     }
+
+    connections
 }
 
 impl TwoEstablished {
@@ -155,7 +164,7 @@ impl TwoEstablished {
         self.now += amount;
     }
 
-    fn run_until_event(mut self) -> (Self, either::Either<Event<(), ()>, Event<(), ()>>) {
+    fn run_until_event(mut self) -> (Self, either::Either<Event<()>, Event<()>>) {
         loop {
             let alice_to_bob_buffer_len = self.alice_to_bob_buffer.len();
             if alice_to_bob_buffer_len < self.alice_to_bob_buffer.capacity() {
@@ -245,9 +254,9 @@ fn handshake_works() {
     fn test_with_buffer_sizes(size1: usize, size2: usize) {
         let config = Config {
             first_out_ping: Duration::new(0, 0),
-            notifications_protocols: Vec::new(),
-            request_protocols: Vec::new(),
             max_inbound_substreams: 64,
+            substreams_capacity: 16,
+            max_protocol_name_len: 128,
             ping_interval: Duration::from_secs(20),
             ping_protocol: "ping".to_owned(),
             ping_timeout: Duration::from_secs(20),
@@ -268,14 +277,9 @@ fn handshake_works() {
 fn successful_request() {
     let config = Config {
         first_out_ping: Duration::new(60, 0),
-        notifications_protocols: Vec::new(),
-        request_protocols: vec![ConfigRequestResponse {
-            inbound_allowed: true,
-            inbound_config: ConfigRequestResponseIn::Payload { max_size: 128 },
-            max_response_size: 1024,
-            name: "test-request-protocol".to_owned(),
-        }],
         max_inbound_substreams: 64,
+        substreams_capacity: 16,
+        max_protocol_name_len: 128,
         ping_interval: Duration::from_secs(20),
         ping_protocol: "ping".to_owned(),
         ping_timeout: Duration::from_secs(20),
@@ -284,19 +288,34 @@ fn successful_request() {
 
     let mut connections = perform_handshake(256, 256, config.clone(), config);
 
-    let substream_id = connections
-        .alice
-        .add_request(0, b"request payload".to_vec(), Duration::from_secs(5), ())
-        .unwrap();
+    let substream_id = connections.alice.add_request(
+        "test-request-protocol".to_owned(),
+        Some(b"request payload".to_vec()),
+        Duration::from_secs(5),
+        1024,
+        (),
+    );
 
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
     match event {
-        either::Right(Event::RequestIn {
-            id,
-            protocol_index: 0,
-            request,
-        }) => {
+        either::Right(Event::InboundNegotiated { id, protocol_name }) => {
+            assert_eq!(protocol_name, "test-request-protocol");
+            connections.bob.accept_inbound(
+                id,
+                InboundTy::Request {
+                    request_max_size: Some(1024 * 1024),
+                },
+                (),
+            );
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::RequestIn { id, request }) => {
             assert_eq!(request, b"request payload");
             connections
                 .bob
@@ -320,14 +339,9 @@ fn successful_request() {
 fn refused_request() {
     let config = Config {
         first_out_ping: Duration::new(60, 0),
-        notifications_protocols: Vec::new(),
-        request_protocols: vec![ConfigRequestResponse {
-            inbound_allowed: true,
-            inbound_config: ConfigRequestResponseIn::Payload { max_size: 128 },
-            max_response_size: 1024,
-            name: "test-request-protocol".to_owned(),
-        }],
         max_inbound_substreams: 64,
+        substreams_capacity: 16,
+        max_protocol_name_len: 128,
         ping_interval: Duration::from_secs(20),
         ping_protocol: "ping".to_owned(),
         ping_timeout: Duration::from_secs(20),
@@ -336,19 +350,34 @@ fn refused_request() {
 
     let mut connections = perform_handshake(256, 256, config.clone(), config);
 
-    let substream_id = connections
-        .alice
-        .add_request(0, b"request payload".to_vec(), Duration::from_secs(5), ())
-        .unwrap();
+    let substream_id = connections.alice.add_request(
+        "test-request-protocol".to_owned(),
+        Some(b"request payload".to_vec()),
+        Duration::from_secs(5),
+        1024,
+        (),
+    );
 
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
     match event {
-        either::Right(Event::RequestIn {
-            id,
-            protocol_index: 0,
-            request,
-        }) => {
+        either::Right(Event::InboundNegotiated { id, protocol_name }) => {
+            assert_eq!(protocol_name, "test-request-protocol");
+            connections.bob.accept_inbound(
+                id,
+                InboundTy::Request {
+                    request_max_size: Some(1024 * 1024),
+                },
+                (),
+            );
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::RequestIn { id, request }) => {
             assert_eq!(request, b"request payload");
             connections.bob.respond_in_request(id, Err(())).unwrap();
         }
@@ -372,14 +401,9 @@ fn refused_request() {
 fn request_protocol_not_supported() {
     let alice_config = Config {
         first_out_ping: Duration::new(60, 0),
-        notifications_protocols: Vec::new(),
-        request_protocols: vec![ConfigRequestResponse {
-            inbound_allowed: true,
-            inbound_config: ConfigRequestResponseIn::Payload { max_size: 128 },
-            max_response_size: 1024,
-            name: "test-request-protocol".to_owned(),
-        }],
         max_inbound_substreams: 64,
+        substreams_capacity: 16,
+        max_protocol_name_len: 128,
         ping_interval: Duration::from_secs(20),
         ping_protocol: "ping".to_owned(),
         ping_timeout: Duration::from_secs(20),
@@ -387,16 +411,28 @@ fn request_protocol_not_supported() {
     };
 
     let bob_config = Config {
-        request_protocols: Vec::new(),
         ..alice_config.clone()
     };
 
     let mut connections = perform_handshake(256, 256, alice_config, bob_config);
 
-    let substream_id = connections
-        .alice
-        .add_request(0, b"request payload".to_vec(), Duration::from_secs(5), ())
-        .unwrap();
+    let substream_id = connections.alice.add_request(
+        "test-request-protocol".to_owned(),
+        Some(b"request payload".to_vec()),
+        Duration::from_secs(5),
+        1024,
+        (),
+    );
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::InboundNegotiated { id, protocol_name }) => {
+            assert_eq!(protocol_name, "test-request-protocol");
+            connections.bob.reject_inbound(id);
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
 
     let (_, event) = connections.run_until_event();
     match event {
@@ -413,14 +449,9 @@ fn request_protocol_not_supported() {
 fn request_timeout() {
     let config = Config {
         first_out_ping: Duration::new(60, 0),
-        notifications_protocols: Vec::new(),
-        request_protocols: vec![ConfigRequestResponse {
-            inbound_allowed: true,
-            inbound_config: ConfigRequestResponseIn::Payload { max_size: 128 },
-            max_response_size: 1024,
-            name: "test-request-protocol".to_owned(),
-        }],
         max_inbound_substreams: 64,
+        substreams_capacity: 16,
+        max_protocol_name_len: 128,
         ping_interval: Duration::from_secs(20),
         ping_protocol: "ping".to_owned(),
         ping_timeout: Duration::from_secs(20),
@@ -429,19 +460,34 @@ fn request_timeout() {
 
     let mut connections = perform_handshake(256, 256, config.clone(), config);
 
-    let substream_id = connections
-        .alice
-        .add_request(0, b"request payload".to_vec(), Duration::from_secs(5), ())
-        .unwrap();
+    let substream_id = connections.alice.add_request(
+        "test-request-protocol".to_owned(),
+        Some(b"request payload".to_vec()),
+        Duration::from_secs(5),
+        1024,
+        (),
+    );
 
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
     match event {
-        either::Right(Event::RequestIn {
-            protocol_index: 0,
-            request,
-            ..
-        }) => {
+        either::Right(Event::InboundNegotiated { id, protocol_name }) => {
+            assert_eq!(protocol_name, "test-request-protocol");
+            connections.bob.accept_inbound(
+                id,
+                InboundTy::Request {
+                    request_max_size: Some(1024 * 1024),
+                },
+                (),
+            );
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::RequestIn { request, .. }) => {
             assert_eq!(request, b"request payload");
             // Don't answer.
         }
@@ -464,13 +510,9 @@ fn request_timeout() {
 fn outbound_substream_works() {
     let config = Config {
         first_out_ping: Duration::new(60, 0),
-        notifications_protocols: vec![ConfigNotifications {
-            name: "test-notif-protocol".to_owned(),
-            max_handshake_size: 1024,
-            max_notification_size: 1024,
-        }],
-        request_protocols: Vec::new(),
         max_inbound_substreams: 64,
+        substreams_capacity: 16,
+        max_protocol_name_len: 128,
         ping_interval: Duration::from_secs(20),
         ping_protocol: "ping".to_owned(),
         ping_timeout: Duration::from_secs(20),
@@ -480,8 +522,9 @@ fn outbound_substream_works() {
     let mut connections = perform_handshake(256, 256, config.clone(), config);
 
     let substream_id = connections.alice.open_notifications_substream(
-        0,
+        "test-notif-protocol".to_owned(),
         b"hello".to_vec(),
+        1024,
         connections.now + Duration::from_secs(5),
         (),
     );
@@ -489,15 +532,27 @@ fn outbound_substream_works() {
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
     match event {
-        either::Right(Event::NotificationsInOpen {
-            id,
-            protocol_index: 0,
-            handshake,
-        }) => {
+        either::Right(Event::InboundNegotiated { id, protocol_name }) => {
+            assert_eq!(protocol_name, "test-notif-protocol");
+            connections.bob.accept_inbound(
+                id,
+                InboundTy::Notifications {
+                    max_handshake_size: 1024,
+                },
+                (),
+            );
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::NotificationsInOpen { id, handshake }) => {
             assert_eq!(handshake, b"hello");
             connections
                 .bob
-                .accept_in_notifications_substream(id, b"hello back".to_vec(), ());
+                .accept_in_notifications_substream(id, b"hello back".to_vec(), 4 * 1024);
         }
         _ev => unreachable!("{:?}", _ev),
     }
@@ -545,13 +600,9 @@ fn outbound_substream_works() {
 fn outbound_substream_open_timeout() {
     let config = Config {
         first_out_ping: Duration::new(60, 0),
-        notifications_protocols: vec![ConfigNotifications {
-            name: "test-notif-protocol".to_owned(),
-            max_handshake_size: 1024,
-            max_notification_size: 1024,
-        }],
-        request_protocols: Vec::new(),
         max_inbound_substreams: 64,
+        substreams_capacity: 16,
+        max_protocol_name_len: 128,
         ping_interval: Duration::from_secs(20),
         ping_protocol: "ping".to_owned(),
         ping_timeout: Duration::from_secs(20),
@@ -561,8 +612,9 @@ fn outbound_substream_open_timeout() {
     let mut connections = perform_handshake(256, 256, config.clone(), config);
 
     let substream_id = connections.alice.open_notifications_substream(
-        0,
+        "test-notif-protocol".to_owned(),
         b"hello".to_vec(),
+        1024,
         connections.now + Duration::from_secs(5),
         (),
     );
@@ -570,11 +622,23 @@ fn outbound_substream_open_timeout() {
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
     match event {
-        either::Right(Event::NotificationsInOpen {
-            protocol_index: 0,
-            handshake,
-            ..
-        }) => {
+        either::Right(Event::InboundNegotiated { id, protocol_name }) => {
+            assert_eq!(protocol_name, "test-notif-protocol");
+            connections.bob.accept_inbound(
+                id,
+                InboundTy::Notifications {
+                    max_handshake_size: 1024,
+                },
+                (),
+            );
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::NotificationsInOpen { handshake, .. }) => {
             assert_eq!(handshake, b"hello");
             // Don't answer.
         }
@@ -597,13 +661,9 @@ fn outbound_substream_open_timeout() {
 fn outbound_substream_refuse() {
     let config = Config {
         first_out_ping: Duration::new(60, 0),
-        notifications_protocols: vec![ConfigNotifications {
-            name: "test-notif-protocol".to_owned(),
-            max_handshake_size: 1024,
-            max_notification_size: 1024,
-        }],
-        request_protocols: Vec::new(),
         max_inbound_substreams: 64,
+        substreams_capacity: 16,
+        max_protocol_name_len: 128,
         ping_interval: Duration::from_secs(20),
         ping_protocol: "ping".to_owned(),
         ping_timeout: Duration::from_secs(20),
@@ -613,8 +673,9 @@ fn outbound_substream_refuse() {
     let mut connections = perform_handshake(256, 256, config.clone(), config);
 
     let substream_id = connections.alice.open_notifications_substream(
-        0,
+        "test-notif-protocol".to_owned(),
         b"hello".to_vec(),
+        1024,
         connections.now + Duration::from_secs(5),
         (),
     );
@@ -622,11 +683,23 @@ fn outbound_substream_refuse() {
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
     match event {
-        either::Right(Event::NotificationsInOpen {
-            id,
-            protocol_index: 0,
-            handshake,
-        }) => {
+        either::Right(Event::InboundNegotiated { id, protocol_name }) => {
+            assert_eq!(protocol_name, "test-notif-protocol");
+            connections.bob.accept_inbound(
+                id,
+                InboundTy::Notifications {
+                    max_handshake_size: 1024,
+                },
+                (),
+            );
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::NotificationsInOpen { id, handshake }) => {
             assert_eq!(handshake, b"hello");
             connections.bob.reject_in_notifications_substream(id);
         }
@@ -650,13 +723,9 @@ fn outbound_substream_refuse() {
 fn outbound_substream_close_demanded() {
     let config = Config {
         first_out_ping: Duration::new(60, 0),
-        notifications_protocols: vec![ConfigNotifications {
-            name: "test-notif-protocol".to_owned(),
-            max_handshake_size: 1024,
-            max_notification_size: 1024,
-        }],
-        request_protocols: Vec::new(),
         max_inbound_substreams: 64,
+        substreams_capacity: 16,
+        max_protocol_name_len: 128,
         ping_interval: Duration::from_secs(20),
         ping_protocol: "ping".to_owned(),
         ping_timeout: Duration::from_secs(20),
@@ -666,8 +735,9 @@ fn outbound_substream_close_demanded() {
     let mut connections = perform_handshake(256, 256, config.clone(), config);
 
     let substream_id = connections.alice.open_notifications_substream(
-        0,
+        "test-notif-protocol".to_owned(),
         b"hello".to_vec(),
+        1024,
         connections.now + Duration::from_secs(5),
         (),
     );
@@ -675,15 +745,27 @@ fn outbound_substream_close_demanded() {
     let (connections_update, event) = connections.run_until_event();
     connections = connections_update;
     match event {
-        either::Right(Event::NotificationsInOpen {
-            id,
-            protocol_index: 0,
-            handshake,
-        }) => {
+        either::Right(Event::InboundNegotiated { id, protocol_name }) => {
+            assert_eq!(protocol_name, "test-notif-protocol");
+            connections.bob.accept_inbound(
+                id,
+                InboundTy::Notifications {
+                    max_handshake_size: 1024,
+                },
+                (),
+            );
+        }
+        _ev => unreachable!("{:?}", _ev),
+    }
+
+    let (connections_update, event) = connections.run_until_event();
+    connections = connections_update;
+    match event {
+        either::Right(Event::NotificationsInOpen { id, handshake }) => {
             assert_eq!(handshake, b"hello");
             connections
                 .bob
-                .accept_in_notifications_substream(id, b"hello back".to_vec(), ());
+                .accept_in_notifications_substream(id, b"hello back".to_vec(), 4 * 1024);
         }
         _ev => unreachable!("{:?}", _ev),
     }

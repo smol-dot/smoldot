@@ -15,17 +15,20 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use super::{BlockNotification, FinalizedBlockRuntime, Notification, SubscribeAll, ToBackground};
-use crate::{network_service, platform::Platform};
+use super::{
+    BlockNotification, ConfigRelayChainRuntimeCodeHint, FinalizedBlockRuntime, Notification,
+    SubscribeAll, ToBackground,
+};
+use crate::{network_service, platform::PlatformRef, util};
 
 use alloc::{borrow::ToOwned as _, string::String, sync::Arc, vec::Vec};
 use core::{
     iter,
-    marker::PhantomData,
     num::{NonZeroU32, NonZeroU64},
     time::Duration,
 };
-use futures::{channel::mpsc, prelude::*};
+use futures_channel::mpsc;
+use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use hashbrown::{HashMap, HashSet};
 use smoldot::{
     chain, header,
@@ -36,10 +39,12 @@ use smoldot::{
 };
 
 /// Starts a sync service background task to synchronize a standalone chain (relay chain or not).
-pub(super) async fn start_standalone_chain<TPlat: Platform>(
+pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
     log_target: String,
+    platform: TPlat,
     chain_information: chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
+    runtime_code_hint: Option<ConfigRelayChainRuntimeCodeHint>,
     mut from_foreground: mpsc::Receiver<ToBackground>,
     network_service: Arc<network_service::NetworkService<TPlat>>,
     network_chain_index: usize,
@@ -49,6 +54,13 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
         sync: all::AllSync::new(all::Config {
             chain_information,
             block_number_bytes,
+            // Since this module doesn't verify block bodies, any block (even invalid) is accepted
+            // as long as it comes from a legitimate validator. Consequently, validators could
+            // perform attacks by sending completely invalid blocks. Passing `false` to this
+            // option would tighten the definition of what a "legitimate" validator is, and thus
+            // reduce the feasibility of attacks, but not in a significant way. Passing `true`,
+            // on the other hand, allows supporting chains that use custom consensus engines,
+            // which is considered worth the trade-off.
             allow_unknown_consensus_engines: true,
             sources_capacity: 32,
             blocks_capacity: {
@@ -73,25 +85,30 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                 // is 5k.
                 NonZeroU32::new(5000).unwrap()
             },
-            full: None,
+            full_mode: false,
+            code_trie_node_hint: runtime_code_hint.map(|hint| all::ConfigCodeTrieNodeHint {
+                merkle_value: hint.merkle_value,
+                storage_value: hint.storage_value,
+                closest_ancestor_excluding: hint.closest_ancestor_excluding,
+            }),
         }),
         network_up_to_date_best: true,
         network_up_to_date_finalized: true,
         known_finalized_runtime: None,
-        pending_block_requests: stream::FuturesUnordered::new(),
-        pending_grandpa_requests: stream::FuturesUnordered::new(),
-        pending_storage_requests: stream::FuturesUnordered::new(),
-        pending_call_proof_requests: stream::FuturesUnordered::new(),
-        warp_sync_taking_long_time_warning: future::Either::Left(TPlat::sleep(
-            Duration::from_secs(10),
-        ))
+        pending_requests: stream::FuturesUnordered::new(),
+        warp_sync_taking_long_time_warning: future::Either::Left(
+            platform.sleep(Duration::from_secs(10)),
+        )
         .fuse(),
         all_notifications: Vec::<mpsc::Sender<Notification>>::new(),
         log_target,
         network_service,
         network_chain_index,
-        peers_source_id_map: HashMap::with_capacity_and_hasher(0, Default::default()),
-        platform: PhantomData,
+        peers_source_id_map: HashMap::with_capacity_and_hasher(
+            0,
+            util::SipHasherBuild::new(rand::random()),
+        ),
+        platform,
     };
 
     // Necessary for the `select!` loop below.
@@ -130,9 +147,8 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
             if has_done_verif {
                 queue_empty = false;
 
-                // As explained in the documentation of `yield_after_cpu_intensive`, we should
-                // yield after a CPU-intensive operation. This helps provide a better granularity.
-                TPlat::yield_after_cpu_intensive().await;
+                // Yield after a CPU-intensive operation. This helps provide a better granularity.
+                futures_lite::future::yield_now().await;
             }
 
             queue_empty
@@ -191,7 +207,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
 
         // Now waiting for some event to happen: a network event, a request from the frontend
         // of the sync service, or a request being finished.
-        let response_outcome = futures::select! {
+        let response_outcome = futures_util::select! {
             network_event = from_network_service.next() => {
                 // Something happened on the network.
                 // We expect the networking channel to never close, so the event is unwrapped.
@@ -214,39 +230,34 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                 continue;
             },
 
-            (request_id, result) = task.pending_block_requests.select_next_some() => {
-                // A block(s) request has been finished.
-                // `result` is an error if the block request got cancelled by the sync state
-                // machine.
-                if let Ok(result) = result {
-                    // Inject the result of the request into the sync state machine.
-                    task.sync.blocks_request_response(
-                        request_id,
-                        result.map_err(|_| ()).map(|v| {
-                            v.into_iter().filter_map(|block| {
+            (request_id, result) = task.pending_requests.select_next_some() => {
+                // A request has been finished.
+                // `result` is an error if the request got cancelled by the sync state machine.
+                let Ok(result) = result else { continue; };
+
+                // Inject the result of the request into the sync state machine.
+                match result {
+                    RequestOutcome::Block(Ok(v)) => {
+                        task.sync.blocks_request_response(
+                            request_id,
+                            Ok(v.into_iter().filter_map(|block| {
                                 Some(all::BlockRequestSuccessBlock {
                                     scale_encoded_header: block.header?,
-                                    scale_encoded_justifications: block.justifications.unwrap_or(Vec::new()),
+                                    scale_encoded_justifications: block.justifications
+                                        .unwrap_or(Vec::new())
+                                        .into_iter()
+                                        .map(|j| all::Justification { engine_id: j.engine_id, justification: j.justification })
+                                        .collect(),
                                     scale_encoded_extrinsics: Vec::new(),
                                     user_data: (),
                                 })
-                            })
-                        })
-                    ).1
-
-                } else {
-                    // The sync state machine has emitted a `Action::Cancel` earlier, and is
-                    // thus no longer interested in the response.
-                    continue;
-                }
-            },
-
-            (request_id, result) = task.pending_grandpa_requests.select_next_some() => {
-                // A GrandPa warp sync request has been finished.
-                // `result` is an error if the block request got cancelled by the sync state
-                // machine.
-                match result {
-                    Ok(Ok(result)) => {
+                            }))
+                        ).1
+                    },
+                    RequestOutcome::Block(Err(_)) => {
+                        task.sync.blocks_request_response(request_id, Err::<iter::Empty<_>, _>(())).1
+                    },
+                    RequestOutcome::WarpSync(Ok(result)) => {
                         let decoded = result.decode();
                         let fragments = decoded.fragments
                             .into_iter()
@@ -261,50 +272,15 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                             decoded.is_finished,
                         ).1
                     }
-                    Ok(Err(_)) => {
+                    RequestOutcome::WarpSync(Err(_)) => {
                         task.sync.grandpa_warp_sync_response_err(
                             request_id,
                         );
                         continue;
                     }
-                    Err(_) => {
-                        // The sync state machine has emitted a `Action::Cancel` earlier, and is
-                        // thus no longer interested in the response.
-                        continue;
-                    }
-                }
-            },
-
-            (request_id, result) = task.pending_storage_requests.select_next_some() => {
-                // A storage request has been finished.
-                // `result` is an error if the request got cancelled by the sync state machine.
-                if let Ok(result) = result {
-                    // Inject the result of the request into the sync state machine.
-                    task.sync.storage_get_response(request_id, result).1
-                } else {
-                    // The sync state machine has emitted a `Action::Cancel` earlier, and is
-                    // thus no longer interested in the response.
-                    continue;
-                }
-            },
-
-            (request_id, result) = task.pending_call_proof_requests.select_next_some() => {
-                // A call proof request has been finished.
-                // `result` is an error if the request got cancelled by the sync state machine.
-                if let Ok(result) = result {
-                    // Inject the result of the request into the sync state machine.
-                    task.sync.call_proof_response(
-                        request_id,
-                        match result {
-                            Ok(ref r) => Ok(r.decode().to_owned()), // TODO: need help from networking service to avoid this to_owned
-                            Err(err) => Err(err),
-                        }
-                    ).1
-
-                } else {
-                    // The sync state machine has emitted a `Action::Cancel` earlier, and is
-                    // thus no longer interested in the response.
-                    continue;
+                    RequestOutcome::Storage(r) => task.sync.storage_get_response(request_id, r).1,
+                    RequestOutcome::CallProof(Ok(r)) => task.sync.call_proof_response(request_id, Ok(r.decode().to_owned())).1, // TODO: need help from networking service to avoid this to_owned
+                    RequestOutcome::CallProof(Err(err)) => task.sync.call_proof_response(request_id, Err(err)).1,
                 }
             },
 
@@ -332,7 +308,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                 };
 
                 task.warp_sync_taking_long_time_warning =
-                    future::Either::Left(TPlat::sleep(Duration::from_secs(10))).fuse();
+                    future::Either::Left(task.platform.sleep(Duration::from_secs(10))).fuse();
                 continue;
             },
 
@@ -361,9 +337,12 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
     }
 }
 
-struct Task<TPlat: Platform> {
+struct Task<TPlat: PlatformRef> {
     /// Log target to use for all logs that are emitted.
     log_target: String,
+
+    /// Access to the platform's capabilities.
+    platform: TPlat,
 
     /// Main syncing state machine. Contains a list of peers, requests, and blocks, and manages
     /// everything about the non-finalized chain.
@@ -376,8 +355,7 @@ struct Task<TPlat: Platform> {
     known_finalized_runtime: Option<FinalizedBlockRuntime>,
 
     /// For each networking peer, the index of the corresponding peer within the [`Task::sync`].
-    // TODO: use SipHasher
-    peers_source_id_map: HashMap<libp2p::PeerId, all::SourceId, fnv::FnvBuildHasher>,
+    peers_source_id_map: HashMap<libp2p::PeerId, all::SourceId, util::SipHasherBuild>,
 
     /// `false` after the best block in the [`Task::sync`] has changed. Set back to `true`
     /// after the networking has been notified of this change.
@@ -401,57 +379,25 @@ struct Task<TPlat: Platform> {
     /// the network service whenever a request is started.
     network_chain_index: usize,
 
-    /// List of block requests currently in progress.
-    pending_block_requests: stream::FuturesUnordered<
-        future::BoxFuture<
-            'static,
-            (
-                all::RequestId,
-                Result<
-                    Result<Vec<protocol::BlockData>, network_service::BlocksRequestError>,
-                    future::Aborted,
-                >,
-            ),
-        >,
+    /// List of requests currently in progress.
+    pending_requests: stream::FuturesUnordered<
+        future::BoxFuture<'static, (all::RequestId, Result<RequestOutcome, future::Aborted>)>,
     >,
-
-    /// List of grandpa warp sync requests currently in progress.
-    pending_grandpa_requests: stream::FuturesUnordered<
-        future::BoxFuture<
-            'static,
-            (
-                all::RequestId,
-                Result<
-                    Result<
-                        network::service::EncodedGrandpaWarpSyncResponse,
-                        network_service::GrandpaWarpSyncRequestError,
-                    >,
-                    future::Aborted,
-                >,
-            ),
-        >,
-    >,
-
-    /// List of storage requests currently in progress.
-    pending_storage_requests: stream::FuturesUnordered<
-        future::BoxFuture<'static, (all::RequestId, Result<Result<Vec<u8>, ()>, future::Aborted>)>,
-    >,
-
-    /// List of call proof requests currently in progress.
-    pending_call_proof_requests: stream::FuturesUnordered<
-        future::BoxFuture<
-            'static,
-            (
-                all::RequestId,
-                Result<Result<network::service::EncodedMerkleProof, ()>, future::Aborted>,
-            ),
-        >,
-    >,
-
-    platform: PhantomData<fn() -> TPlat>,
 }
 
-impl<TPlat: Platform> Task<TPlat> {
+enum RequestOutcome {
+    Block(Result<Vec<protocol::BlockData>, network_service::BlocksRequestError>),
+    WarpSync(
+        Result<
+            network::service::EncodedGrandpaWarpSyncResponse,
+            network_service::GrandpaWarpSyncRequestError,
+        >,
+    ),
+    Storage(Result<Vec<u8>, ()>),
+    CallProof(Result<network::service::EncodedMerkleProof, ()>),
+}
+
+impl<TPlat: PlatformRef> Task<TPlat> {
     /// Starts one network request if any is necessary.
     ///
     /// Returns `true` if a request has been started.
@@ -520,8 +466,10 @@ impl<TPlat: Platform> Task<TPlat> {
                     .sync
                     .add_request(source_id, request_detail.into(), abort);
 
-                self.pending_block_requests
-                    .push(async move { (request_id, block_request.await) }.boxed());
+                self.pending_requests.push(
+                    async move { (request_id, block_request.await.map(RequestOutcome::Block)) }
+                        .boxed(),
+                );
             }
 
             all::DesiredRequest::GrandpaWarpSync {
@@ -545,8 +493,15 @@ impl<TPlat: Platform> Task<TPlat> {
                     .sync
                     .add_request(source_id, request_detail.into(), abort);
 
-                self.pending_grandpa_requests
-                    .push(async move { (request_id, grandpa_request.await) }.boxed());
+                self.pending_requests.push(
+                    async move {
+                        (
+                            request_id,
+                            grandpa_request.await.map(RequestOutcome::WarpSync),
+                        )
+                    }
+                    .boxed(),
+                );
             }
 
             all::DesiredRequest::StorageGetMerkleProof {
@@ -580,8 +535,15 @@ impl<TPlat: Platform> Task<TPlat> {
                     .sync
                     .add_request(source_id, request_detail.into(), abort);
 
-                self.pending_storage_requests
-                    .push(async move { (request_id, storage_request.await) }.boxed());
+                self.pending_requests.push(
+                    async move {
+                        (
+                            request_id,
+                            storage_request.await.map(RequestOutcome::Storage),
+                        )
+                    }
+                    .boxed(),
+                );
             }
 
             all::DesiredRequest::RuntimeCallMerkleProof {
@@ -619,8 +581,15 @@ impl<TPlat: Platform> Task<TPlat> {
                     .sync
                     .add_request(source_id, request_detail.into(), abort);
 
-                self.pending_call_proof_requests
-                    .push(async move { (request_id, call_proof_request.await) }.boxed());
+                self.pending_requests.push(
+                    async move {
+                        (
+                            request_id,
+                            call_proof_request.await.map(RequestOutcome::CallProof),
+                        )
+                    }
+                    .boxed(),
+                );
             }
         }
 
@@ -641,21 +610,49 @@ impl<TPlat: Platform> Task<TPlat> {
                 return (self, false);
             }
 
-            all::ProcessOne::WarpSyncError { sync, error } => {
-                self.sync = sync;
-                log::warn!(
-                    target: &self.log_target,
-                    "Error during GrandPa warp syncing: {}",
-                    error
-                );
-                return (self, true);
+            all::ProcessOne::WarpSyncBuildRuntime(req) => {
+                // Warp syncing compiles the runtime. The compiled runtime will later be yielded
+                // in the `WarpSyncFinished` variant, which is then provided as an event.
+                let before_instant = self.platform.now();
+                let (new_sync, error) = req.build(all::ExecHint::CompileAheadOfTime, true);
+                let elapsed = self.platform.now() - before_instant;
+                match error {
+                    Ok(()) => {
+                        log::debug!(
+                            target: &self.log_target,
+                            "Sync => WarpSyncRuntimeBuild(success=true, duration={:?})",
+                            elapsed
+                        );
+                    }
+                    Err(err) => {
+                        log::debug!(target: &self.log_target, "Sync => WarpSyncRuntimeBuild(error={})", err);
+                        log::warn!(target: &self.log_target, "Failed to compile runtime during warp syncing process: {}", err);
+                    }
+                };
+                self.sync = new_sync;
+            }
+
+            all::ProcessOne::WarpSyncBuildChainInformation(req) => {
+                let (new_sync, error) = req.build();
+                match error {
+                    Ok(()) => {
+                        log::debug!(target: &self.log_target, "Sync => WarpSyncBuildChainInformation(success=true)")
+                    }
+                    Err(err) => {
+                        log::debug!(target: &self.log_target, "Sync => WarpSyncBuildChainInformation(error={})", err);
+                        log::warn!(target: &self.log_target, "Failed to build the chain information during warp syncing process: {}", err);
+                    }
+                };
+                self.sync = new_sync;
             }
 
             all::ProcessOne::WarpSyncFinished {
                 sync,
                 finalized_block_runtime,
                 finalized_storage_code,
+                finalized_storage_code_closest_ancestor_excluding,
                 finalized_storage_heap_pages,
+                finalized_storage_code_merkle_value,
             } => {
                 self.sync = sync;
 
@@ -675,6 +672,8 @@ impl<TPlat: Platform> Task<TPlat> {
                     virtual_machine: finalized_block_runtime,
                     storage_code: finalized_storage_code,
                     storage_heap_pages: finalized_storage_heap_pages,
+                    code_merkle_value: finalized_storage_code_merkle_value,
+                    closest_ancestor_excluding: finalized_storage_code_closest_ancestor_excluding,
                 });
 
                 self.network_up_to_date_finalized = false;
@@ -682,8 +681,6 @@ impl<TPlat: Platform> Task<TPlat> {
                 // Since there is a gap in the blocks, all active notifications to all blocks
                 // must be cleared.
                 self.all_notifications.clear();
-
-                return (self, true);
             }
 
             all::ProcessOne::VerifyWarpSyncFragment(verify) => {
@@ -706,18 +703,26 @@ impl<TPlat: Platform> Task<TPlat> {
                             chain specification with a checkpoint past this forced change."
                         } else { "" }
                     );
+                } else {
+                    log::debug!(
+                        target: &self.log_target,
+                        "Sync => WarpSyncFragmentVerified(sender={})",
+                        sender_peer_id,
+                    );
                 }
             }
 
-            all::ProcessOne::VerifyHeader(verify) => {
+            all::ProcessOne::VerifyBlock(verify) => {
                 // Header to verify.
                 let verified_hash = verify.hash();
-                let verified_height = verify.height();
-                match verify.perform(TPlat::now_from_unix_epoch(), ()) {
+                match verify.verify_header(self.platform.now_from_unix_epoch()) {
                     all::HeaderVerifyOutcome::Success {
-                        sync, is_new_best, ..
+                        success,
+                        is_new_best,
+                        ..
                     } => {
-                        self.sync = sync;
+                        let verified_height = success.height();
+                        self.sync = success.finish(());
 
                         log::debug!(
                             target: &self.log_target,
@@ -937,9 +942,6 @@ impl<TPlat: Platform> Task<TPlat> {
                     }
                 }
             }
-
-            // Can't verify header and body in non-full mode.
-            all::ProcessOne::VerifyBodyHeader(_) => unreachable!(),
         }
 
         (self, true)
@@ -1170,6 +1172,16 @@ impl<TPlat: Platform> Task<TPlat> {
                         // Log messages are already printed above.
                     }
                 }
+            }
+
+            network_service::Event::GrandpaNeighborPacket {
+                peer_id,
+                chain_index,
+                finalized_block_height,
+            } if chain_index == self.network_chain_index => {
+                let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
+                self.sync
+                    .update_source_finality_state(sync_source_id, finalized_block_height);
             }
 
             network_service::Event::GrandpaCommitMessage {

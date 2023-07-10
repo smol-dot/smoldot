@@ -33,8 +33,14 @@ pub fn find_embedded_runtime_version(
 ) -> Result<Option<CoreVersion>, FindEmbeddedRuntimeVersionError> {
     let (runtime_version_content, runtime_apis_content) =
         match find_encoded_embedded_runtime_version_apis(binary_wasm_module) {
-            Ok((Some(v), Some(a))) => (v, a),
-            Ok((None, None)) => return Ok(None),
+            Ok(EmbeddedRuntimeVersionApis {
+                runtime_version_content: Some(v),
+                runtime_apis_content: Some(a),
+            }) => (v, a),
+            Ok(EmbeddedRuntimeVersionApis {
+                runtime_version_content: None,
+                runtime_apis_content: None,
+            }) => return Ok(None),
             Ok(_) => return Err(FindEmbeddedRuntimeVersionError::CustomSectionsPresenceMismatch),
             Err(err) => return Err(FindEmbeddedRuntimeVersionError::FindSections(err)),
         };
@@ -47,7 +53,7 @@ pub fn find_embedded_runtime_version(
     decoded_runtime_version.apis =
         match CoreVersionApisRefIter::from_slice_no_length(runtime_apis_content) {
             Ok(d) => d,
-            Err(()) => return Err(FindEmbeddedRuntimeVersionError::RuntimeApisDecode),
+            Err(err) => return Err(FindEmbeddedRuntimeVersionError::RuntimeApisDecode(err)),
         };
 
     Ok(Some(CoreVersion(
@@ -66,7 +72,17 @@ pub enum FindEmbeddedRuntimeVersionError {
     /// Error while decoding the runtime version.
     RuntimeVersionDecode,
     /// Error while decoding the runtime APIs.
-    RuntimeApisDecode,
+    #[display(fmt = "{_0}")]
+    RuntimeApisDecode(CoreVersionApisFromSliceErr),
+}
+
+/// Returns by [`find_encoded_embedded_runtime_version_apis`].
+#[derive(Debug, Copy, Clone)]
+pub struct EmbeddedRuntimeVersionApis<'a> {
+    /// Content of the `runtime_version` section, if any was found.
+    pub runtime_version_content: Option<&'a [u8]>,
+    /// Content of the `runtime_apis` section, if any was found.
+    pub runtime_apis_content: Option<&'a [u8]>,
 }
 
 /// Tries to find the custom sections containing the runtime version and APIs.
@@ -74,7 +90,7 @@ pub enum FindEmbeddedRuntimeVersionError {
 /// This function does not attempt to decode the content of the custom sections.
 pub fn find_encoded_embedded_runtime_version_apis(
     binary_wasm_module: &[u8],
-) -> Result<(Option<&[u8]>, Option<&[u8]>), FindEncodedEmbeddedRuntimeVersionApisError> {
+) -> Result<EmbeddedRuntimeVersionApis, FindEncodedEmbeddedRuntimeVersionApisError> {
     let mut parser =
         nom::combinator::all_consuming(nom::combinator::complete(nom::sequence::preceded(
             nom::sequence::tuple((
@@ -92,17 +108,37 @@ pub fn find_encoded_embedded_runtime_version_apis(
                         // We found a custom section with a name that interests us, but we already
                         // parsed a custom section with that same name earlier. Continue with the
                         // value that was parsed earlier.
-                        (prev_found @ (Some(_), _), Some((b"runtime_version", _))) => prev_found,
-                        (prev_found @ (_, Some(_)), Some((b"runtime_apis", _))) => prev_found,
+                        (
+                            prev_found @ (Some(_), _),
+                            Some(WasmSection {
+                                name: b"runtime_version",
+                                ..
+                            }),
+                        ) => prev_found,
+                        (
+                            prev_found @ (_, Some(_)),
+                            Some(WasmSection {
+                                name: b"runtime_apis",
+                                ..
+                            }),
+                        ) => prev_found,
 
                         // Found a custom section that interests us, and we didn't find one
                         // before.
-                        ((None, prev_rt_apis), Some((b"runtime_version", content))) => {
-                            (Some(content), prev_rt_apis)
-                        }
-                        ((prev_rt_version, None), Some((b"runtime_apis", content))) => {
-                            (prev_rt_version, Some(content))
-                        }
+                        (
+                            (None, prev_rt_apis),
+                            Some(WasmSection {
+                                name: b"runtime_version",
+                                content,
+                            }),
+                        ) => (Some(content), prev_rt_apis),
+                        (
+                            (prev_rt_version, None),
+                            Some(WasmSection {
+                                name: b"runtime_apis",
+                                content,
+                            }),
+                        ) => (prev_rt_version, Some(content)),
 
                         // Found a custom section with a name that doesn't interest us.
                         (prev_found, Some(_)) => prev_found,
@@ -111,12 +147,15 @@ pub fn find_encoded_embedded_runtime_version_apis(
             ),
         )));
 
-    let (runtime_version, runtime_apis) = match parser(binary_wasm_module) {
+    let (runtime_version_content, runtime_apis_content) = match parser(binary_wasm_module) {
         Ok((_, content)) => content,
         Err(_) => return Err(FindEncodedEmbeddedRuntimeVersionApisError::FailedToParse),
     };
 
-    Ok((runtime_version, runtime_apis))
+    Ok(EmbeddedRuntimeVersionApis {
+        runtime_version_content,
+        runtime_apis_content,
+    })
 }
 
 /// Error returned by [`find_encoded_embedded_runtime_version_apis`].
@@ -255,7 +294,7 @@ impl<'a> CoreVersionApisRefIter<'a> {
     /// Decodes a SCALE-encoded list of APIs.
     ///
     /// The input slice isn't expected to contain the number of APIs.
-    pub fn from_slice_no_length(input: &'a [u8]) -> Result<Self, ()> {
+    pub fn from_slice_no_length(input: &'a [u8]) -> Result<Self, CoreVersionApisFromSliceErr> {
         let result: Result<_, nom::Err<nom::error::Error<&[u8]>>> =
             nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
                 nom::combinator::recognize(nom::multi::fold_many0(
@@ -268,7 +307,7 @@ impl<'a> CoreVersionApisRefIter<'a> {
 
         match result {
             Ok((_, me)) => Ok(me),
-            Err(_) => Err(()),
+            Err(_) => Err(CoreVersionApisFromSliceErr()),
         }
     }
 
@@ -370,6 +409,11 @@ impl<'a> fmt::Debug for CoreVersionApisRefIter<'a> {
         f.debug_list().entries(self.clone()).finish()
     }
 }
+
+/// Error potentially returned by [`CoreVersionApisRefIter::from_slice_no_length`].
+#[derive(Debug, Clone, derive_more::Display)]
+#[display(fmt = "Error decoding core version APIs")]
+pub struct CoreVersionApisFromSliceErr();
 
 /// Hashes the name of an API in order to be able to compare it to [`CoreVersionApi::name_hash`].
 pub fn hash_api_name(api_name: &str) -> [u8; 8] {
@@ -476,8 +520,13 @@ fn core_version_api<'a, E: nom::error::ParseError<&'a [u8]>>(
     )(bytes)
 }
 
+struct WasmSection<'a> {
+    name: &'a [u8],
+    content: &'a [u8],
+}
+
 /// Parses a Wasm section. If it is a custom section, returns its name and content.
-fn wasm_section(bytes: &'_ [u8]) -> nom::IResult<&'_ [u8], Option<(&'_ [u8], &'_ [u8])>> {
+fn wasm_section(bytes: &'_ [u8]) -> nom::IResult<&'_ [u8], Option<WasmSection<'_>>> {
     nom::branch::alt((
         nom::combinator::map(
             nom::combinator::map_parser(
@@ -496,7 +545,7 @@ fn wasm_section(bytes: &'_ [u8]) -> nom::IResult<&'_ [u8], Option<(&'_ [u8], &'_
                     nom::combinator::rest,
                 )),
             ),
-            |(name, content)| Some((name, content)),
+            |(name, content)| Some(WasmSection { name, content }),
         ),
         nom::combinator::map(
             nom::sequence::tuple((

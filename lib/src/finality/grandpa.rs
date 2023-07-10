@@ -16,4 +16,3 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 pub mod commit;
-pub mod warp_sync;

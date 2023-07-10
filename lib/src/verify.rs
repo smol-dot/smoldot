@@ -68,6 +68,6 @@
 
 pub mod aura;
 pub mod babe;
-pub mod header_body;
+pub mod body_only;
 pub mod header_only;
 pub mod inherents;

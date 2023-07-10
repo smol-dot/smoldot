@@ -31,10 +31,7 @@
 //! See also [the official specification](https://github.com/libp2p/specs/tree/69e57d59dc5d59d3979d79842b577ec2c483f7fa/identify).
 
 use crate::{
-    libp2p::{
-        peer_id::{FromProtobufEncodingError, PublicKey},
-        Multiaddr,
-    },
+    libp2p::peer_id::{FromProtobufEncodingError, PublicKey},
     util::protobuf,
 };
 
@@ -43,15 +40,29 @@ use alloc::vec::{self, Vec};
 /// Description of a response to an identify request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentifyResponse<'a, TLaIter, TProtoIter> {
+    /// Name of the set of protocols supposed by the node.
     pub protocol_version: &'a str,
+
+    /// Name and version of the software that responds. Similar to `User-Agent` in the HTTP
+    /// protocol. Used for debugging purposes.
     pub agent_version: &'a str,
+
     /// Ed25519 public key of the local node.
     pub ed25519_public_key: [u8; 32],
-    /// List of addresses the local node is listening on. This should include first and foremost
-    /// addresses that are publicly-reachable.
+
+    /// List of multiaddresses the local node is listening on. This should include first and
+    /// foremost addresses that are publicly-reachable.
+    ///
+    /// > **Note**: Each item should be decoded into a multiaddr, but keep in mind that it might
+    /// >           not be valid.
     pub listen_addrs: TLaIter,
-    /// Address of the sender of the identify request, as seen from the receiver.
-    pub observed_addr: Multiaddr,
+
+    /// Multiaddress of the sender of the identify request, as seen from the receiver.
+    ///
+    /// > **Note**: This should be decoded into a multiaddr, but keep in mind that it might not
+    /// >           be valid.
+    pub observed_addr: &'a [u8],
+
     /// Names of the protocols supported by the local node.
     pub protocols: TProtoIter,
 }
@@ -63,7 +74,7 @@ pub struct IdentifyResponse<'a, TLaIter, TProtoIter> {
 pub fn build_identify_response<'a>(
     config: IdentifyResponse<
         'a,
-        impl Iterator<Item = &'a Multiaddr> + 'a,
+        impl Iterator<Item = &'a [u8]> + 'a,
         impl Iterator<Item = &'a str> + 'a,
     >,
 ) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
@@ -112,7 +123,7 @@ pub fn build_identify_response<'a>(
 pub fn decode_identify_response(
     response_bytes: &'_ [u8],
 ) -> Result<
-    IdentifyResponse<'_, vec::IntoIter<Multiaddr>, vec::IntoIter<&'_ str>>,
+    IdentifyResponse<'_, vec::IntoIter<&'_ [u8]>, vec::IntoIter<&'_ str>>,
     DecodeIdentifyResponseError,
 > {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
@@ -141,15 +152,8 @@ pub fn decode_identify_response(
         {
             PublicKey::Ed25519(key) => key,
         },
-        listen_addrs: decoded
-            .listen_addrs
-            .into_iter()
-            .map(|a| Multiaddr::try_from(a.to_vec()))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| DecodeIdentifyResponseError::InvalidMultiaddr)?
-            .into_iter(),
-        observed_addr: Multiaddr::try_from(decoded.observed_addr.unwrap_or_default().to_vec())
-            .map_err(|_| DecodeIdentifyResponseError::InvalidMultiaddr)?,
+        listen_addrs: decoded.listen_addrs.into_iter(),
+        observed_addr: decoded.observed_addr.unwrap_or_default(),
         protocols: decoded.protocols.into_iter(),
     })
 }
@@ -159,8 +163,6 @@ pub fn decode_identify_response(
 pub enum DecodeIdentifyResponseError {
     /// Error while decoding the Protobuf encoding.
     ProtobufDecode,
-    /// Couldn't decode one of the multiaddresses.
-    InvalidMultiaddr,
     /// Couldn't decode the public key of the remote.
     #[display(fmt = "Failed to decode remote public key: {_0}")]
     InvalidPublicKey(FromProtobufEncodingError),

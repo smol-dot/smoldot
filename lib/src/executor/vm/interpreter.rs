@@ -51,11 +51,26 @@ struct BaseComponents {
 impl InterpreterPrototype {
     /// See [`super::VirtualMachinePrototype::new`].
     pub fn new(
-        module_bytes: impl AsRef<[u8]>,
-        mut symbols: impl FnMut(&str, &str, &Signature) -> Result<usize, ()>,
+        module_bytes: &[u8],
+        symbols: &mut dyn FnMut(&str, &str, &Signature) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
-        let engine = wasmi::Engine::default(); // TODO: investigate config
-        let module = wasmi::Module::new(&engine, module_bytes.as_ref())
+        let engine = {
+            let mut config = wasmi::Config::default();
+
+            // Disable all the post-MVP wasm features.
+            config.wasm_sign_extension(false);
+            config.wasm_reference_types(false);
+            config.wasm_bulk_memory(false);
+            config.wasm_multi_value(false);
+            config.wasm_extended_const(false);
+            config.wasm_mutable_global(false);
+            config.wasm_saturating_float_to_int(false);
+            config.wasm_tail_call(false);
+
+            wasmi::Engine::new(&config)
+        };
+
+        let module = wasmi::Module::new(&engine, module_bytes)
             .map_err(|err| NewErr::InvalidWasm(err.to_string()))?;
 
         let mut resolved_imports = Vec::with_capacity(module.imports().len());
@@ -98,7 +113,7 @@ impl InterpreterPrototype {
     fn from_base_components(base_components: BaseComponents) -> Result<Self, NewErr> {
         let mut store = wasmi::Store::new(base_components.module.engine(), ());
 
-        let mut linker = wasmi::Linker::<()>::new(&base_components.module.engine());
+        let mut linker = wasmi::Linker::<()>::new(base_components.module.engine());
         let mut import_memory = None;
 
         for (module_import, resolved_function) in base_components
@@ -161,16 +176,21 @@ impl InterpreterPrototype {
             .ensure_no_start(&mut store)
             .map_err(|_| NewErr::StartFunctionNotSupported)?;
 
+        let exported_memory = match instance.get_export(&store, "memory") {
+            Some(wasmi::Extern::Memory(m)) => Some(m),
+            None => None,
+            Some(_) => return Err(NewErr::MemoryIsntMemory),
+        };
+
         let memory = if let Some(wasmi::Extern::Memory(import_memory)) =
             linker.get(&store, "env", "memory")
         {
-            if instance.get_memory(&store, "memory").is_some() {
+            if exported_memory.is_some() {
                 return Err(NewErr::TwoMemories);
             }
 
             import_memory
-        } else if let Some(mem) = instance.get_memory(&store, "memory") {
-            // TODO: we don't detect NewErr::MemoryIsntMemory
+        } else if let Some(mem) = exported_memory {
             mem
         } else {
             return Err(NewErr::NoMemory);
@@ -189,14 +209,11 @@ impl InterpreterPrototype {
         let value = self
             .instance
             .get_global(&self.store, name)
-            .ok_or(GlobalValueErr::NotFound)? // TODO: we don't differentiate between "missing" and "invalid"
+            .ok_or(GlobalValueErr::NotFound)?
             .get(&self.store);
 
         match value {
-            wasmi::Value::I32(v) => match u32::try_from(v) {
-                Ok(v) => Ok(v),
-                Err(_) => Err(GlobalValueErr::Invalid), // Negative value.
-            },
+            wasmi::Value::I32(v) => Ok(u32::from_ne_bytes(v.to_ne_bytes())),
             _ => Err(GlobalValueErr::Invalid),
         }
     }
@@ -330,9 +347,9 @@ impl Prepare {
         let func_to_call = match self
             .inner
             .instance
-            .get_func(&self.inner.store, function_name)
+            .get_export(&self.inner.store, function_name)
         {
-            Some(function) => {
+            Some(wasmi::Extern::Func(function)) => {
                 // Try to convert the signature of the function to call, in order to make sure
                 // that the type of parameters and return value are supported.
                 let Ok(signature) = Signature::try_from(function.ty(&self.inner.store)) else {
@@ -353,7 +370,8 @@ impl Prepare {
 
                 function
             }
-            None => return Err((StartErr::FunctionNotFound, self.inner)), // TODO: we don't differentiate between `FunctionNotFound` and `NotAFunction` here
+            Some(_) => return Err((StartErr::NotAFunction, self.inner)),
+            None => return Err((StartErr::FunctionNotFound, self.inner)),
         };
 
         let dummy_output_value = {

@@ -19,13 +19,13 @@
 
 use smoldot::libp2p::{
     connection::{
-        established::{Config, ConfigRequestResponse, ConfigRequestResponseIn, Event},
+        established::{Config, Event, InboundTy},
         noise, single_stream_handshake,
     },
     read_write::ReadWrite,
 };
 
-use core::{iter, time::Duration};
+use core::{cmp, time::Duration};
 
 // This fuzzing target simulates an incoming or outgoing connection whose handshake has succeeded.
 // The remote endpoint of that connection sends the fuzzing data to smoldot after it has been
@@ -47,15 +47,16 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         is_initiator
     };
 
-    let mut local = single_stream_handshake::Handshake::noise_yamux(local_is_initiator);
-    let mut remote = single_stream_handshake::Handshake::noise_yamux(!local_is_initiator);
-
     // Note that the noise keys and randomness are constant rather than being derived from the
     // fuzzing data. This is because we're not here to fuzz the cryptographic code (which we
     // assume is working well) but everything around it (decoding frames, allocating buffers,
     // etc.).
     let local_key = noise::NoiseKey::new(&[0; 32]);
     let remote_key = noise::NoiseKey::new(&[1; 32]);
+
+    let mut local = single_stream_handshake::Handshake::noise_yamux(&local_key, local_is_initiator);
+    let mut remote =
+        single_stream_handshake::Handshake::noise_yamux(&remote_key, !local_is_initiator);
 
     // Store the data that the local has emitted but the remote hasn't received yet, and vice
     // versa.
@@ -72,9 +73,6 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     ) {
         match local {
             single_stream_handshake::Handshake::Success { .. } => {}
-            single_stream_handshake::Handshake::NoiseKeyRequired(key_req) => {
-                local = key_req.resume(&local_key).into()
-            }
             single_stream_handshake::Handshake::Healthy(nego) => {
                 let local_to_remote_buffer_len = local_to_remote_buffer.len();
                 if local_to_remote_buffer_len < local_to_remote_buffer.capacity() {
@@ -104,9 +102,6 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
 
         match remote {
             single_stream_handshake::Handshake::Success { .. } => {}
-            single_stream_handshake::Handshake::NoiseKeyRequired(key_req) => {
-                remote = key_req.resume(&remote_key).into()
-            }
             single_stream_handshake::Handshake::Healthy(nego) => {
                 let remote_to_local_buffer_len = remote_to_local_buffer.len();
                 if remote_to_local_buffer_len < remote_to_local_buffer.capacity() {
@@ -139,16 +134,11 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     // Turn `local` and `remote` into state machines corresponding to the established connection.
     let mut local = match local {
         single_stream_handshake::Handshake::Success { connection, .. } => connection
-            .into_connection::<_, (), ()>(Config {
+            .into_connection::<_, ()>(Config {
                 first_out_ping: Duration::new(60, 0),
+                max_protocol_name_len: 12,
                 max_inbound_substreams: 10,
-                notifications_protocols: Vec::new(),
-                request_protocols: vec![ConfigRequestResponse {
-                    inbound_allowed: true,
-                    inbound_config: ConfigRequestResponseIn::Payload { max_size: 128 },
-                    max_response_size: 1024,
-                    name: "test-request-protocol".to_owned(),
-                }],
+                substreams_capacity: 16,
                 ping_interval: Duration::from_secs(20),
                 ping_protocol: "ping".to_owned(),
                 ping_timeout: Duration::from_secs(20),
@@ -170,15 +160,18 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     // We now encrypt the fuzzing data and add it to the buffer to send to the remote. This is
     // done all in one go.
     {
-        // Need to find the size that the encrypted data will occupy. This is done in a rather
-        // inefficient way because this is a test.
-        let mut size = 4096;
-        while remote.encrypt_size_conv(size) < data.len() {
-            size *= 2;
+        let mut encrypted = vec![0; 65536];
+        let mut encrypt = remote.encrypt((&mut encrypted, &mut [])).unwrap();
+        let mut num_written = 0;
+        for buffer in encrypt.unencrypted_write_buffers() {
+            let to_copy = cmp::min(data.len(), buffer.len());
+            if to_copy == 0 {
+                break;
+            }
+            buffer[..to_copy].copy_from_slice(&data[..to_copy]);
+            num_written += to_copy;
         }
-        let mut encrypted = vec![0; size];
-        let (read, written) = remote.encrypt(iter::once(data), (&mut encrypted, &mut []));
-        assert_eq!(read, data.len());
+        let written = encrypt.encrypt(num_written);
         remote_to_local_buffer.extend_from_slice(&encrypted[..written]);
     }
 
@@ -211,12 +204,36 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         // Process some of the events in order to drive the fuzz test as far as possible.
         match local_event {
             None => {}
+            Some(Event::InboundNegotiated { id, protocol_name }) => {
+                if protocol_name == "rq" {
+                    local.accept_inbound(
+                        id,
+                        InboundTy::Request {
+                            request_max_size: Some(128),
+                        },
+                        (),
+                    )
+                } else if protocol_name == "notif" {
+                    local.accept_inbound(
+                        id,
+                        InboundTy::Notifications {
+                            max_handshake_size: 128,
+                        },
+                        (),
+                    );
+                } else if protocol_name == "ping" {
+                    local.accept_inbound(id, InboundTy::Ping, ());
+                } else {
+                    local.reject_inbound(id);
+                }
+                continue;
+            }
             Some(Event::RequestIn { id, .. }) => {
                 let _ = local.respond_in_request(id, Ok(b"dummy response".to_vec()));
                 continue;
             }
             Some(Event::NotificationsInOpen { id, .. }) => {
-                local.accept_in_notifications_substream(id, b"dummy handshake".to_vec(), ());
+                local.accept_in_notifications_substream(id, b"dummy handshake".to_vec(), 16);
                 continue;
             }
 

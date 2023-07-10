@@ -18,8 +18,7 @@
 // TODO: needs docs
 
 use super::{
-    super::super::read_write::ReadWrite, substream, AddRequestError, Config, ConfigNotifications,
-    ConfigRequestResponse, ConfigRequestResponseIn, Event, SubstreamId, SubstreamIdInner,
+    super::super::read_write::ReadWrite, substream, Config, Event, SubstreamId, SubstreamIdInner,
 };
 use crate::util::{self, protobuf};
 
@@ -27,16 +26,17 @@ use alloc::{collections::VecDeque, string::String, vec, vec::Vec};
 use core::{
     cmp, fmt,
     hash::Hash,
-    iter,
-    ops::{Add, Sub},
+    ops::{Add, Index, IndexMut, Sub},
     time::Duration,
 };
 use rand::{Rng as _, SeedableRng as _};
 
+pub use substream::InboundTy;
+
 /// State machine of a fully-established connection where substreams are handled externally.
-pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
+pub struct MultiStream<TNow, TSubId, TSubUd> {
     /// Events that should be yielded from [`MultiStream::pull_event`].
-    pending_events: VecDeque<Event<TRqUd, TNotifUd>>,
+    pending_events: VecDeque<Event<TSubUd>>,
 
     /// List of all open substreams, both inbound and outbound.
     ///
@@ -44,8 +44,7 @@ pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
     /// to notifications and requests, and "in substreams", used for API purposes when it comes to
     /// raw data sent/received on a substream. When the user for example resets an "in substream",
     /// the "out substream" remains valid.
-    in_substreams:
-        hashbrown::HashMap<TSubId, Substream<TNow, TRqUd, TNotifUd>, util::SipHasherBuild>,
+    in_substreams: hashbrown::HashMap<TSubId, Substream<TNow, TSubUd>, util::SipHasherBuild>,
 
     out_in_substreams_map: hashbrown::HashMap<u32, TSubId, fnv::FnvBuildHasher>,
 
@@ -56,7 +55,7 @@ pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
     /// Every time an outgoing substream is opened, an item is pulled from this list.
     ///
     /// Does not include the ping substream.
-    desired_out_substreams: VecDeque<Substream<TNow, TRqUd, TNotifUd>>,
+    desired_out_substreams: VecDeque<Substream<TNow, TSubUd>>,
 
     /// Substream used for outgoing pings.
     ///
@@ -77,10 +76,8 @@ pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
     /// See [`Config::max_inbound_substreams`].
     // TODO: not enforced at the moment
     _max_inbound_substreams: usize,
-    /// See [`Config::request_protocols`].
-    request_protocols: Vec<ConfigRequestResponse>,
-    /// See [`Config::notifications_protocols`].
-    notifications_protocols: Vec<ConfigNotifications>,
+    /// See [`Config::max_protocol_name_len`].
+    max_protocol_name_len: usize,
     /// See [`Config::ping_protocol`].
     ping_protocol: String,
     /// See [`Config::ping_interval`].
@@ -89,11 +86,14 @@ pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
     ping_timeout: Duration,
 }
 
-struct Substream<TNow, TRqUd, TNotifUd> {
+struct Substream<TNow, TSubUd> {
     id: u32,
+    /// Opaque data decided by the user. `None` if the substream doesn't exist on the API layer
+    /// yet.
+    user_data: Option<TSubUd>,
     /// Underlying state machine for the substream. Always `Some` while the substream is alive,
     /// and `None` if it has been reset.
-    inner: Option<substream::Substream<TNow, TRqUd, TNotifUd>>,
+    inner: Option<substream::Substream<TNow>>,
     /// All incoming data is first transferred to this buffer.
     // TODO: this is very suboptimal code, instead the parsing should be done in a streaming way
     read_buffer: Vec<u8>,
@@ -108,20 +108,13 @@ struct Substream<TNow, TRqUd, TNotifUd> {
 
 const MAX_PENDING_EVENTS: usize = 4;
 
-impl<TNow, TSubId, TRqUd, TNotifUd> MultiStream<TNow, TSubId, TRqUd, TNotifUd>
+impl<TNow, TSubId, TSubUd> MultiStream<TNow, TSubId, TSubUd>
 where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
     TSubId: Clone + PartialEq + Eq + Hash,
 {
     /// Creates a new connection from the given configuration.
-    pub fn webrtc(config: Config<TNow>) -> MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
-        // TODO: check conflicts between protocol names?
-
-        // We expect at maximum one parallel request per protocol, plus one substream per direction
-        // (in and out) per notification substream, plus one ping substream per direction.
-        let num_expected_substreams =
-            config.request_protocols.len() + config.notifications_protocols.len() * 2 + 2;
-
+    pub fn webrtc(config: Config<TNow>) -> MultiStream<TNow, TSubId, TSubUd> {
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
 
         MultiStream {
@@ -132,25 +125,24 @@ where
                 // complexity). For this reason, we reserve enough for the events that can happen
                 // by reading/writing substreams plus events that can happen by resetting
                 // substreams.
-                let cap = MAX_PENDING_EVENTS + num_expected_substreams;
+                let cap = MAX_PENDING_EVENTS + config.substreams_capacity;
                 VecDeque::with_capacity(cap)
             },
             in_substreams: hashbrown::HashMap::with_capacity_and_hasher(
-                num_expected_substreams,
+                config.substreams_capacity,
                 util::SipHasherBuild::new(randomness.sample(rand::distributions::Standard)),
             ),
             out_in_substreams_map: hashbrown::HashMap::with_capacity_and_hasher(
-                num_expected_substreams,
+                config.substreams_capacity,
                 Default::default(),
             ),
             next_out_substream_id: 0,
-            desired_out_substreams: VecDeque::with_capacity(num_expected_substreams),
+            desired_out_substreams: VecDeque::with_capacity(config.substreams_capacity),
             ping_substream: None,
             next_ping: config.first_out_ping,
             ping_payload_randomness: randomness,
             _max_inbound_substreams: config.max_inbound_substreams,
-            request_protocols: config.request_protocols,
-            notifications_protocols: config.notifications_protocols,
+            max_protocol_name_len: config.max_protocol_name_len,
             ping_protocol: config.ping_protocol,
             ping_interval: config.ping_interval,
             ping_timeout: config.ping_timeout,
@@ -161,7 +153,7 @@ where
     ///
     /// This method should be called after [`MultiStream::substream_read_write`] or
     /// [`MultiStream::reset_substream`] is called.
-    pub fn pull_event(&mut self) -> Option<Event<TRqUd, TNotifUd>> {
+    pub fn pull_event(&mut self) -> Option<Event<TSubUd>> {
         self.pending_events.pop_front()
     }
 
@@ -199,18 +191,10 @@ where
             let out_substream_id = self.next_out_substream_id;
             self.next_out_substream_id += 1;
 
-            let supported_protocols = self
-                .request_protocols
-                .iter()
-                .filter(|p| p.inbound_allowed)
-                .map(|p| p.name.clone())
-                .chain(self.notifications_protocols.iter().map(|p| p.name.clone()))
-                .chain(iter::once(self.ping_protocol.clone()))
-                .collect::<Vec<_>>();
-
             Substream {
                 id: out_substream_id,
-                inner: Some(substream::Substream::ingoing(supported_protocols)),
+                inner: Some(substream::Substream::ingoing(self.max_protocol_name_len)),
+                user_data: None,
                 read_buffer: Vec::new(),
                 read_buffer_partial_read: 0,
                 local_writing_side_closed: false,
@@ -225,6 +209,7 @@ where
             Substream {
                 id: out_substream_id,
                 inner: Some(substream::Substream::ping_out(self.ping_protocol.clone())),
+                user_data: None,
                 read_buffer: Vec::new(),
                 read_buffer_partial_read: 0,
                 local_writing_side_closed: false,
@@ -257,9 +242,9 @@ where
     /// Panics if there is no substream with that identifier.
     ///
     pub fn reset_substream(&mut self, substream_id: &TSubId) {
-        let substream = self.in_substreams.remove(substream_id).unwrap();
+        let mut substream = self.in_substreams.remove(substream_id).unwrap();
         let _was_in = self.out_in_substreams_map.remove(&substream.id);
-        debug_assert!(!_was_in.is_some());
+        debug_assert!(_was_in.is_none());
 
         if Some(substream_id) == self.ping_substream.as_ref() {
             self.ping_substream = None;
@@ -267,7 +252,12 @@ where
 
         let maybe_event = substream.inner.unwrap().reset();
         if let Some(event) = maybe_event {
-            Self::on_substream_event(&mut self.pending_events, substream.id, event);
+            Self::on_substream_event(
+                &mut self.pending_events,
+                substream.id,
+                &mut substream.user_data,
+                event,
+            );
         }
     }
 
@@ -294,7 +284,7 @@ where
         substream_id: &TSubId,
         read_write: &'_ mut ReadWrite<'_, TNow>,
     ) -> SubstreamFate {
-        let mut substream = self.in_substreams.get_mut(substream_id).unwrap();
+        let substream = self.in_substreams.get_mut(substream_id).unwrap();
 
         // In WebRTC, the reading and writing side is never closed.
         assert!(read_write.incoming_buffer.is_some() && read_write.outgoing_buffer.is_some());
@@ -538,55 +528,14 @@ where
 
             match event {
                 None => {}
-
-                Some(substream::Event::InboundNegotiated(protocol)) => {
-                    continue_looping = true;
-
-                    if protocol == self.ping_protocol {
-                        substream
-                            .inner
-                            .as_mut()
-                            .unwrap()
-                            .set_inbound_ty(substream::InboundTy::Ping);
-                    } else if let Some(protocol_index) = self
-                        .request_protocols
-                        .iter()
-                        .position(|p| p.name == protocol)
-                    {
-                        substream.inner.as_mut().unwrap().set_inbound_ty(
-                            substream::InboundTy::Request {
-                                protocol_index,
-                                request_max_size: if let ConfigRequestResponseIn::Payload {
-                                    max_size,
-                                } =
-                                    self.request_protocols[protocol_index].inbound_config
-                                {
-                                    Some(max_size)
-                                } else {
-                                    None
-                                },
-                            },
-                        );
-                    } else if let Some(protocol_index) = self
-                        .notifications_protocols
-                        .iter()
-                        .position(|p| p.name == protocol)
-                    {
-                        substream.inner.as_mut().unwrap().set_inbound_ty(
-                            substream::InboundTy::Notifications {
-                                protocol_index,
-                                max_handshake_size: self.notifications_protocols[protocol_index]
-                                    .max_handshake_size,
-                            },
-                        );
-                    } else {
-                        unreachable!();
-                    }
-                }
-
                 Some(other) => {
                     continue_looping = true;
-                    Self::on_substream_event(&mut self.pending_events, substream.id, other)
+                    Self::on_substream_event(
+                        &mut self.pending_events,
+                        substream.id,
+                        &mut substream.user_data,
+                        other,
+                    )
                 }
             }
 
@@ -607,42 +556,42 @@ where
     }
 
     /// Turns an event from the [`substream`] module into an [`Event`] and adds it to the queue.
-    ///
-    /// # Panics
-    ///
-    /// Intentionally panics on [`substream::Event::InboundNegotiated`]. Please handle this
-    /// variant separately.
-    ///
     fn on_substream_event(
-        pending_events: &mut VecDeque<Event<TRqUd, TNotifUd>>,
+        pending_events: &mut VecDeque<Event<TSubUd>>,
         substream_id: u32,
-        event: substream::Event<TRqUd, TNotifUd>,
+        substream_user_data: &mut Option<TSubUd>,
+        event: substream::Event,
     ) {
         pending_events.push_back(match event {
-            substream::Event::InboundNegotiated(_) => panic!(),
-            substream::Event::InboundError(error) => Event::InboundError(error),
-            substream::Event::RequestIn {
-                protocol_index,
-                request,
-            } => Event::RequestIn {
+            substream::Event::InboundError {
+                error,
+                was_accepted: false,
+            } => Event::InboundError(error),
+            substream::Event::InboundError {
+                was_accepted: true, ..
+            } => Event::InboundAcceptedCancel {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
-                protocol_index,
+                user_data: substream_user_data.take().unwrap(),
+            },
+            substream::Event::InboundNegotiated(protocol_name) => Event::InboundNegotiated {
+                id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
+                protocol_name,
+            },
+            substream::Event::InboundNegotiatedCancel => Event::InboundAcceptedCancel {
+                id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
+                user_data: substream_user_data.take().unwrap(),
+            },
+            substream::Event::RequestIn { request } => Event::RequestIn {
+                id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
                 request,
             },
-            substream::Event::Response {
-                response,
-                user_data,
-            } => Event::Response {
+            substream::Event::Response { response } => Event::Response {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
                 response,
-                user_data,
+                user_data: substream_user_data.take().unwrap(),
             },
-            substream::Event::NotificationsInOpen {
-                protocol_index,
-                handshake,
-            } => Event::NotificationsInOpen {
+            substream::Event::NotificationsInOpen { handshake } => Event::NotificationsInOpen {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
-                protocol_index,
                 handshake,
             },
             substream::Event::NotificationsInOpenCancel => Event::NotificationsInOpenCancel {
@@ -655,19 +604,23 @@ where
             substream::Event::NotificationsInClose { outcome } => Event::NotificationsInClose {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
                 outcome,
+                user_data: substream_user_data.take().unwrap(),
             },
             substream::Event::NotificationsOutResult { result } => Event::NotificationsOutResult {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
-                result,
+                result: match result {
+                    Ok(r) => Ok(r),
+                    Err(err) => Err((err, substream_user_data.take().unwrap())),
+                },
             },
             substream::Event::NotificationsOutCloseDemanded => {
                 Event::NotificationsOutCloseDemanded {
                     id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
                 }
             }
-            substream::Event::NotificationsOutReset { user_data } => Event::NotificationsOutReset {
+            substream::Event::NotificationsOutReset => Event::NotificationsOutReset {
                 id: SubstreamId(SubstreamIdInner::MultiStream(substream_id)),
-                user_data,
+                user_data: substream_user_data.take().unwrap(),
             },
             substream::Event::PingOutSuccess => Event::PingOutSuccess,
             substream::Event::PingOutError { .. } => {
@@ -680,13 +633,15 @@ where
 
     /// Sends a request to the remote.
     ///
-    /// Must pass the index of the protocol within [`Config::request_protocols`].
-    ///
     /// This method only inserts the request into the connection object. The request will later
     /// be sent out through [`MultiStream::substream_read_write`].
     ///
     /// Assuming that the remote is using the same implementation, an [`Event::RequestIn`] will
     /// be generated on its side.
+    ///
+    /// If `request` is `None`, then no request is sent to the remote at all. If `request` is
+    /// `Some`, then a (potentially-empty) request is sent. If `Some(&[])` is provided, a
+    /// length-prefix containing a 0 is sent to the remote.
     ///
     /// After the remote has sent back a response, an [`Event::Response`] event will be generated
     /// locally. The `user_data` parameter will be passed back.
@@ -696,42 +651,24 @@ where
     /// answer during this time window, the request is considered failed.
     pub fn add_request(
         &mut self,
-        protocol_index: usize,
-        request: Vec<u8>,
+        protocol_name: String,
+        request: Option<Vec<u8>>,
         timeout: TNow,
-        user_data: TRqUd,
-    ) -> Result<SubstreamId, AddRequestError> {
-        let has_length_prefix = match self.request_protocols[protocol_index].inbound_config {
-            ConfigRequestResponseIn::Payload { max_size } => {
-                if request.len() > max_size {
-                    return Err(AddRequestError::RequestTooLarge);
-                }
-                true
-            }
-            ConfigRequestResponseIn::Empty => {
-                if !request.is_empty() {
-                    return Err(AddRequestError::RequestTooLarge);
-                }
-                false
-            }
-        };
-
+        max_response_size: usize,
+        user_data: TSubUd,
+    ) -> SubstreamId {
         let substream_id = self.next_out_substream_id;
         self.next_out_substream_id += 1;
 
         self.desired_out_substreams.push_back(Substream {
             id: substream_id,
             inner: Some(substream::Substream::request_out(
-                self.request_protocols[protocol_index].name.clone(), // TODO: clone :-/
+                protocol_name,
                 timeout,
-                if has_length_prefix {
-                    Some(request)
-                } else {
-                    None
-                },
-                self.request_protocols[protocol_index].max_response_size,
-                user_data,
+                request,
+                max_response_size,
             )),
+            user_data: Some(user_data),
             read_buffer: Vec::new(),
             read_buffer_partial_read: 0,
             local_writing_side_closed: false,
@@ -740,7 +677,7 @@ where
 
         // TODO: ? do this? substream.reserve_window(128 * 1024 * 1024 + 128); // TODO: proper max size
 
-        Ok(SubstreamId(SubstreamIdInner::MultiStream(substream_id)))
+        SubstreamId(SubstreamIdInner::MultiStream(substream_id))
     }
 
     /// Returns the user data associated to a notifications substream.
@@ -749,7 +686,7 @@ where
     pub fn notifications_substream_user_data_mut(
         &mut self,
         id: SubstreamId,
-    ) -> Option<&mut TNotifUd> {
+    ) -> Option<&mut TSubUd> {
         let id = match id.0 {
             SubstreamIdInner::MultiStream(id) => id,
             _ => return None,
@@ -760,16 +697,12 @@ where
         self.in_substreams
             .get_mut(inner_substream_id)
             .unwrap()
-            .inner
+            .user_data
             .as_mut()
-            .unwrap()
-            .notifications_substream_user_data_mut()
     }
 
     /// Opens a outgoing substream with the given protocol, destined for a stream of
     /// notifications.
-    ///
-    /// Must pass the index of the protocol within [`Config::notifications_protocols`].
     ///
     /// The remote must first accept (or reject) the substream before notifications can be sent
     /// on it.
@@ -782,18 +715,12 @@ where
     ///
     pub fn open_notifications_substream(
         &mut self,
-        now: TNow,
-        protocol_index: usize,
+        protocol_name: String,
+        max_handshake_size: usize,
         handshake: Vec<u8>,
-        user_data: TNotifUd,
+        timeout: TNow,
+        user_data: TSubUd,
     ) -> SubstreamId {
-        let max_handshake_size = self.notifications_protocols[protocol_index].max_handshake_size;
-
-        // TODO: turn this assert into something that can't panic?
-        assert!(handshake.len() <= max_handshake_size);
-
-        let timeout = now + Duration::from_secs(20); // TODO:
-
         let substream_id = self.next_out_substream_id;
         self.next_out_substream_id += 1;
 
@@ -801,11 +728,11 @@ where
             id: substream_id,
             inner: Some(substream::Substream::notifications_out(
                 timeout,
-                self.notifications_protocols[protocol_index].name.clone(), // TODO: clone :-/,
+                protocol_name,
                 handshake,
                 max_handshake_size,
-                user_data,
             )),
+            user_data: Some(user_data),
             read_buffer: Vec::new(),
             read_buffer_partial_read: 0,
             local_writing_side_closed: false,
@@ -813,6 +740,51 @@ where
         });
 
         SubstreamId(SubstreamIdInner::MultiStream(substream_id))
+    }
+
+    /// Call after an [`Event::InboundNegotiated`] has been emitted in order to accept the protocol
+    /// name and indicate the type of the protocol.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the substream is not in the correct state.
+    ///
+    pub fn accept_inbound(&mut self, substream_id: SubstreamId, ty: InboundTy, user_data: TSubUd) {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::MultiStream(id) => id,
+            _ => panic!(),
+        };
+
+        let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+
+        let substream = self.in_substreams.get_mut(inner_substream_id).unwrap();
+        substream.inner.as_mut().unwrap().accept_inbound(ty);
+        debug_assert!(substream.user_data.is_none());
+        substream.user_data = Some(user_data);
+    }
+
+    /// Call after an [`Event::InboundNegotiated`] has been emitted in order to reject the
+    /// protocol name as not supported.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the substream is not in the correct state.
+    ///
+    pub fn reject_inbound(&mut self, substream_id: SubstreamId) {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::MultiStream(id) => id,
+            _ => panic!(),
+        };
+
+        let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+
+        self.in_substreams
+            .get_mut(inner_substream_id)
+            .unwrap()
+            .inner
+            .as_mut()
+            .unwrap()
+            .reject_inbound();
     }
 
     /// Accepts an inbound notifications protocol. Must be called in response to a
@@ -826,7 +798,7 @@ where
         &mut self,
         substream_id: SubstreamId,
         handshake: Vec<u8>,
-        user_data: TNotifUd,
+        max_notification_size: usize,
     ) {
         let substream_id = match substream_id.0 {
             SubstreamIdInner::MultiStream(id) => id,
@@ -835,15 +807,13 @@ where
 
         let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
 
-        let max_notification_size = 16 * 1024 * 1024; // TODO: hack
-                                                      // TODO: self.notifications_protocols[protocol_index].max_notification_size;
         self.in_substreams
             .get_mut(inner_substream_id)
             .unwrap()
             .inner
             .as_mut()
             .unwrap()
-            .accept_in_notifications_substream(handshake, max_notification_size, user_data);
+            .accept_in_notifications_substream(handshake, max_notification_size);
     }
 
     /// Rejects an inbound notifications protocol. Must be called in response to a
@@ -989,7 +959,51 @@ where
     }
 }
 
-impl<TNow, TSubId, TRqUd, TNotifUd> fmt::Debug for MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
+impl<TNow, TSubId, TSubUd> Index<SubstreamId> for MultiStream<TNow, TSubId, TSubUd>
+where
+    TSubId: Clone + PartialEq + Eq + Hash,
+{
+    type Output = TSubUd;
+
+    fn index(&self, substream_id: SubstreamId) -> &Self::Output {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::MultiStream(id) => id,
+            _ => panic!(),
+        };
+
+        let inner_sub_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+
+        self.in_substreams
+            .get(inner_sub_id)
+            .unwrap()
+            .user_data
+            .as_ref()
+            .unwrap()
+    }
+}
+
+impl<TNow, TSubId, TSubUd> IndexMut<SubstreamId> for MultiStream<TNow, TSubId, TSubUd>
+where
+    TSubId: Clone + PartialEq + Eq + Hash,
+{
+    fn index_mut(&mut self, substream_id: SubstreamId) -> &mut Self::Output {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::MultiStream(id) => id,
+            _ => panic!(),
+        };
+
+        let inner_sub_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+
+        self.in_substreams
+            .get_mut(inner_sub_id)
+            .unwrap()
+            .user_data
+            .as_mut()
+            .unwrap()
+    }
+}
+
+impl<TNow, TSubId, TSubUd> fmt::Debug for MultiStream<TNow, TSubId, TSubUd> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("Established").finish()
     }

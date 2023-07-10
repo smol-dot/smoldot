@@ -20,7 +20,7 @@
 //! The [`NetworkService`] manages background tasks dedicated to connecting to other nodes.
 //! Importantly, its design is oriented towards the particular use case of the light client.
 //!
-//! The [`NetworkService`] spawns one background task (using the [`Config::tasks_executor`]) for
+//! The [`NetworkService`] spawns one background task (using [`PlatformRef::spawn_task`]) for
 //! each active connection.
 //!
 //! The objective of the [`NetworkService`] in general is to try stay connected as much as
@@ -36,7 +36,7 @@
 //! [`NetworkService::new`]. These channels inform the foreground about updates to the network
 //! connectivity.
 
-use crate::platform::Platform;
+use crate::{platform::PlatformRef, util};
 
 use alloc::{
     boxed::Box,
@@ -45,12 +45,10 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use async_lock::Mutex;
 use core::{cmp, num::NonZeroUsize, task::Poll, time::Duration};
-use futures::{
-    channel::{mpsc, oneshot},
-    lock::Mutex,
-    prelude::*,
-};
+use futures_channel::{mpsc, oneshot};
+use futures_util::{future, stream, FutureExt as _, SinkExt as _, StreamExt as _};
 use hashbrown::{hash_map, HashMap, HashSet};
 use itertools::Itertools as _;
 use smoldot::{
@@ -65,9 +63,12 @@ pub use service::EncodedMerkleProof;
 mod tasks;
 
 /// Configuration for a [`NetworkService`].
-pub struct Config {
-    /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
+pub struct Config<TPlat> {
+    /// Access to the platform's capabilities.
+    pub platform: TPlat,
+
+    /// Value sent back for the agent version when receiving an identification request.
+    pub identify_agent_version: String,
 
     /// Key to use for the encryption layer of all the connections. Gives the node its identity.
     pub noise_key: connection::NoiseKey,
@@ -113,7 +114,7 @@ pub struct ConfigChain {
     pub has_grandpa_protocol: bool,
 }
 
-pub struct NetworkService<TPlat: Platform> {
+pub struct NetworkService<TPlat: PlatformRef> {
     /// Struct shared between the foreground and background.
     shared: Arc<Shared<TPlat>>,
 
@@ -122,9 +123,15 @@ pub struct NetworkService<TPlat: Platform> {
 }
 
 /// Struct shared between the foreground and background.
-struct Shared<TPlat: Platform> {
+struct Shared<TPlat: PlatformRef> {
     /// Fields protected by a mutex.
     guarded: Mutex<SharedGuarded<TPlat>>,
+
+    /// See [`Config::platform`].
+    platform: TPlat,
+
+    /// Value provided through [`Config::identify_agent_version`].
+    identify_agent_version: String,
 
     /// Names of the various chains the network service connects to. Used only for logging
     /// purposes.
@@ -138,7 +145,7 @@ struct Shared<TPlat: Platform> {
     wake_up_main_background_task: event_listener::Event,
 }
 
-struct SharedGuarded<TPlat: Platform> {
+struct SharedGuarded<TPlat: PlatformRef> {
     /// Data structure holding the entire state of the networking.
     network: service::ChainNetwork<TPlat::Instant>,
 
@@ -149,17 +156,13 @@ struct SharedGuarded<TPlat: Platform> {
     /// List of peer and chain index tuples for which no outbound slot should be assigned.
     ///
     /// The values are the moment when the ban expires.
-    // TODO: use SipHasher
-    slots_assign_backoff: HashMap<(PeerId, usize), TPlat::Instant, fnv::FnvBuildHasher>,
+    slots_assign_backoff: HashMap<(PeerId, usize), TPlat::Instant, util::SipHasherBuild>,
 
     messages_from_connections_tx:
         mpsc::Sender<(service::ConnectionId, service::ConnectionToCoordinator)>,
 
     messages_from_connections_rx:
         mpsc::Receiver<(service::ConnectionId, service::ConnectionToCoordinator)>,
-
-    /// Value received in [`Config::tasks_executor`].
-    tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 
     active_connections: HashMap<
         service::ConnectionId,
@@ -197,13 +200,13 @@ struct SharedGuarded<TPlat: Platform> {
         HashMap<service::KademliaOperationId, usize, fnv::FnvBuildHasher>,
 }
 
-impl<TPlat: Platform> NetworkService<TPlat> {
+impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// Initializes the network service with the given configuration.
     ///
     /// Returns the networking service, plus a list of receivers on which events are pushed.
     /// All of these receivers must be polled regularly to prevent the networking service from
     /// slowing down.
-    pub async fn new(config: Config) -> (Arc<Self>, Vec<stream::BoxStream<'static, Event>>) {
+    pub async fn new(config: Config<TPlat>) -> (Arc<Self>, Vec<stream::BoxStream<'static, Event>>) {
         let (event_senders, event_receivers): (Vec<_>, Vec<_>) = (0..config.num_events_receivers)
             .map(|_| mpsc::channel(16))
             .unzip();
@@ -245,7 +248,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         let shared = Arc::new(Shared {
             guarded: Mutex::new(SharedGuarded {
                 network: service::ChainNetwork::new(service::Config {
-                    now: TPlat::now(),
+                    now: config.platform.now(),
                     chains,
                     connections_capacity: 32,
                     peers_capacity: 8,
@@ -254,12 +257,14 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                     handshake_timeout: Duration::from_secs(8),
                     randomness_seed: rand::random(),
                 }),
-                slots_assign_backoff: HashMap::with_capacity_and_hasher(32, Default::default()),
+                slots_assign_backoff: HashMap::with_capacity_and_hasher(
+                    32,
+                    util::SipHasherBuild::new(rand::random()),
+                ),
                 important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
                 active_connections: HashMap::with_capacity_and_hasher(32, Default::default()),
                 messages_from_connections_tx,
                 messages_from_connections_rx,
-                tasks_executor: config.tasks_executor,
                 blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
                 grandpa_warp_sync_requests: HashMap::with_capacity_and_hasher(
                     8,
@@ -272,12 +277,14 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                     Default::default(),
                 ),
             }),
+            platform: config.platform,
+            identify_agent_version: config.identify_agent_version,
             log_chain_names,
             wake_up_main_background_task: event_listener::Event::new(),
         });
 
         // Spawn main task that processes the network service.
-        (shared.guarded.try_lock().unwrap().tasks_executor)(
+        shared.platform.spawn_task(
             "network-service".into(),
             Box::pin({
                 let shared = shared.clone();
@@ -291,7 +298,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
 
         // Spawn task starts a discovery request at a periodic interval.
         // This is done through a separate task due to ease of implementation.
-        (shared.guarded.try_lock().unwrap().tasks_executor)(
+        shared.platform.spawn_task(
             "network-discovery".into(),
             Box::pin({
                 let shared = shared.clone();
@@ -299,14 +306,14 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                     let mut next_discovery = Duration::from_secs(5);
 
                     loop {
-                        TPlat::sleep(next_discovery).await;
+                        shared.platform.sleep(next_discovery).await;
                         next_discovery = cmp::min(next_discovery * 2, Duration::from_secs(120));
 
                         let mut guarded = shared.guarded.lock().await;
                         for chain_index in 0..shared.log_chain_names.len() {
                             let operation_id = guarded
                                 .network
-                                .start_kademlia_discovery_round(TPlat::now(), chain_index);
+                                .start_kademlia_discovery_round(shared.platform.now(), chain_index);
 
                             let _prev_value = guarded
                                 .kademlia_discovery_operations
@@ -389,7 +396,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             }
 
             let request_id = guarded.network.start_blocks_request(
-                TPlat::now(),
+                self.shared.platform.now(),
                 &target,
                 chain_index,
                 config,
@@ -416,7 +423,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                     BytesDisplay(blocks.iter().fold(0, |sum, block| {
                         let block_size = block.header.as_ref().map_or(0, |h| h.len()) +
                             block.body.as_ref().map_or(0, |b| b.iter().fold(0, |s, e| s + e.len())) +
-                            block.justifications.as_ref().into_iter().flat_map(|l| l.iter()).fold(0, |s, j| s + j.1.len());
+                            block.justifications.as_ref().into_iter().flat_map(|l| l.iter()).fold(0, |s, j| s + j.justification.len());
                         sum + u64::try_from(block_size).unwrap()
                     }))
                 );
@@ -476,7 +483,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             );
 
             let request_id = guarded.network.start_grandpa_warp_sync_request(
-                TPlat::now(),
+                self.shared.platform.now(),
                 &target,
                 chain_index,
                 begin_hash,
@@ -583,7 +590,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             );
 
             let request_id = match guarded.network.start_storage_proof_request(
-                TPlat::now(),
+                self.shared.platform.now(),
                 &target,
                 chain_index,
                 config,
@@ -659,7 +666,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             );
 
             let request_id = match guarded.network.start_call_proof_request(
-                TPlat::now(),
+                self.shared.platform.now(),
                 &target,
                 chain_index,
                 config,
@@ -837,7 +844,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
     }
 }
 
-impl<TPlat: Platform> Drop for NetworkService<TPlat> {
+impl<TPlat: PlatformRef> Drop for NetworkService<TPlat> {
     fn drop(&mut self) {
         for abort in &self.abort_handles {
             abort.abort();
@@ -863,6 +870,11 @@ pub enum Event {
         peer_id: PeerId,
         chain_index: usize,
         announce: service::EncodedBlockAnnounce,
+    },
+    GrandpaNeighborPacket {
+        peer_id: PeerId,
+        chain_index: usize,
+        finalized_block_height: u64,
     },
     /// Received a GrandPa commit message from the network.
     GrandpaCommitMessage {
@@ -938,7 +950,7 @@ pub enum QueueNotificationError {
     Queue(peers::QueueNotificationError),
 }
 
-async fn background_task<TPlat: Platform>(
+async fn background_task<TPlat: PlatformRef>(
     shared: Arc<Shared<TPlat>>,
     mut event_senders: Vec<mpsc::Sender<Event>>,
 ) {
@@ -953,7 +965,7 @@ async fn background_task<TPlat: Platform>(
     }
 }
 
-async fn update_round<TPlat: Platform>(
+async fn update_round<TPlat: PlatformRef>(
     shared: &Arc<Shared<TPlat>>,
     event_senders: &mut [mpsc::Sender<Event>],
 ) {
@@ -975,7 +987,7 @@ async fn update_round<TPlat: Platform>(
     // Process the events that the coordinator has generated.
     'events_loop: loop {
         let event = loop {
-            let inner_event = match guarded.network.next_event(TPlat::now()) {
+            let inner_event = match guarded.network.next_event(shared.platform.now()) {
                 Some(ev) => ev,
                 None => break 'events_loop,
             };
@@ -1073,7 +1085,7 @@ async fn update_round<TPlat: Platform>(
                         &shared.log_chain_names[chain_index],
                         peer_id
                     );
-                    guarded.unassign_slot_and_ban(chain_index, peer_id);
+                    guarded.unassign_slot_and_ban(&shared.platform, chain_index, peer_id);
                     shared.wake_up_main_background_task.notify(1);
                 }
                 service::Event::ChainDisconnected {
@@ -1097,7 +1109,7 @@ async fn update_round<TPlat: Platform>(
                         &shared.log_chain_names[chain_index],
                         peer_id
                     );
-                    guarded.unassign_slot_and_ban(chain_index, peer_id.clone());
+                    guarded.unassign_slot_and_ban(&shared.platform, chain_index, peer_id.clone());
                     shared.wake_up_main_background_task.notify(1);
                     break Event::Disconnected {
                         peer_id,
@@ -1165,11 +1177,26 @@ async fn update_round<TPlat: Platform>(
                             );
 
                             for (peer_id, addrs) in nodes {
+                                let mut valid_addrs = Vec::with_capacity(addrs.len());
+                                for addr in addrs {
+                                    match Multiaddr::try_from(addr) {
+                                        Ok(a) => valid_addrs.push(a),
+                                        Err(err) => {
+                                            log::debug!(
+                                                target: "connections",
+                                                "Discovery => InvalidAddress({})",
+                                                hex::encode(&err.addr)
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                }
+
                                 guarded.network.discover(
-                                    &TPlat::now(),
+                                    &shared.platform.now(),
                                     chain_index,
                                     peer_id,
-                                    addrs,
+                                    valid_addrs,
                                 );
                             }
                         }
@@ -1190,6 +1217,21 @@ async fn update_round<TPlat: Platform>(
                                 service::DiscoveryError::FindNode(
                                     service::KademliaFindNodeError::RequestFailed(err),
                                 ) if !err.is_protocol_error() => {}
+                                service::DiscoveryError::FindNode(
+                                    service::KademliaFindNodeError::RequestFailed(
+                                        peers::RequestError::Substream(connection::established::RequestError::ProtocolNotAvailable)
+                                    ))
+                                => {
+                                    // TODO: remove this warning in a long time
+                                    log::warn!(
+                                        target: "connections",
+                                        "Problem during discovery on {}: protocol not available. \
+                                        This might indicate that the version of Substrate used by \
+                                        the chain doesn't include \
+                                        <https://github.com/paritytech/substrate/pull/12545>.",
+                                        &shared.log_chain_names[chain_index]
+                                    );
+                                }
                                 _ => {
                                     log::warn!(
                                         target: "connections",
@@ -1222,7 +1264,9 @@ async fn update_round<TPlat: Platform>(
                         "Connection({}) => IdentifyRequest",
                         peer_id,
                     );
-                    guarded.network.respond_identify(request_id, "smoldot");
+                    guarded
+                        .network
+                        .respond_identify(request_id, &shared.identify_agent_version);
                 }
                 service::Event::BlocksRequestIn { .. } => unreachable!(),
                 service::Event::RequestInCancel { .. } => {
@@ -1243,6 +1287,11 @@ async fn update_round<TPlat: Platform>(
                         state.set_id,
                         state.commit_finalized_height,
                     );
+                    break Event::GrandpaNeighborPacket {
+                        chain_index,
+                        peer_id,
+                        finalized_block_height: state.commit_finalized_height,
+                    };
                 }
                 service::Event::GrandpaCommitMessage {
                     chain_index,
@@ -1272,7 +1321,11 @@ async fn update_round<TPlat: Platform>(
                     );
 
                     for chain_index in 0..guarded.network.num_chains() {
-                        guarded.unassign_slot_and_ban(chain_index, peer_id.clone());
+                        guarded.unassign_slot_and_ban(
+                            &shared.platform,
+                            chain_index,
+                            peer_id.clone(),
+                        );
                     }
                     shared.wake_up_main_background_task.notify(1);
                 }
@@ -1304,7 +1357,7 @@ async fn update_round<TPlat: Platform>(
 
     // TODO: doc
     for chain_index in 0..shared.log_chain_names.len() {
-        let now = TPlat::now();
+        let now = shared.platform.now();
 
         // Clean up the content of `slots_assign_backoff`.
         // TODO: the background task should be woken up when the ban expires
@@ -1339,7 +1392,7 @@ async fn update_round<TPlat: Platform>(
     // Grab this list and start opening a connection for each.
     // TODO: restore the rate limiting for connections openings
     loop {
-        let start_connect = match guarded.network.next_start_connect(|| TPlat::now()) {
+        let start_connect = match guarded.network.next_start_connect(|| shared.platform.now()) {
             Some(sc) => sc,
             None => break,
         };
@@ -1364,7 +1417,7 @@ async fn update_round<TPlat: Platform>(
         // Sending the new task might fail in case a shutdown is happening, in which case
         // we don't really care about the state of anything anymore.
         // The sending here is normally very quick.
-        let _ = (guarded.tasks_executor)(task_name, Box::pin(task));
+        shared.platform.spawn_task(task_name.into(), Box::pin(task));
     }
 
     // Pull messages that the coordinator has generated in destination to the various
@@ -1391,11 +1444,11 @@ async fn update_round<TPlat: Platform>(
     }
 }
 
-impl<TPlat: Platform> SharedGuarded<TPlat> {
-    fn unassign_slot_and_ban(&mut self, chain_index: usize, peer_id: PeerId) {
+impl<TPlat: PlatformRef> SharedGuarded<TPlat> {
+    fn unassign_slot_and_ban(&mut self, platform: &TPlat, chain_index: usize, peer_id: PeerId) {
         self.network.unassign_slot(chain_index, &peer_id);
 
-        let new_expiration = TPlat::now() + Duration::from_secs(20); // TODO: arbitrary constant
+        let new_expiration = platform.now() + Duration::from_secs(20); // TODO: arbitrary constant
         match self.slots_assign_backoff.entry((peer_id, chain_index)) {
             hash_map::Entry::Occupied(e) if *e.get() < new_expiration => {
                 *e.into_mut() = new_expiration;

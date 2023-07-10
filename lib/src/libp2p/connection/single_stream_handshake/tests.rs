@@ -25,8 +25,8 @@ fn handshake_basic_works() {
         let key1 = NoiseKey::new(&rand::random());
         let key2 = NoiseKey::new(&rand::random());
 
-        let mut handshake1 = Handshake::noise_yamux(true);
-        let mut handshake2 = Handshake::noise_yamux(false);
+        let mut handshake1 = Handshake::noise_yamux(&key1, true);
+        let mut handshake2 = Handshake::noise_yamux(&key2, false);
 
         let mut buf_1_to_2 = Vec::new();
         let mut buf_2_to_1 = Vec::new();
@@ -37,7 +37,6 @@ fn handshake_basic_works() {
         ) {
             match handshake1 {
                 Handshake::Success { .. } => {}
-                Handshake::NoiseKeyRequired(req) => handshake1 = req.resume(&key1).into(),
                 Handshake::Healthy(nego) => {
                     if buf_1_to_2.is_empty() {
                         buf_1_to_2.resize(size1, 0);
@@ -75,7 +74,6 @@ fn handshake_basic_works() {
 
             match handshake2 {
                 Handshake::Success { .. } => {}
-                Handshake::NoiseKeyRequired(req) => handshake2 = req.resume(&key2).into(),
                 Handshake::Healthy(nego) => {
                     if buf_2_to_1.is_empty() {
                         buf_2_to_1.resize(size2, 0);

@@ -107,7 +107,7 @@ impl<'a> fmt::Debug for MultihashRef<'a> {
 impl<'a> fmt::Display for MultihashRef<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let base58 = bs58::encode(&self.to_vec()).into_string();
-        write!(f, "{}", base58)
+        write!(f, "{base58}")
     }
 }
 

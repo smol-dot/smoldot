@@ -26,26 +26,26 @@
 use crate::libp2p::{connection::multistream_select, read_write};
 use crate::util::leb128;
 
-use alloc::{
-    collections::VecDeque,
-    string::String,
-    vec::{self, Vec},
-};
+use alloc::{borrow::ToOwned as _, collections::VecDeque, string::String, vec::Vec};
+use core::mem;
 use core::{fmt, num::NonZeroUsize};
 
 /// State machine containing the state of a single substream of an established connection.
-pub struct Substream<TNow, TRqUd, TNotifUd> {
-    inner: SubstreamInner<TNow, TRqUd, TNotifUd>,
+pub struct Substream<TNow> {
+    inner: SubstreamInner<TNow>,
 }
 
-// TODO: remove `protocol_index` fields?
-enum SubstreamInner<TNow, TRqUd, TNotifUd> {
+enum SubstreamInner<TNow> {
     /// Protocol negotiation in progress in an incoming substream.
-    InboundNegotiating(multistream_select::InProgress<vec::IntoIter<String>, String>),
-    /// Protocol negotiation in an incoming substream has finished, and an
-    /// [`Event::InboundNegotiated`] has been emitted. Now waiting for the remote to indicate the
-    /// type of substream.
-    InboundNegotiatingApiWait,
+    InboundNegotiating(multistream_select::InProgress<String>, bool),
+    /// Protocol negotiation in an incoming substream is in progress, and an
+    /// [`Event::InboundNegotiated`] has been emitted. Now waiting for the API user to indicate
+    /// whether the protocol is supported and if so the type of substream.
+    InboundNegotiatingApiWait(multistream_select::ListenerAcceptOrDeny<String>),
+    /// Protocol negotiation in an incoming substream is in progress, and the API user has
+    /// indicated that the given protocol is supported. Finishing the handshake before switching
+    /// to a different state.
+    InboundNegotiatingAccept(multistream_select::InProgress<String>, InboundTy),
     /// Incoming substream has failed to negotiate a protocol. Waiting for a close from the remote.
     /// In order to save a round-trip time, the remote might assume that the protocol negotiation
     /// has succeeded. As such, it might send additional data on this substream that should be
@@ -60,21 +60,17 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
         /// When the opening will time out in the absence of response.
         timeout: TNow,
         /// State of the protocol negotiation. `None` if the handshake has already finished.
-        negotiation: Option<multistream_select::InProgress<vec::IntoIter<String>, String>>,
+        negotiation: Option<multistream_select::InProgress<String>>,
         /// Buffer for the incoming handshake.
         handshake_in: leb128::FramedInProgress,
         /// Handshake payload to write out.
         handshake_out: VecDeque<u8>,
-        /// Data passed by the user to [`Substream::notifications_out`].
-        user_data: TNotifUd,
     },
     /// A notifications protocol has been negotiated, and the remote accepted it. Can now send
     /// notifications.
     NotificationsOut {
         /// Notifications to write out.
         notifications: VecDeque<u8>,
-        /// Data passed by the user to [`Substream::notifications_out`].
-        user_data: TNotifUd,
         /// If `true`, we have reported a [`Event::NotificationsOutCloseDemanded`] event in the
         /// past and shouldn't report one again.
         close_demanded_by_remote: bool,
@@ -87,15 +83,10 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
     NotificationsInHandshake {
         /// Buffer for the incoming handshake.
         handshake: leb128::FramedInProgress,
-        /// Protocol that was negotiated.
-        protocol_index: usize,
     },
     /// A handshake on a notifications protocol has been received. Now waiting for an action from
     /// the API user.
-    NotificationsInWait {
-        /// Protocol that was negotiated.
-        protocol_index: usize,
-    },
+    NotificationsInWait,
     /// API user has refused an incoming substream. Waiting for a close from the remote.
     /// In order to save a round-trip time, the remote might assume that the protocol negotiation
     /// has succeeded. As such, it might send additional data on this substream that should be
@@ -110,12 +101,8 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
         next_notification: leb128::FramedInProgress,
         /// Handshake payload to write out.
         handshake: VecDeque<u8>,
-        /// Protocol that was negotiated.
-        protocol_index: usize,
         /// Maximum size, in bytes, allowed for each notification.
         max_notification_size: usize,
-        /// Data passed by the user to [`Substream::accept_in_notifications_substream`].
-        user_data: TNotifUd,
     },
     /// An inbound notifications protocol was open, but then the remote closed its writing side.
     NotificationsInClosed,
@@ -125,11 +112,9 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
         /// When the request will time out in the absence of response.
         timeout: TNow,
         /// State of the protocol negotiation. `None` if the negotiation has finished.
-        negotiation: Option<multistream_select::InProgress<vec::IntoIter<String>, String>>,
+        negotiation: Option<multistream_select::InProgress<String>>,
         /// Request payload to write out.
         request: VecDeque<u8>,
-        /// Data passed by the user to [`Substream::request_out`].
-        user_data: TRqUd,
         /// Buffer for the incoming response.
         response: leb128::FramedInProgress,
     },
@@ -139,15 +124,10 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
     RequestInRecv {
         /// Buffer for the incoming request.
         request: leb128::FramedInProgress,
-        /// Protocol that was negotiated.
-        protocol_index: usize,
     },
     /// Similar to [`SubstreamInner::RequestInRecv`], but doesn't expect any request body.
     /// Immediately reports an event and switches to [`SubstreamInner::RequestInApiWait`].
-    RequestInRecvEmpty {
-        /// Protocol that was negotiated.
-        protocol_index: usize,
-    },
+    RequestInRecvEmpty,
     /// A request has been sent by the remote. API user must now send back the response.
     RequestInApiWait,
     /// A request has been sent by the remote. Sending back the response.
@@ -170,7 +150,7 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
     /// Outbound ping substream.
     PingOut {
         /// State of the protocol negotiation. `None` if the handshake is already finished.
-        negotiation: Option<multistream_select::InProgress<vec::IntoIter<String>, String>>,
+        negotiation: Option<multistream_select::InProgress<String>>,
         /// Payload of the queued pings that remains to write out.
         outgoing_payload: VecDeque<u8>,
         /// Data waiting to be received from the remote. Any mismatch will cause an error.
@@ -182,15 +162,16 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
     },
 }
 
-impl<TNow, TRqUd, TNotifUd> Substream<TNow, TRqUd, TNotifUd>
+impl<TNow> Substream<TNow>
 where
     TNow: Clone + Ord,
 {
     /// Initializes an new `ingoing` substream.
     ///
     /// After the remote has requested a protocol, an [`Event::InboundNegotiated`] event will be
-    /// generated, after which [`Substream::set_inbound_ty`] must be called in order to indicate
-    /// the nature of the negotiated protocol.
+    /// generated, after which [`Substream::accept_inbound`] or [`Substream::reject_inbound`] must
+    /// be called in order to indicate whether the protocol is accepted, and if so the nature of
+    /// the negotiated protocol.
     /// A [`Event::InboundError`] can also be generated, either before or after the
     /// [`Event::InboundNegotiated`], but always before any [`Event::NotificationsInOpen`].
     ///
@@ -209,14 +190,14 @@ where
     /// can happen at any point.
     ///
     /// This flow is also true if you call [`Substream::reset`] at any point.
-    pub fn ingoing(supported_protocols: Vec<String>) -> Self {
+    pub fn ingoing(max_protocol_name_len: usize) -> Self {
         let negotiation =
             multistream_select::InProgress::new(multistream_select::Config::Listener {
-                supported_protocols: supported_protocols.into_iter(),
+                max_protocol_name_len,
             });
 
         Substream {
-            inner: SubstreamInner::InboundNegotiating(negotiation),
+            inner: SubstreamInner::InboundNegotiating(negotiation, false),
         }
     }
 
@@ -235,7 +216,6 @@ where
         requested_protocol: String,
         handshake: Vec<u8>,
         max_handshake_size: usize,
-        user_data: TNotifUd,
     ) -> Self {
         // TODO: check `handshake < max_handshake_size`?
 
@@ -256,7 +236,6 @@ where
                 negotiation: Some(negotiation),
                 handshake_in: leb128::FramedInProgress::new(max_handshake_size),
                 handshake_out,
-                user_data,
             },
         }
     }
@@ -274,7 +253,6 @@ where
         timeout: TNow,
         request: Option<Vec<u8>>,
         max_response_size: usize,
-        user_data: TRqUd,
     ) -> Self {
         let negotiation = multistream_select::InProgress::new(multistream_select::Config::Dialer {
             requested_protocol,
@@ -295,7 +273,6 @@ where
                 negotiation: Some(negotiation),
                 request: request_payload,
                 response: leb128::FramedInProgress::new(max_response_size),
-                user_data,
             },
         }
 
@@ -327,28 +304,6 @@ where
         }
     }
 
-    /// Returns the user data associated to a request substream.
-    ///
-    /// Returns `None` if the substream isn't a request substream.
-    pub fn request_substream_user_data_mut(&mut self) -> Option<&mut TRqUd> {
-        match &mut self.inner {
-            SubstreamInner::RequestOut { user_data, .. } => Some(user_data),
-            _ => None,
-        }
-    }
-
-    /// Returns the user data associated to a notifications substream.
-    ///
-    /// Returns `None` if the substream isn't a notifications substream.
-    pub fn notifications_substream_user_data_mut(&mut self) -> Option<&mut TNotifUd> {
-        match &mut self.inner {
-            SubstreamInner::NotificationsOutHandshakeRecv { user_data, .. } => Some(user_data),
-            SubstreamInner::NotificationsOut { user_data, .. } => Some(user_data),
-            SubstreamInner::NotificationsIn { user_data, .. } => Some(user_data),
-            _ => None,
-        }
-    }
-
     /// Reads data coming from the socket, updates the internal state machine, and writes data
     /// destined to the socket through the [`read_write::ReadWrite`].
     ///
@@ -358,7 +313,7 @@ where
     pub fn read_write(
         self,
         read_write: &'_ mut read_write::ReadWrite<'_, TNow>,
-    ) -> (Option<Self>, Option<Event<TRqUd, TNotifUd>>) {
+    ) -> (Option<Self>, Option<Event>) {
         let (me, event) = self.read_write2(read_write);
         (me.map(|inner| Substream { inner }), event)
     }
@@ -366,29 +321,102 @@ where
     fn read_write2(
         self,
         read_write: &'_ mut read_write::ReadWrite<'_, TNow>,
-    ) -> (
-        Option<SubstreamInner<TNow, TRqUd, TNotifUd>>,
-        Option<Event<TRqUd, TNotifUd>>,
-    ) {
+    ) -> (Option<SubstreamInner<TNow>>, Option<Event>) {
         match self.inner {
-            SubstreamInner::InboundNegotiating(nego) => match nego.read_write(read_write) {
-                Ok(multistream_select::Negotiation::InProgress(nego)) => {
-                    (Some(SubstreamInner::InboundNegotiating(nego)), None)
+            SubstreamInner::InboundNegotiating(nego, was_rejected_already) => {
+                match nego.read_write(read_write) {
+                    Ok(multistream_select::Negotiation::InProgress(nego)) => (
+                        Some(SubstreamInner::InboundNegotiating(
+                            nego,
+                            was_rejected_already,
+                        )),
+                        None,
+                    ),
+                    Ok(multistream_select::Negotiation::ListenerAcceptOrDeny(accept_deny)) => {
+                        // TODO: maybe avoid cloning the protocol name?
+                        let protocol = accept_deny.requested_protocol().to_owned();
+                        (
+                            Some(SubstreamInner::InboundNegotiatingApiWait(accept_deny)),
+                            Some(Event::InboundNegotiated(protocol)),
+                        )
+                    }
+                    Ok(multistream_select::Negotiation::Success) => {
+                        // Unreachable, as we expect a `ListenerAcceptOrDeny`.
+                        unreachable!()
+                    }
+                    Ok(multistream_select::Negotiation::NotAvailable) => {
+                        // Unreachable in listener mode.
+                        unreachable!()
+                    }
+                    Err(_) if was_rejected_already => {
+                        // If the negotiation was already rejected once, it is likely that the
+                        // multistream-select protocol error is due to the fact that the remote
+                        // assumes that the multistream-select negotiation always succeeds. As such,
+                        // we treat this situation as "negotiation has failed gracefully".
+                        (Some(SubstreamInner::InboundFailed), None)
+                    }
+                    Err(err) => (
+                        None,
+                        Some(Event::InboundError {
+                            error: InboundError::NegotiationError(err),
+                            was_accepted: false,
+                        }),
+                    ),
                 }
-                Ok(multistream_select::Negotiation::Success(protocol)) => (
-                    Some(SubstreamInner::InboundNegotiatingApiWait),
-                    Some(Event::InboundNegotiated(protocol)),
-                ),
-                Ok(multistream_select::Negotiation::NotAvailable) => {
-                    (Some(SubstreamInner::InboundFailed), None)
+            }
+            SubstreamInner::InboundNegotiatingApiWait(accept_deny) => (
+                Some(SubstreamInner::InboundNegotiatingApiWait(accept_deny)),
+                None,
+            ),
+            SubstreamInner::InboundNegotiatingAccept(nego, inbound_ty) => {
+                match nego.read_write(read_write) {
+                    Ok(multistream_select::Negotiation::InProgress(nego)) => (
+                        Some(SubstreamInner::InboundNegotiatingAccept(nego, inbound_ty)),
+                        None,
+                    ),
+                    Ok(multistream_select::Negotiation::ListenerAcceptOrDeny(_)) => {
+                        // Can't be reached again, as we have already accepted the protocol.
+                        unreachable!()
+                    }
+                    Ok(multistream_select::Negotiation::Success) => match inbound_ty {
+                        InboundTy::Ping => (
+                            Some(SubstreamInner::PingIn {
+                                payload_in: Default::default(),
+                                payload_out: VecDeque::with_capacity(32),
+                            }),
+                            None,
+                        ),
+                        InboundTy::Notifications { max_handshake_size } => (
+                            Some(SubstreamInner::NotificationsInHandshake {
+                                handshake: leb128::FramedInProgress::new(max_handshake_size),
+                            }),
+                            None,
+                        ),
+                        InboundTy::Request { request_max_size } => {
+                            if let Some(request_max_size) = request_max_size {
+                                (
+                                    Some(SubstreamInner::RequestInRecv {
+                                        request: leb128::FramedInProgress::new(request_max_size),
+                                    }),
+                                    None,
+                                )
+                            } else {
+                                (Some(SubstreamInner::RequestInRecvEmpty), None)
+                            }
+                        }
+                    },
+                    Ok(multistream_select::Negotiation::NotAvailable) => {
+                        // Unreachable in listener mode.
+                        unreachable!()
+                    }
+                    Err(err) => (
+                        None,
+                        Some(Event::InboundError {
+                            error: InboundError::NegotiationError(err),
+                            was_accepted: true,
+                        }),
+                    ),
                 }
-                Err(err) => (
-                    None,
-                    Some(Event::InboundError(InboundError::NegotiationError(err))),
-                ),
-            },
-            SubstreamInner::InboundNegotiatingApiWait => {
-                (Some(SubstreamInner::InboundNegotiatingApiWait), None)
             }
             SubstreamInner::InboundFailed => {
                 // Substream is an inbound substream that has failed to negotiate a
@@ -423,13 +451,12 @@ where
                 mut negotiation,
                 handshake_in,
                 mut handshake_out,
-                user_data,
             } => {
                 if timeout < read_write.now {
                     return (
                         Some(SubstreamInner::NotificationsOutNegotiationFailed),
                         Some(Event::NotificationsOutResult {
-                            result: Err((NotificationsOutErr::Timeout, user_data)),
+                            result: Err(NotificationsOutErr::Timeout),
                         }),
                     );
                 }
@@ -441,15 +468,16 @@ where
                         Ok(multistream_select::Negotiation::InProgress(nego)) => {
                             negotiation = Some(nego)
                         }
-                        Ok(multistream_select::Negotiation::Success(_)) => {}
+                        Ok(multistream_select::Negotiation::ListenerAcceptOrDeny(_)) => {
+                            // Never happens when dialing.
+                            unreachable!()
+                        }
+                        Ok(multistream_select::Negotiation::Success) => {}
                         Ok(multistream_select::Negotiation::NotAvailable) => {
                             return (
                                 Some(SubstreamInner::NotificationsOutNegotiationFailed),
                                 Some(Event::NotificationsOutResult {
-                                    result: Err((
-                                        NotificationsOutErr::ProtocolNotAvailable,
-                                        user_data,
-                                    )),
+                                    result: Err(NotificationsOutErr::ProtocolNotAvailable),
                                 }),
                             )
                         }
@@ -457,10 +485,7 @@ where
                             return (
                                 None,
                                 Some(Event::NotificationsOutResult {
-                                    result: Err((
-                                        NotificationsOutErr::NegotiationError(err),
-                                        user_data,
-                                    )),
+                                    result: Err(NotificationsOutErr::NegotiationError(err)),
                                 }),
                             )
                         }
@@ -481,7 +506,7 @@ where
                             return (
                                 Some(SubstreamInner::NotificationsOutNegotiationFailed),
                                 Some(Event::NotificationsOutResult {
-                                    result: Err((NotificationsOutErr::RefusedHandshake, user_data)),
+                                    result: Err(NotificationsOutErr::RefusedHandshake),
                                 }),
                             );
                         }
@@ -496,7 +521,6 @@ where
                                 negotiation,
                                 handshake_in,
                                 handshake_out,
-                                user_data,
                             }),
                             None,
                         );
@@ -509,7 +533,6 @@ where
                             (
                                 Some(SubstreamInner::NotificationsOut {
                                     notifications: VecDeque::new(),
-                                    user_data,
                                     close_demanded_by_remote: false,
                                 }),
                                 Some(Event::NotificationsOutResult {
@@ -525,7 +548,6 @@ where
                                     negotiation,
                                     handshake_in,
                                     handshake_out,
-                                    user_data,
                                 }),
                                 None,
                             )
@@ -533,10 +555,7 @@ where
                         Err(err) => (
                             None,
                             Some(Event::NotificationsOutResult {
-                                result: Err((
-                                    NotificationsOutErr::HandshakeRecvError(err),
-                                    user_data,
-                                )),
+                                result: Err(NotificationsOutErr::HandshakeRecvError(err)),
                             }),
                         ),
                     }
@@ -547,7 +566,6 @@ where
                             negotiation,
                             handshake_in,
                             handshake_out,
-                            user_data,
                         }),
                         None,
                     )
@@ -555,7 +573,6 @@ where
             }
             SubstreamInner::NotificationsOut {
                 mut notifications,
-                user_data,
                 close_demanded_by_remote,
             } => {
                 // Receiving data on an outgoing substream is forbidden by the protocol.
@@ -570,7 +587,6 @@ where
                     return (
                         Some(SubstreamInner::NotificationsOut {
                             notifications,
-                            user_data,
                             close_demanded_by_remote: true,
                         }),
                         Some(Event::NotificationsOutCloseDemanded),
@@ -580,7 +596,6 @@ where
                 (
                     Some(SubstreamInner::NotificationsOut {
                         notifications,
-                        user_data,
                         close_demanded_by_remote,
                     }),
                     None,
@@ -603,7 +618,6 @@ where
                 timeout,
                 mut negotiation,
                 mut request,
-                user_data,
                 response,
             } => {
                 // Note that this might trigger timeouts for requests whose response is available
@@ -616,7 +630,6 @@ where
                         None,
                         Some(Event::Response {
                             response: Err(RequestError::Timeout),
-                            user_data,
                         }),
                     );
                 }
@@ -627,12 +640,15 @@ where
                         Ok(multistream_select::Negotiation::InProgress(nego)) => {
                             negotiation = Some(nego)
                         }
-                        Ok(multistream_select::Negotiation::Success(_)) => {}
+                        Ok(multistream_select::Negotiation::ListenerAcceptOrDeny(_)) => {
+                            // Never happens when dialing.
+                            unreachable!()
+                        }
+                        Ok(multistream_select::Negotiation::Success) => {}
                         Ok(multistream_select::Negotiation::NotAvailable) => {
                             return (
                                 None,
                                 Some(Event::Response {
-                                    user_data,
                                     response: Err(RequestError::ProtocolNotAvailable),
                                 }),
                             )
@@ -641,7 +657,6 @@ where
                             return (
                                 None,
                                 Some(Event::Response {
-                                    user_data,
                                     response: Err(RequestError::NegotiationError(err)),
                                 }),
                             )
@@ -668,7 +683,6 @@ where
                             return (
                                 None,
                                 Some(Event::Response {
-                                    user_data,
                                     response: Err(RequestError::SubstreamClosed),
                                 }),
                             );
@@ -682,7 +696,6 @@ where
                             (
                                 None,
                                 Some(Event::Response {
-                                    user_data,
                                     response: Ok(response),
                                 }),
                             )
@@ -694,7 +707,6 @@ where
                                     timeout,
                                     negotiation,
                                     request,
-                                    user_data,
                                     response,
                                 }),
                                 None,
@@ -703,7 +715,6 @@ where
                         Err(err) => (
                             None,
                             Some(Event::Response {
-                                user_data,
                                 response: Err(RequestError::ResponseLebError(err)),
                             }),
                         ),
@@ -714,7 +725,6 @@ where
                             timeout,
                             negotiation,
                             request,
-                            user_data,
                             response,
                         }),
                         None,
@@ -722,16 +732,16 @@ where
                 }
             }
 
-            SubstreamInner::RequestInRecv {
-                request,
-                protocol_index,
-            } => {
+            SubstreamInner::RequestInRecv { request } => {
                 let incoming_buffer = match read_write.incoming_buffer {
                     Some(buf) => buf,
                     None => {
                         return (
                             None,
-                            Some(Event::InboundError(InboundError::RequestInExpectedEof)),
+                            Some(Event::InboundError {
+                                error: InboundError::RequestInExpectedEof,
+                                was_accepted: true,
+                            }),
                         );
                     }
                 };
@@ -741,32 +751,25 @@ where
                         read_write.advance_read(num_read);
                         (
                             Some(SubstreamInner::RequestInApiWait),
-                            Some(Event::RequestIn {
-                                protocol_index,
-                                request,
-                            }),
+                            Some(Event::RequestIn { request }),
                         )
                     }
                     Ok((num_read, leb128::Framed::InProgress(request))) => {
                         read_write.advance_read(num_read);
-                        (
-                            Some(SubstreamInner::RequestInRecv {
-                                request,
-                                protocol_index,
-                            }),
-                            None,
-                        )
+                        (Some(SubstreamInner::RequestInRecv { request }), None)
                     }
                     Err(err) => (
                         None,
-                        Some(Event::InboundError(InboundError::RequestInLebError(err))),
+                        Some(Event::InboundError {
+                            error: InboundError::RequestInLebError(err),
+                            was_accepted: true,
+                        }),
                     ),
                 }
             }
-            SubstreamInner::RequestInRecvEmpty { protocol_index } => (
+            SubstreamInner::RequestInRecvEmpty => (
                 Some(SubstreamInner::RequestInApiWait),
                 Some(Event::RequestIn {
-                    protocol_index,
                     request: Vec::new(),
                 }),
             ),
@@ -781,19 +784,17 @@ where
                 }
             }
 
-            SubstreamInner::NotificationsInHandshake {
-                handshake,
-                protocol_index,
-            } => {
+            SubstreamInner::NotificationsInHandshake { handshake } => {
                 let incoming_buffer = match read_write.incoming_buffer {
                     Some(buf) => buf,
                     None => {
                         read_write.close_write_if_empty();
                         return (
                             None,
-                            Some(Event::InboundError(
-                                InboundError::NotificationsInUnexpectedEof { protocol_index },
-                            )),
+                            Some(Event::InboundError {
+                                error: InboundError::NotificationsInUnexpectedEof,
+                                was_accepted: true,
+                            }),
                         );
                     }
                 };
@@ -802,39 +803,30 @@ where
                     Ok((num_read, leb128::Framed::Finished(handshake))) => {
                         read_write.advance_read(num_read);
                         (
-                            Some(SubstreamInner::NotificationsInWait { protocol_index }),
-                            Some(Event::NotificationsInOpen {
-                                protocol_index,
-                                handshake,
-                            }),
+                            Some(SubstreamInner::NotificationsInWait),
+                            Some(Event::NotificationsInOpen { handshake }),
                         )
                     }
                     Ok((num_read, leb128::Framed::InProgress(handshake))) => {
                         read_write.advance_read(num_read);
                         (
-                            Some(SubstreamInner::NotificationsInHandshake {
-                                handshake,
-                                protocol_index,
-                            }),
+                            Some(SubstreamInner::NotificationsInHandshake { handshake }),
                             None,
                         )
                     }
                     Err(error) => (
                         None,
-                        Some(Event::InboundError(InboundError::NotificationsInError {
-                            error,
-                            protocol_index,
-                        })),
+                        Some(Event::InboundError {
+                            error: InboundError::NotificationsInError { error },
+                            was_accepted: true,
+                        }),
                     ),
                 }
             }
-            SubstreamInner::NotificationsInWait { protocol_index } => {
+            SubstreamInner::NotificationsInWait => {
                 // Incoming data isn't processed, potentially back-pressuring it.
                 if read_write.incoming_buffer.is_some() {
-                    (
-                        Some(SubstreamInner::NotificationsInWait { protocol_index }),
-                        None,
-                    )
+                    (Some(SubstreamInner::NotificationsInWait), None)
                 } else {
                     (
                         Some(SubstreamInner::NotificationsInRefused),
@@ -858,9 +850,7 @@ where
                 close_desired,
                 mut next_notification,
                 mut handshake,
-                protocol_index,
                 max_notification_size,
-                user_data,
             } => {
                 read_write.write_from_vec_deque(&mut handshake);
 
@@ -890,9 +880,7 @@ where
                                     max_notification_size,
                                 ),
                                 handshake,
-                                protocol_index,
                                 max_notification_size,
-                                user_data,
                             }),
                             Some(Event::NotificationIn { notification }),
                         )
@@ -906,9 +894,7 @@ where
                                 close_desired,
                                 next_notification,
                                 handshake,
-                                protocol_index,
                                 max_notification_size,
-                                user_data,
                             }),
                             None,
                         )
@@ -987,7 +973,11 @@ where
                         Ok(multistream_select::Negotiation::InProgress(nego)) => {
                             negotiation = Some(nego)
                         }
-                        Ok(multistream_select::Negotiation::Success(_)) => {}
+                        Ok(multistream_select::Negotiation::ListenerAcceptOrDeny(_)) => {
+                            // Never happens when dialing.
+                            unreachable!()
+                        }
+                        Ok(multistream_select::Negotiation::Success) => {}
                         Ok(multistream_select::Negotiation::NotAvailable) => {
                             return (Some(SubstreamInner::PingOutFailed { queued_pings }), None)
                         }
@@ -1065,13 +1055,13 @@ where
         }
     }
 
-    pub fn reset(self) -> Option<Event<TRqUd, TNotifUd>> {
+    pub fn reset(self) -> Option<Event> {
         match self.inner {
-            SubstreamInner::InboundNegotiating(_) => None,
-            SubstreamInner::InboundNegotiatingApiWait => None,
+            SubstreamInner::InboundNegotiating(_, _) => None,
+            SubstreamInner::InboundNegotiatingAccept(_, _) => None,
+            SubstreamInner::InboundNegotiatingApiWait(_) => Some(Event::InboundNegotiatedCancel),
             SubstreamInner::InboundFailed => None,
-            SubstreamInner::RequestOut { user_data, .. } => Some(Event::Response {
-                user_data,
+            SubstreamInner::RequestOut { .. } => Some(Event::Response {
                 response: Err(RequestError::SubstreamReset),
             }),
             SubstreamInner::NotificationsInHandshake { .. } => None,
@@ -1081,15 +1071,13 @@ where
             }),
             SubstreamInner::NotificationsInRefused => None,
             SubstreamInner::NotificationsInClosed => None,
-            SubstreamInner::NotificationsOutHandshakeRecv { user_data, .. } => {
+            SubstreamInner::NotificationsOutHandshakeRecv { .. } => {
                 Some(Event::NotificationsOutResult {
-                    result: Err((NotificationsOutErr::SubstreamReset, user_data)),
+                    result: Err(NotificationsOutErr::SubstreamReset),
                 })
             }
             SubstreamInner::NotificationsOutNegotiationFailed => None,
-            SubstreamInner::NotificationsOut { user_data, .. } => {
-                Some(Event::NotificationsOutReset { user_data })
-            }
+            SubstreamInner::NotificationsOut { .. } => Some(Event::NotificationsOutReset),
             SubstreamInner::NotificationsOutClosed { .. } => None,
             SubstreamInner::PingIn { .. } => None,
             SubstreamInner::RequestInRecv { .. } => None,
@@ -1115,28 +1103,22 @@ where
         &mut self,
         handshake: Vec<u8>,
         max_notification_size: usize,
-        user_data: TNotifUd,
     ) {
-        match &mut self.inner {
-            SubstreamInner::NotificationsInWait { protocol_index } => {
-                let protocol_index = *protocol_index;
-
-                self.inner = SubstreamInner::NotificationsIn {
-                    close_desired: false,
-                    next_notification: leb128::FramedInProgress::new(max_notification_size),
-                    handshake: {
-                        let handshake_len = handshake.len();
-                        leb128::encode_usize(handshake_len)
-                            .chain(handshake.into_iter())
-                            .collect::<VecDeque<_>>()
-                    },
-                    protocol_index,
-                    max_notification_size,
-                    user_data,
-                }
+        if let SubstreamInner::NotificationsInWait = &mut self.inner {
+            self.inner = SubstreamInner::NotificationsIn {
+                close_desired: false,
+                next_notification: leb128::FramedInProgress::new(max_notification_size),
+                handshake: {
+                    let handshake_len = handshake.len();
+                    leb128::encode_usize(handshake_len)
+                        .chain(handshake.into_iter())
+                        .collect::<VecDeque<_>>()
+                },
+                max_notification_size,
             }
-            _ => {} // TODO: too defensive, should be panic!()
         }
+
+        // TODO: too defensive, should be } else { panic!() }
     }
 
     /// Rejects an inbound notifications protocol. Must be called in response to a
@@ -1277,61 +1259,50 @@ where
         }
     }
 
-    /// Call after an [`Event::InboundNegotiated`] has been emitted in order to indicate the type
-    /// of the protocol.
+    /// Call after an [`Event::InboundNegotiated`] has been emitted in order to accept the protocol
+    /// name and indicate the type of the protocol.
     ///
     /// # Panic
     ///
     /// Panics if the substream is not in the correct state.
     ///
-    pub fn set_inbound_ty(&mut self, ty: InboundTy) {
-        assert!(matches!(
-            self.inner,
-            SubstreamInner::InboundNegotiatingApiWait
-        ));
+    pub fn accept_inbound(&mut self, ty: InboundTy) {
+        match mem::replace(&mut self.inner, SubstreamInner::InboundFailed) {
+            SubstreamInner::InboundNegotiatingApiWait(accept_deny) => {
+                self.inner = SubstreamInner::InboundNegotiatingAccept(accept_deny.accept(), ty)
+            }
+            _ => panic!(),
+        }
+    }
 
-        match ty {
-            InboundTy::Ping => {
-                self.inner = SubstreamInner::PingIn {
-                    payload_in: Default::default(),
-                    payload_out: VecDeque::with_capacity(32),
-                }
+    /// Call after an [`Event::InboundNegotiated`] has been emitted in order to reject the
+    /// protocol name as not supported.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the substream is not in the correct state.
+    ///
+    pub fn reject_inbound(&mut self) {
+        match mem::replace(&mut self.inner, SubstreamInner::InboundFailed) {
+            SubstreamInner::InboundNegotiatingApiWait(accept_deny) => {
+                self.inner = SubstreamInner::InboundNegotiating(accept_deny.reject(), true)
             }
-            InboundTy::Notifications {
-                protocol_index,
-                max_handshake_size,
-            } => {
-                self.inner = SubstreamInner::NotificationsInHandshake {
-                    protocol_index,
-                    handshake: leb128::FramedInProgress::new(max_handshake_size),
-                }
-            }
-            InboundTy::Request {
-                protocol_index,
-                request_max_size,
-            } => {
-                if let Some(request_max_size) = request_max_size {
-                    self.inner = SubstreamInner::RequestInRecv {
-                        protocol_index,
-                        request: leb128::FramedInProgress::new(request_max_size),
-                    };
-                } else {
-                    self.inner = SubstreamInner::RequestInRecvEmpty { protocol_index };
-                }
-            }
+            _ => panic!(),
         }
     }
 }
 
-impl<TNow, TRqUd, TNotifUd> fmt::Debug for Substream<TNow, TRqUd, TNotifUd>
-where
-    TRqUd: fmt::Debug,
-{
+impl<TNow> fmt::Debug for Substream<TNow> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self.inner {
             SubstreamInner::InboundFailed => f.debug_tuple("incoming-negotiation-failed").finish(),
-            SubstreamInner::InboundNegotiating(_) => f.debug_tuple("incoming-negotiating").finish(),
-            SubstreamInner::InboundNegotiatingApiWait => {
+            SubstreamInner::InboundNegotiating(_, _) => {
+                f.debug_tuple("incoming-negotiating").finish()
+            }
+            SubstreamInner::InboundNegotiatingAccept(_, _) => {
+                f.debug_tuple("incoming-negotiating-after-accept").finish()
+            }
+            SubstreamInner::InboundNegotiatingApiWait(..) => {
                 f.debug_tuple("incoming-negotiated-api-wait").finish()
             }
             SubstreamInner::NotificationsOutHandshakeRecv { .. } => {
@@ -1344,10 +1315,9 @@ where
             SubstreamInner::NotificationsOutClosed { .. } => {
                 f.debug_tuple("notifications-out-closed").finish()
             }
-            SubstreamInner::NotificationsInHandshake { protocol_index, .. } => f
-                .debug_tuple("notifications-in-handshake")
-                .field(protocol_index)
-                .finish(),
+            SubstreamInner::NotificationsInHandshake { .. } => {
+                f.debug_tuple("notifications-in-handshake").finish()
+            }
             SubstreamInner::NotificationsInWait { .. } => {
                 f.debug_tuple("notifications-in-wait").finish()
             }
@@ -1358,12 +1328,9 @@ where
             SubstreamInner::NotificationsInClosed => {
                 f.debug_tuple("notifications-in-closed").finish()
             }
-            SubstreamInner::RequestOut { user_data, .. } => {
-                f.debug_tuple("request-out").field(&user_data).finish()
-            }
-            SubstreamInner::RequestInRecv { protocol_index, .. }
-            | SubstreamInner::RequestInRecvEmpty { protocol_index, .. } => {
-                f.debug_tuple("request-in").field(protocol_index).finish()
+            SubstreamInner::RequestOut { .. } => f.debug_tuple("request-out").finish(),
+            SubstreamInner::RequestInRecv { .. } | SubstreamInner::RequestInRecvEmpty { .. } => {
+                f.debug_tuple("request-in").finish()
             }
             SubstreamInner::RequestInRespond { .. } => f.debug_tuple("request-in-respond").finish(),
             SubstreamInner::RequestInApiWait => f.debug_tuple("request-in").finish(),
@@ -1377,18 +1344,24 @@ where
 /// Event that happened on the connection. See [`Substream::read_write`].
 #[must_use]
 #[derive(Debug)]
-pub enum Event<TRqUd, TNotifUd> {
+pub enum Event {
     /// Error while receiving an inbound substream.
-    InboundError(InboundError),
+    InboundError {
+        error: InboundError,
+        was_accepted: bool,
+    },
 
     /// An inbound substream has successfully negotiated a protocol. Call
-    /// [`Substream::set_inbound_ty`] in order to resume.
+    /// [`Substream::accept_inbound`] or [`Substream::reject_inbound`] in order to resume.
     InboundNegotiated(String),
+
+    /// An inbound substream that had successfully negotiated a protocol got abruptly closed
+    /// while waiting for the call to [`Substream::accept_inbound`] or
+    /// [`Substream::reject_inbound`].
+    InboundNegotiatedCancel,
 
     /// Received a request in the context of a request-response protocol.
     RequestIn {
-        /// Index of the request-response protocol the request was sent on.
-        protocol_index: usize,
         /// Bytes of the request. Its interpretation is out of scope of this module.
         request: Vec<u8>,
     },
@@ -1397,8 +1370,6 @@ pub enum Event<TRqUd, TNotifUd> {
     Response {
         /// Bytes of the response. Its interpretation is out of scope of this module.
         response: Result<Vec<u8>, RequestError>,
-        /// Value that was passed to [`Substream::request_out`].
-        user_data: TRqUd,
     },
 
     /// Remote has opened an inbound notifications substream.
@@ -1407,8 +1378,6 @@ pub enum Event<TRqUd, TNotifUd> {
     /// [`Substream::reject_in_notifications_substream`] must be called in the near future in
     /// order to accept or reject this substream.
     NotificationsInOpen {
-        /// Index of the notifications protocol concerned by the substream.
-        protocol_index: usize,
         /// Handshake sent by the remote. Its interpretation is out of scope of this module.
         handshake: Vec<u8>,
     },
@@ -1440,16 +1409,13 @@ pub enum Event<TRqUd, TNotifUd> {
     NotificationsOutResult {
         /// If `Ok`, contains the handshake sent back by the remote. Its interpretation is out of
         /// scope of this module.
-        result: Result<Vec<u8>, (NotificationsOutErr, TNotifUd)>,
+        result: Result<Vec<u8>, NotificationsOutErr>,
     },
     /// Remote has closed an outgoing notifications substream, meaning that it demands the closing
     /// of the substream.
     NotificationsOutCloseDemanded,
     /// Remote has reset an outgoing notifications substream. The substream is instantly closed.
-    NotificationsOutReset {
-        /// Value that was passed to [`Substream::notifications_out`].
-        user_data: TNotifUd,
-    },
+    NotificationsOutReset,
 
     /// A ping has been successfully answered by the remote.
     PingOutSuccess,
@@ -1464,14 +1430,12 @@ pub enum Event<TRqUd, TNotifUd> {
 pub enum InboundTy {
     Ping,
     Request {
-        protocol_index: usize,
         /// Maximum allowed size of the request.
         /// If `None`, then no data is expected on the substream, not even the length of the
         /// request.
         request_max_size: Option<usize>,
     },
     Notifications {
-        protocol_index: usize,
         max_handshake_size: usize,
     },
 }
@@ -1488,24 +1452,16 @@ pub enum InboundError {
     /// Unexpected end of file while receiving an inbound request.
     RequestInExpectedEof,
     /// Error while receiving an inbound notifications substream handshake.
-    #[display(
-        fmt = "Error while receiving an inbound notifications substream handshake: {}",
-        error
-    )]
+    #[display(fmt = "Error while receiving an inbound notifications substream handshake: {error}")]
     NotificationsInError {
         /// Error that happened.
         error: leb128::FramedError,
-        /// Index of the protocol that was passed in the [`InboundTy::Notifications`].
-        protocol_index: usize,
     },
     /// Unexpected end of file while receiving an inbound notifications substream handshake.
     #[display(
         fmt = "Unexpected end of file while receiving an inbound notifications substream handshake"
     )]
-    NotificationsInUnexpectedEof {
-        /// Index of the protocol that was passed in the [`InboundTy::Notifications`].
-        protocol_index: usize,
-    },
+    NotificationsInUnexpectedEof,
 }
 
 /// Error that can happen during a request in a request-response scheme.

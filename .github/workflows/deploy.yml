@@ -41,43 +41,118 @@ jobs:
       # This `if` adds an additional safety against accidental pushes.
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       with:
-        registry: docker.pkg.github.com
+        registry: ghcr.io
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-    - uses: docker/build-push-action@v4.0.0
+    - uses: docker/build-push-action@v4.1.1
       with:
         context: .
         file: ./full-node/Dockerfile
         load: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        tags: docker.pkg.github.com/smol-dot/smoldot/node:main
-    - run: docker push docker.pkg.github.com/smol-dot/smoldot/node:main
+        tags: ghcr.io/smol-dot/full-node:main
+    - run: docker push ghcr.io/smol-dot/full-node:main
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
-  docs-publish:
+  build-js-doc:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write   # Necessary to push on the `gh-pages` branch.
     container:
-      image: rust:1
+      image: rust:1.70
     steps:
       - uses: actions/checkout@v3
         with:
           path: repo
-      - uses: actions/setup-node@v3.6.0
+      - uses: actions/setup-node@v3.7.0
         with:
           node-version: current
       - run: npm install
         working-directory: ./repo/wasm-node/javascript
       - uses: Swatinem/rust-cache@v2
-      - run: cargo doc --verbose --all-features --no-deps --package smoldot --package smoldot-light
-        working-directory: ./repo
+        with:
+          workspaces: ./repo -> target
       - run: npm run doc
         working-directory: ./repo/wasm-node/javascript
       - run: |
-          mkdir -p ./upload/doc-rust
+          mkdir -p ./doc
+          mv ./repo/wasm-node/javascript/dist/doc/* ./doc
+      - uses: actions/upload-artifact@v3
+        with:
+          name: javascript-documentation
+          path: ./doc/
+
+  build-rust-doc:
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1.70
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          path: repo
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./repo -> target
+      - run: cargo doc --verbose --all-features --no-deps --package smoldot --package smoldot-light
+        working-directory: ./repo
+      - run: |
+          mkdir -p ./doc
+          mv ./repo/target/doc/* ./doc
+      - uses: actions/upload-artifact@v3
+        with:
+          name: rust-documentation
+          path: ./doc/
+
+  build-tests-coverage:
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1.70
+    steps:
+      - run: apt update && apt install -y jq
+      - run: rustup component add llvm-tools-preview
+      - uses: actions/checkout@v3
+        with:
+          path: repo
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./repo -> target
+      - run: |
+          mkdir -p ../coverage
+          RUSTFLAGS="-C instrument-coverage" LLVM_PROFILE_FILE="`pwd`/../coverage/default_%m_%p.profraw" cargo test --workspace --tests
+          RUSTFLAGS="-C instrument-coverage" cargo test --workspace --tests --no-run --message-format=json | jq -r "select(.profile.test == true) | .filenames[]" | grep -v dSYM > ../coverage/binaries-list
+        working-directory: ./repo
+      - run: |
+          `rustc --print sysroot`/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata merge -sparse ./coverage/default_*.profraw -o ./coverage/tests-coverage.profdata
+          `rustc --print sysroot`/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov show --format=html --output-dir=./html-out --instr-profile=./coverage/tests-coverage.profdata --ignore-filename-regex='cargo/registry' --ignore-filename-regex='/rustc/' --show-instantiations --show-line-counts-or-regions $(for file in `cat ./coverage/binaries-list`; do printf "%s %s " -object $file; done)
+          `rustc --print sysroot`/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov report --instr-profile=./coverage/tests-coverage.profdata --ignore-filename-regex='cargo/registry' --ignore-filename-regex='/rustc/' $(for file in `cat ./coverage/binaries-list`; do printf "%s %s " -object $file; done)
+      - uses: actions/upload-artifact@v3
+        with:
+          name: code-coverage-report
+          path: ./html-out/
+
+  docs-publish:
+    runs-on: ubuntu-latest
+    needs: [build-js-doc, build-rust-doc, build-tests-coverage]
+    permissions:
+      contents: write   # Necessary to push on the `gh-pages` branch.
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          path: repo
+      - run: |
           mkdir -p ./upload/doc-javascript
-          mv ./repo/target/doc/* ./upload/doc-rust
-          mv ./repo/wasm-node/javascript/dist/doc/* ./upload/doc-javascript
+          mkdir -p ./upload/doc-rust
+          mkdir -p ./upload/tests-coverage
+          touch ./upload/.nojekyll
+      - uses: actions/download-artifact@v3
+        with:
+          name: javascript-documentation
+          path: ./upload/doc-javascript
+      - uses: actions/download-artifact@v3
+        with:
+          name: rust-documentation
+          path: ./upload/doc-rust
+      - uses: actions/download-artifact@v3
+        with:
+          name: code-coverage-report
+          path: ./upload/tests-coverage
       - run: |
           git config user.email "github-action@users.noreply.github.com"
           git config user.name "GitHub Action"
@@ -85,10 +160,12 @@ jobs:
           git checkout --orphan gh-pages
           git rm -rf .
           git clean -d --force
+          shopt -s dotglob
           mv ../upload/* .
           git add --all
           git commit -m "Documentation"
         working-directory: ./repo
+        shell: bash       # Necessary for `shopt`
       - run: git push -f origin gh-pages:gh-pages
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         working-directory: ./repo
@@ -96,13 +173,13 @@ jobs:
   npm-publish:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.67
+      image: rust:1.70
     steps:
       - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3.6.0
+      - uses: actions/setup-node@v3.7.0
         with:
-          node-version: 14   # An old version is intentionally used in order to check compatibility
-      - run: apt-get update && apt install -y binaryen # For `wasm-opt`
+          # Set the oldest version still maintained, in order to ensure compatibility. See <https://nodejs.dev/en/about/releases/>
+          node-version: 16
       - uses: actions-rs/toolchain@v1
         with:
           # Ideally we don't want to install any toolchain, but the GH action doesn't support this.
@@ -113,7 +190,7 @@ jobs:
         working-directory: ./wasm-node/javascript
       - run: npm publish --unsafe-perm --dry-run
         working-directory: ./wasm-node/javascript
-      - uses: JS-DevTools/npm-publish@v1
+      - uses: JS-DevTools/npm-publish@v2
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         # Warning: this GitHub action doesn't seem to run prepublish scripts, hence
         # the `npm publish --dry-run` done right above is important to ensure this.
@@ -132,13 +209,12 @@ jobs:
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0   # Necessary below for checking if the tag exists.
-      - uses: actions/setup-node@v3.6.0
+      - uses: actions/setup-node@v3.7.0
         with:
-          node-version: 14
+          node-version: 16
       - uses: denoland/setup-deno@v1
         with:
           deno-version: v1.x
-      - run: sudo apt-get update && sudo apt install -y binaryen # For `wasm-opt`
       - uses: actions-rs/toolchain@v1
         with:
           # Ideally we don't want to install any toolchain, but the GH action doesn't support this.
@@ -146,9 +222,9 @@ jobs:
           profile: minimal
       - uses: Swatinem/rust-cache@v2
       - id: compute-tag  # Compute the tag that we might push.
-        run: echo "::set-output name=tag::light-js-deno-v`jq -r .version ./wasm-node/javascript/package.json`"
+        run: echo "tag=light-js-deno-v`jq -r .version ./wasm-node/javascript/package.json`" >> $GITHUB_OUTPUT
       - id: check-tag-exists  # Check whether the tag already exists.
-        run: echo "::set-output name=num-existing::`git tag -l | grep ${{ steps.compute-tag.outputs.tag }} | wc -l`"
+        run: echo "num-existing=`git tag -l | grep ${{ steps.compute-tag.outputs.tag }} | wc -l`" >> $GITHUB_OUTPUT
       - run: npm install
         working-directory: ./wasm-node/javascript
       - run: npm publish --unsafe-perm --dry-run

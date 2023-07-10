@@ -4,28 +4,198 @@
 
 ### Changed
 
+- The runtime code of the finalized block is now stored in the database. At initialization, smoldot now only downloads the hash of the runtime and compares it with the one in cache. If the hashes match (which is the case if no runtime update has happened on the chain since the database has been created), smoldot doesn't download the runtime code but uses the value in the cache. This saves a relatively heavy download (typically around 1 MiB to 1.5 MiB depending on the chain) and speeds up the loading time. ([#863](https://github.com/smol-dot/smoldot/pull/863))
+- The `chainHead_unstable_storage` JSON-RPC function now supports a `type` equal to `closest-descendant-merkle-value` and no longer supports `closest-ancestor-merkle-value`, in accordance with the latest changes in the JSON-RPC API specification. ([#824](https://github.com/smol-dot/smoldot/pull/824))
+- Blocks are now reported to `chain_subscribeAllHeads` and `chain_subscribeNewHeads` subscribers only after they have been put in the cache, preventing race conditions where JSON-RPC clients suffer from a cache miss if they ask information about these blocks too quickly. ([#854](https://github.com/smol-dot/smoldot/pull/854))
+- Runtime updates are now always reported to `state_subscribeRuntimeVersion` subscribers immediately after the `chain_subscribeNewHeads` notification corresponding to the block containing the runtime update. They were previously reported in a pseudo-random order. ([#854](https://github.com/smol-dot/smoldot/pull/854))
+- All the storage subscriptions made using `state_subscribeStorage` are now queried together into a single networking request per block, instead of sending one networking query per storage key and per subscription. ([#854](https://github.com/smol-dot/smoldot/pull/854))
+- An `AddChainError` is now thrown if the `databaseContent` parameter is not of type `string`. The database was previously silently ignored. ([#861](https://github.com/smol-dot/smoldot/pull/861))
+
+### Fixed
+
+- Fix downloading the runtime code twice during the warp syncing process. ([#863](https://github.com/smol-dot/smoldot/pull/863))
+
+## 1.0.11 - 2023-06-25
+
+### Changed
+
+- The runtime specification yielded by the `chainHead_unstable_follow` JSON-RPC function no longer includes the `authoringVersion` field, in accordance with the latest changes in the JSON-RPC API specification. ([#815](https://github.com/smol-dot/smoldot/pull/815))
+- The `chainHead_unstable_unpin` JSON-RPC function now accepts either a single hash or an array of hashes, in accordance with the latest changes in the JSON-RPC API specification. ([#814](https://github.com/smol-dot/smoldot/pull/814))
+- Add support for the `descendants-values`, `descendants-hashes`, and `closest-ancestor-merkle-value` types for the `chainHead_unstable_storage` JSON-RPC function. ([#813](https://github.com/smol-dot/smoldot/pull/813))
+- The `chainHead_unstable_storage` JSON-RPC function now accepts an array of `items` as parameter instead of a `key` and `type`, in accordance with the latest changes in the JSON-RPC API specification. ([#813](https://github.com/smol-dot/smoldot/pull/813))
+- The `chainHead_unstable_storage` JSON-RPC function now generates `items` notifications containin an array of multiple `items`, in accordance with the latest changes in the JSON-RPC API specification. ([#813](https://github.com/smol-dot/smoldot/pull/813))
+
+### Fixed
+
+- Fix not absorbing the JavaScript exception triggered by the browser when connecting to a `ws://` node when smoldot is embedded in a web page served over `https://`. ([#795](https://github.com/smol-dot/smoldot/pull/795), [#800](https://github.com/smol-dot/smoldot/pull/800))
+- Fix potential panic due to race condition when smoldot wants to abort connecting to a peer that we have just failed connecting to. ([#801](https://github.com/smol-dot/smoldot/pull/801))
+- Smoldot no longer calls `close()` on WebSockets that aren't fully established yet (even though it is legal to do so according to the WHATWG specification) in order to avoid browsers printing warnings in the console when you do so. ([#799](https://github.com/smol-dot/smoldot/pull/799))
+- Fix panic-inducing race condition when a networking event happens right when the warp syncing finishes. ([#808](https://github.com/smol-dot/smoldot/pull/808))
+
+## 1.0.10 - 2023-06-19
+
+### Changed
+
+- Multiaddresses that can't be parsed during the discovery process are now silently ignored instead of causing the entire list of discovered nodes to be discarded. ([#705](https://github.com/smol-dot/smoldot/pull/705))
+
+### Fixed
+
+- Smoldot no longer assumes that the runtime calls `ext_default_child_storage_root` in order to properly update the hashes of the child tries that have been modified. ([#743](https://github.com/smol-dot/smoldot/pull/743))
+- Fix various mishandlings of child tries. ([#763](https://github.com/smol-dot/smoldot/pull/763))
+- Fix panic when the `ext_default_child_storage_clear_prefix_version_1` and `ext_default_child_storage_clear_prefix_version_2` functions are called. ([#764](https://github.com/smol-dot/smoldot/pull/764))
+- Fix wrong trie root hash calculation with `state_version = 1`. ([#711](https://github.com/smol-dot/smoldot/pull/711))
+- Fix bug when decoding BABE configuration produced by runtimes using version 1 of the `BabeApi` API. In practice, this should concern only old Kusama blocks. ([#739](https://github.com/smol-dot/smoldot/pull/739))
+- No longer panic when `state_getKeysPaged` is called with a `prefix` parameter equal to `null`. ([#776](https://github.com/smol-dot/smoldot/pull/776))
+
+## 1.0.9 - 2023-06-08
+
+### Added
+
+- Add support for child tries, meaning that errors will no longer be returned when performing runtime calls on chains that use child tries. In practice, this typically concerns contracts chains. ([#680](https://github.com/smol-dot/smoldot/pull/680), [#684](https://github.com/smol-dot/smoldot/pull/684))
+- The checksum of the SS58 address passed to the `system_accountNextIndex` JSON-RPC function is now verified. Note that its prefix isn't compared against the one of the current chain, because there is no straight-forward way for smoldot to determine the SS58 prefix of the chain that it is running. ([#691](https://github.com/smol-dot/smoldot/pull/691))
+- Add `AddChainOptions.jsonRpcMaxPendingRequests` and `AddChainOptions.jsonRpcMaxSubscriptions`, allowing you to specify the maximum number of pending JSON-RPC requests and the maximum number of active JSON-RPC subscriptions. These two limits were previously implicitly set to respectively 128 and 1024. Not passing any value defaults to "infinity". You are strongly encouraged to specify a value for these two options if the source of the JSON-RPC requests is untrusted. ([#694](https://github.com/smol-dot/smoldot/pull/694))
+
+### Fixed
+
+- A `validated` event is now properly generated when watching a transaction using `transaction_unstable_submitAndWatch`. ([#676](https://github.com/smol-dot/smoldot/pull/676))
+- Fix `author_submitAndWatchExtrinsic` erroneously generating `transaction_unstable_watchEvent` notifications, and `transaction_unstable_submitAndWatch` erroneously generating `author_extrinsicUpdate` notifications. ([#677](https://github.com/smol-dot/smoldot/pull/677))
+
+### Changed
+
+- TCP NODELAY is now enabled on Deno. The minimum required Deno version is now v1.29.0, which was released on 2022-12-14. ([#665](https://github.com/smol-dot/smoldot/pull/665))
+
+## 1.0.8 - 2023-06-05
+
+### Changed
+
+- Instead of manually decompressing the WebAssembly bytecode in JavaScript, smoldot will now use the native `DecompressionStream` API within browsers and the native `zlib.inflate` function in NodeJS. This should speed up the initialization and reduce the size of the package. The new `DecompressionStream` API has been stable since February 2020 on Chrome and Edge, since March 2023 on Safari, and since May 2023 on Firefox. ([#640](https://github.com/smol-dot/smoldot/pull/640))
+- The parameter of `chainHead_unstable_follow` has been renamed from `runtimeUpdates` to `withRuntime` in accordance with the latest JSON-RPC specification changes. ([#624](https://github.com/smol-dot/smoldot/pull/624))
+- Errors while building the runtime and errors while building the consensus-related information that can happen during the warp syncing process are now printed in the logs. ([#644](https://github.com/smol-dot/smoldot/pull/644))
+- The `chainHead_unstable_storage` JSON-RPC method has been updated according to the latest changes to the JSON-RPC specification. These changes can be found [here](https://github.com/paritytech/json-rpc-interface-spec/pull/37). The `descendants-values`, `descendants-hashes`, and `closest-ancestor-merkle-value` types aren't implemented yet and produce an error. ([#647](https://github.com/smol-dot/smoldot/pull/647))
+
+### Fixed
+
+- Smoldot will no longer produce errors when calling a runtime function (such as with `state_call` or `chainHead_unstable_call`) that calls the `ext_storage_root` host function. ([#670](https://github.com/smol-dot/smoldot/pull/670))
+- Fix panic when receiving a networking request of a protocol not supported by smoldot. ([#635](https://github.com/smol-dot/smoldot/pull/635))
+- Fix `chainHead_unstable_stopStorage` and `chainHead_unstable_stopBody` being mixed. In other words, storage requests were interrupted by `chainHead_unstable_stopBody` and body requests were interrupted by `chainHead_unstable_stopStorage` ([#648](https://github.com/smol-dot/smoldot/pull/648))
+
+## 1.0.7 - 2023-05-25
+
+### Fixed
+
+- When a runtime contains a `runtime_apis` custom section but no `runtime_version` custom section, or vice-versa, smoldot now falls back to calling `Core_version`. ([#607](https://github.com/smol-dot/smoldot/pull/607))
+- Fix panic when the checkpoint in the chain specification is invalid, which can normally only happen if the checkpoint was modified manually. ([#603](https://github.com/smol-dot/smoldot/pull/603))
+- Fix panic when the checkpoint in the chain specification contains zero or one Babe epochs, which can happen if the checkpoint was generated before any block was authored. ([#603](https://github.com/smol-dot/smoldot/pull/603))
+- The notifications generated by the `author_extrinsicUpdate` JSON-RPC function are now properly camelCased (`future`, `ready`, `broadcast`, `inBlock`, `retracted`, `finalityTimeout`, `finalized`, `usurped`, `dropped`, and `invalid`). They were previously PascalCased (`Future`, `Ready`, `Broadcast`, `InBlock`, `Retracted`, `FinalityTimeout`, `Finalized`, `Usurped`, `Dropped`, and `Invalid`). ([#611](https://github.com/smol-dot/smoldot/pull/611))
+
+## 1.0.6 - 2023-05-09
+
+### Changed
+
+- The version numbers of the `BabeApi`, `GrandpaApi` and `AuraApi` runtime APIs is now checked during the warp sync process. An error is returned if these version numbers aren't equal to known values. These version numbers are changed when the logic of the API has changed, and returning an error in that situation ensures that smoldot will not do the wrong thing such as running with a weakened security. ([#549](https://github.com/smol-dot/smoldot/pull/549))
+
+### Fixed
+
+- The `Promise` returned by `terminate()` now correctly waits for everything to be completely shut down before yielding instead of letting the shutdown continue happening in the background. ([#538](https://github.com/smol-dot/smoldot/pull/538))
+
+## 1.0.5 - 2023-05-05
+
+It is now possible to run the CPU-heavy tasks of smoldot within a worker (WebWorker, worker threads, etc.). To do so, create two ports using `new MessageChannel()`, pass one of the two ports in the `ClientOptions.portToWorker` field and send the other port to a web worker, then call `run(port)` from within that worker. The `run` function can be found by importing `import { run } from 'smoldot/worker'`. If a `portToWorker` is provided, then the `cpuRateLimit` setting applies to the worker.
+
+It is also now possible to load the smoldot bytecode separately or within a worker. To do so, import the `compileBytecode` function using `import { compileBytecode } from 'smoldot/bytecode';`, call it, optionally send it from a worker to the main thread if necessary, then pass the object to the options of the new `startWithBytecode` function. The new `startWithBytecode` function can be imported with `import { startWithBytecode } from 'smoldot/no-auto-bytecode';`. It is equivalent to `start`, except that its configuration must contains a `bytecode` field.
+
+See the README of the JavaScript package for more information.
+
+### Added
+
+- Add `ClientOptions.portToWorker` field. ([#529](https://github.com/smol-dot/smoldot/pull/529))
+- Add a new `worker` entry point to the library (for Deno: `worker-deno.ts`) containing a `run` function ([#529](https://github.com/smol-dot/smoldot/pull/529))
+- Add a new `SmoldotBytecode` public interface. ([#532](https://github.com/smol-dot/smoldot/pull/532))
+- Add a new `ClientOptionsWithBytecode` interface that extends `ClientOptions` with an extra `bytecode` field. ([#532](https://github.com/smol-dot/smoldot/pull/532))
+- Add a new `bytecode` entry point to the library (for Deno: `bytecode-deno.ts`) containin a `comileBytecode` function. ([#532](https://github.com/smol-dot/smoldot/pull/532))
+- Add a new `no-auto-bytecode` entry point to the library (for Deno: `no-auto-bytecode-deno.ts`) containin a `startWithBytecode` function. This function is equivalent to `start`, but accepts a `ClientOptionsWithBytecode` rather than a `ClientOptions`. ([#532](https://github.com/smol-dot/smoldot/pull/532))
+
+### Changed
+
+- When in the browser, smoldot no longer uses `document.visibilityState` to determine whether to reduce the number of calls to `setTimeout`. Instead, the execution dynamically adjusts based on the time `setTimeout` actually takes compared to how much was passed as parameter. ([#518](https://github.com/smol-dot/smoldot/pull/518))
+
+### Fixed
+
+- Fix panic when a remote opens a substream then immediately resets it before smoldot has been able to determine asynchronously whether to accept it or not. ([#521](https://github.com/smol-dot/smoldot/pull/521))
+
+## 1.0.4 - 2023-05-03
+
+### Added
+
+- Support v2 of the `Metadata` runtime API. ([#514](https://github.com/smol-dot/smoldot/pull/514))
+
+### Changed
+
+- The size of the read buffer of TCP connections on Deno has been increased from 1kiB to 32kiB. This should improve the performance by reducing the number of function calls. ([#501](https://github.com/smol-dot/smoldot/pull/501))
+
+### Fixed
+
+- Fix panic when the best block of a chain switches to being equal to the current finalized block. This can occasionally happen for parachains in case of a reorg on the relay chain. ([#497](https://github.com/smol-dot/smoldot/pull/497))
+- Fix panic when failing to find the desired runtime API in a runtime. ([#512](https://github.com/smol-dot/smoldot/pull/512))
+
+## 1.0.3 - 2023-04-27
+
+### Changed
+
+- As NodeJS v14 reaches its end of life on April 30th 2023, the minimum NodeJS version required to run smoldot is now v16. The smoldot Wasm binary now has SIMD enabled, meaning that the minimum Deno version required to run smoldot is now v1.9.
+- When receiving an identify request through the libp2p protocol, smoldot now sends back `smoldot-light-wasm vX.X.X` (with proper version numbers) as its agent name and version, instead of previously just `smoldot`. ([#417](https://github.com/smol-dot/smoldot/pull/417))
+- Yielding to the browser using `setTimeout` and `setImmediate` is now done less frequently in order to reduce the overhead of doing so. ([#481](https://github.com/smol-dot/smoldot/pull/481))
+
+### Fixed
+
+- Fix finality stalling on epoch change by explicitly requesting justifications of blocks that a peer has reported as finalized but that isn't finalized locally. ([#441](https://github.com/smol-dot/smoldot/pull/441))
+- Fix `AlreadyDestroyedError` not being properly thrown if a function is called after `terminate()`. ([#438](https://github.com/smol-dot/smoldot/pull/438))
+
+## 1.0.2 - 2023-04-12
+
+### Changed
+
+- Removed support for the `ls` message in the multistream-select protocol, in accordance with the rest of the libp2p ecosystem. This message was in practice never used, and removing support for it simplifies the implementation. ([#379](https://github.com/smol-dot/smoldot/pull/379))
+- Yamux now considers answering pings in the wrong order as invalid. ([#383](https://github.com/smol-dot/smoldot/pull/383))
+
+### Fixed
+
+- Fix the JSON-RPC service not being deallocated when a chain is removed with some subscriptions still active. ([#408](https://github.com/smol-dot/smoldot/pull/408), [#410](https://github.com/smol-dot/smoldot/pull/410), [#409](https://github.com/smol-dot/smoldot/pull/409))
+- Calling the `chainHead_unstable_call`, `chainHead_unstable_storage`, or `chainHead_unstable_body` JSON-RPC functions with the hash of an unpinned block no longer silently kills the `chainHead_follow` subscription. ([#409](https://github.com/smol-dot/smoldot/pull/409))
+- No longer generate a `chainHead_unstable_followEvent` notification with a `stop` event in response to a call to `chainHead_unstable_unfollow`. ([#409](https://github.com/smol-dot/smoldot/pull/409))
+- Fix a potential undefined behavior in the way the Rust and JavaScript communicate. ([#396](https://github.com/smol-dot/smoldot/pull/396))
+- Properly check whether Yamux substream IDs allocated by the remote are valid. ([#383](https://github.com/smol-dot/smoldot/pull/383))
+- Fix the size of the data of Yamux frames with the `SYN` flag not being verified against the allowed credits. ([#383](https://github.com/smol-dot/smoldot/pull/383))
+- Fix Yamux repeatedly sending empty data frames when the allowed window size is 0. ([#383](https://github.com/smol-dot/smoldot/pull/383))
+- Post-MVP WebAssembly features are now properly disabled when compiling runtimes. This rejects runtimes that Substrate would consider as invalid as well. ([#386](https://github.com/smol-dot/smoldot/pull/386))
+
+## 1.0.1 - 2023-03-29
+
+### Changed
+
 - No longer panic when a libp2p networking request emitted by smoldot exceeds the maximum size allowed by the protocol. Instead, either a warning is printed (similar to consensus-related issues) or a JSON-RPC error is returned. ([#318](https://github.com/smol-dot/smoldot/pull/318))
 - Add an arbitrary limit to the size of unprocessed networking packets, in order to avoid DoS attacks. This limit is necessary in order to bypass limitations in the networking APIs exposed by browsers. ([#312](https://github.com/smol-dot/smoldot/pull/312))
 - Rename `/webrtc` to `/webrtc-direct` in multiaddresses, in accordance with the rest of the libp2p ecosystem. ([#326](https://github.com/smol-dot/smoldot/pull/326))
+- Improved the ganularity of the tasks that handle JSON-RPC requests and libp2p connections. Smoldot now yields more often to the browser, reducing the chances and the severity of freezes during the rendering of the web page. ([#349](https://github.com/smol-dot/smoldot/pull/349))
+- Smoldot is now compiled with the `bulk-memory-operations` and `sign-extensions-ops` WebAssembly features enabled. This is expected to considerably speed up its execution. The minimum version required to run smoldot is now Chrome 75, Firefox 79, NodeJS v12.5, and Deno v0.4. ([#356](https://github.com/smol-dot/smoldot/pull/356))
+- When the `state_getKeysPaged` JSON-RPC function is called, and the list of keys returned in the response is truncated (due to the `count` and `startKey` parameters), the rest of the keys are now put in a cache with the expectation that `state_getKeysPaged` is called again in order to obtain the rest of the keys. The `state_getKeysPaged` JSON-RPC function is unfortunately very often used by PolkadotJS despite being completely unsuitable for light clients. ([#361](https://github.com/smol-dot/smoldot/pull/361))
+- Significantly optimize the performance of the proof verification in `state_getKeys` and `state_getKeysPaged`. ([#363](https://github.com/smol-dot/smoldot/pull/363))
 
 ### Fixed
 
 - Fix runtime transactions not being handled properly when multiple transactions are stacked. ([#335](https://github.com/smol-dot/smoldot/pull/335))
 - No longer generate a JavaScript exception due to `document` being undefined when executing inside of a WebWorker. ([#340](https://github.com/smol-dot/smoldot/pull/340))
-
-### Fixed
-
 - Fix JavaScript errors being thrown if a peer resets a libp2p connection abruptly. ([#315](https://github.com/smol-dot/smoldot/pull/315))
 - TCP connections are now properly closed gracefully (with a FIN flag) on NodeJS and Deno. ([#315](https://github.com/smol-dot/smoldot/pull/315))
 - Outbound data on libp2p connections is now properly back-pressured if the remote doesn't accept to receive more data. ([#315](https://github.com/smol-dot/smoldot/pull/315))
 
-## 1.0.0 - 2022-03-12
+## 1.0.0 - 2023-03-12
 
 ### Fixed
 
 - Fix Deno throwing an exception when failing to connect to an unreachable node through a TCP/IP multiaddr. ([#246](https://github.com/smol-dot/smoldot/pull/246))
 
-## 0.7.13 - 2022-03-03
+## 0.7.13 - 2023-03-03
 
 ### Added
 
@@ -43,7 +213,7 @@
 - Fix panic when the input data of a Wasm function call is larger than a Wasm page. ([#218](https://github.com/smol-dot/smoldot/pull/218))
 - Subscriptions to the `chain_subscribeAllHeads` JSON-RPC function now generate notifications named `chain_allHead`, like in Substrate. They were erroneously named `chain_newHead`. ([#227](https://github.com/smol-dot/smoldot/pull/227))
 
-## 0.7.12 - 2022-02-22
+## 0.7.12 - 2023-02-22
 
 ### Changed
 
@@ -56,7 +226,7 @@
 - The memory of the Wasm virtual machine is now properly zeroed between runs. This should fix a rare `MemoryAccessOutOfBounds` error occasionally appearing. ([#211](https://github.com/smol-dot/smoldot/pull/211))
 - Fix the Wasm virtual machine not working properly if it exports its memory rather than import it. ([#207](https://github.com/smol-dot/smoldot/pull/207))
 
-## 0.7.11 - 2022-02-13
+## 0.7.11 - 2023-02-13
 
 ### Changed
 
@@ -67,7 +237,7 @@
 - Fix `state_getKeys` and `state_getKeysPaged` missing entries under certain conditions. ([#178](https://github.com/smol-dot/smoldot/pull/178))
 - The alternative spellings `relayChain` and `paraId` for the `relay_chain` and `para_id` fields in chain specifications are now properly accepted as intended. ([#160](https://github.com/smol-dot/smoldot/pull/160))
 
-## 0.7.10 - 2022-02-10
+## 0.7.10 - 2023-02-10
 
 ### Fixed
 

@@ -29,10 +29,9 @@ use core::{
     slice,
     task::{Context, Poll, Waker},
 };
+use futures_util::{task, FutureExt as _};
 // TODO: we use std::sync::Mutex rather than parking_lot::Mutex due to issues with Cargo features, see <https://github.com/paritytech/smoldot/issues/2732>
 use std::sync::Mutex;
-
-use futures::{task, FutureExt as _};
 
 /// See [`super::VirtualMachinePrototype`].
 pub struct JitPrototype {
@@ -65,8 +64,8 @@ struct BaseComponents {
 impl JitPrototype {
     /// See [`super::VirtualMachinePrototype::new`].
     pub fn new(
-        module_bytes: impl AsRef<[u8]>,
-        mut symbols: impl FnMut(&str, &str, &Signature) -> Result<usize, ()>,
+        module_bytes: &[u8],
+        symbols: &mut dyn FnMut(&str, &str, &Signature) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
         let mut config = wasmtime::Config::new();
         config.cranelift_nan_canonicalization(true);
@@ -78,10 +77,22 @@ impl JitPrototype {
         // environment variables whatsoever. Whether to use `Enable` or `Disable` below isn't
         // very important, so long as it is not `Environment`.
         config.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Enable);
+
+        // Disable all post-MVP wasm features.
+        // Some of these configuration options are `true` by default while some others are `false`
+        // by default, but we just disable them all to be sure.
+        config.wasm_threads(false);
+        config.wasm_reference_types(false);
+        config.wasm_simd(false);
+        config.wasm_bulk_memory(false);
+        config.wasm_multi_value(false);
+        config.wasm_multi_memory(false);
+        config.wasm_memory64(false);
+
         let engine =
             wasmtime::Engine::new(&config).map_err(|err| NewErr::InvalidWasm(err.to_string()))?;
 
-        let module = wasmtime::Module::from_binary(&engine, module_bytes.as_ref())
+        let module = wasmtime::Module::from_binary(&engine, module_bytes)
             .map_err(|err| NewErr::InvalidWasm(err.to_string()))?;
 
         // Building the list of imports that the Wasm VM is able to use.
@@ -181,8 +192,10 @@ impl JitPrototype {
                                                     .unwrap(),
                                                 expected_return_ty,
                                                 in_interrupted_waker: None, // Filled below
-                                                memory_pointer: memory.data_ptr(&caller) as usize,
-                                                memory_size: memory.data_size(&mut caller),
+                                                memory: SliceRawParts(
+                                                    memory.data_ptr(&caller),
+                                                    memory.data_size(&caller),
+                                                ),
                                             };
                                         }
                                         Shared::ExecutingStart => {
@@ -222,8 +235,10 @@ impl JitPrototype {
                                             memory.grow(&mut caller, additional).unwrap();
                                             *shared_lock = Shared::WithinFunctionCall {
                                                 in_interrupted_waker: Some(cx.waker().clone()),
-                                                memory_pointer: memory.data_ptr(&caller) as usize,
-                                                memory_size: memory.data_size(&caller),
+                                                memory: SliceRawParts(
+                                                    memory.data_ptr(&caller),
+                                                    memory.data_size(&caller),
+                                                ),
                                                 expected_return_ty,
                                             };
                                             Poll::Pending
@@ -522,23 +537,18 @@ enum Shared {
         /// Parameters of the function currently being called.
         parameters: Vec<WasmValue>,
 
-        /// See [`Shared::WithinFunctionCall::memory_pointer`].
-        memory_pointer: usize,
-        /// See [`Shared::WithinFunctionCall::memory_size`].
-        memory_size: usize,
+        /// See [`Shared::WithinFunctionCall::memory`].
+        memory: SliceRawParts,
         /// See [`Shared::WithinFunctionCall::expected_return_ty`].
         expected_return_ty: Option<ValueType>,
         /// See [`Shared::WithinFunctionCall::in_interrupted_waker`].
         in_interrupted_waker: Option<Waker>,
     },
     WithinFunctionCall {
-        /// Pointer to the location where the virtual machine memory is located in the host
-        /// memory. This pointer is invalidated if the memory is grown, which can happen between
-        /// function calls.
-        memory_pointer: usize,
-        /// Size of the virtual machine memory in bytes. This size is invalidated if the memory
-        /// is grown, which can happen between function calls.
-        memory_size: usize,
+        /// Pointer and size of the location where the virtual machine memory is located in the
+        /// host memory. This pointer is invalidated if the memory is grown, which can happen
+        /// between function calls.
+        memory: SliceRawParts,
 
         /// Type of the return value of the function.
         expected_return_ty: Option<ValueType>,
@@ -562,6 +572,13 @@ enum Shared {
         memory: wasmtime::Memory,
     },
 }
+
+/// This idiotic struct and unsafe code are necessary because Rust doesn't implement `Send` and
+/// `Sync` for raw pointers.
+#[derive(Copy, Clone)]
+struct SliceRawParts(*mut u8, usize);
+unsafe impl Send for SliceRawParts {}
+unsafe impl Sync for SliceRawParts {}
 
 /// See [`super::VirtualMachine`].
 pub struct Jit {
@@ -590,21 +607,13 @@ enum JitInner {
         params: Vec<wasmtime::Val>,
     },
     /// `Future` that drives the execution. Contains an invocation of `wasmtime::Func::call_async`.
-    Executing(
-        Pin<
-            Box<
-                dyn future::Future<
-                        Output = (
-                            wasmtime::Store<()>,
-                            Result<Option<WasmValue>, wasmtime::Error>,
-                        ),
-                    > + Send,
-            >,
-        >,
-    ),
+    Executing(BoxFuture<(wasmtime::Store<()>, ExecOutcomeValue)>),
     /// Execution has finished because the future has returned `Poll::Ready` in the past.
     Done(wasmtime::Store<()>),
 }
+
+type BoxFuture<T> = Pin<Box<dyn future::Future<Output = T> + Send>>;
+type ExecOutcomeValue = Result<Option<WasmValue>, wasmtime::Error>;
 
 impl Jit {
     /// See [`super::VirtualMachine::run`].
@@ -620,16 +629,14 @@ impl Jit {
                     Shared::WithinFunctionCall {
                         in_interrupted_waker,
                         expected_return_ty,
-                        memory_pointer,
-                        memory_size,
+                        memory,
                     } => {
                         let provided_value_ty = value.as_ref().map(|v| v.ty());
                         if expected_return_ty != provided_value_ty {
                             *shared_lock = Shared::WithinFunctionCall {
                                 in_interrupted_waker,
                                 expected_return_ty,
-                                memory_pointer,
-                                memory_size,
+                                memory,
                             };
                             return Err(RunErr::BadValueTy {
                                 expected: expected_return_ty,
@@ -715,8 +722,6 @@ impl Jit {
             _ => unreachable!(),
         };
 
-        // TODO: check value type
-
         // Resume the coroutine execution.
         // The `Future` is polled with a no-op waker. We are in total control of when the
         // execution might be able to progress, hence the lack of need for a waker.
@@ -745,14 +750,12 @@ impl Jit {
                     Shared::EnteredFunctionCall {
                         function_index,
                         parameters,
-                        memory_pointer,
-                        memory_size,
+                        memory,
                         expected_return_ty,
                         in_interrupted_waker,
                     } => {
                         *shared_lock = Shared::WithinFunctionCall {
-                            memory_pointer,
-                            memory_size,
+                            memory,
                             expected_return_ty,
                             in_interrupted_waker,
                         };
@@ -777,7 +780,7 @@ impl Jit {
             }
             JitInner::Executing(_) => {
                 let size_bytes = match *self.shared.try_lock().unwrap() {
-                    Shared::WithinFunctionCall { memory_size, .. } => memory_size,
+                    Shared::WithinFunctionCall { memory, .. } => memory.1,
                     _ => unreachable!(),
                 };
 
@@ -800,16 +803,12 @@ impl Jit {
         let memory_slice = match &self.inner {
             JitInner::NotStarted { store, .. } | JitInner::Done(store) => self.memory.data(store),
             JitInner::Executing(_) => {
-                let (memory_pointer, memory_size) = match *self.shared.try_lock().unwrap() {
-                    Shared::WithinFunctionCall {
-                        memory_pointer,
-                        memory_size,
-                        ..
-                    } => (memory_pointer, memory_size),
+                let memory = match *self.shared.try_lock().unwrap() {
+                    Shared::WithinFunctionCall { memory, .. } => memory,
                     _ => unreachable!(),
                 };
 
-                unsafe { slice::from_raw_parts(memory_pointer as *mut u8, memory_size) }
+                unsafe { slice::from_raw_parts(memory.0, memory.1) }
             }
             JitInner::Poisoned => unreachable!(),
         };
@@ -833,16 +832,12 @@ impl Jit {
                 self.memory.data_mut(store)
             }
             JitInner::Executing(_) => {
-                let (memory_pointer, memory_size) = match *self.shared.try_lock().unwrap() {
-                    Shared::WithinFunctionCall {
-                        memory_pointer,
-                        memory_size,
-                        ..
-                    } => (memory_pointer, memory_size),
+                let memory = match *self.shared.try_lock().unwrap() {
+                    Shared::WithinFunctionCall { memory, .. } => memory,
                     _ => unreachable!(),
                 };
 
-                unsafe { slice::from_raw_parts_mut(memory_pointer as *mut u8, memory_size) }
+                unsafe { slice::from_raw_parts_mut(memory.0, memory.1) }
             }
             JitInner::Poisoned => unreachable!(),
         };
@@ -881,17 +876,16 @@ impl Jit {
                 let mut shared_lock = self.shared.try_lock().unwrap();
                 match mem::replace(&mut *shared_lock, Shared::Poisoned) {
                     Shared::WithinFunctionCall {
-                        memory_pointer,
-                        memory_size,
+                        memory,
                         expected_return_ty,
                         in_interrupted_waker,
                     } => {
                         // We check now what the memory bounds are, as it is more difficult to
                         // recover from `grow` returning an error than checking manually.
-                        let current_pages = if memory_size == 0 {
+                        let current_pages = if memory.1 == 0 {
                             0
                         } else {
-                            1 + u64::try_from((memory_size - 1) / (64 * 1024)).unwrap()
+                            1 + u64::try_from((memory.1 - 1) / (64 * 1024)).unwrap()
                         };
                         if self
                             .memory_type
@@ -900,8 +894,7 @@ impl Jit {
                         {
                             // Put everything back as it was.
                             *shared_lock = Shared::WithinFunctionCall {
-                                memory_pointer,
-                                memory_size,
+                                memory,
                                 expected_return_ty,
                                 in_interrupted_waker,
                             };

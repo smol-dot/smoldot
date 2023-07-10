@@ -20,116 +20,171 @@ use crate::{bindings, timers::Delay};
 use smoldot::libp2p::multihash;
 use smoldot_light::platform::{ConnectError, PlatformSubstreamDirection};
 
-use core::{mem, pin, slice, str, task, time::Duration};
-use futures::prelude::*;
+use core::{future, mem, pin, str, task, time::Duration};
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, VecDeque},
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex,
     },
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-/// Total number of bytes that all the connections created through [`Platform`] combined have
+/// Total number of bytes that all the connections created through [`PlatformRef`] combined have
 /// received.
 pub static TOTAL_BYTES_RECEIVED: AtomicU64 = AtomicU64::new(0);
-/// Total number of bytes that all the connections created through [`Platform`] combined have
+/// Total number of bytes that all the connections created through [`PlatformRef`] combined have
 /// sent.
 pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) struct Platform;
+pub(crate) const PLATFORM_REF: PlatformRef = PlatformRef {};
+
+#[derive(Debug, Copy, Clone)]
+pub(crate) struct PlatformRef {}
 
 // TODO: this trait implementation was written before GATs were stable in Rust; now that the associated types have lifetimes, it should be possible to considerably simplify this code
-impl smoldot_light::platform::Platform for Platform {
+impl smoldot_light::platform::PlatformRef for PlatformRef {
     type Delay = Delay;
-    type Yield = Yield;
-    type Instant = crate::Instant;
-    type Connection = ConnectionWrapper; // Entry in the ̀`CONNECTIONS` map.
+    type Instant = Instant;
+    type MultiStream = MultiStreamWrapper; // Entry in the ̀`CONNECTIONS` map.
     type Stream = StreamWrapper; // Entry in the ̀`STREAMS` map and a read buffer.
-    type ConnectFuture = future::BoxFuture<
-        'static,
-        Result<
-            smoldot_light::platform::PlatformConnection<Self::Stream, Self::Connection>,
-            ConnectError,
+    type ConnectFuture = pin::Pin<
+        Box<
+            dyn future::Future<
+                    Output = Result<
+                        smoldot_light::platform::PlatformConnection<
+                            Self::Stream,
+                            Self::MultiStream,
+                        >,
+                        ConnectError,
+                    >,
+                > + Send,
         >,
     >;
-    type StreamUpdateFuture<'a> = future::BoxFuture<'a, ()>;
-    type NextSubstreamFuture<'a> = future::BoxFuture<
-        'a,
-        Option<(
-            Self::Stream,
-            smoldot_light::platform::PlatformSubstreamDirection,
-        )>,
+    type StreamUpdateFuture<'a> = pin::Pin<Box<dyn future::Future<Output = ()> + Send + 'a>>;
+    type NextSubstreamFuture<'a> = pin::Pin<
+        Box<
+            dyn future::Future<
+                    Output = Option<(
+                        Self::Stream,
+                        smoldot_light::platform::PlatformSubstreamDirection,
+                    )>,
+                > + Send
+                + 'a,
+        >,
     >;
 
-    fn now_from_unix_epoch() -> Duration {
-        let value = unsafe { bindings::unix_time_ms() };
-        debug_assert!(value.is_finite());
+    fn now_from_unix_epoch(&self) -> Duration {
         // The documentation of `now_from_unix_epoch()` mentions that it's ok to panic if we're
         // before the UNIX epoch.
-        assert!(
-            value >= 0.0,
-            "running before the UNIX epoch isn't supported"
-        );
-        Duration::from_secs_f64(value / 1000.0)
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|_| panic!())
     }
 
-    fn now() -> Self::Instant {
-        crate::Instant::now()
+    fn now(&self) -> Self::Instant {
+        Instant::now()
     }
 
-    fn sleep(duration: Duration) -> Self::Delay {
+    fn sleep(&self, duration: Duration) -> Self::Delay {
         Delay::new(duration)
     }
 
-    fn sleep_until(when: Self::Instant) -> Self::Delay {
+    fn sleep_until(&self, when: Self::Instant) -> Self::Delay {
         Delay::new_at(when)
     }
 
-    fn yield_after_cpu_intensive() -> Self::Yield {
-        // We do not yield once, but twice.
-        // The reason is that, at the time of writing, `FuturesUnordered` yields to the outside
-        // after one of its futures has yielded twice.
-        // Yielding to the outside is important in the context of the browser node because it
-        // gives time to the browser to run its own events loop.
-        // See <https://github.com/rust-lang/futures-rs/blob/7a98cf0bbeb397dcfaf5f020b371ab9e836d33d4/futures-util/src/stream/futures_unordered/mod.rs#L531>
-        // See <https://github.com/rust-lang/futures-rs/issues/2053> for a discussion about a proper
-        // solution.
-        Yield {
-            num_pending_remain: 2,
+    fn spawn_task(
+        &self,
+        task_name: Cow<str>,
+        task: impl future::Future<Output = ()> + Send + 'static,
+    ) {
+        // The code below processes tasks that have names.
+        #[pin_project::pin_project]
+        struct FutureAdapter<F> {
+            name: String,
+            #[pin]
+            future: F,
         }
+
+        impl<F: future::Future> future::Future for FutureAdapter<F> {
+            type Output = F::Output;
+            fn poll(self: pin::Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
+                let this = self.project();
+                unsafe {
+                    bindings::current_task_entered(
+                        u32::try_from(this.name.as_bytes().as_ptr() as usize).unwrap(),
+                        u32::try_from(this.name.as_bytes().len()).unwrap(),
+                    )
+                }
+
+                let before_polling = Instant::now();
+                let out = this.future.poll(cx);
+                let poll_duration = Instant::now() - before_polling;
+
+                unsafe {
+                    bindings::current_task_exit();
+                }
+
+                if poll_duration.as_millis() >= 20 {
+                    log::warn!(
+                        "The task named `{}` has occupied the CPU for an unreasonable amount \
+                        of time ({}ms). Please report this issue{}.",
+                        this.name,
+                        poll_duration.as_millis(),
+                        if poll_duration.as_millis() < 100 {
+                            " if it happens regularly"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+
+                out
+            }
+        }
+
+        let task = FutureAdapter {
+            name: task_name.into_owned(),
+            future: task,
+        };
+
+        super::EXECUTOR.spawn(task).detach();
     }
 
-    fn connect(url: &str) -> Self::ConnectFuture {
+    fn client_name(&self) -> Cow<str> {
+        env!("CARGO_PKG_NAME").into()
+    }
+
+    fn client_version(&self) -> Cow<str> {
+        env!("CARGO_PKG_VERSION").into()
+    }
+
+    fn connect(&self, url: &str) -> Self::ConnectFuture {
         let mut lock = STATE.try_lock().unwrap();
 
         let connection_id = lock.next_connection_id;
         lock.next_connection_id += 1;
 
-        let mut error_ptr = [0u8; 9];
+        let mut error_buffer_index = [0u8; 4];
 
         let ret_code = unsafe {
             bindings::connection_new(
                 connection_id,
                 u32::try_from(url.as_bytes().as_ptr() as usize).unwrap(),
                 u32::try_from(url.as_bytes().len()).unwrap(),
-                u32::try_from(&mut error_ptr as *mut [u8; 9] as usize).unwrap(),
+                u32::try_from(&mut error_buffer_index as *mut [u8; 4] as usize).unwrap(),
             )
         };
 
         let result = if ret_code != 0 {
-            let ptr = u32::from_le_bytes(<[u8; 4]>::try_from(&error_ptr[0..4]).unwrap());
-            let len = u32::from_le_bytes(<[u8; 4]>::try_from(&error_ptr[4..8]).unwrap());
-            let error_message: Box<[u8]> = unsafe {
-                Box::from_raw(slice::from_raw_parts_mut(
-                    usize::try_from(ptr).unwrap() as *mut u8,
-                    usize::try_from(len).unwrap(),
-                ))
-            };
-
+            let error_message = bindings::get_buffer(u32::from_le_bytes(
+                <[u8; 4]>::try_from(&error_buffer_index[0..4]).unwrap(),
+            ));
             Err(ConnectError {
                 message: str::from_utf8(&error_message).unwrap().to_owned(),
-                is_bad_addr: error_ptr[8] != 0,
+                is_bad_addr: true,
             })
         } else {
             let _prev_value = lock.connections.insert(
@@ -144,7 +199,7 @@ impl smoldot_light::platform::Platform for Platform {
             Ok(())
         };
 
-        async move {
+        Box::pin(async move {
             result?;
 
             // Wait until the connection state is no longer `ConnectionInner::NotOpen`.
@@ -183,14 +238,19 @@ impl smoldot_light::platform::Platform for Platform {
                 ConnectionInner::MultiStreamWebRtc {
                     connection_handles_alive,
                     local_tls_certificate_multihash,
-                    remote_tls_certificate_multihash, ..
+                    remote_tls_certificate_multihash,
+                    ..
                 } => {
                     *connection_handles_alive += 1;
-                    Ok(smoldot_light::platform::PlatformConnection::MultiStreamWebRtc {
-                        connection: ConnectionWrapper(connection_id),
-                        local_tls_certificate_multihash: local_tls_certificate_multihash.clone(),
-                        remote_tls_certificate_multihash: remote_tls_certificate_multihash.clone(),
-                    })
+                    Ok(
+                        smoldot_light::platform::PlatformConnection::MultiStreamWebRtc {
+                            connection: MultiStreamWrapper(connection_id),
+                            local_tls_certificate_multihash: local_tls_certificate_multihash
+                                .clone(),
+                            remote_tls_certificate_multihash: remote_tls_certificate_multihash
+                                .clone(),
+                        },
+                    )
                 }
                 ConnectionInner::Reset {
                     message,
@@ -208,16 +268,16 @@ impl smoldot_light::platform::Platform for Platform {
                     })
                 }
             }
-        }
-        .boxed()
+        })
     }
 
-    fn next_substream(
-        ConnectionWrapper(connection_id): &'_ mut Self::Connection,
-    ) -> Self::NextSubstreamFuture<'_> {
+    fn next_substream<'a>(
+        &self,
+        MultiStreamWrapper(connection_id): &'a mut Self::MultiStream,
+    ) -> Self::NextSubstreamFuture<'a> {
         let connection_id = *connection_id;
 
-        async move {
+        Box::pin(async move {
             let (stream_id, direction, initial_writable_bytes) = loop {
                 let something_happened = {
                     let mut lock = STATE.try_lock().unwrap();
@@ -264,11 +324,10 @@ impl smoldot_light::platform::Platform for Platform {
                 },
                 direction,
             ))
-        }
-        .boxed()
+        })
     }
 
-    fn open_out_substream(ConnectionWrapper(connection_id): &mut Self::Connection) {
+    fn open_out_substream(&self, MultiStreamWrapper(connection_id): &mut Self::MultiStream) {
         match STATE
             .try_lock()
             .unwrap()
@@ -287,7 +346,8 @@ impl smoldot_light::platform::Platform for Platform {
         }
     }
 
-    fn update_stream(
+    fn update_stream<'a>(
+        &self,
         StreamWrapper {
             connection_id,
             stream_id,
@@ -295,8 +355,8 @@ impl smoldot_light::platform::Platform for Platform {
             is_reset,
             writable_bytes,
             ..
-        }: &'_ mut Self::Stream,
-    ) -> Self::StreamUpdateFuture<'_> {
+        }: &'a mut Self::Stream,
+    ) -> Self::StreamUpdateFuture<'a> {
         Box::pin(async move {
             loop {
                 if *is_reset {
@@ -325,6 +385,9 @@ impl smoldot_light::platform::Platform for Platform {
                     }
 
                     if stream.writable_bytes_extra != 0 {
+                        // As documented, the number of writable bytes must never exceed the
+                        // initial writable bytes value. As such, this can't overflow unless there
+                        // is a bug on the JavaScript side.
                         *writable_bytes += stream.writable_bytes_extra;
                         stream.writable_bytes_extra = 0;
                         shall_return = true;
@@ -342,13 +405,14 @@ impl smoldot_light::platform::Platform for Platform {
         })
     }
 
-    fn read_buffer(
+    fn read_buffer<'a>(
+        &self,
         StreamWrapper {
             read_buffer,
             is_reset,
             ..
-        }: &mut Self::Stream,
-    ) -> smoldot_light::platform::ReadBuffer {
+        }: &'a mut Self::Stream,
+    ) -> smoldot_light::platform::ReadBuffer<'a> {
         if *is_reset {
             return smoldot_light::platform::ReadBuffer::Reset;
         }
@@ -361,6 +425,7 @@ impl smoldot_light::platform::Platform for Platform {
     }
 
     fn advance_read_cursor(
+        &self,
         StreamWrapper {
             read_buffer,
             is_reset,
@@ -375,6 +440,7 @@ impl smoldot_light::platform::Platform for Platform {
     }
 
     fn writable_bytes(
+        &self,
         StreamWrapper {
             is_reset,
             writable_bytes,
@@ -390,6 +456,7 @@ impl smoldot_light::platform::Platform for Platform {
     }
 
     fn send(
+        &self,
         StreamWrapper {
             connection_id,
             stream_id,
@@ -425,6 +492,7 @@ impl smoldot_light::platform::Platform for Platform {
     }
 
     fn close_send(
+        &self,
         StreamWrapper {
             connection_id,
             stream_id,
@@ -449,24 +517,6 @@ impl smoldot_light::platform::Platform for Platform {
         }
 
         *write_closed = true;
-    }
-}
-
-pub(crate) struct Yield {
-    num_pending_remain: u32,
-}
-
-impl Future for Yield {
-    type Output = ();
-
-    fn poll(mut self: pin::Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
-        if self.num_pending_remain > 0 {
-            self.num_pending_remain -= 1;
-            cx.waker().wake_by_ref();
-            task::Poll::Pending
-        } else {
-            task::Poll::Ready(())
-        }
     }
 }
 
@@ -530,13 +580,7 @@ impl Drop for StreamWrapper {
                 ..
             } => {
                 *connection_handles_alive -= 1;
-                let remove_connection = *connection_handles_alive == 0;
-                if remove_connection {
-                    unsafe {
-                        bindings::reset_connection(self.connection_id);
-                    }
-                }
-                remove_connection
+                *connection_handles_alive == 0
             }
         };
 
@@ -546,9 +590,9 @@ impl Drop for StreamWrapper {
     }
 }
 
-pub(crate) struct ConnectionWrapper(u32);
+pub(crate) struct MultiStreamWrapper(u32);
 
-impl Drop for ConnectionWrapper {
+impl Drop for MultiStreamWrapper {
     fn drop(&mut self) {
         let mut lock = STATE.try_lock().unwrap();
 
@@ -579,12 +623,19 @@ impl Drop for ConnectionWrapper {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref STATE: Mutex<NetworkState> = Mutex::new(NetworkState {
-        next_connection_id: 0,
-        connections: hashbrown::HashMap::with_capacity_and_hasher(32, Default::default()),
-        streams: BTreeMap::new(),
-    });
+static STATE: Mutex<NetworkState> = Mutex::new(NetworkState {
+    next_connection_id: 0,
+    connections: hashbrown::HashMap::with_hasher(FnvBuildHasher),
+    streams: BTreeMap::new(),
+});
+
+// TODO: we use a custom `FnvBuildHasher` because it's not possible to create `fnv::FnvBuildHasher` in a `const` context
+struct FnvBuildHasher;
+impl core::hash::BuildHasher for FnvBuildHasher {
+    type Hasher = fnv::FnvHasher;
+    fn build_hasher(&self) -> fnv::FnvHasher {
+        fnv::FnvHasher::default()
+    }
 }
 
 /// All the connections and streams that are alive.
@@ -594,7 +645,7 @@ lazy_static::lazy_static! {
 /// Multi-stream connections have one entry in `connections` and zero or more entries in `streams`.
 struct NetworkState {
     next_connection_id: u32,
-    connections: hashbrown::HashMap<u32, Connection, fnv::FnvBuildHasher>,
+    connections: hashbrown::HashMap<u32, Connection, FnvBuildHasher>,
     streams: BTreeMap<(u32, Option<u32>), Stream>,
 }
 
@@ -614,9 +665,9 @@ enum ConnectionInner {
     MultiStreamWebRtc {
         /// List of substreams that the host (i.e. JavaScript side) has reported have been opened,
         /// but that haven't been reported through
-        /// [`smoldot_light::platform::Platform::next_substream`] yet.
+        /// [`smoldot_light::platform::PlatformRef::next_substream`] yet.
         opened_substreams_to_pick_up: VecDeque<(u32, PlatformSubstreamDirection, u32)>,
-        /// Number of objects (connections and streams) in the [`Platform`] API that reference
+        /// Number of objects (connections and streams) in the [`PlatformRef`] API that reference
         /// this connection. If it switches from 1 to 0, the connection must be removed.
         connection_handles_alive: u32,
         /// Multihash encoding of the TLS certificate used by the local node at the DTLS layer.
@@ -628,7 +679,7 @@ enum ConnectionInner {
     Reset {
         /// Message given by the bindings to justify the closure.
         message: String,
-        /// Number of objects (connections and streams) in the [`Platform`] API that reference
+        /// Number of objects (connections and streams) in the [`PlatformRef`] API that reference
         /// this connection. If it switches from 1 to 0, the connection must be removed.
         connection_handles_alive: u32,
     },
@@ -693,22 +744,7 @@ pub(crate) fn connection_open_single_stream(
     connection.something_happened.notify(usize::max_value());
 }
 
-pub(crate) fn connection_open_multi_stream(
-    connection_id: u32,
-    handshake_ty_ptr: u32,
-    handshake_ty_len: u32,
-) {
-    let handshake_ty: Box<[u8]> = {
-        let handshake_ty_ptr = usize::try_from(handshake_ty_ptr).unwrap();
-        let handshake_ty_len = usize::try_from(handshake_ty_len).unwrap();
-        unsafe {
-            Box::from_raw(slice::from_raw_parts_mut(
-                handshake_ty_ptr as *mut u8,
-                handshake_ty_len,
-            ))
-        }
-    };
-
+pub(crate) fn connection_open_multi_stream(connection_id: u32, handshake_ty: Vec<u8>) {
     let (_, (local_tls_certificate_multihash, remote_tls_certificate_multihash)) =
         nom::sequence::preceded(
             nom::bytes::complete::tag::<_, _, nom::error::Error<&[u8]>>(&[0]),
@@ -770,14 +806,13 @@ pub(crate) fn stream_writable_bytes(connection_id: u32, stream_id: u32, bytes: u
         .unwrap();
     debug_assert!(!stream.reset);
 
-    stream.writable_bytes_extra = stream
-        .writable_bytes_extra
-        .checked_add(usize::try_from(bytes).unwrap())
-        .unwrap();
+    // As documented, the number of writable bytes must never exceed the initial writable bytes
+    // value. As such, this can't overflow unless there is a bug on the JavaScript side.
+    stream.writable_bytes_extra += usize::try_from(bytes).unwrap();
     stream.something_happened.notify(usize::max_value());
 }
 
-pub(crate) fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, len: u32) {
+pub(crate) fn stream_message(connection_id: u32, stream_id: u32, message: Vec<u8>) {
     let mut lock = STATE.try_lock().unwrap();
 
     let connection = lock.connections.get_mut(&connection_id).unwrap();
@@ -796,13 +831,7 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, len: 
         .unwrap();
     debug_assert!(!stream.reset);
 
-    let ptr = usize::try_from(ptr).unwrap();
-    let len_usize = usize::try_from(len).unwrap();
-
-    TOTAL_BYTES_RECEIVED.fetch_add(u64::from(len), Ordering::Relaxed);
-
-    let message: Box<[u8]> =
-        unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr as *mut u8, len_usize)) };
+    TOTAL_BYTES_RECEIVED.fetch_add(u64::try_from(message.len()).unwrap(), Ordering::Relaxed);
 
     // Ignore empty message to avoid all sorts of problems.
     if message.is_empty() {
@@ -830,7 +859,7 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, len: 
     }
 
     stream.messages_queue_total_size += message.len();
-    stream.messages_queue.push_back(message);
+    stream.messages_queue.push_back(message.into_boxed_slice());
     stream.something_happened.notify(usize::max_value());
 }
 
@@ -880,7 +909,7 @@ pub(crate) fn connection_stream_opened(
     }
 }
 
-pub(crate) fn connection_reset(connection_id: u32, ptr: u32, len: u32) {
+pub(crate) fn connection_reset(connection_id: u32, message: Vec<u8>) {
     let mut lock = STATE.try_lock().unwrap();
     let connection = lock.connections.get_mut(&connection_id).unwrap();
 
@@ -896,13 +925,9 @@ pub(crate) fn connection_reset(connection_id: u32, ptr: u32, len: u32) {
 
     connection.inner = ConnectionInner::Reset {
         connection_handles_alive,
-        message: {
-            let ptr = usize::try_from(ptr).unwrap();
-            let len = usize::try_from(len).unwrap();
-            let message: Box<[u8]> =
-                unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr as *mut u8, len)) };
-            str::from_utf8(&message).unwrap().to_owned()
-        },
+        message: str::from_utf8(&message)
+            .unwrap_or_else(|_| panic!("non-UTF-8 message"))
+            .to_owned(),
     };
 
     connection.something_happened.notify(usize::max_value());

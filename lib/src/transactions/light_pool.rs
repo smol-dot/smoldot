@@ -953,7 +953,6 @@ where
     /// body is missing is encountered.
     ///
     /// Also removes the transactions from the pool that were included in these blocks.
-    #[must_use]
     pub fn prune_finalized_with_body(
         &'_ mut self,
     ) -> impl Iterator<Item = PruneBodyFinalized<TTx, TBl>> + '_ {

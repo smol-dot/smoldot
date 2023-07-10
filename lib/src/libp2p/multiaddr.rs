@@ -54,6 +54,11 @@ impl Multiaddr {
         self.bytes.clone()
     }
 
+    /// Returns the serialized version of this `Multiaddr`.
+    pub fn into_vec(self) -> Vec<u8> {
+        self.bytes
+    }
+
     /// Returns the list of components of the multiaddress.
     pub fn iter(&'_ self) -> impl Iterator<Item = ProtocolRef<'_>> + '_ {
         let mut iter =
@@ -148,7 +153,7 @@ impl TryFrom<Vec<u8>> for Multiaddr {
         ))(&bytes)
         .is_err()
         {
-            return Err(FromVecError {});
+            return Err(FromVecError { addr: bytes });
         }
 
         Ok(Multiaddr { bytes })
@@ -173,7 +178,10 @@ impl fmt::Display for Multiaddr {
 
 // TODO: more doc and properly derive Display
 #[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
-pub struct FromVecError {}
+#[display(fmt = "Unable to parse multiaddress")]
+pub struct FromVecError {
+    pub addr: Vec<u8>,
+}
 
 // TODO: more doc and properly derive Display
 #[derive(Debug, derive_more::Display, Clone)]
@@ -369,10 +377,10 @@ impl<'a> fmt::Display for ProtocolRef<'a> {
         match self {
             // Note that since a `DomainNameRef` always contains a valid domain name, it is
             // guaranteed that `addr` never contains a `/`.
-            ProtocolRef::Dns(addr) => write!(f, "/dns/{}", addr),
-            ProtocolRef::Dns4(addr) => write!(f, "/dns4/{}", addr),
-            ProtocolRef::Dns6(addr) => write!(f, "/dns6/{}", addr),
-            ProtocolRef::DnsAddr(addr) => write!(f, "/dnsaddr/{}", addr),
+            ProtocolRef::Dns(addr) => write!(f, "/dns/{addr}"),
+            ProtocolRef::Dns4(addr) => write!(f, "/dns4/{addr}"),
+            ProtocolRef::Dns6(addr) => write!(f, "/dns6/{addr}"),
+            ProtocolRef::DnsAddr(addr) => write!(f, "/dnsaddr/{addr}"),
             ProtocolRef::Ip4(ip) => write!(f, "/ip4/{}", no_std_net::Ipv4Addr::from(*ip)),
             ProtocolRef::Ip6(ip) => write!(f, "/ip6/{}", no_std_net::Ipv6Addr::from(*ip)),
             ProtocolRef::P2p(multihash) => {
@@ -380,12 +388,12 @@ impl<'a> fmt::Display for ProtocolRef<'a> {
                 write!(f, "/p2p/{}", bs58::encode(multihash).into_string())
             }
             ProtocolRef::Quic => write!(f, "/quic"),
-            ProtocolRef::Tcp(port) => write!(f, "/tcp/{}", port),
+            ProtocolRef::Tcp(port) => write!(f, "/tcp/{port}"),
             ProtocolRef::Tls => write!(f, "/tls"),
-            ProtocolRef::Udp(port) => write!(f, "/udp/{}", port),
+            ProtocolRef::Udp(port) => write!(f, "/udp/{port}"),
             ProtocolRef::Ws => write!(f, "/ws"),
             ProtocolRef::Wss => write!(f, "/wss"),
-            ProtocolRef::Memory(payload) => write!(f, "/memory/{}", payload),
+            ProtocolRef::Memory(payload) => write!(f, "/memory/{payload}"),
             ProtocolRef::WebRtcDirect => write!(f, "/webrtc-direct"),
             ProtocolRef::Certhash(multihash) => {
                 write!(

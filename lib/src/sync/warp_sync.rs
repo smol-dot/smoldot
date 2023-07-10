@@ -60,7 +60,7 @@
 //! fragment represents a change in the list of Grandpa authorities, and a list of signatures of
 //! the previous authorities that certify that this change is correct.
 //! - Verifying the fragments. Each fragment that is successfully verified progresses towards
-//! towards the head of the chain. Even if one fragment is invalid, all the previously-verified
+//! the head of the chain. Even if one fragment is invalid, all the previously-verified
 //! fragments can still be kept, and the warp syncing can resume from there.
 //! - Downloading from a source the runtime code of the final block of the proof.
 //! - Performing some runtime calls in order to obtain the current consensus-related parameters
@@ -101,9 +101,8 @@ use crate::{
         host::{self, HostVmPrototype},
         vm::ExecHint,
     },
-    finality::grandpa::warp_sync,
     header::{self, Header},
-    trie::proof_decode,
+    trie::{self, proof_decode},
 };
 
 use alloc::{
@@ -113,7 +112,10 @@ use alloc::{
 };
 use core::{iter, mem, ops};
 
-pub use warp_sync::{Error as FragmentError, WarpSyncFragment};
+pub use trie::Nibble;
+pub use verifier::{Error as FragmentError, WarpSyncFragment};
+
+mod verifier;
 
 /// Problem encountered during a call to [`start_warp_sync()`].
 #[derive(Debug, derive_more::Display)]
@@ -142,6 +144,7 @@ pub enum Error {
 }
 
 /// The configuration for [`start_warp_sync()`].
+#[derive(Debug)]
 pub struct Config {
     /// The chain information of the starting point of the warp syncing.
     pub start_chain_information: ValidChainInformation,
@@ -155,6 +158,27 @@ pub struct Config {
 
     /// The initial capacity of the list of requests.
     pub requests_capacity: usize,
+
+    /// Known valid Merkle value and storage value combination for the `:code` key.
+    ///
+    /// If provided, the warp syncing algorithm will first fetch the Merkle value of `:code`, and
+    /// if it matches the Merkle value provided in the hint, use the storage value in the hint
+    /// instead of downloading it. If the hint doesn't match, an extra round-trip will be needed,
+    /// but if the hint matches it saves a big download.
+    pub code_trie_node_hint: Option<ConfigCodeTrieNodeHint>,
+}
+
+/// See [`Config::code_trie_node_hint`].
+#[derive(Debug)]
+pub struct ConfigCodeTrieNodeHint {
+    /// Potential Merkle value of the `:code` key.
+    pub merkle_value: Vec<u8>,
+
+    /// Storage value corresponding to [`ConfigCodeTrieNodeHint::merkle_value`].
+    pub storage_value: Vec<u8>,
+
+    /// Closest ancestor of the `:code` key except for `:code` itself.
+    pub closest_ancestor_excluding: Vec<Nibble>,
 }
 
 /// Initializes the warp sync state machine.
@@ -185,6 +209,7 @@ pub fn start_warp_sync<TSrc, TRq>(
 
     Ok(InProgressWarpSync {
         start_chain_information: config.start_chain_information,
+        code_trie_node_hint: config.code_trie_node_hint,
         block_number_bytes: config.block_number_bytes,
         sources: slab::Slab::with_capacity(config.sources_capacity),
         in_progress_requests: slab::Slab::with_capacity(config.requests_capacity),
@@ -209,6 +234,17 @@ pub enum WarpSyncInitError {
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct SourceId(usize);
 
+impl SourceId {
+    /// Returns the smallest possible [`SourceId`]. It is always inferior or equal to any other.
+    pub fn min_value() -> Self {
+        SourceId(usize::min_value())
+    }
+
+    pub fn checked_add(&self, n: u8) -> Option<Self> {
+        Some(SourceId(self.0.checked_add(usize::from(n))?))
+    }
+}
+
 /// The result of a successful warp sync.
 pub struct Success<TSrc, TRq> {
     /// The synced chain information.
@@ -224,8 +260,15 @@ pub struct Success<TSrc, TRq> {
     /// Storage value at the `:heappages` key of the finalized block.
     pub finalized_storage_heap_pages: Option<Vec<u8>>,
 
+    /// Merkle value of the `:code` trie node of the finalized block.
+    pub finalized_storage_code_merkle_value: Option<Vec<u8>>,
+
+    /// Closest ancestor of the `:code` trie node of the finalized block excluding `:code` itself.
+    pub finalized_storage_code_closest_ancestor_excluding: Option<Vec<Nibble>>,
+
     /// The list of sources that were added to the state machine.
-    pub sources: Vec<TSrc>,
+    /// The list is ordered by [`SourceId`].
+    pub sources_ordered: Vec<(SourceId, TSrc)>,
 
     /// The list of requests that were added to the state machine.
     pub in_progress_requests: Vec<(SourceId, RequestId, TRq, RequestDetail)>,
@@ -262,6 +305,8 @@ impl<TSrc, TRq> ops::IndexMut<SourceId> for InProgressWarpSync<TSrc, TRq> {
 pub struct InProgressWarpSync<TSrc, TRq> {
     /// See [`Phase`].
     phase: Phase,
+    /// See [`Config::code_trie_node_hint`].
+    code_trie_node_hint: Option<ConfigCodeTrieNodeHint>,
     /// Starting point of the warp syncing, as provided to [`start_warp_sync`].
     start_chain_information: ValidChainInformation,
     /// Number of bytes used to encode the block number in headers.
@@ -292,7 +337,7 @@ enum Phase {
         /// Contains the downloaded fragments.
         /// Always `Some`, but wrapped within an `Option` in order to permit extracting
         /// temporarily.
-        verifier: Option<warp_sync::Verifier>,
+        verifier: Option<verifier::Verifier>,
     },
     /// All warp sync fragments have been verified, and we are now downloading the runtime of the
     /// finalized block of the chain.
@@ -304,6 +349,9 @@ enum Phase {
         /// Source we downloaded the last fragments from. Assuming that the source isn't malicious,
         /// it is guaranteed to have access to the storage of the finalized block.
         warp_sync_source_id: SourceId,
+        /// `true` if it is known that [`InProgressWarpSync::code_trie_node_hint`] doesn't match
+        /// the storage of the header we warp synced to.
+        hint_doesnt_match: bool,
         /// Merkle proof containing the runtime information, or `None` if it was not downloaded yet.
         downloaded_runtime: Option<Vec<u8>>,
     },
@@ -340,6 +388,10 @@ struct DownloadedRuntime {
     storage_code: Option<Vec<u8>>,
     /// Storage item at the `:heappages` key. `None` if there is no entry at that key.
     storage_heap_pages: Option<Vec<u8>>,
+    /// Merkle value of the `:code` trie node. `None` if there is no entry at that key.
+    code_merkle_value: Option<Vec<u8>>,
+    /// Closest ancestor of the `:code` key except for `:code` itself.
+    closest_ancestor_excluding: Option<Vec<Nibble>>,
 }
 
 /// See [`InProgressWarpSync::status`].
@@ -575,18 +627,11 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             };
 
             // TODO: O(n)
-            if !self
-                .in_progress_requests
-                .iter()
-                .any(|(_, (_, _, rq))| match rq {
+            if !self.in_progress_requests.iter().any(|(_, (_, _, rq))| {
+                matches!(rq,
                     RequestDetail::WarpSyncRequest { block_hash }
-                        if *block_hash == start_block_hash =>
-                    {
-                        true
-                    }
-                    _ => false,
-                })
-            {
+                        if *block_hash == start_block_hash)
+            }) {
                 // Combine the request with every single available source.
                 either::Left(self.sources.iter().filter_map(move |(src_id, src)| {
                     // TODO: also filter by source finalized block? so that we don't request from sources below us
@@ -614,24 +659,34 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         let runtime_parameters_get = if let Phase::RuntimeDownload {
             header,
             warp_sync_source_id,
+            hint_doesnt_match,
+            downloaded_runtime: None,
             ..
         } = &self.phase
         {
+            let code_key_to_request = if let (false, Some(hint)) =
+                (*hint_doesnt_match, self.code_trie_node_hint.as_ref())
+            {
+                Cow::Owned(
+                    trie::nibbles_to_bytes_truncate(
+                        hint.closest_ancestor_excluding.iter().copied(),
+                    )
+                    .collect::<Vec<_>>(),
+                )
+            } else {
+                Cow::Borrowed(&b":code"[..])
+            };
+
             // TODO: O(n)
             if !self.in_progress_requests.iter().any(|(_, rq)| {
                 rq.0 == *warp_sync_source_id
-                    && match rq.2 {
+                    && matches!(rq.2,
                         RequestDetail::StorageGetMerkleProof {
                             block_hash: ref b,
                             ref keys,
                         } if *b == header.hash(self.block_number_bytes)
-                            && keys.iter().any(|k| k == b":code")
-                            && keys.iter().any(|k| k == b":heappages") =>
-                        {
-                            true
-                        }
-                        _ => false,
-                    }
+                            && keys.iter().any(|k| &*k == &*code_key_to_request)
+                            && keys.iter().any(|k| k == b":heappages"))
             }) {
                 Some((
                     *warp_sync_source_id,
@@ -639,7 +694,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     DesiredRequest::StorageGetMerkleProof {
                         block_hash: header.hash(self.block_number_bytes),
                         state_trie_root: header.state_root,
-                        keys: vec![b":code".to_vec(), b":heappages".to_vec()],
+                        keys: vec![code_key_to_request.to_vec(), b":heappages".to_vec()],
                     },
                 ))
             } else {
@@ -801,7 +856,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                 ),
                 Phase::RuntimeDownload { header, .. },
             ) if *block_hash == header.hash(self.block_number_bytes)
-                && keys.iter().any(|k| k == b":code")
+                // TODO: doesn't check for `:cod` ,but in practice this doesn't really matter anyway
                 && keys.iter().any(|k| k == b":heappages") =>
             {
                 user_data
@@ -931,13 +986,13 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                 self.sources[rq_source_id.0].already_tried = true;
 
                 let verifier = match &previous_verifier_values {
-                    Some((_, chain_information_finality)) => warp_sync::Verifier::new(
+                    Some((_, chain_information_finality)) => verifier::Verifier::new(
                         chain_information_finality.into(),
                         self.block_number_bytes,
                         fragments,
                         final_set_of_fragments,
                     ),
-                    None => warp_sync::Verifier::new(
+                    None => verifier::Verifier::new(
                         self.start_chain_information.as_ref().finality,
                         self.block_number_bytes,
                         fragments,
@@ -1113,10 +1168,10 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
         } = &mut self.inner.phase
         {
             match verifier.take().unwrap().next(randomness_seed) {
-                Ok(warp_sync::Next::NotFinished(next_verifier)) => {
+                Ok(verifier::Next::NotFinished(next_verifier)) => {
                     *verifier = Some(next_verifier);
                 }
-                Ok(warp_sync::Next::EmptyProof) => {
+                Ok(verifier::Next::EmptyProof) => {
                     self.inner.phase = Phase::RuntimeDownload {
                         header: self
                             .inner
@@ -1132,9 +1187,10 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                             .into(),
                         warp_sync_source_id: *downloaded_source,
                         downloaded_runtime: None,
+                        hint_doesnt_match: false,
                     };
                 }
-                Ok(warp_sync::Next::Success {
+                Ok(verifier::Next::Success {
                     scale_encoded_header,
                     chain_information_finality,
                 }) => {
@@ -1151,6 +1207,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                             chain_information_finality,
                             warp_sync_source_id: *downloaded_source,
                             downloaded_runtime: None,
+                            hint_doesnt_match: false,
                         };
                     } else {
                         self.inner.phase = Phase::DownloadFragments {
@@ -1197,6 +1254,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             downloaded_runtime,
             chain_information_finality,
             warp_sync_source_id,
+            hint_doesnt_match,
             ..
         } = &mut self.inner.phase
         {
@@ -1204,7 +1262,6 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             let decoded_downloaded_runtime =
                 match proof_decode::decode_and_verify_proof(proof_decode::Config {
                     proof: &downloaded_runtime[..],
-                    trie_root_hash: &header.state_root,
                 }) {
                     Ok(p) => p,
                     Err(err) => {
@@ -1221,35 +1278,105 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     }
                 };
 
-            let finalized_storage_code = match decoded_downloaded_runtime.storage_value(b":code") {
-                Some(Some((code, _))) => code,
-                Some(None) => {
-                    self.inner.phase = Phase::DownloadFragments {
-                        previous_verifier_values: Some((
-                            header.clone(),
-                            chain_information_finality.clone(),
-                        )),
-                    };
-                    return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
+            let (
+                finalized_storage_code_merkle_value,
+                finalized_storage_code_closest_ancestor_excluding,
+            ) = {
+                let code_nibbles =
+                    trie::bytes_to_nibbles(b":code".iter().copied()).collect::<Vec<_>>();
+                match decoded_downloaded_runtime.closest_ancestor_in_proof(
+                    &header.state_root,
+                    &code_nibbles[..code_nibbles.len() - 1],
+                ) {
+                    Ok(Some(closest_ancestor_key)) => {
+                        let next_nibble = code_nibbles[closest_ancestor_key.len()];
+                        let merkle_value = decoded_downloaded_runtime
+                            .trie_node_info(&header.state_root, closest_ancestor_key)
+                            .unwrap()
+                            .children
+                            .child(next_nibble)
+                            .merkle_value();
+
+                        match merkle_value {
+                            Some(mv) => (mv.to_owned(), closest_ancestor_key.to_vec()),
+                            None => {
+                                self.inner.phase = Phase::DownloadFragments {
+                                    previous_verifier_values: Some((
+                                        header.clone(),
+                                        chain_information_finality.clone(),
+                                    )),
+                                };
+                                return (
+                                    WarpSync::InProgress(self.inner),
+                                    Some(Error::MissingCode),
+                                );
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: Some((
+                                header.clone(),
+                                chain_information_finality.clone(),
+                            )),
+                        };
+                        return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
+                    }
+                    Err(proof_decode::IncompleteProofError { .. }) => {
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: Some((
+                                header.clone(),
+                                chain_information_finality.clone(),
+                            )),
+                        };
+                        return (
+                            WarpSync::InProgress(self.inner),
+                            Some(Error::MerkleProofEntriesMissing),
+                        );
+                    }
                 }
-                None => {
-                    self.inner.phase = Phase::DownloadFragments {
-                        previous_verifier_values: Some((
-                            header.clone(),
-                            chain_information_finality.clone(),
-                        )),
-                    };
-                    return (
-                        WarpSync::InProgress(self.inner),
-                        Some(Error::MerkleProofEntriesMissing),
-                    );
+            };
+
+            let finalized_storage_code = if let (false, Some(hint)) =
+                (*hint_doesnt_match, self.inner.code_trie_node_hint.as_ref())
+            {
+                if hint.merkle_value == finalized_storage_code_merkle_value {
+                    &hint.storage_value
+                } else {
+                    *hint_doesnt_match = true;
+                    return (WarpSync::InProgress(self.inner), None);
+                }
+            } else {
+                match decoded_downloaded_runtime.storage_value(&header.state_root, b":code") {
+                    Ok(Some((code, _))) => code,
+                    Ok(None) => {
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: Some((
+                                header.clone(),
+                                chain_information_finality.clone(),
+                            )),
+                        };
+                        return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
+                    }
+                    Err(proof_decode::IncompleteProofError { .. }) => {
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: Some((
+                                header.clone(),
+                                chain_information_finality.clone(),
+                            )),
+                        };
+                        return (
+                            WarpSync::InProgress(self.inner),
+                            Some(Error::MerkleProofEntriesMissing),
+                        );
+                    }
                 }
             };
 
             let finalized_storage_heappages =
-                match decoded_downloaded_runtime.storage_value(b":heappages") {
-                    Some(val) => val.map(|(v, _)| v),
-                    None => {
+                match decoded_downloaded_runtime.storage_value(&header.state_root, b":heappages") {
+                    Ok(val) => val.map(|(v, _)| v),
+                    Err(proof_decode::IncompleteProofError { .. }) => {
                         self.inner.phase = Phase::DownloadFragments {
                             previous_verifier_values: Some((
                                 header.clone(),
@@ -1309,10 +1436,12 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                         }
                     } else {
                         chain_information::build::ConfigFinalizedBlockHeader::NonGenesis {
-                            header: header.clone(),
+                            scale_encoded_header: header
+                                .scale_encoding_vec(self.inner.block_number_bytes),
                             known_finality: Some(chain_information_finality.clone()),
                         }
                     },
+                    block_number_bytes: self.inner.block_number_bytes,
                     runtime,
                 },
             );
@@ -1329,11 +1458,15 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                             finalized_storage_code: Some(finalized_storage_code.to_owned()),
                             finalized_storage_heap_pages: finalized_storage_heappages
                                 .map(|v| v.to_vec()),
-                            sources: self
-                                .inner
-                                .sources
-                                .drain()
-                                .map(|source| source.user_data)
+                            finalized_storage_code_merkle_value: Some(
+                                finalized_storage_code_merkle_value,
+                            ),
+                            finalized_storage_code_closest_ancestor_excluding: Some(
+                                finalized_storage_code_closest_ancestor_excluding,
+                            ),
+                            sources_ordered: mem::take(&mut self.inner.sources)
+                                .into_iter()
+                                .map(|(id, source)| (SourceId(id), source.user_data))
                                 .collect(),
                             in_progress_requests: mem::take(&mut self.inner.in_progress_requests)
                                 .into_iter()
@@ -1376,6 +1509,10 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 downloaded_runtime: Some(DownloadedRuntime {
                     storage_code: Some(finalized_storage_code.to_vec()),
                     storage_heap_pages: finalized_storage_heappages.map(|v| v.to_vec()),
+                    code_merkle_value: Some(finalized_storage_code_merkle_value),
+                    closest_ancestor_excluding: Some(
+                        finalized_storage_code_closest_ancestor_excluding,
+                    ),
                 }),
                 chain_info_builder: Some(chain_info_builder),
                 calls,
@@ -1421,7 +1558,6 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     let proof = proof.take().unwrap();
                     let decoded_proof =
                         match proof_decode::decode_and_verify_proof(proof_decode::Config {
-                            trie_root_hash: &header.state_root,
                             proof: proof.into_iter(),
                         }) {
                             Ok(d) => d,
@@ -1438,7 +1574,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                 );
                             }
                         };
-                    decoded_proofs.insert(call.clone(), decoded_proof);
+                    decoded_proofs.insert(*call, decoded_proof);
                 }
 
                 decoded_proofs
@@ -1449,22 +1585,24 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
             loop {
                 match chain_info_builder {
                     chain_information::build::InProgress::StorageGet(get) => {
+                        // TODO: child tries not supported
                         let proof = calls.get(&get.call_in_progress()).unwrap();
-                        let value = match proof.storage_value(get.key().as_ref()) {
-                            Some(v) => v.map(|(v, _)| v),
-                            None => {
-                                self.inner.phase = Phase::DownloadFragments {
-                                    previous_verifier_values: Some((
-                                        header.clone(),
-                                        chain_information_finality.clone(),
-                                    )),
-                                };
-                                return (
-                                    WarpSync::InProgress(self.inner),
-                                    Some(Error::MerkleProofEntriesMissing),
-                                );
-                            }
-                        };
+                        let value =
+                            match proof.storage_value(&header.state_root, get.key().as_ref()) {
+                                Ok(v) => v.map(|(v, _)| v),
+                                Err(proof_decode::IncompleteProofError { .. }) => {
+                                    self.inner.phase = Phase::DownloadFragments {
+                                        previous_verifier_values: Some((
+                                            header.clone(),
+                                            chain_information_finality.clone(),
+                                        )),
+                                    };
+                                    return (
+                                        WarpSync::InProgress(self.inner),
+                                        Some(Error::MerkleProofEntriesMissing),
+                                    );
+                                }
+                            };
 
                         match get.inject_value(value.map(iter::once)) {
                             chain_information::build::ChainInformationBuild::Finished {
@@ -1480,11 +1618,13 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                         finalized_storage_code: downloaded_runtime.storage_code,
                                         finalized_storage_heap_pages: downloaded_runtime
                                             .storage_heap_pages,
-                                        sources: self
-                                            .inner
-                                            .sources
-                                            .drain()
-                                            .map(|source| source.user_data)
+                                        finalized_storage_code_merkle_value: downloaded_runtime
+                                            .code_merkle_value,
+                                        finalized_storage_code_closest_ancestor_excluding:
+                                            downloaded_runtime.closest_ancestor_excluding,
+                                        sources_ordered: mem::take(&mut self.inner.sources)
+                                            .into_iter()
+                                            .map(|(id, source)| (SourceId(id), source.user_data))
                                             .collect(),
                                         in_progress_requests: mem::take(
                                             &mut self.inner.in_progress_requests,

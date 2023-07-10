@@ -40,7 +40,6 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
             // This timeout doesn't matter as we pass dummy time values.
             handshake_timeout: Duration::from_secs(5),
             ping_protocol: "ping".into(),
-            noise_key: smoldot::libp2p::connection::NoiseKey::new(&[0; 32]),
         });
 
     // We use the first element of ̀`data` to determine whether we have opened the connection
@@ -56,7 +55,9 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
 
     let (_id, mut task) = collection.insert_single_stream(
         Duration::new(0, 0),
-        smoldot::libp2p::collection::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
+        smoldot::libp2p::collection::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
+            noise_key: &smoldot::libp2p::connection::NoiseKey::new(&[0; 32]),
+        },
         is_initiator,
         (),
     );

@@ -54,7 +54,7 @@
 //! large, the subscription is force-killed by the [`RuntimeService`].
 //!
 
-use crate::{platform::Platform, sync_service};
+use crate::{platform::PlatformRef, sync_service};
 
 use alloc::{
     borrow::ToOwned as _,
@@ -63,39 +63,36 @@ use alloc::{
     format,
     string::{String, ToString as _},
     sync::{Arc, Weak},
-    vec,
     vec::Vec,
 };
+use async_lock::{Mutex, MutexGuard};
 use core::{
     iter, mem,
     num::{NonZeroU32, NonZeroUsize},
     pin::Pin,
     time::Duration,
 };
-use futures::{
-    channel::mpsc,
-    lock::{Mutex, MutexGuard},
-    prelude::*,
-};
+use futures_channel::mpsc;
+use futures_util::{future, stream, FutureExt as _, Stream, StreamExt as _};
 use itertools::Itertools as _;
 use smoldot::{
     chain::async_tree,
     executor, header,
     informant::{BytesDisplay, HashDisplay},
     network::protocol,
-    trie::{self, proof_decode, TrieEntryVersion},
+    trie::{self, proof_decode, Nibble, TrieEntryVersion},
 };
 
 /// Configuration for a runtime service.
-pub struct Config<TPlat: Platform> {
+pub struct Config<TPlat: PlatformRef> {
     /// Name of the chain, for logging purposes.
     ///
     /// > **Note**: This name will be directly printed out. Any special character should already
     /// >           have been filtered out from this name.
     pub log_name: String,
 
-    /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
+    /// Access to the platform's capabilities.
+    pub platform: TPlat,
 
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService<TPlat>>,
@@ -109,7 +106,7 @@ pub struct Config<TPlat: Platform> {
 pub struct PinnedRuntimeId(Arc<Runtime>);
 
 /// See [the module-level documentation](..).
-pub struct RuntimeService<TPlat: Platform> {
+pub struct RuntimeService<TPlat: PlatformRef> {
     /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService<TPlat>>,
 
@@ -120,12 +117,12 @@ pub struct RuntimeService<TPlat: Platform> {
     background_task_abort: future::AbortHandle,
 }
 
-impl<TPlat: Platform> RuntimeService<TPlat> {
+impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     /// Initializes a new runtime service.
     ///
     /// The future returned by this function is expected to finish relatively quickly and is
     /// necessary only for locking purposes.
-    pub async fn new(mut config: Config<TPlat>) -> Self {
+    pub async fn new(config: Config<TPlat>) -> Self {
         // Target to use for all the logs of this service.
         let log_target = format!("runtime-{}", config.log_name);
 
@@ -165,11 +162,12 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
 
         // Spawns a task that runs in the background and updates the content of the mutex.
         let background_task_abort;
-        (config.tasks_executor)(log_target.clone(), {
+        config.platform.spawn_task(log_target.clone().into(), {
             let sync_service = config.sync_service.clone();
             let guarded = guarded.clone();
+            let platform = config.platform.clone();
             let (abortable, abort) = future::abortable(async move {
-                run_background(log_target, sync_service, guarded).await;
+                run_background(log_target, platform, sync_service, guarded).await;
             });
             background_task_abort = abort;
             abortable.map(|_| ()).boxed()
@@ -268,7 +266,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         let _prev_value = pinned_blocks.insert(
             (subscription_id, finalized_block.hash),
             PinnedBlock {
-                runtime: tree.finalized_async_user_data().clone(),
+                runtime: tree.output_finalized_async_user_data().clone(),
                 state_trie_root_hash: *decoded_finalized_block.state_root,
                 block_number: decoded_finalized_block.number,
                 block_ignores_limit: false,
@@ -278,18 +276,17 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
 
         let mut non_finalized_blocks_ancestry_order =
             Vec::with_capacity(tree.num_input_non_finalized_blocks());
-        for block in tree.input_iter_ancestry_order() {
+        for block in tree.input_output_iter_ancestry_order() {
             let runtime = match block.async_op_user_data {
                 Some(rt) => rt.clone(),
                 None => continue, // Runtime of that block not known yet, so it shouldn't be reported.
             };
 
             let block_hash = block.user_data.hash;
-            let parent_runtime = tree
-                .parent(block.id)
-                .map_or(tree.finalized_async_user_data().clone(), |parent_idx| {
-                    tree.block_async_user_data(parent_idx).unwrap().clone()
-                });
+            let parent_runtime = tree.parent(block.id).map_or(
+                tree.output_finalized_async_user_data().clone(),
+                |parent_idx| tree.block_async_user_data(parent_idx).unwrap().clone(),
+            );
 
             let parent_hash = *header::decode(
                 &block.user_data.scale_encoded_header,
@@ -300,7 +297,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             debug_assert!(
                 parent_hash == finalized_block.hash
                     || tree
-                        .input_iter_ancestry_order()
+                        .input_output_iter_ancestry_order()
                         .any(|b| parent_hash == b.user_data.hash && b.async_op_user_data.is_some())
             );
 
@@ -355,7 +352,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         SubscribeAll {
             finalized_block_scale_encoded_header: finalized_block.scale_encoded_header.clone(),
             finalized_block_runtime: tree
-                .finalized_async_user_data()
+                .output_finalized_async_user_data()
                 .runtime
                 .as_ref()
                 .map(|rt| rt.runtime_spec.clone())
@@ -423,6 +420,28 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         }
     }
 
+    /// Returns the storage value and Merkle value of the `:code` key of the finalized block.
+    ///
+    /// Returns `None` if the runtime of the current finalized block is not known yet.
+    // TODO: this function has a bad API but is hopefully temporary
+    pub async fn finalized_runtime_storage_merkle_values(
+        &self,
+    ) -> Option<(Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<Nibble>>)> {
+        let mut guarded = self.guarded.lock().await;
+        let guarded = &mut *guarded;
+
+        if let GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } = &guarded.tree {
+            let runtime = &tree.output_finalized_async_user_data();
+            Some((
+                runtime.runtime_code.clone(),
+                runtime.code_merkle_value.clone(),
+                runtime.closest_ancestor_excluding.clone(),
+            ))
+        } else {
+            None
+        }
+    }
+
     /// Lock the runtime service and prepare a call to a runtime entry point.
     ///
     /// The hash of the block passed as parameter corresponds to the block whose runtime to use
@@ -436,11 +455,11 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     ///
     /// Panics if the given block isn't currently pinned by the given subscription.
     ///
-    pub async fn pinned_block_runtime_lock(
+    pub async fn pinned_block_runtime_access(
         &self,
         subscription_id: SubscriptionId,
         block_hash: &[u8; 32],
-    ) -> Result<RuntimeLock<TPlat>, PinnedBlockRuntimeLockError> {
+    ) -> Result<RuntimeAccess<TPlat>, PinnedBlockRuntimeAccessError> {
         // Note: copying the hash ahead of time fixes some weird intermittent borrow checker
         // issue.
         let block_hash = *block_hash;
@@ -464,16 +483,16 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                         {
                             panic!("block already unpinned for subscription {sub_name}");
                         } else {
-                            return Err(PinnedBlockRuntimeLockError::ObsoleteSubscription);
+                            return Err(PinnedBlockRuntimeAccessError::ObsoleteSubscription);
                         }
                     }
                 }
             } else {
-                return Err(PinnedBlockRuntimeLockError::ObsoleteSubscription);
+                return Err(PinnedBlockRuntimeAccessError::ObsoleteSubscription);
             }
         };
 
-        Ok(RuntimeLock {
+        Ok(RuntimeAccess {
             sync_service: self.sync_service.clone(),
             hash: block_hash,
             runtime: pinned_block.runtime,
@@ -492,14 +511,14 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     ///
     /// Panics if the provided [`PinnedRuntimeId`] is stale or invalid.
     ///
-    pub async fn pinned_runtime_lock(
+    pub async fn pinned_runtime_access(
         &self,
         pinned_runtime_id: PinnedRuntimeId,
         block_hash: [u8; 32],
         block_number: u64,
         block_state_trie_root_hash: [u8; 32],
-    ) -> RuntimeLock<TPlat> {
-        RuntimeLock {
+    ) -> RuntimeAccess<TPlat> {
+        RuntimeAccess {
             sync_service: self.sync_service.clone(),
             hash: block_hash,
             runtime: pinned_runtime_id.0,
@@ -516,6 +535,8 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         &self,
         storage_code: Option<Vec<u8>>,
         storage_heap_pages: Option<Vec<u8>>,
+        code_merkle_value: Option<Vec<u8>>,
+        closest_ancestor_excluding: Option<Vec<Nibble>>,
     ) -> PinnedRuntimeId {
         let mut guarded = self.guarded.lock().await;
 
@@ -535,6 +556,8 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             let runtime = Arc::new(Runtime {
                 heap_pages: storage_heap_pages,
                 runtime_code: storage_code,
+                code_merkle_value,
+                closest_ancestor_excluding,
                 runtime,
             });
             guarded.runtimes.insert(Arc::downgrade(&runtime));
@@ -565,14 +588,14 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     }
 }
 
-impl<TPlat: Platform> Drop for RuntimeService<TPlat> {
+impl<TPlat: PlatformRef> Drop for RuntimeService<TPlat> {
     fn drop(&mut self) {
         self.background_task_abort.abort();
     }
 }
 
 /// Return value of [`RuntimeService::subscribe_all`].
-pub struct SubscribeAll<TPlat: Platform> {
+pub struct SubscribeAll<TPlat: PlatformRef> {
     /// SCALE-encoded header of the finalized block at the time of the subscription.
     pub finalized_block_scale_encoded_header: Vec<u8>,
 
@@ -595,13 +618,13 @@ pub struct SubscribeAll<TPlat: Platform> {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SubscriptionId(u64);
 
-pub struct Subscription<TPlat: Platform> {
+pub struct Subscription<TPlat: PlatformRef> {
     subscription_id: u64,
     channel: mpsc::Receiver<Notification>,
     guarded: Arc<Mutex<Guarded<TPlat>>>,
 }
 
-impl<TPlat: Platform> Subscription<TPlat> {
+impl<TPlat: PlatformRef> Subscription<TPlat> {
     pub async fn next(&mut self) -> Option<Notification> {
         self.channel.next().await
     }
@@ -714,7 +737,7 @@ pub struct BlockNotification {
     pub new_runtime: Option<Result<executor::CoreVersion, RuntimeError>>,
 }
 
-async fn is_near_head_of_chain_heuristic<TPlat: Platform>(
+async fn is_near_head_of_chain_heuristic<TPlat: PlatformRef>(
     sync_service: &sync_service::SyncService<TPlat>,
     guarded: &Mutex<Guarded<TPlat>>,
 ) -> bool {
@@ -736,17 +759,16 @@ async fn is_near_head_of_chain_heuristic<TPlat: Platform>(
     guarded.lock().await.best_near_head_of_chain
 }
 
-/// See [`RuntimeService::pinned_block_runtime_lock`].
+/// See [`RuntimeService::pinned_block_runtime_access`].
 #[derive(Debug, derive_more::Display, Clone)]
-pub enum PinnedBlockRuntimeLockError {
+pub enum PinnedBlockRuntimeAccessError {
     /// Subscription is dead.
     ObsoleteSubscription,
 }
 
-/// See [`RuntimeService::pinned_block_runtime_lock`].
-// TODO: rename, as it doesn't lock anything anymore
+/// See [`RuntimeService::pinned_block_runtime_access`].
 #[must_use]
-pub struct RuntimeLock<TPlat: Platform> {
+pub struct RuntimeAccess<TPlat: PlatformRef> {
     sync_service: Arc<sync_service::SyncService<TPlat>>,
 
     block_number: u64,
@@ -755,7 +777,7 @@ pub struct RuntimeLock<TPlat: Platform> {
     runtime: Arc<Runtime>,
 }
 
-impl<TPlat: Platform> RuntimeLock<TPlat> {
+impl<TPlat: PlatformRef> RuntimeAccess<TPlat> {
     /// Returns the hash of the block the call is being made against.
     pub fn block_hash(&self) -> &[u8; 32] {
         &self.hash
@@ -776,7 +798,7 @@ impl<TPlat: Platform> RuntimeLock<TPlat> {
         total_attempts: u32,
         timeout_per_request: Duration,
         max_parallel: NonZeroU32,
-    ) -> Result<(RuntimeCallLock<'b>, executor::host::HostVmPrototype), RuntimeCallError> {
+    ) -> Result<(RuntimeCall<'b>, executor::host::HostVmPrototype), RuntimeCallError> {
         // TODO: DRY :-/ this whole thing is messy
 
         // Perform the call proof request.
@@ -803,7 +825,6 @@ impl<TPlat: Platform> RuntimeLock<TPlat> {
         let call_proof = call_proof.and_then(|call_proof| {
             proof_decode::decode_and_verify_proof(proof_decode::Config {
                 proof: call_proof.decode().to_owned(), // TODO: to_owned() inefficiency, need some help from the networking to obtain the owned data
-                trie_root_hash: &self.block_state_root_hash,
             })
             .map_err(RuntimeCallError::StorageRetrieval)
         });
@@ -819,7 +840,7 @@ impl<TPlat: Platform> RuntimeLock<TPlat> {
             }
         };
 
-        let lock = RuntimeCallLock {
+        let lock = RuntimeCall {
             guarded,
             block_state_root_hash: self.block_state_root_hash,
             call_proof,
@@ -829,15 +850,15 @@ impl<TPlat: Platform> RuntimeLock<TPlat> {
     }
 }
 
-/// See [`RuntimeService::pinned_block_runtime_lock`].
+/// See [`RuntimeService::pinned_block_runtime_access`].
 #[must_use]
-pub struct RuntimeCallLock<'a> {
+pub struct RuntimeCall<'a> {
     guarded: MutexGuard<'a, Option<executor::host::HostVmPrototype>>,
     block_state_root_hash: [u8; 32],
     call_proof: Result<trie::proof_decode::DecodedTrieProof<Vec<u8>>, RuntimeCallError>,
 }
 
-impl<'a> RuntimeCallLock<'a> {
+impl<'a> RuntimeCall<'a> {
     /// Returns the storage root of the block the call is being made against.
     pub fn block_storage_root(&self) -> &[u8; 32] {
         &self.block_state_root_hash
@@ -845,11 +866,15 @@ impl<'a> RuntimeCallLock<'a> {
 
     /// Finds the given key in the call proof and returns the associated storage value.
     ///
+    /// If `child_trie` is `Some`, look for the key in the given child trie. If it is `None`, look
+    /// for the key in the main trie.
+    ///
     /// Returns an error if the key couldn't be found in the proof, meaning that the proof is
     /// invalid.
     // TODO: if proof is invalid, we should give the option to fetch another call proof
     pub fn storage_entry(
         &self,
+        child_trie: Option<&[u8]>,
         requested_key: &[u8],
     ) -> Result<Option<(&[u8], TrieEntryVersion)>, RuntimeCallError> {
         let call_proof = match &self.call_proof {
@@ -857,62 +882,100 @@ impl<'a> RuntimeCallLock<'a> {
             Err(err) => return Err(err.clone()),
         };
 
-        match call_proof.storage_value(requested_key) {
-            Some(v) => Ok(v),
-            None => Err(RuntimeCallError::MissingProofEntry),
+        let trie_root = match child_trie {
+            Some(child_trie) => {
+                match Self::child_trie_root(call_proof, &self.block_state_root_hash, child_trie)? {
+                    Some(h) => h,
+                    None => return Ok(None),
+                }
+            }
+            None => self.block_state_root_hash,
+        };
+
+        match call_proof.storage_value(&trie_root, requested_key) {
+            Ok(v) => Ok(v),
+            Err(err) => Err(RuntimeCallError::MissingProofEntry(err)),
         }
     }
 
-    /// Finds in the call proof the list of keys that match a certain prefix.
+    /// Find in the proof the trie node that follows `key_before` in lexicographic order.
     ///
-    /// Returns an error if not all the keys could be found in the proof, meaning that the proof
-    /// is invalid.
+    /// If `child_trie` is `Some`, look for the key in the given child trie. If it is `None`, look
+    /// for the key in the main trie.
     ///
-    /// The keys returned are ordered lexicographically.
-    // TODO: if proof is invalid, we should give the option to fetch another call proof
-    pub fn storage_prefix_keys_ordered(
+    /// If `or_equal` is `true`, then `key_before` is returned if it is equal to a node in the
+    /// trie. If `false`, then only keys that are strictly superior are returned.
+    ///
+    /// The returned value must always start with `prefix`. Note that the value of `prefix` is
+    /// important as it can be the difference between `None` and `Some(None)`.
+    ///
+    /// If `branch_nodes` is `false`, then trie nodes that don't have a storage value are skipped.
+    ///
+    /// Returns an error if the proof doesn't contain enough information, meaning that the proof is
+    /// invalid.
+    pub fn next_key(
         &'_ self,
-        prefix: &[u8],
-    ) -> Result<impl Iterator<Item = impl AsRef<[u8]> + '_>, RuntimeCallError> {
-        // TODO: this could be a function in the proof_decode module
-        let mut to_find = vec![trie::bytes_to_nibbles(prefix.iter().copied()).collect::<Vec<_>>()];
-        let mut output = Vec::new();
-
+        child_trie: Option<&[u8]>,
+        key_before: &[trie::Nibble],
+        or_equal: bool,
+        prefix: &[trie::Nibble],
+        branch_nodes: bool,
+    ) -> Result<Option<&'_ [trie::Nibble]>, RuntimeCallError> {
         let call_proof = match &self.call_proof {
             Ok(p) => p,
             Err(err) => return Err(err.clone()),
         };
 
-        for key in mem::take(&mut to_find) {
-            let node_info = call_proof
-                .trie_node_info(&key)
-                .ok_or(RuntimeCallError::MissingProofEntry)?;
-
-            if matches!(
-                node_info.storage_value,
-                proof_decode::StorageValue::Known { .. }
-                    | proof_decode::StorageValue::HashKnownValueMissing(_)
-            ) {
-                assert_eq!(key.len() % 2, 0);
-                output.push(
-                    trie::nibbles_to_bytes_suffix_extend(key.iter().copied()).collect::<Vec<_>>(),
-                );
-            }
-
-            for nibble in trie::all_nibbles() {
-                if !node_info.children.has_child(nibble) {
-                    continue;
+        let trie_root = match child_trie {
+            Some(child_trie) => {
+                match Self::child_trie_root(call_proof, &self.block_state_root_hash, child_trie)? {
+                    Some(h) => h,
+                    None => return Ok(None),
                 }
-
-                let mut child = key.clone();
-                child.push(nibble);
-                to_find.push(child);
             }
-        }
+            None => self.block_state_root_hash,
+        };
 
-        // TODO: maybe we could iterate over the proof in an ordered way rather than sorting at the end
-        output.sort();
-        Ok(output.into_iter())
+        match call_proof.next_key(&trie_root, key_before, or_equal, prefix, branch_nodes) {
+            Ok(v) => Ok(v),
+            Err(err) => Err(RuntimeCallError::MissingProofEntry(err)),
+        }
+    }
+
+    /// Find in the proof the closest trie node that descends from `key` and returns its Merkle
+    /// value.
+    ///
+    /// If `child_trie` is `Some`, look for the key in the given child trie. If it is `None`, look
+    /// for the key in the main trie.
+    ///
+    /// Returns an error if the proof doesn't contain enough information, meaning that the proof is
+    /// invalid.
+    ///
+    /// Returns `Ok(None)` if the child trie is known to not exist or if it is known that there is
+    /// no descendant.
+    pub fn closest_descendant_merkle_value(
+        &'_ self,
+        child_trie: Option<&[u8]>,
+        key: &[trie::Nibble],
+    ) -> Result<Option<&'_ [u8]>, RuntimeCallError> {
+        let call_proof = match &self.call_proof {
+            Ok(p) => p,
+            Err(err) => return Err(err.clone()),
+        };
+
+        let trie_root = match child_trie {
+            Some(child_trie) => {
+                match Self::child_trie_root(call_proof, &self.block_state_root_hash, child_trie)? {
+                    Some(h) => h,
+                    None => return Ok(None),
+                }
+            }
+            None => self.block_state_root_hash,
+        };
+
+        call_proof
+            .closest_descendant_merkle_value(&trie_root, key)
+            .map_err(RuntimeCallError::MissingProofEntry)
     }
 
     /// End the runtime call.
@@ -922,12 +985,33 @@ impl<'a> RuntimeCallLock<'a> {
         debug_assert!(self.guarded.is_none());
         *self.guarded = Some(vm);
     }
+
+    fn child_trie_root(
+        proof: &proof_decode::DecodedTrieProof<Vec<u8>>,
+        main_trie_root: &[u8; 32],
+        child_trie: &[u8],
+    ) -> Result<Option<[u8; 32]>, RuntimeCallError> {
+        // TODO: allocation here, but probably not problematic
+        const PREFIX: &[u8] = b":child_storage:default:";
+        let mut key = Vec::with_capacity(PREFIX.len() + child_trie.as_ref().len());
+        key.extend_from_slice(PREFIX);
+        key.extend_from_slice(child_trie.as_ref());
+
+        match proof.storage_value(main_trie_root, &key) {
+            Err(err) => Err(RuntimeCallError::MissingProofEntry(err)),
+            Ok(None) => Ok(None),
+            Ok(Some((value, _))) => match <[u8; 32]>::try_from(value) {
+                Ok(hash) => Ok(Some(hash)),
+                Err(_) => Err(RuntimeCallError::InvalidChildTrieRoot),
+            },
+        }
+    }
 }
 
-impl<'a> Drop for RuntimeCallLock<'a> {
+impl<'a> Drop for RuntimeCall<'a> {
     fn drop(&mut self) {
         if self.guarded.is_none() {
-            // The [`RuntimeCallLock`] has been destroyed without being properly unlocked.
+            // The [`RuntimeCall`] has been destroyed without being properly unlocked.
             panic!()
         }
     }
@@ -945,7 +1029,10 @@ pub enum RuntimeCallError {
     #[display(fmt = "Error in call proof: {_0}")]
     StorageRetrieval(proof_decode::Error),
     /// One or more entries are missing from the call proof.
-    MissingProofEntry,
+    #[display(fmt = "One or more entries are missing from the call proof")]
+    MissingProofEntry(proof_decode::IncompleteProofError),
+    /// Call proof contains a reference to a child trie whose hash isn't 32 bytes.
+    InvalidChildTrieRoot,
     /// Error while retrieving the call proof from the network.
     #[display(fmt = "Error when retrieving the call proof: {_0}")]
     CallProof(sync_service::CallProofQueryError),
@@ -961,7 +1048,8 @@ impl RuntimeCallError {
         match self {
             RuntimeCallError::InvalidRuntime(_) => false,
             RuntimeCallError::StorageRetrieval(_) => false,
-            RuntimeCallError::MissingProofEntry => false,
+            RuntimeCallError::MissingProofEntry(_) => false,
+            RuntimeCallError::InvalidChildTrieRoot => false,
             RuntimeCallError::CallProof(err) => err.is_network_problem(),
             RuntimeCallError::StorageQuery(err) => err.is_network_problem(),
         }
@@ -981,7 +1069,7 @@ pub enum RuntimeError {
     Build(executor::host::NewErr),
 }
 
-struct Guarded<TPlat: Platform> {
+struct Guarded<TPlat: PlatformRef> {
     /// Identifier of the next subscription for
     /// [`GuardedInner::FinalizedBlockRuntimeKnown::all_blocks_subscriptions`].
     ///
@@ -1008,7 +1096,7 @@ struct Guarded<TPlat: Platform> {
     tree: GuardedInner<TPlat>,
 }
 
-enum GuardedInner<TPlat: Platform> {
+enum GuardedInner<TPlat: PlatformRef> {
     FinalizedBlockRuntimeKnown {
         /// Tree of blocks. Holds the state of the download of everything. Always `Some` when the
         /// `Mutex` is being locked. Temporarily switched to `None` during some operations.
@@ -1091,8 +1179,9 @@ struct Block {
     scale_encoded_header: Vec<u8>,
 }
 
-async fn run_background<TPlat: Platform>(
+async fn run_background<TPlat: PlatformRef>(
     log_target: String,
+    platform: TPlat,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     guarded: Arc<Mutex<Guarded<TPlat>>>,
 ) {
@@ -1148,6 +1237,8 @@ async fn run_background<TPlat: Platform>(
                 let runtime = Arc::new(Runtime {
                     runtime_code: finalized_block_runtime.storage_code,
                     heap_pages: finalized_block_runtime.storage_heap_pages,
+                    code_merkle_value: finalized_block_runtime.code_merkle_value,
+                    closest_ancestor_excluding: finalized_block_runtime.closest_ancestor_excluding,
                     runtime: Ok(SuccessfulRuntime {
                         runtime_spec: finalized_block_runtime
                             .virtual_machine
@@ -1210,7 +1301,7 @@ async fn run_background<TPlat: Platform>(
                                 None
                             } else {
                                 Some(
-                                    tree.input_iter_unordered()
+                                    tree.input_output_iter_unordered()
                                         .find(|b| b.user_data.hash == block.parent_hash)
                                         .unwrap()
                                         .id,
@@ -1266,7 +1357,7 @@ async fn run_background<TPlat: Platform>(
 
                         for block in subscription.non_finalized_blocks_ancestry_order {
                             let parent_index = tree
-                                .input_iter_unordered()
+                                .input_output_iter_unordered()
                                 .find(|b| b.user_data.hash == block.parent_hash)
                                 .unwrap()
                                 .id;
@@ -1297,6 +1388,7 @@ async fn run_background<TPlat: Platform>(
         // State machine containing all the state that will be manipulated below.
         let mut background = Background {
             log_target: log_target.clone(),
+            platform: platform.clone(),
             sync_service: sync_service.clone(),
             guarded: guarded.clone(),
             blocks_stream: subscription.new_blocks.boxed(),
@@ -1308,7 +1400,7 @@ async fn run_background<TPlat: Platform>(
 
         // Inner loop. Process incoming events.
         loop {
-            futures::select! {
+            futures_util::select! {
                 _ = &mut background.wake_up_new_necessary_download => {
                     background.start_necessary_downloads().await;
                 },
@@ -1342,7 +1434,7 @@ async fn run_background<TPlat: Platform>(
                                     let parent_index = if new_block.parent_hash == finalized_block.hash {
                                         None
                                     } else {
-                                        Some(tree.input_iter_unordered().find(|block| block.user_data.hash == new_block.parent_hash).unwrap().id)
+                                        Some(tree.input_output_iter_unordered().find(|block| block.user_data.hash == new_block.parent_hash).unwrap().id)
                                     };
 
                                     tree.input_insert_block(Block {
@@ -1351,7 +1443,7 @@ async fn run_background<TPlat: Platform>(
                                     }, parent_index, same_runtime_as_parent, new_block.is_new_best);
                                 }
                                 GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                                    let parent_index = tree.input_iter_unordered().find(|block| block.user_data.hash == new_block.parent_hash).unwrap().id;
+                                    let parent_index = tree.input_output_iter_unordered().find(|block| block.user_data.hash == new_block.parent_hash).unwrap().id;
                                     tree.input_insert_block(Block {
                                         hash: header::hash_from_scale_encoded_header(&new_block.scale_encoded_header),
                                         scale_encoded_header: new_block.scale_encoded_header,
@@ -1385,14 +1477,19 @@ async fn run_background<TPlat: Platform>(
 
                             match &mut guarded.tree {
                                 GuardedInner::FinalizedBlockRuntimeKnown {
+                                    finalized_block,
                                     tree, ..
                                 } => {
-                                    let idx = tree.input_iter_unordered().find(|block| block.user_data.hash == hash).unwrap().id;
+                                    let idx = if hash == finalized_block.hash {
+                                        None
+                                    } else {
+                                        Some(tree.input_output_iter_unordered().find(|block| block.user_data.hash == hash).unwrap().id)
+                                    };
                                     tree.input_set_best_block(idx);
                                 }
                                 GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                                    let idx = tree.input_iter_unordered().find(|block| block.user_data.hash == hash).unwrap().id;
-                                    tree.input_set_best_block(idx);
+                                    let idx = tree.input_output_iter_unordered().find(|block| block.user_data.hash == hash).unwrap().id;
+                                    tree.input_set_best_block(Some(idx));
                                 }
                             }
 
@@ -1416,7 +1513,7 @@ async fn run_background<TPlat: Platform>(
                     }.format_with(", ", |block, fmt| fmt(&HashDisplay(&block.hash))).to_string();
 
                     match download_result {
-                        Ok((storage_code, storage_heap_pages)) => {
+                        Ok((storage_code, storage_heap_pages, code_merkle_value, closest_ancestor_excluding)) => {
                             log::debug!(
                                 target: &log_target,
                                 "Worker <= SuccessfulDownload(blocks=[{}])",
@@ -1427,7 +1524,7 @@ async fn run_background<TPlat: Platform>(
                             guarded.best_near_head_of_chain = true;
                             drop(guarded);
 
-                            background.runtime_download_finished(async_op_id, storage_code, storage_heap_pages).await;
+                            background.runtime_download_finished(async_op_id, storage_code, storage_heap_pages, code_merkle_value, closest_ancestor_excluding).await;
                         }
                         Err(error) => {
                             log::debug!(
@@ -1449,10 +1546,10 @@ async fn run_background<TPlat: Platform>(
                                 GuardedInner::FinalizedBlockRuntimeKnown {
                                     tree, ..
                                 } => {
-                                    tree.async_op_failure(async_op_id, &TPlat::now());
+                                    tree.async_op_failure(async_op_id, &background.platform.now());
                                 }
                                 GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                                    tree.async_op_failure(async_op_id, &TPlat::now());
+                                    tree.async_op_failure(async_op_id, &background.platform.now());
                                 }
                             }
 
@@ -1486,8 +1583,11 @@ impl RuntimeDownloadError {
     }
 }
 
-struct Background<TPlat: Platform> {
+struct Background<TPlat: PlatformRef> {
     log_target: String,
+
+    /// See [`Config::platform`].
+    platform: TPlat,
 
     sync_service: Arc<sync_service::SyncService<TPlat>>,
 
@@ -1497,14 +1597,22 @@ struct Background<TPlat: Platform> {
     blocks_stream: Pin<Box<dyn Stream<Item = sync_service::Notification> + Send>>,
 
     /// List of runtimes currently being downloaded from the network.
-    /// For each item, the download id, storage value of `:code`, and storage value of
-    /// `:heappages`.
+    /// For each item, the download id, storage value of `:code`, storage value of `:heappages`,
+    /// and Merkle value and closest ancestor of `:code`.
     runtime_downloads: stream::FuturesUnordered<
         future::BoxFuture<
             'static,
             (
                 async_tree::AsyncOpId,
-                Result<(Option<Vec<u8>>, Option<Vec<u8>>), RuntimeDownloadError>,
+                Result<
+                    (
+                        Option<Vec<u8>>,
+                        Option<Vec<u8>>,
+                        Option<Vec<u8>>,
+                        Option<Vec<Nibble>>,
+                    ),
+                    RuntimeDownloadError,
+                >,
             ),
         >,
     >,
@@ -1513,13 +1621,15 @@ struct Background<TPlat: Platform> {
     wake_up_new_necessary_download: future::Fuse<future::BoxFuture<'static, ()>>,
 }
 
-impl<TPlat: Platform> Background<TPlat> {
+impl<TPlat: PlatformRef> Background<TPlat> {
     /// Injects into the state of `self` a completed runtime download.
     async fn runtime_download_finished(
         &mut self,
         async_op_id: async_tree::AsyncOpId,
         storage_code: Option<Vec<u8>>,
         storage_heap_pages: Option<Vec<u8>>,
+        code_merkle_value: Option<Vec<u8>>,
+        closest_ancestor_excluding: Option<Vec<Nibble>>,
     ) {
         let mut guarded = self.guarded.lock().await;
 
@@ -1562,6 +1672,8 @@ impl<TPlat: Platform> Background<TPlat> {
                 heap_pages: storage_heap_pages,
                 runtime_code: storage_code,
                 runtime,
+                code_merkle_value,
+                closest_ancestor_excluding,
             });
 
             guarded.runtimes.insert(Arc::downgrade(&runtime));
@@ -1680,7 +1792,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                         let parent_runtime = tree
                             .parent(block_index)
-                            .map_or(tree.finalized_async_user_data().clone(), |idx| {
+                            .map_or(tree.output_finalized_async_user_data().clone(), |idx| {
                                 tree.block_async_user_data(idx).unwrap().clone()
                             });
 
@@ -1842,10 +1954,10 @@ impl<TPlat: Platform> Background<TPlat> {
             let download_params = {
                 let async_op = match &mut guarded.tree {
                     GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
-                        tree.next_necessary_async_op(&TPlat::now())
+                        tree.next_necessary_async_op(&self.platform.now())
                     }
                     GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                        tree.next_necessary_async_op(&TPlat::now())
+                        tree.next_necessary_async_op(&self.platform.now())
                     }
                 };
 
@@ -1853,7 +1965,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     async_tree::NextNecessaryAsyncOp::Ready(dl) => dl,
                     async_tree::NextNecessaryAsyncOp::NotReady { when } => {
                         self.wake_up_new_necessary_download = if let Some(when) = when {
-                            TPlat::sleep_until(when).boxed()
+                            self.platform.sleep_until(when).boxed()
                         } else {
                             future::pending().boxed()
                         }
@@ -1893,7 +2005,21 @@ impl<TPlat: Platform> Background<TPlat> {
                                     block_number,
                                     &block_hash,
                                     &state_root,
-                                    iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
+                                    [
+                                        sync_service::StorageRequestItem {
+                                            key: b":code".to_vec(),
+                                            ty: sync_service::StorageRequestItemTy::ClosestDescendantMerkleValue,
+                                        },
+                                        sync_service::StorageRequestItem {
+                                            key: b":code".to_vec(),
+                                            ty: sync_service::StorageRequestItemTy::Value,
+                                        },
+                                        sync_service::StorageRequestItem {
+                                            key: b":heappages".to_vec(),
+                                            ty: sync_service::StorageRequestItemTy::Value,
+                                        },
+                                    ]
+                                    .into_iter(),
                                     3,
                                     Duration::from_secs(20),
                                     NonZeroU32::new(3).unwrap(),
@@ -1901,10 +2027,49 @@ impl<TPlat: Platform> Background<TPlat> {
                                 .await;
 
                             let result = match result {
-                                Ok(mut c) => {
-                                    let heap_pages = c.pop().unwrap();
-                                    let code = c.pop().unwrap();
-                                    Ok((code, heap_pages))
+                                Ok(entries) => {
+                                    let heap_pages = entries
+                                        .iter()
+                                        .find_map(|entry| match entry {
+                                            sync_service::StorageResultItem::Value {
+                                                key,
+                                                value,
+                                            } if key == b":heappages" => {
+                                                Some(value.clone()) // TODO: overhead
+                                            }
+                                            _ => None,
+                                        })
+                                        .unwrap();
+                                    let code = entries
+                                        .iter()
+                                        .find_map(|entry| match entry {
+                                            sync_service::StorageResultItem::Value {
+                                                key,
+                                                value,
+                                            } if key == b":code" => {
+                                                Some(value.clone()) // TODO: overhead
+                                            }
+                                            _ => None,
+                                        })
+                                        .unwrap();
+                                    let (code_merkle_value, code_closest_ancestor) = if code.is_some() {
+                                        entries
+                                            .iter()
+                                            .find_map(|entry| match entry {
+                                                sync_service::StorageResultItem::ClosestDescendantMerkleValue {
+                                                    requested_key,
+                                                    found_closest_ancestor_excluding,
+                                                    closest_descendant_merkle_value,
+                                                } if requested_key == b":code" => {
+                                                    Some((closest_descendant_merkle_value.clone(), found_closest_ancestor_excluding.clone())) // TODO overhead
+                                                }
+                                                _ => None
+                                            })
+                                            .unwrap()
+                                    } else {
+                                        (None, None)
+                                    };
+                                    Ok((code, heap_pages, code_merkle_value, code_closest_ancestor))
                                 }
                                 Err(error) => Err(RuntimeDownloadError::StorageQuery(error)),
                             };
@@ -1939,12 +2104,12 @@ impl<TPlat: Platform> Background<TPlat> {
             } => {
                 debug_assert_ne!(finalized_block.hash, hash_to_finalize);
                 let node_to_finalize = tree
-                    .input_iter_unordered()
+                    .input_output_iter_unordered()
                     .find(|block| block.user_data.hash == hash_to_finalize)
                     .unwrap()
                     .id;
                 let new_best_block = tree
-                    .input_iter_unordered()
+                    .input_output_iter_unordered()
                     .find(|block| block.user_data.hash == new_best_block_hash)
                     .unwrap()
                     .id;
@@ -1952,12 +2117,12 @@ impl<TPlat: Platform> Background<TPlat> {
             }
             GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
                 let node_to_finalize = tree
-                    .input_iter_unordered()
+                    .input_output_iter_unordered()
                     .find(|block| block.user_data.hash == hash_to_finalize)
                     .unwrap()
                     .id;
                 let new_best_block = tree
-                    .input_iter_unordered()
+                    .input_output_iter_unordered()
                     .find(|block| block.user_data.hash == new_best_block_hash)
                     .unwrap()
                     .id;
@@ -1978,6 +2143,15 @@ struct Runtime {
     /// Successfully-compiled runtime and all its information. Can contain an error if an error
     /// happened, including a problem when obtaining the runtime specs.
     runtime: Result<SuccessfulRuntime, RuntimeError>,
+
+    /// Merkle value of the `:code` trie node.
+    ///
+    /// Can be `None` if the storage is empty, in which case the runtime will have failed to
+    /// build.
+    code_merkle_value: Option<Vec<u8>>,
+
+    /// Closest ancestor of the `:code` key except for `:code` itself.
+    closest_ancestor_excluding: Option<Vec<Nibble>>,
 
     /// Undecoded storage value of `:code` corresponding to the [`Runtime::runtime`]
     /// field.
@@ -2007,12 +2181,12 @@ struct SuccessfulRuntime {
 }
 
 impl SuccessfulRuntime {
-    async fn from_storage<TPlat: Platform>(
+    async fn from_storage<TPlat: PlatformRef>(
         code: &Option<Vec<u8>>,
         heap_pages: &Option<Vec<u8>>,
     ) -> Result<Self, RuntimeError> {
         // Since compiling the runtime is a CPU-intensive operation, we yield once before.
-        TPlat::yield_after_cpu_intensive().await;
+        futures_lite::future::yield_now().await;
 
         // Parameters for `HostVmPrototype::new`.
         let module = code.as_ref().ok_or(RuntimeError::CodeNotFound)?;

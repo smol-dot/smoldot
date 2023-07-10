@@ -21,6 +21,7 @@ import * as smoldot from '../dist/mjs/index-nodejs.js';
 import { WebSocketServer } from 'ws';
 import * as process from 'node:process';
 import * as fs from 'node:fs';
+import { Worker } from 'node:worker_threads';
 
 // List of files containing chains available to the user.
 // The first item has a specific role in that we always connect to it at initialization.
@@ -50,7 +51,13 @@ for (const file of chainSpecsFiles) {
     };
 }
 
+const { port1, port2 } = new MessageChannel();
+const worker = new Worker("./demo/demo-worker.mjs");
+worker.on('error', (err) => { console.log("Worker error: \n" + err.message + "\n" + err.stack) });
+worker.postMessage(port2, [port2]);
+
 const client = smoldot.start({
+    portToWorker: port1,
     maxLogLevel: 3,  // Can be increased for more verbosity
     forbidTcp: false,
     forbidWs: false,
@@ -72,16 +79,35 @@ const client = smoldot.start({
     }
 });
 
+// Try to open a database, expecting it to fail in most situations.
+let defaultChainDb = "";
+try {
+    defaultChainDb = fs.readFileSync('database.json', { encoding: 'utf-8' });
+} catch(error) {}
+
 // Note that We call `addChain` again with the same chain spec again every time a new WebSocket
 // connection is established, but smoldot will de-duplicate them and only connect to the chain
 // once. By calling it now, we let smoldot start syncing that chain in the background even before
 // a WebSocket connection has been established.
-client
-    .addChain({ chainSpec: chainSpecsById[firstChainSpecId].chainSpec })
+const defaultChain = client
+    .addChain({
+        chainSpec: chainSpecsById[firstChainSpecId].chainSpec,
+        databaseContent: defaultChainDb
+    })
     .catch((error) => {
         console.error("Error while adding chain: " + error);
         process.exit(1);
     });
+
+// Uncomment if you want to test the database.
+/*defaultChain.then(async (chain) => {
+    while (true) {
+        chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"chainHead_unstable_finalizedDatabase","params":[]}');
+        const jsonResponse = JSON.parse(await chain.nextJsonRpcResponse());
+        fs.writeFileSync('database.json', jsonResponse.result);
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+    }
+});*/
 
 // Start the WebSocket server listening on port 9944.
 let wsServer = new WebSocketServer({
@@ -91,7 +117,7 @@ let wsServer = new WebSocketServer({
 console.log('JSON-RPC server now listening on port 9944');
 console.log('Please visit one of:');
 for (const chainId in chainSpecsById) {
-    console.log('- ' + chainId + ': https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2F' + chainId);
+    console.log('- ' + chainId + ': https://cloudflare-ipfs.com/ipns/dotapps.io/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2F' + chainId);
 }
 console.log('');
 

@@ -39,7 +39,7 @@
 // TODO: more docs
 
 use alloc::{collections::BTreeMap, vec::Vec};
-use core::{cmp, fmt, iter, ops};
+use core::{borrow::Borrow, cmp, fmt, ops};
 use hashbrown::HashMap;
 
 #[derive(Clone)]
@@ -167,6 +167,23 @@ impl<T> TrieDiff<T> {
         self.hashmap.into_iter().map(|(k, (v, ud))| (k, v, ud))
     }
 
+    /// Returns an iterator to all the entries in the diff within a given range.
+    ///
+    /// Each iterator element is the given and a boolean. This boolean is `true` if the diff
+    /// overwrites this entry, or `false` if it erases the underlying value.
+    pub fn diff_range_ordered<U: ?Sized>(
+        &self,
+        range: impl ops::RangeBounds<U>,
+    ) -> impl Iterator<Item = (&[u8], bool)> + Clone
+    where
+        U: Ord,
+        Vec<u8>: Borrow<U>,
+    {
+        self.btree
+            .range(range)
+            .map(|(k, inserts)| (&k[..], *inserts))
+    }
+
     /// Returns the storage key that immediately follows the provided `key`. Must be passed the
     /// storage key that immediately follows the provided `key` according to the base storage this
     /// diff is based upon.
@@ -184,6 +201,7 @@ impl<T> TrieDiff<T> {
         &'a self,
         key: &'_ [u8],
         in_parent_next_key: Option<&'a [u8]>,
+        or_equal: bool,
     ) -> StorageNextKey<'a> {
         if let Some(in_parent_next_key) = in_parent_next_key {
             assert!(in_parent_next_key > key);
@@ -192,15 +210,22 @@ impl<T> TrieDiff<T> {
         // Find the diff entry that immediately follows `key`.
         let in_diff = self
             .btree
-            .range::<[u8], _>((ops::Bound::Excluded(key), ops::Bound::Unbounded))
+            .range::<[u8], _>((
+                if or_equal {
+                    ops::Bound::Included(key)
+                } else {
+                    ops::Bound::Excluded(key)
+                },
+                ops::Bound::Unbounded,
+            ))
             .next();
 
         match (in_parent_next_key, in_diff) {
             (Some(a), Some((b, true))) if a <= &b[..] => StorageNextKey::Found(Some(a)),
             (Some(a), Some((b, false))) if a < &b[..] => StorageNextKey::Found(Some(a)),
             (Some(a), Some((b, false))) => {
-                debug_assert!(a >= &b[..]);
-                debug_assert_ne!(&b[..], key);
+                debug_assert!(a >= &b[..]); // We actually expect `a == b` but let's be defensive.
+                debug_assert!(&b[..] > key || or_equal);
 
                 // The next key according to the parent storage has been erased in this diff. It
                 // is necessary to ask the user again, this time for the key after the one that
@@ -219,7 +244,7 @@ impl<T> TrieDiff<T> {
             (Some(a), None) => StorageNextKey::Found(Some(a)),
             (None, Some((b, true))) => StorageNextKey::Found(Some(&b[..])),
             (None, Some((b, false))) => {
-                debug_assert!(&b[..] > key);
+                debug_assert!(&b[..] > key || or_equal);
                 let found = self
                     .btree
                     .range::<[u8], _>((ops::Bound::Excluded(&b[..]), ops::Bound::Unbounded))
@@ -229,47 +254,6 @@ impl<T> TrieDiff<T> {
             }
             (None, None) => StorageNextKey::Found(None),
         }
-    }
-
-    /// Takes as parameter a list (`in_parent_ordered`) of all the keys that are present in the
-    /// storage this diff is based upon and that start with the given `prefix`.
-    ///
-    /// Returns another iterator that provides the list of all keys that start with the given
-    /// `prefix` after this diff has been applied.
-    ///
-    /// The list must be lexicographically ordered. The returned list is ordered
-    /// lexicographically as well.
-    pub fn storage_prefix_keys_ordered<'a>(
-        &'a self, // TODO: unclear lifetime
-        prefix: &'a [u8],
-        in_parent_ordered: impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
-        let mut in_finalized_filtered = in_parent_ordered
-            .filter(|k| !self.btree.contains_key(k.as_ref()))
-            .peekable();
-
-        let mut diff_inserted = self
-            .btree
-            .range::<[u8], _>((ops::Bound::Included(prefix), ops::Bound::Unbounded))
-            .take_while(|(k, _)| k.starts_with(prefix))
-            .filter(|(_, v)| **v)
-            .map(|(k, _)| &k[..])
-            .peekable();
-
-        iter::from_fn(
-            move || match (in_finalized_filtered.peek(), diff_inserted.peek()) {
-                (Some(_), None) => in_finalized_filtered.next().map(either::Left),
-                (Some(a), Some(b)) if a.as_ref() < *b => {
-                    in_finalized_filtered.next().map(either::Left)
-                }
-                (Some(a), Some(b)) => {
-                    debug_assert_ne!(a.as_ref(), *b);
-                    diff_inserted.next().map(either::Right)
-                }
-                (None, Some(_)) => diff_inserted.next().map(either::Right),
-                (None, None) => None,
-            },
-        )
     }
 
     /// Applies the given diff on top of the current one.

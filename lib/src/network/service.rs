@@ -480,28 +480,27 @@ where
         id: PendingId,
         handshake_kind: SingleStreamHandshakeKind,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
-        // Don't remove the value in `pending_ids` yet, so that the state remains consistent if
-        // the user cancels the future returned by `add_outgoing_connection`.
-        let (expected_peer_id, multiaddr, when_connected) = self.pending_ids.get(id.0).unwrap();
+        let (expected_peer_id, multiaddr, when_connected) = self.pending_ids.remove(id.0);
 
         let (connection_id, connection_task) = self.inner.add_single_stream_outgoing_connection(
-            when_connected.clone(),
+            when_connected,
             handshake_kind,
-            expected_peer_id,
-            multiaddr.clone(),
+            &expected_peer_id,
+            multiaddr,
         );
 
         // Update `self.peers`.
         {
-            let value = self.num_pending_per_peer.get_mut(expected_peer_id).unwrap();
+            let value = self
+                .num_pending_per_peer
+                .get_mut(&expected_peer_id)
+                .unwrap();
             if let Some(new_value) = NonZeroUsize::new(value.get() - 1) {
                 *value = new_value;
             } else {
-                self.num_pending_per_peer.remove(expected_peer_id).unwrap();
+                self.num_pending_per_peer.remove(&expected_peer_id).unwrap();
             }
         }
-
-        self.pending_ids.remove(id.0);
 
         (connection_id, connection_task)
     }
@@ -523,28 +522,27 @@ where
     where
         TSubId: Clone + PartialEq + Eq + Hash,
     {
-        // Don't remove the value in `pending_ids` yet, so that the state remains consistent if
-        // the user cancels the future returned by `add_outgoing_connection`.
-        let (expected_peer_id, multiaddr, when_connected) = self.pending_ids.get(id.0).unwrap();
+        let (expected_peer_id, multiaddr, when_connected) = self.pending_ids.remove(id.0);
 
         let (connection_id, connection_task) = self.inner.add_multi_stream_outgoing_connection(
-            when_connected.clone(),
+            when_connected,
             handshake_kind,
-            expected_peer_id,
-            multiaddr.clone(),
+            &expected_peer_id,
+            multiaddr,
         );
 
         // Update `self.peers`.
         {
-            let value = self.num_pending_per_peer.get_mut(expected_peer_id).unwrap();
+            let value = self
+                .num_pending_per_peer
+                .get_mut(&expected_peer_id)
+                .unwrap();
             if let Some(new_value) = NonZeroUsize::new(value.get() - 1) {
                 *value = new_value;
             } else {
-                self.num_pending_per_peer.remove(expected_peer_id).unwrap();
+                self.num_pending_per_peer.remove(&expected_peer_id).unwrap();
             }
         }
-
-        self.pending_ids.remove(id.0);
 
         (connection_id, connection_task)
     }
@@ -564,12 +562,11 @@ where
     /// Panics if the [`PendingId`] is invalid.
     ///
     pub fn pending_outcome_err(&mut self, id: PendingId, is_bad_address: bool) {
-        let (expected_peer_id, multiaddr, _) = self.pending_ids.get(id.0).unwrap();
-        let multiaddr = multiaddr.clone(); // Solves borrowck issues.
+        let (expected_peer_id, multiaddr, _) = self.pending_ids.remove(id.0);
 
         let has_any_attempt_left = self
             .num_pending_per_peer
-            .get(expected_peer_id)
+            .get(&expected_peer_id)
             .unwrap()
             .get()
             != 1;
@@ -578,7 +575,7 @@ where
         if !has_any_attempt_left
             && self
                 .inner
-                .established_peer_connections(expected_peer_id)
+                .established_peer_connections(&expected_peer_id)
                 .count()
                 == 0
         {
@@ -589,12 +586,6 @@ where
                 self.unassign_slot(chain_index, &expected_peer_id);
             }
         }
-
-        // Now update `self`.
-        // For future-cancellation-safety reasons, this is done after all the asynchronous
-        // operations.
-
-        let (expected_peer_id, _, _) = self.pending_ids.remove(id.0);
 
         // Updates the addresses book.
         if let Some(KBucketsPeer { addresses, .. }) = self.kbuckets_peers.get_mut(&expected_peer_id)
@@ -628,7 +619,7 @@ where
             } else {
                 self.num_pending_per_peer.remove(&expected_peer_id).unwrap();
             }
-        };
+        }
     }
 
     /// Returns the next event produced by the service.
@@ -766,7 +757,7 @@ where
                         if let Some(KBucketsPeer { addresses, .. }) =
                             self.kbuckets_peers.get_mut(&peer_id)
                         {
-                            addresses.set_disconnected(&address);
+                            addresses.set_disconnected(address);
                             debug_assert_eq!(addresses.iter_connected().count(), 0);
                         }
                     }
@@ -791,7 +782,7 @@ where
                         if let Some(KBucketsPeer { addresses, .. }) =
                             self.kbuckets_peers.get_mut(&peer_id)
                         {
-                            addresses.set_disconnected(&address);
+                            addresses.set_disconnected(address);
                             debug_assert_ne!(addresses.iter_connected().count(), 0);
                         }
                     }
@@ -809,7 +800,7 @@ where
                     if let Some(KBucketsPeer { addresses, .. }) =
                         self.kbuckets_peers.get_mut(&expected_peer_id)
                     {
-                        addresses.set_disconnected(&address);
+                        addresses.set_disconnected(address);
                     }
                 }
                 peers::Event::StartShutdown {
@@ -1136,7 +1127,7 @@ where
 /// One of [`ChainNetwork::pending_outcome_ok_single_stream`],
 /// [`ChainNetwork::pending_outcome_ok_multi_stream`], or [`ChainNetwork::pending_outcome_err`]
 /// must later be called in order to inform of the outcome of the connection.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[must_use]
 pub struct StartConnect<TNow> {
     /// Identifier of this connection request. Must be passed back later.
@@ -1283,7 +1274,7 @@ pub enum Event {
 
     KademliaDiscoveryResult {
         operation_id: KademliaOperationId,
-        result: Result<Vec<(PeerId, Vec<multiaddr::Multiaddr>)>, DiscoveryError>,
+        result: Result<Vec<(PeerId, Vec<Vec<u8>>)>, DiscoveryError>,
     },
     /*Transactions {
         peer_id: PeerId,
@@ -1304,10 +1295,7 @@ pub enum ProtocolError {
     #[display(fmt = "Error in an incoming substream: {_0}")]
     InboundError(InboundError),
     /// Error while decoding the handshake of the block announces substream.
-    #[display(
-        fmt = "Error while decoding the handshake of the block announces substream: {}",
-        _0
-    )]
+    #[display(fmt = "Error while decoding the handshake of the block announces substream: {_0}")]
     BadBlockAnnouncesHandshake(protocol::BlockAnnouncesHandshakeDecodeError),
     /// Error while decoding a received block announce.
     #[display(fmt = "Error while decoding a received block announce: {_0}")]
