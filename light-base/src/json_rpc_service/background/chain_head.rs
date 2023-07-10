@@ -1185,7 +1185,6 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             virtual_machine,
                             function_to_call: &function_to_call,
                             parameter: iter::once(&call_parameters),
-                            offchain_storage_changes: Default::default(),
                             storage_main_trie_changes: Default::default(),
                             max_log_level: 0,
                         }) {
@@ -1312,8 +1311,21 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             };
                                             runtime_call = nk.inject_key(next_key.map(|k| k.iter().copied()));
                                         }
+                                        runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
+                                            runtime_call = req.resume();
+                                        }
                                         runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
                                             runtime_call = sig.verify_and_resume();
+                                        }
+                                        runtime_host::RuntimeHostVm::Offchain(ctx) => {
+                                            runtime_call_lock.unlock(runtime_host::RuntimeHostVm::Offchain(ctx).into_prototype());
+                                            subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
+                                                subscription: (&subscription_id).into(),
+                                                result: methods::ChainHeadCallEvent::Error {
+                                                    error: "Runtime has called an offchain host function".to_string().into(),
+                                                },
+                                            }).await;
+                                            break;
                                         }
                                     }
                                 }

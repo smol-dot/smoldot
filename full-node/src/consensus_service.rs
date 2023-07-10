@@ -948,6 +948,10 @@ impl SyncBackground {
                                 k.into_iter().map(|b| trie::Nibble::try_from(b).unwrap())
                             }));
                     }
+                    author::build::BuilderAuthoring::OffchainStorageSet(req) => {
+                        // Ignore offchain storage writes at the moment.
+                        block_authoring = req.resume();
+                    }
                 }
             }
         };
@@ -1559,6 +1563,10 @@ impl SyncBackground {
                             body_verification = req.inject_key(next_key.map(|k| {
                                 k.into_iter().map(|b| trie::Nibble::try_from(b).unwrap())
                             }));
+                        }
+                        body_only::Verify::OffchainStorageSet(req) => {
+                            // Ignore offchain storage writes at the moment.
+                            body_verification = req.resume();
                         }
                         body_only::Verify::RuntimeCompilation(rt) => {
                             let before_runtime_build = Instant::now();
