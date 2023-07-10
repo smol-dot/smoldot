@@ -8,6 +8,7 @@ authors.workspace = true
 license.workspace = true
 edition.workspace = true
 repository.workspace = true
+include.workspace = true
 
 [features]
 default = ["database-sqlite", "std", "wasmtime"]
