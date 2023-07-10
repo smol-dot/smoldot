@@ -27,7 +27,7 @@ use crate::{
 use alloc::vec::Vec;
 use core::{num::NonZeroU64, time::Duration};
 
-pub use runtime::{Nibble, TrieEntryVersion};
+pub use runtime::{Nibble, StorageChanges, TrieEntryVersion};
 
 /// Configuration for a block generation.
 pub struct Config<'a, TLocAuth> {
