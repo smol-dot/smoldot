@@ -59,12 +59,11 @@ export type Event =
     { ty: "add-chain-result", success: false, error: string } |
     { ty: "log", level: number, target: string, message: string } |
     { ty: "json-rpc-responses-non-empty", chainId: number } |
-    { ty: "current-task", taskName: string | null } |
     // Smoldot has crashed. Note that the public API of the instance can technically still be
     // used, as all functions will start running fallback code. Existing connections are *not*
     // closed. It is the responsibility of the API user to close all connections if they stop
     // using the instance.
-    { ty: "wasm-panic", message: string } |
+    { ty: "wasm-panic", message: string, currentTask: string | null } |
     { ty: "executor-shutdown" } |
     { ty: "new-connection", connectionId: number, address: ParsedMultiaddr } |
     { ty: "connection-reset", connectionId: number } |
@@ -76,7 +75,7 @@ export type Event =
 export type ParsedMultiaddr =
     { ty: "tcp", hostname: string, port: number } |
     { ty: "websocket", url: string } |
-    { ty: "webrtc", targetPort: string, ipVersion: string, targetIp: string, remoteCertMultibase: string };
+    { ty: "webrtc", targetPort: number, ipVersion: string, targetIp: string, remoteTlsCertificateSha256: Uint8Array };
 
 export interface Instance {
     request: (request: string, chainId: number) => number,
@@ -92,7 +91,7 @@ export interface Instance {
      * all connections.
      */
     shutdownExecutor: () => void,
-    connectionOpened: (connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number, writeClosable: boolean } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateMultihash: Uint8Array, remoteTlsCertificateMultihash: Uint8Array }) => void,
+    connectionOpened: (connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateSha256: Uint8Array, remoteTlsCertificateSha256: Uint8Array }) => void,
     connectionReset: (connectionId: number, message: string) => void,
     streamWritableBytes: (connectionId: number, numExtra: number, streamId?: number) => void,
     streamMessage: (connectionId: number, message: Uint8Array, streamId?: number) => void,
@@ -115,7 +114,10 @@ export interface Instance {
 export async function startLocalInstance(config: Config, wasmModule: WebAssembly.Module, eventCallback: (event: Event) => void): Promise<Instance> {
     const state: {
         // Null before initialization and after a panic.
-        instance: SmoldotWasmInstance | null
+        instance: SmoldotWasmInstance | null,
+        // Name of the task currently being executed by smoldot. Used for diagnostics in case of
+        // a panic. `null` if not in a task.
+        currentTask: string | null,
         bufferIndices: Uint8Array[],
         advanceExecutionPromise: null | (() => void),
         stdoutBuffer: string,
@@ -123,6 +125,7 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
         onShutdownExecutorOrWasmPanic: () => void,
     } = {
         instance: null,
+        currentTask: null,
         bufferIndices: new Array(),
         advanceExecutionPromise: null,
         stdoutBuffer: "",
@@ -141,7 +144,7 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             len >>>= 0;
 
             const message = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), ptr, len);
-            eventCallback({ ty: "wasm-panic", message });
+            eventCallback({ ty: "wasm-panic", message, currentTask: state.currentTask });
             state.onShutdownExecutorOrWasmPanic();
             state.onShutdownExecutorOrWasmPanic = () => { };
             throw new Error();
@@ -219,28 +222,94 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             }
         },
 
+        // Must indicate whether the given connection type is supported.
+        connection_type_supported: (ty: number): number => {
+            // TODO: consider extracting config options so user can't change the fields dynamically
+            switch (ty) {
+                case 0:
+                case 1:
+                case 2: {
+                    return config.forbidTcp ? 0 : 1
+                }
+                case 4:
+                case 5:
+                case 6: {
+                    return config.forbidWs ? 0 : 1
+                }
+                case 7: {
+                    return config.forbidNonLocalWs ? 0 : 1
+                }
+                case 14: {
+                    return config.forbidWss ? 0 : 1
+                }
+                case 16:
+                case 17: {
+                    return config.forbidWebRtc ? 0 : 1
+                }
+                default:
+                    // Indicates a bug somewhere.
+                    throw new Error("Invalid connection type passed to `connection_type_supported`");
+            }
+        },
+
         // Must create a new connection object. This implementation stores the created object in
         // `connections`.
-        connection_new: (connectionId: number, addrPtr: number, addrLen: number, errorBufferIndexPtr: number) => {
+        connection_new: (connectionId: number, addrPtr: number, addrLen: number) => {
             const instance = state.instance!;
+            const mem = new Uint8Array(instance.exports.memory.buffer);
 
             addrPtr >>>= 0;
             addrLen >>>= 0;
-            errorBufferIndexPtr >>>= 0;
 
-            const address = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), addrPtr, addrLen);
-            // TODO: consider extracting config options so user can't change the fields dynamically
-            const result = parseMultiaddr(address, config.forbidTcp, config.forbidWs, config.forbidNonLocalWs, config.forbidWss, config.forbidWebRtc);
-            if (result.success) {
-                eventCallback({ ty: "new-connection", connectionId, address: result.address });
-                return 0
-            } else {
-                const mem = new Uint8Array(instance.exports.memory.buffer);
-                state.bufferIndices[0] = new TextEncoder().encode(result.error)
-                buffer.writeUInt32LE(mem, errorBufferIndexPtr, 0);
-                buffer.writeUInt8(mem, errorBufferIndexPtr + 4, 1);  // TODO: remove isBadAddress param since it's always true
-                return 1;
+            let address: ParsedMultiaddr;
+            switch (buffer.readUInt8(mem, addrPtr)) {
+                case 0:
+                case 1:
+                case 2: {
+                    const port = buffer.readUInt16BE(mem, addrPtr + 1);
+                    const hostname = buffer.utf8BytesToString(mem, addrPtr + 3, addrLen - 3);
+                    address = { ty: "tcp", port, hostname }
+                    break;
+                }
+                case 4:
+                case 6: {
+                    const port = buffer.readUInt16BE(mem, addrPtr + 1);
+                    const hostname = buffer.utf8BytesToString(mem, addrPtr + 3, addrLen - 3);
+                    address = { ty: "websocket", url: "ws://" + hostname + ":" + port }
+                    break;
+                }
+                case 5: {
+                    const port = buffer.readUInt16BE(mem, addrPtr + 1);
+                    const hostname = buffer.utf8BytesToString(mem, addrPtr + 3, addrLen - 3);
+                    address = { ty: "websocket", url: "ws://[" + hostname + "]:" + port }
+                    break;
+                }
+                case 14: {
+                    const port = buffer.readUInt16BE(mem, addrPtr + 1);
+                    const hostname = buffer.utf8BytesToString(mem, addrPtr + 3, addrLen - 3);
+                    address = { ty: "websocket", url: "wss://" + hostname + ":" + port }
+                    break;
+                }
+                case 16: {
+                    const targetPort = buffer.readUInt16BE(mem, addrPtr + 1);
+                    const remoteTlsCertificateSha256 = mem.slice(addrPtr + 3, addrPtr + 35);
+                    const targetIp = buffer.utf8BytesToString(mem, addrPtr + 35, addrLen - 3);
+                    address = { ty: "webrtc", ipVersion: '4', remoteTlsCertificateSha256, targetIp, targetPort }
+                    break;
+                }
+                case 17: {
+                    const targetPort = buffer.readUInt16BE(mem, addrPtr + 1);
+                    const remoteTlsCertificateSha256 = mem.slice(addrPtr + 3, addrPtr + 35);
+                    const targetIp = buffer.utf8BytesToString(mem, addrPtr + 35, addrLen - 3);
+                    address = { ty: "webrtc", ipVersion: '6', remoteTlsCertificateSha256, targetIp, targetPort }
+                    break;
+                }
+                default:
+                    // Indicates a bug somewhere.
+                    throw new Error("Invalid encoded address passed to `connection_new`");
             }
+
+            eventCallback({ ty: "new-connection", connectionId, address });
         },
 
         // Must close and destroy the connection object.
@@ -281,11 +350,11 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             len >>>= 0;
 
             const taskName = buffer.utf8BytesToString(new Uint8Array(state.instance!.exports.memory.buffer), ptr, len);
-            eventCallback({ ty: "current-task", taskName });
+            state.currentTask = taskName;
         },
 
         current_task_exit: () => {
-            eventCallback({ ty: "current-task", taskName: null });
+            state.currentTask = null;
         }
     };
 
@@ -411,7 +480,11 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
         // Used by Rust in catastrophic situations, such as a double panic.
         proc_exit: (retCode: number) => {
             state.instance = null;
-            eventCallback({ ty: "wasm-panic", message: `proc_exit called: ${retCode}` });
+            eventCallback({
+                ty: "wasm-panic",
+                message: `proc_exit called: ${retCode}`,
+                currentTask: state.currentTask
+            });
             state.onShutdownExecutorOrWasmPanic();
             state.onShutdownExecutorOrWasmPanic = () => { };
             throw new Error();
@@ -632,19 +705,19 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             cb();
         },
 
-        connectionOpened: (connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number, writeClosable: boolean } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateMultihash: Uint8Array, remoteTlsCertificateMultihash: Uint8Array }) => {
+        connectionOpened: (connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateSha256: Uint8Array, remoteTlsCertificateSha256: Uint8Array }) => {
             if (!state.instance)
                 return;
             switch (info.type) {
                 case 'single-stream': {
-                    state.instance.exports.connection_open_single_stream(connectionId, 0, info.initialWritableBytes, info.writeClosable ? 1 : 0);
+                    state.instance.exports.connection_open_single_stream(connectionId, info.initialWritableBytes);
                     break
                 }
                 case 'multi-stream': {
-                    const handshakeTy = new Uint8Array(1 + info.localTlsCertificateMultihash.length + info.remoteTlsCertificateMultihash.length);
+                    const handshakeTy = new Uint8Array(1 + info.localTlsCertificateSha256.length + info.remoteTlsCertificateSha256.length);
                     buffer.writeUInt8(handshakeTy, 0, 0);
-                    handshakeTy.set(info.localTlsCertificateMultihash, 1)
-                    handshakeTy.set(info.remoteTlsCertificateMultihash, 1 + info.localTlsCertificateMultihash.length)
+                    handshakeTy.set(info.localTlsCertificateSha256, 1)
+                    handshakeTy.set(info.remoteTlsCertificateSha256, 1 + info.localTlsCertificateSha256.length)
                     state.bufferIndices[0] = handshakeTy;
                     state.instance.exports.connection_open_multi_stream(connectionId, 0);
                     delete state.bufferIndices[0]
@@ -717,7 +790,7 @@ interface SmoldotWasmExports extends WebAssembly.Exports {
     json_rpc_responses_peek: (chainId: number) => number,
     json_rpc_responses_pop: (chainId: number) => void,
     timer_finished: () => void,
-    connection_open_single_stream: (connectionId: number, handshakeTy: number, initialWritableBytes: number, writeClosable: number) => void,
+    connection_open_single_stream: (connectionId: number, initialWritableBytes: number) => void,
     connection_open_multi_stream: (connectionId: number, handshakeTyBufferIndex: number) => void,
     stream_writable_bytes: (connectionId: number, streamId: number, numBytes: number) => void,
     stream_message: (connectionId: number, streamId: number, bufferIndex: number) => void,
@@ -728,62 +801,4 @@ interface SmoldotWasmExports extends WebAssembly.Exports {
 
 interface SmoldotWasmInstance extends WebAssembly.Instance {
     readonly exports: SmoldotWasmExports;
-}
-
-// TODO: consider moving this function somewhere else or something
-export function parseMultiaddr(
-    address: string,
-    forbidTcp: boolean,
-    forbidWs: boolean,
-    forbidNonLocalWs: boolean,
-    forbidWss: boolean,
-    forbidWebRtc: boolean
-): { success: true, address: ParsedMultiaddr } | { success: false, error: string } {
-    const tcpParsed = address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)$/);
-    // TODO: remove support for `/wss` in a long time (https://github.com/paritytech/smoldot/issues/1940)
-    const wsParsed = address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)\/(ws|wss|tls\/ws)$/);
-    const webRTCParsed = address.match(/^\/(ip4|ip6)\/(.*?)\/udp\/(.*?)\/webrtc-direct\/certhash\/(.*?)$/);
-
-    if (wsParsed != null) {
-        const proto = (wsParsed[4] == 'ws') ? 'ws' : 'wss';
-        if (proto == 'ws' && forbidWs) {
-            return { success: false, error: 'WebSocket connections not available' }
-        }
-        if (proto == 'wss' && forbidWss) {
-            return { success: false, error: 'WebSocket secure connections not available' }
-        }
-        if (proto == 'ws' && wsParsed[2] != 'localhost' && wsParsed[2] != '127.0.0.1' && forbidNonLocalWs) {
-            return { success: false, error: 'Non-local WebSocket connections not available' }
-        }
-
-        const url = (wsParsed[1] == 'ip6') ?
-            (proto + "://[" + wsParsed[2] + "]:" + wsParsed[3]) :
-            (proto + "://" + wsParsed[2] + ":" + wsParsed[3]);
-
-        return { success: true, address: { ty: "websocket", url } }
-    } else if (tcpParsed != null) {
-        if (forbidTcp) {
-            return { success: false, error: 'TCP connections not available' }
-        }
-
-        return { success: true, address: { ty: "tcp", hostname: tcpParsed[2]!, port: parseInt(tcpParsed[3]!) } }
-
-    } else if (webRTCParsed != null) {
-        const targetPort = webRTCParsed[3]!;
-        if (forbidWebRtc) {
-            return { success: false, error: 'WebRTC connections not available' }
-        }
-        if (targetPort === '0') {
-            return { success: false, error: 'Invalid WebRTC target port' }
-        }
-
-        const ipVersion = webRTCParsed[1] == 'ip4' ? '4' : '6';
-        const targetIp = webRTCParsed[2]!;
-        const remoteCertMultibase = webRTCParsed[4]!;
-
-        return { success: true, address: { ty: "webrtc", targetPort, ipVersion, targetIp, remoteCertMultibase } }
-
-    } else {
-        return { success: false, error: 'Unrecognized multiaddr format' }
-    }
 }

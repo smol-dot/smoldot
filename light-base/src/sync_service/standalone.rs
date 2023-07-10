@@ -15,7 +15,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use super::{BlockNotification, FinalizedBlockRuntime, Notification, SubscribeAll, ToBackground};
+use super::{
+    BlockNotification, ConfigRelayChainRuntimeCodeHint, FinalizedBlockRuntime, Notification,
+    SubscribeAll, ToBackground,
+};
 use crate::{network_service, platform::PlatformRef, util};
 
 use alloc::{borrow::ToOwned as _, string::String, sync::Arc, vec::Vec};
@@ -41,6 +44,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
     platform: TPlat,
     chain_information: chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
+    runtime_code_hint: Option<ConfigRelayChainRuntimeCodeHint>,
     mut from_foreground: mpsc::Receiver<ToBackground>,
     network_service: Arc<network_service::NetworkService<TPlat>>,
     network_chain_index: usize,
@@ -82,6 +86,11 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 NonZeroU32::new(5000).unwrap()
             },
             full_mode: false,
+            code_trie_node_hint: runtime_code_hint.map(|hint| all::ConfigCodeTrieNodeHint {
+                merkle_value: hint.merkle_value,
+                storage_value: hint.storage_value,
+                closest_ancestor_excluding: hint.closest_ancestor_excluding,
+            }),
         }),
         network_up_to_date_best: true,
         network_up_to_date_finalized: true,
@@ -138,9 +147,8 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
             if has_done_verif {
                 queue_empty = false;
 
-                // As explained in the documentation of `yield_after_cpu_intensive`, we should
-                // yield after a CPU-intensive operation. This helps provide a better granularity.
-                task.platform.yield_after_cpu_intensive().await;
+                // Yield after a CPU-intensive operation. This helps provide a better granularity.
+                futures_lite::future::yield_now().await;
             }
 
             queue_empty
@@ -653,7 +661,9 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 sync,
                 finalized_block_runtime,
                 finalized_storage_code,
+                finalized_storage_code_closest_ancestor_excluding,
                 finalized_storage_heap_pages,
+                finalized_storage_code_merkle_value,
             } => {
                 self.sync = sync;
 
@@ -673,6 +683,8 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     virtual_machine: finalized_block_runtime,
                     storage_code: finalized_storage_code,
                     storage_heap_pages: finalized_storage_heap_pages,
+                    code_merkle_value: finalized_storage_code_merkle_value,
+                    closest_ancestor_excluding: finalized_storage_code_closest_ancestor_excluding,
                 });
 
                 self.network_up_to_date_finalized = false;
@@ -711,15 +723,17 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 }
             }
 
-            all::ProcessOne::VerifyHeader(verify) => {
+            all::ProcessOne::VerifyBlock(verify) => {
                 // Header to verify.
                 let verified_hash = verify.hash();
-                let verified_height = verify.height();
-                match verify.perform(self.platform.now_from_unix_epoch(), ()) {
+                match verify.verify_header(self.platform.now_from_unix_epoch()) {
                     all::HeaderVerifyOutcome::Success {
-                        sync, is_new_best, ..
+                        success,
+                        is_new_best,
+                        ..
                     } => {
-                        self.sync = sync;
+                        let verified_height = success.height();
+                        self.sync = success.finish(());
 
                         log::debug!(
                             target: &self.log_target,
@@ -939,9 +953,6 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     }
                 }
             }
-
-            // Can't verify header and body in non-full mode.
-            all::ProcessOne::VerifyBodyHeader(_) => unreachable!(),
         }
 
         (self, true)

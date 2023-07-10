@@ -74,7 +74,6 @@ extern crate alloc;
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 use core::{num::NonZeroU32, ops, pin};
-use futures_channel::oneshot;
 use futures_util::{future, FutureExt as _};
 use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
@@ -147,6 +146,8 @@ pub enum AddChainConfigJsonRpc {
         ///
         /// This parameter is necessary in order to prevent JSON-RPC clients from using up too
         /// much memory within the client.
+        /// If the JSON-RPC client is entirely trusted, then passing `u32::max_value()` is
+        /// completely reasonable.
         ///
         /// A typical value is 128.
         max_pending_requests: NonZeroU32,
@@ -158,6 +159,8 @@ pub enum AddChainConfigJsonRpc {
         ///
         /// This parameter is necessary in order to prevent JSON-RPC clients from using up too
         /// much memory within the client.
+        /// If the JSON-RPC client is entirely trusted, then passing `u32::max_value()` is
+        /// completely reasonable.
         ///
         /// While a typical reasonable value would be for example 64, existing UIs tend to start
         /// a lot of subscriptions, and a value such as 1024 is recommended.
@@ -222,9 +225,9 @@ struct PublicApiChain<TChain> {
     /// [`AddChainConfig::json_rpc`] was [`AddChainConfigJsonRpc::Disabled`] when adding the chain.
     json_rpc_frontend: Option<json_rpc_service::Frontend>,
 
-    /// Dummy channel. Nothing is ever sent on it, but the receiving side is stored in the
-    /// [`JsonRpcResponses`] in order to detect when the chain has been removed.
-    _public_api_chain_destroyed_tx: oneshot::Sender<()>,
+    /// Notified when the [`PublicApiChain`] is destroyed, in order for the [`JsonRpcResponses`]
+    /// to detect when the chain has been removed.
+    public_api_chain_destroyed_event: event_listener::Event,
 }
 
 /// Identifies a chain, so that multiple identical chains are de-duplicated.
@@ -303,25 +306,29 @@ pub struct JsonRpcResponses {
     ///
     /// As long as this object is alive, the JSON-RPC service will continue running. In order
     /// to prevent that from happening, we destroy it as soon as the
-    /// [`JsonRpcResponses::public_api_chain_destroyed_rx`] is notified of the destruction of
+    /// [`JsonRpcResponses::public_api_chain_destroyed`] is notified of the destruction of
     /// the sender.
     inner: Option<json_rpc_service::Frontend>,
 
-    /// Dummy channel. Nothing is ever sent on it, but the sending side is stored in the
-    /// [`PublicApiChain`] in order to detect when the chain has been removed.
-    public_api_chain_destroyed_rx: oneshot::Receiver<()>,
+    /// Notified when the [`PublicApiChain`] is destroyed.
+    public_api_chain_destroyed: event_listener::EventListener,
 }
 
 impl JsonRpcResponses {
     /// Returns the next response or notification, or `None` if the chain has been removed.
     pub async fn next(&mut self) -> Option<String> {
         if let Some(frontend) = self.inner.as_mut() {
-            let response_fut = pin::pin!(frontend.next_json_rpc_response());
-            match future::select(response_fut, &mut self.public_api_chain_destroyed_rx).await {
-                future::Either::Left((response, _)) => return Some(response),
-                future::Either::Right((_result, _)) => {
-                    debug_assert!(_result.is_err());
-                }
+            match futures_lite::future::or(
+                async { Some(frontend.next_json_rpc_response().await) },
+                async {
+                    (&mut self.public_api_chain_destroyed).await;
+                    None
+                },
+            )
+            .await
+            {
+                Some(response) => return Some(response),
+                None => {}
             }
         }
 
@@ -364,7 +371,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         // known as a checkpoint) is present in the chain spec, it is possible to start syncing at
         // the finalized block it describes.
         // TODO: clean up that block
-        let (chain_information, genesis_block_header, checkpoint_nodes) = {
+        let (chain_information, genesis_block_header, checkpoint_nodes, runtime_code_hint) = {
             match (
                 chain_spec.to_chain_information().map(|(ci, _)| ci), // TODO: don't just throw away the runtime
                 chain_spec
@@ -399,6 +406,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         database_content.chain_information,
                         genesis_header.into(),
                         database_content.known_nodes,
+                        database_content.runtime_code_hint,
                     )
                 }
 
@@ -434,10 +442,16 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                             database_content.chain_information,
                             genesis_header,
                             database_content.known_nodes,
+                            database_content.runtime_code_hint,
                         )
                     } else if let Some(Ok(checkpoint)) = checkpoint {
                         // Database is incorrect.
-                        (checkpoint, genesis_header, database_content.known_nodes)
+                        (
+                            checkpoint,
+                            genesis_header,
+                            database_content.known_nodes,
+                            None,
+                        )
                     } else {
                         // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
                         // TODO: is this relevant for parachains?
@@ -464,14 +478,14 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         digest: header::DigestRef::empty().into(),
                     };
 
-                    (checkpoint, genesis_header, Default::default())
+                    (checkpoint, genesis_header, Default::default(), None)
                 }
 
                 (Err(err), _, _) => return Err(AddChainError::InvalidGenesisStorage(err)),
 
                 (Ok(genesis_ci), Some(Ok(checkpoint)), _) => {
                     let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
-                    (checkpoint, genesis_header.into(), Default::default())
+                    (checkpoint, genesis_header.into(), Default::default(), None)
                 }
 
                 (
@@ -484,7 +498,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 ) => {
                     let genesis_header =
                         header::Header::from(genesis_ci.as_ref().finalized_block_header.clone());
-                    (genesis_ci, genesis_header, Default::default())
+                    (genesis_ci, genesis_header, Default::default(), None)
                 }
 
                 (_, Some(Err(err)), _) => {
@@ -701,6 +715,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                             log_name.clone(),
                             &platform,
                             chain_information,
+                            runtime_code_hint,
                             genesis_block_header
                                 .scale_encoding_vec(chain_spec.block_number_bytes().into()),
                             chain_spec,
@@ -865,7 +880,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 // supposed to know what happens within the client, they can't rationally decide
                 // what value is appropriate.
                 max_parallel_requests: NonZeroU32::new(24).unwrap(),
-                max_parallel_subscription_updates: NonZeroU32::new(8).unwrap(),
             });
 
             let system_name = self.platform.client_name().into_owned();
@@ -903,19 +917,20 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         };
 
         // Success!
-        let (public_api_chain_destroyed_tx, public_api_chain_destroyed_rx) = oneshot::channel();
+        let public_api_chain_destroyed_event = event_listener::Event::new();
+        let public_api_chain_destroyed = public_api_chain_destroyed_event.listen();
         public_api_chains_entry.insert(PublicApiChain {
             user_data: config.user_data,
             key: new_chain_key,
             chain_spec_chain_id,
             json_rpc_frontend: json_rpc_frontend.clone(),
-            _public_api_chain_destroyed_tx: public_api_chain_destroyed_tx,
+            public_api_chain_destroyed_event,
         });
         Ok(AddChainSuccess {
             chain_id: new_chain_id,
             json_rpc_responses: json_rpc_frontend.map(|f| JsonRpcResponses {
                 inner: Some(f),
-                public_api_chain_destroyed_rx,
+                public_api_chain_destroyed,
             }),
         })
     }
@@ -935,6 +950,10 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
     #[must_use]
     pub fn remove_chain(&mut self, id: ChainId) -> TChain {
         let removed_chain = self.public_api_chains.remove(id.0);
+
+        removed_chain
+            .public_api_chain_destroyed_event
+            .notify(usize::max_value());
 
         // `chains_by_key` is created lazily when `add_chain` is called.
         // Since we're removing a chain that has been added with `add_chain`, it is guaranteed
@@ -963,9 +982,15 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
     /// Since most JSON-RPC requests can only be answered asynchronously, the request is only
     /// queued and will be decoded and processed later.
     ///
-    /// Returns an error if the node is overloaded and is capable of processing more JSON-RPC
-    /// requests before some time has passed or the [`AddChainSuccess::json_rpc_responses`]
-    /// stream is emptied.
+    /// Returns an error if the number of requests that have been sent but whose answer hasn't been
+    /// pulled with [`JsonRpcResponses::next`] is superior or equal to the value that was passed
+    /// through [`AddChainConfigJsonRpc::Enabled::max_pending_requests`]. In that situation, the
+    /// API user is encouraged to stop sending requests and start pulling answers with
+    /// [`JsonRpcResponses::next`].
+    ///
+    /// Passing `u32::max_value()` to [`AddChainConfigJsonRpc::Enabled::max_pending_requests`] is
+    /// a good way to avoid errors here, but this should only be done if the JSON-RPC client is
+    /// trusted.
     ///
     /// Also returns an error if the request could not be parsed as a valid JSON-RPC request, as
     /// in that situation smoldot is unable to send back a corresponding JSON-RPC error message.
@@ -1051,6 +1076,7 @@ async fn start_services<TPlat: platform::PlatformRef>(
     log_name: String,
     platform: &TPlat,
     chain_information: chain::chain_information::ValidChainInformation,
+    runtime_code_hint: Option<database::DatabaseContentRuntimeCodeHint>,
     genesis_block_scale_encoded_header: Vec<u8>,
     chain_spec: chain_spec::ChainSpec,
     relay_chain: Option<&ChainServices<TPlat>>,
@@ -1106,11 +1132,15 @@ async fn start_services<TPlat: platform::PlatformRef>(
                 block_number_bytes: usize::from(chain_spec.block_number_bytes()),
                 network_service: (network_service.clone(), 0),
                 network_events_receiver: network_event_receivers.pop().unwrap(),
-                parachain: Some(sync_service::ConfigParachain {
-                    parachain_id: chain_spec.relay_chain().unwrap().1,
-                    relay_chain_sync: relay_chain.runtime_service.clone(),
-                    relay_chain_block_number_bytes: relay_chain.sync_service.block_number_bytes(),
-                }),
+                chain_type: sync_service::ConfigChainType::Parachain(
+                    sync_service::ConfigParachain {
+                        parachain_id: chain_spec.relay_chain().unwrap().1,
+                        relay_chain_sync: relay_chain.runtime_service.clone(),
+                        relay_chain_block_number_bytes: relay_chain
+                            .sync_service
+                            .block_number_bytes(),
+                    },
+                ),
             })
             .await,
         );
@@ -1142,7 +1172,17 @@ async fn start_services<TPlat: platform::PlatformRef>(
                 platform: platform.clone(),
                 network_service: (network_service.clone(), 0),
                 network_events_receiver: network_event_receivers.pop().unwrap(),
-                parachain: None,
+                chain_type: sync_service::ConfigChainType::RelayChain(
+                    sync_service::ConfigRelayChain {
+                        runtime_code_hint: runtime_code_hint.map(|hint| {
+                            sync_service::ConfigRelayChainRuntimeCodeHint {
+                                storage_value: hint.code,
+                                merkle_value: hint.code_merkle_value,
+                                closest_ancestor_excluding: hint.closest_ancestor_excluding,
+                            }
+                        }),
+                    },
+                ),
             })
             .await,
         );

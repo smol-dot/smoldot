@@ -64,5 +64,4 @@
 pub mod methods;
 pub mod parse;
 pub mod payment_info;
-pub mod requests_subscriptions;
-pub mod websocket_server;
+pub mod service;

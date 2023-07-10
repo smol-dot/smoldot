@@ -557,14 +557,18 @@ impl ChainInformationBuild {
                     } else {
                         // If the GrandPa runtime API version is too old, it is not possible to
                         // determine the current set ID.
-                        let Some(grandpa_current_set_id_call_output) = inner.grandpa_current_set_id_call_output.take()
-                            else {
-                                debug_assert_eq!(inner.runtime_grandpa_supports_currentsetid, Some(false));
-                                return ChainInformationBuild::Finished {
-                                    result: Err(Error::GrandpaApiTooOld),
-                                    virtual_machine: inner.virtual_machine.take().unwrap(),
-                                }
+                        let Some(grandpa_current_set_id_call_output) =
+                            inner.grandpa_current_set_id_call_output.take()
+                        else {
+                            debug_assert_eq!(
+                                inner.runtime_grandpa_supports_currentsetid,
+                                Some(false)
+                            );
+                            return ChainInformationBuild::Finished {
+                                result: Err(Error::GrandpaApiTooOld),
+                                virtual_machine: inner.virtual_machine.take().unwrap(),
                             };
+                        };
 
                         grandpa_current_set_id_call_output
                     },

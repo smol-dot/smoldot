@@ -74,10 +74,6 @@ pub struct Config<'a, TParams> {
     // TODO: accept also child trie modifications
     pub storage_main_trie_changes: storage_diff::TrieDiff,
 
-    /// Initial state of [`Success::offchain_storage_changes`]. The changes made during this
-    /// execution will be pushed over the value in this field.
-    pub offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
-
     /// Maximum log level of the runtime.
     ///
     /// > **Note**: This value is opaque from the point of the view of the client, and the runtime
@@ -85,6 +81,10 @@ pub struct Config<'a, TParams> {
     /// >           "off", `1` for "error", `2` for "warn", `3` for "info", `4` for "debug",
     /// >           and `5` for "trace".
     pub max_log_level: u32,
+
+    /// If `true`, then [`StorageChanges::trie_changes_iter_ordered`] will return `Some`.
+    /// Passing `None` requires fewer calculation and fewer storage accesses.
+    pub calculate_trie_changes: bool,
 }
 
 /// Start running the WebAssembly virtual machine.
@@ -114,13 +114,15 @@ pub fn run(
                 Default::default(),
             ),
             tries_changes: BTreeMap::new(),
+            offchain_storage_changes: BTreeMap::new(),
         },
         state_trie_version,
         transactions_stack: Vec::new(),
-        offchain_storage_changes: config.offchain_storage_changes,
+        offchain_storage_changes: BTreeMap::new(),
         root_calculation: None,
         logs: String::new(),
         max_log_level: config.max_log_level,
+        calculate_trie_changes: config.calculate_trie_changes,
     }
     .run())
 }
@@ -136,8 +138,6 @@ pub struct Success {
     /// State trie version indicated by the runtime. All the storage changes indicated by
     /// [`Success::storage_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
-    /// List of changes to the off-chain storage that this block performs.
-    pub offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
     /// Concatenation of all the log messages printed by the runtime.
     pub logs: String,
 }
@@ -147,6 +147,9 @@ pub struct StorageChanges {
     /// The [`PendingStorageChanges`] that was built by the state machine. The changes are no
     /// longer pending.
     inner: PendingStorageChanges,
+
+    /// See [`Config::calculate_trie_changes`].
+    calculate_trie_changes: bool,
 }
 
 impl StorageChanges {
@@ -178,59 +181,68 @@ impl StorageChanges {
 
     /// Returns an iterator over the list of all changes performed to the tries (main trie and
     /// child tries included).
+    ///
+    /// Returns `Some` if and only if [`Config::calculate_trie_changes`] was `true`.
     pub fn trie_changes_iter_ordered(
         &'_ self,
-    ) -> impl Iterator<Item = (Option<&'_ [u8]>, &'_ [Nibble], TrieChange<'_>)> {
-        self.inner
-            .tries_changes
-            .iter()
-            .map(|((child_trie, key), change)| {
-                let change = match change {
-                    PendingStorageChangesTrieNode::Removed => TrieChange::Remove,
-                    PendingStorageChangesTrieNode::InsertUpdate {
-                        new_merkle_value,
-                        partial_key,
-                        children_merkle_values,
-                    } => {
-                        debug_assert!(key.ends_with(partial_key));
+    ) -> Option<impl Iterator<Item = (Option<&'_ [u8]>, &'_ [Nibble], TrieChange<'_>)>> {
+        if !self.calculate_trie_changes {
+            return None;
+        }
 
-                        let new_storage_value = if key.len() % 2 == 0 {
-                            let key_bytes = trie::nibbles_to_bytes_truncate(key.iter().copied())
-                                .collect::<Vec<_>>();
-                            match self
-                                .inner
-                                .trie_diffs
-                                .get(child_trie)
-                                .and_then(|diff| diff.diff_get(&key_bytes))
-                            {
-                                None => TrieChangeStorageValue::Unmodified,
-                                Some((new_value, ())) => {
-                                    TrieChangeStorageValue::Modified { new_value }
-                                }
-                            }
-                        } else {
-                            TrieChangeStorageValue::Unmodified
-                        };
-
-                        let children_merkle_values = <Box<[_; 16]>>::try_from(
-                            children_merkle_values
-                                .iter()
-                                .map(|child| child.as_ref().map(|mv| &mv[..]))
-                                .collect::<Box<[_]>>(),
-                        )
-                        .unwrap();
-
-                        TrieChange::InsertUpdate {
+        Some(
+            self.inner
+                .tries_changes
+                .iter()
+                .map(|((child_trie, key), change)| {
+                    let change = match change {
+                        PendingStorageChangesTrieNode::Removed => TrieChange::Remove,
+                        PendingStorageChangesTrieNode::InsertUpdate {
                             new_merkle_value,
                             partial_key,
                             children_merkle_values,
-                            new_storage_value,
-                        }
-                    }
-                };
+                        } => {
+                            debug_assert!(key.ends_with(partial_key));
 
-                (child_trie.as_deref(), &key[..], change)
-            })
+                            let new_storage_value = if key.len() % 2 == 0 {
+                                let key_bytes =
+                                    trie::nibbles_to_bytes_truncate(key.iter().copied())
+                                        .collect::<Vec<_>>();
+                                match self
+                                    .inner
+                                    .trie_diffs
+                                    .get(child_trie)
+                                    .and_then(|diff| diff.diff_get(&key_bytes))
+                                {
+                                    None => TrieChangeStorageValue::Unmodified,
+                                    Some((new_value, ())) => {
+                                        TrieChangeStorageValue::Modified { new_value }
+                                    }
+                                }
+                            } else {
+                                TrieChangeStorageValue::Unmodified
+                            };
+
+                            let children_merkle_values = <Box<[_; 16]>>::try_from(
+                                children_merkle_values
+                                    .iter()
+                                    .map(|child| child.as_ref().map(|mv| &mv[..]))
+                                    .collect::<Box<[_]>>(),
+                            )
+                            .unwrap();
+
+                            TrieChange::InsertUpdate {
+                                new_merkle_value,
+                                partial_key,
+                                children_merkle_values,
+                                new_storage_value,
+                            }
+                        }
+                    };
+
+                    (child_trie.as_deref(), &key[..], change)
+                }),
+        )
     }
 
     /// Returns a diff of the main trie.
@@ -245,10 +257,38 @@ impl StorageChanges {
 
 impl fmt::Debug for StorageChanges {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_map()
-            .entries(
-                self.trie_changes_iter_ordered()
-                    .map(|(child_trie, key, change)| {
+        if let Some(trie_changes) = self.trie_changes_iter_ordered() {
+            f.debug_map()
+                .entries(trie_changes.map(|(child_trie, key, change)| {
+                    let mut key_str = key
+                        .iter()
+                        .copied()
+                        .map(|n| format!("{:x}", n))
+                        .collect::<String>();
+                    if key_str.is_empty() {
+                        key_str = "∅".to_owned();
+                    }
+
+                    let key = match child_trie {
+                        Some(ct) => format!(
+                            "<{}>:{}",
+                            if ct.is_empty() {
+                                "∅".to_string()
+                            } else {
+                                hex::encode(ct)
+                            },
+                            key_str
+                        ),
+                        None => format!("<main>:{}", key_str),
+                    };
+
+                    (key, change)
+                }))
+                .finish()
+        } else {
+            f.debug_map()
+                .entries(self.inner.trie_diffs.iter().flat_map(|(child_trie, diff)| {
+                    diff.diff_iter_unordered().map(move |(key, value, _)| {
                         let mut key_str = key
                             .iter()
                             .copied()
@@ -271,10 +311,17 @@ impl fmt::Debug for StorageChanges {
                             None => format!("<main>:{}", key_str),
                         };
 
+                        let change = if let Some(value) = value {
+                            hex::encode(value)
+                        } else {
+                            "<deleted>".into()
+                        };
+
                         (key, change)
-                    }),
-            )
-            .finish()
+                    })
+                }))
+                .finish()
+        }
     }
 }
 
@@ -412,6 +459,13 @@ pub enum RuntimeHostVm {
     NextKey(NextKey),
     /// Verifying whether a signature is correct is required in order to continue.
     SignatureVerification(SignatureVerification),
+    /// Setting an offchain storage value is required in order to continue.
+    ///
+    /// Contrary to [`OffchainContext::StorageSet`], this variant is allowed to happen
+    /// outside of offchain workers.
+    OffchainStorageSet(OffchainStorageSet),
+    /// Functions that can only be called within the context of an offchain worker.
+    Offchain(OffchainContext),
 }
 
 impl RuntimeHostVm {
@@ -424,6 +478,36 @@ impl RuntimeHostVm {
             RuntimeHostVm::ClosestDescendantMerkleValue(inner) => inner.inner.vm.into_prototype(),
             RuntimeHostVm::NextKey(inner) => inner.inner.vm.into_prototype(),
             RuntimeHostVm::SignatureVerification(inner) => inner.inner.vm.into_prototype(),
+            RuntimeHostVm::OffchainStorageSet(inner) => inner.inner.vm.into_prototype(),
+            RuntimeHostVm::Offchain(inner) => inner.into_prototype(),
+        }
+    }
+}
+
+pub enum OffchainContext {
+    /// Loading an offchain storage value is required in order to continue.
+    StorageGet(OffchainStorageGet),
+    /// Setting an offchain storage value is required in order to continue.
+    ///
+    /// Contrary to [`RuntimeHostVm::OffchainStorageSet`], this variant can only happen in offchain
+    /// workers.
+    StorageSet(OffchainStorageCompareSet),
+    /// Timestamp for offchain worker.
+    Timestamp(OffchainTimestamp),
+    /// Random seed for offchain worker.
+    RandomSeed(OffchainRandomSeed),
+    /// Submit transaction from offchain worker.
+    SubmitTransaction(OffchainSubmitTransaction),
+}
+
+impl OffchainContext {
+    pub fn into_prototype(self) -> host::HostVmPrototype {
+        match self {
+            OffchainContext::StorageGet(inner) => inner.inner.vm.into_prototype(),
+            OffchainContext::StorageSet(inner) => inner.inner.vm.into_prototype(),
+            OffchainContext::Timestamp(inner) => inner.inner.vm.into_prototype(),
+            OffchainContext::RandomSeed(inner) => inner.inner.vm.into_prototype(),
+            OffchainContext::SubmitTransaction(inner) => inner.inner.vm.into_prototype(),
         }
     }
 }
@@ -751,7 +835,9 @@ impl ClosestDescendantMerkleValue {
     pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         let (_, trie_root_calculator::InProgress::ClosestDescendantMerkleValue(request)) =
             self.inner.root_calculation.as_ref().unwrap()
-            else { unreachable!() };
+        else {
+            unreachable!()
+        };
         request.key().flat_map(util::as_ref_iter)
     }
 
@@ -759,7 +845,9 @@ impl ClosestDescendantMerkleValue {
     pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         let (trie, trie_root_calculator::InProgress::ClosestDescendantMerkleValue(_)) =
             self.inner.root_calculation.as_ref().unwrap()
-            else { unreachable!() };
+        else {
+            unreachable!()
+        };
         trie.as_ref()
     }
 
@@ -770,7 +858,9 @@ impl ClosestDescendantMerkleValue {
     pub fn resume_unknown(mut self) -> RuntimeHostVm {
         let (trie, trie_root_calculator::InProgress::ClosestDescendantMerkleValue(request)) =
             self.inner.root_calculation.take().unwrap()
-            else { unreachable!() };
+        else {
+            unreachable!()
+        };
 
         self.inner.root_calculation = Some((trie, request.resume_unknown()));
         self.inner.run()
@@ -783,7 +873,9 @@ impl ClosestDescendantMerkleValue {
     pub fn inject_merkle_value(mut self, merkle_value: Option<&[u8]>) -> RuntimeHostVm {
         let (trie, trie_root_calculator::InProgress::ClosestDescendantMerkleValue(request)) =
             self.inner.root_calculation.take().unwrap()
-            else { unreachable!() };
+        else {
+            unreachable!()
+        };
 
         self.inner.root_calculation = Some((
             trie,
@@ -884,6 +976,230 @@ impl SignatureVerification {
     }
 }
 
+/// Loading an offchain storage value is required in order to continue.
+#[must_use]
+pub struct OffchainStorageGet {
+    inner: Inner,
+}
+
+impl OffchainStorageGet {
+    /// Returns the key whose value must be passed to [`OffchainStorageGet::inject_value`].
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+        match &self.inner.vm {
+            host::HostVm::ExternalOffchainStorageGet(req) => req.key(),
+            // We only create a `OffchainStorageGet` if the state is one of the above.
+            _ => unreachable!(),
+        }
+    }
+
+    /// Injects the corresponding storage value.
+    pub fn inject_value(mut self, value: Option<impl AsRef<[u8]>>) -> RuntimeHostVm {
+        match self.inner.vm {
+            host::HostVm::ExternalOffchainStorageGet(req) => {
+                self.inner.vm = req.resume(value.as_ref().map(|v| v.as_ref()));
+            }
+            // We only create a `OffchainStorageGet` if the state is one of the above.
+            _ => unreachable!(),
+        };
+
+        self.inner.run()
+    }
+}
+
+/// Setting the value of an offchain storage value is required.
+#[must_use]
+pub struct OffchainStorageSet {
+    inner: Inner,
+}
+
+impl OffchainStorageSet {
+    /// Returns the key whose value must be set.
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+        match &self.inner.vm {
+            host::HostVm::Finished(_) => {
+                self.inner
+                    .offchain_storage_changes
+                    .first_key_value()
+                    .unwrap()
+                    .0
+            }
+            // We only create a `OffchainStorageSet` if the state is one of the above.
+            _ => unreachable!(),
+        }
+    }
+
+    /// Returns the value to set.
+    ///
+    /// If `None` is returned, the key should be removed from the storage entirely.
+    pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        match &self.inner.vm {
+            host::HostVm::Finished(_) => self
+                .inner
+                .offchain_storage_changes
+                .first_key_value()
+                .unwrap()
+                .1
+                .as_ref(),
+            // We only create a `OffchainStorageSet` if the state is one of the above.
+            _ => unreachable!(),
+        }
+    }
+
+    /// Resumes execution after having set the value.
+    pub fn resume(mut self) -> RuntimeHostVm {
+        match self.inner.vm {
+            host::HostVm::Finished(_) => {
+                self.inner.offchain_storage_changes.pop_first();
+            }
+            // We only create a `OffchainStorageSet` if the state is one of the above.
+            _ => unreachable!(),
+        };
+
+        self.inner.run()
+    }
+}
+
+/// Setting the value of an offchain storage value is required.
+#[must_use]
+pub struct OffchainStorageCompareSet {
+    inner: Inner,
+}
+
+impl OffchainStorageCompareSet {
+    /// Returns the key whose value must be set.
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+        match &self.inner.vm {
+            host::HostVm::ExternalOffchainStorageSet(req) => either::Left(req.key()),
+            host::HostVm::Finished(_) => either::Right(
+                self.inner
+                    .offchain_storage_changes
+                    .first_key_value()
+                    .unwrap()
+                    .0,
+            ),
+            // We only create a `OffchainStorageSet` if the state is one of the above.
+            _ => unreachable!(),
+        }
+    }
+
+    /// Returns the value to set.
+    ///
+    /// If `None` is returned, the key should be removed from the storage entirely.
+    pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        match &self.inner.vm {
+            host::HostVm::ExternalOffchainStorageSet(req) => req.value().map(either::Left),
+            host::HostVm::Finished(_) => self
+                .inner
+                .offchain_storage_changes
+                .first_key_value()
+                .unwrap()
+                .1
+                .as_ref()
+                .map(either::Right),
+
+            // We only create a `OffchainStorageSet` if the state is one of the above.
+            _ => unreachable!(),
+        }
+    }
+
+    /// Returns the value the current value should be compared against. The operation is a no-op if they don't compare equal.
+    pub fn old_value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        match &self.inner.vm {
+            host::HostVm::ExternalOffchainStorageSet(req) => req.old_value(),
+            host::HostVm::Finished(_) => None,
+            // We only create a `OffchainStorageSet` if the state is one of the above.
+            _ => unreachable!(),
+        }
+    }
+
+    /// Resumes execution after having set the value. Must indicate whether a value was written.
+    pub fn resume(mut self, replaced: bool) -> RuntimeHostVm {
+        match self.inner.vm {
+            host::HostVm::ExternalOffchainStorageSet(req) => {
+                self.inner.vm = req.resume(replaced);
+            }
+            host::HostVm::Finished(_) => {
+                self.inner.offchain_storage_changes.pop_first();
+            }
+            // We only create a `OffchainStorageSet` if the state is one of the above.
+            _ => unreachable!(),
+        };
+
+        self.inner.run()
+    }
+}
+
+/// Providing the current UNIX timestamp is required in order to continue.
+#[must_use]
+pub struct OffchainTimestamp {
+    inner: Inner,
+}
+
+impl OffchainTimestamp {
+    /// Resume execution by providing the current UNIX timestamp.
+    pub fn inject_timestamp(mut self, value: u64) -> RuntimeHostVm {
+        match self.inner.vm {
+            host::HostVm::OffchainTimestamp(req) => {
+                self.inner.vm = req.resume(value);
+            }
+            // We only create a `OffchainTimestamp` if the state is one of the above.
+            _ => unreachable!(),
+        };
+
+        self.inner.run()
+    }
+}
+
+/// Providing a random number is required in order to continue.
+#[must_use]
+pub struct OffchainRandomSeed {
+    inner: Inner,
+}
+
+impl OffchainRandomSeed {
+    /// Resume execution by providing a random number.
+    pub fn inject_random_seed(mut self, value: [u8; 32]) -> RuntimeHostVm {
+        match self.inner.vm {
+            host::HostVm::OffchainRandomSeed(req) => {
+                self.inner.vm = req.resume(value);
+            }
+            // We only create a `OffchainRandomSeed` if the state is one of the above.
+            _ => unreachable!(),
+        };
+
+        self.inner.run()
+    }
+}
+
+/// The runtime requests submitting a transaction.
+#[must_use]
+pub struct OffchainSubmitTransaction {
+    inner: Inner,
+}
+
+impl OffchainSubmitTransaction {
+    /// Returns the SCALE-encoded transaction that must be submitted.
+    pub fn transaction(&'_ self) -> impl AsRef<[u8]> + '_ {
+        match &self.inner.vm {
+            host::HostVm::OffchainSubmitTransaction(req) => req.transaction(),
+            // We only create a `OffchainSubmitTransaction` if the state is one of the above.
+            _ => unreachable!(),
+        }
+    }
+    /// Resume execution. Must indicate whether the transaction has been successfully submitted.
+    pub fn resume(mut self, success: bool) -> RuntimeHostVm {
+        match self.inner.vm {
+            host::HostVm::OffchainSubmitTransaction(req) => {
+                self.inner.vm = req.resume(success);
+            }
+            // We only create a `OffchainSubmitTransaction` if the state is one of the above.
+            _ => unreachable!(),
+        };
+
+        self.inner.run()
+    }
+}
+
 /// Implementation detail of the execution. Shared by all the variants of [`RuntimeHostVm`]
 /// other than [`RuntimeHostVm::Finished`].
 struct Inner {
@@ -905,7 +1221,7 @@ struct Inner {
     state_trie_version: TrieEntryVersion,
 
     /// Pending changes to the off-chain storage that this execution performs.
-    offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    offchain_storage_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 
     /// Trie root calculation in progress. Contains the trie whose root is being calculated
     /// (`Some` for a child trie or `None` for the main trie) and the calculation state machine.
@@ -916,6 +1232,9 @@ struct Inner {
 
     /// Value provided by [`Config::max_log_level`].
     max_log_level: u32,
+
+    /// See [`Config::calculate_trie_changes`].
+    calculate_trie_changes: bool,
 }
 
 /// See [`Inner::pending_storage_changes`].
@@ -931,6 +1250,9 @@ struct PendingStorageChanges {
 
     /// Changes to the trie nodes of all the tries.
     tries_changes: BTreeMap<(Option<Vec<u8>>, Vec<Nibble>), PendingStorageChangesTrieNode>,
+
+    /// Changes to the off-chain storage committed by on-chain transactions.
+    offchain_storage_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 }
 
 /// See [`PendingStorageChanges::tries_changes`].
@@ -1085,27 +1407,41 @@ impl Inner {
             // output to be accurate.
             {
                 let trie_to_flush: Option<Option<either::Either<_, &[u8]>>> = match &self.vm {
-                    host::HostVm::Finished(_) => self
-                        .pending_storage_changes
-                        .stale_child_tries_root_hashes
-                        .iter()
-                        .next()
-                        .as_ref()
-                        .map(|t| t.as_ref().map(|t| either::Right(&t[..]))),
-                    host::HostVm::ExternalStorageRoot(req) => Some({
+                    host::HostVm::Finished(_) => {
+                        if let Some(child_trie) = self
+                            .pending_storage_changes
+                            .stale_child_tries_root_hashes
+                            .iter()
+                            .find_map(|ct| ct.as_ref())
+                        {
+                            Some(Some(either::Right(child_trie)))
+                        } else if self
+                            .pending_storage_changes
+                            .stale_child_tries_root_hashes
+                            .contains(&None)
+                            && self.calculate_trie_changes
+                        {
+                            Some(None)
+                        } else {
+                            None
+                        }
+                    }
+                    host::HostVm::ExternalStorageRoot(req) => {
                         if let Some(child_trie) = req.child_trie() {
-                            Some(either::Left(child_trie))
+                            Some(Some(either::Left(child_trie)))
                         } else {
                             // Find any child trie in `pending_storage_changes`. If `None` is
                             // found, calculate the main trie.
                             // It is important to calculate the child tries before the main tries.
-                            self.pending_storage_changes
-                                .stale_child_tries_root_hashes
-                                .iter()
-                                .find_map(|ct| ct.as_ref())
-                                .map(|t| either::Right(&t[..]))
+                            Some(
+                                self.pending_storage_changes
+                                    .stale_child_tries_root_hashes
+                                    .iter()
+                                    .find_map(|ct| ct.as_ref())
+                                    .map(|t| either::Right(&t[..])),
+                            )
                         }
-                    }),
+                    }
                     _ => None,
                 };
 
@@ -1161,6 +1497,12 @@ impl Inner {
                 }
             }
 
+            if matches!(self.vm, host::HostVm::Finished(_))
+                && !self.offchain_storage_changes.is_empty()
+            {
+                return RuntimeHostVm::OffchainStorageSet(OffchainStorageSet { inner: self });
+            }
+
             match self.vm {
                 host::HostVm::ReadyToRun(r) => self.vm = r.run(),
 
@@ -1176,18 +1518,30 @@ impl Inner {
 
                 host::HostVm::Finished(finished) => {
                     debug_assert!(self.transactions_stack.is_empty()); // Guaranteed by `host`.
-                    debug_assert!(self
-                        .pending_storage_changes
-                        .stale_child_tries_root_hashes
-                        .is_empty());
+                    debug_assert!(
+                        self.pending_storage_changes
+                            .stale_child_tries_root_hashes
+                            .is_empty()
+                            || (!self.calculate_trie_changes
+                                && self
+                                    .pending_storage_changes
+                                    .stale_child_tries_root_hashes
+                                    .len()
+                                    == 1
+                                && self
+                                    .pending_storage_changes
+                                    .stale_child_tries_root_hashes
+                                    .contains(&None))
+                    );
+                    debug_assert!(self.offchain_storage_changes.is_empty());
 
                     return RuntimeHostVm::Finished(Ok(Success {
                         virtual_machine: SuccessVirtualMachine(finished),
                         storage_changes: StorageChanges {
                             inner: self.pending_storage_changes,
+                            calculate_trie_changes: self.calculate_trie_changes,
                         },
                         state_trie_version: self.state_trie_version,
-                        offchain_storage_changes: self.offchain_storage_changes,
                         logs: self.logs,
                     }));
                 }
@@ -1310,12 +1664,35 @@ impl Inner {
                     });
                 }
 
-                host::HostVm::ExternalOffchainStorageSet(req) => {
-                    self.offchain_storage_changes.insert(
-                        req.key().as_ref().to_vec(),
-                        req.value().map(|v| v.as_ref().to_owned()),
-                    );
+                host::HostVm::ExternalOffchainIndexSet(req) => {
+                    self.pending_storage_changes
+                        .offchain_storage_changes
+                        .insert(
+                            req.key().as_ref().to_vec(),
+                            req.value().map(|v| v.as_ref().to_vec()),
+                        );
+
                     self.vm = req.resume();
+                }
+
+                host::HostVm::ExternalOffchainStorageGet(req) => {
+                    let current_value = self.offchain_storage_changes.get(req.key().as_ref());
+                    match current_value {
+                        Some(value) => self.vm = req.resume(value.as_ref().map(|v| &v[..])),
+                        None => {
+                            self.vm = req.into();
+                            return RuntimeHostVm::Offchain(OffchainContext::StorageGet(
+                                OffchainStorageGet { inner: self },
+                            ));
+                        }
+                    }
+                }
+
+                host::HostVm::ExternalOffchainStorageSet(req) => {
+                    self.vm = req.into();
+                    return RuntimeHostVm::Offchain(OffchainContext::StorageSet(
+                        OffchainStorageCompareSet { inner: self },
+                    ));
                 }
 
                 host::HostVm::SignatureVerification(req) => {
@@ -1407,6 +1784,24 @@ impl Inner {
                         }
                     }
                     self.vm = req.resume();
+                }
+                host::HostVm::OffchainTimestamp(req) => {
+                    self.vm = req.into();
+                    return RuntimeHostVm::Offchain(OffchainContext::Timestamp(
+                        OffchainTimestamp { inner: self },
+                    ));
+                }
+                host::HostVm::OffchainRandomSeed(req) => {
+                    self.vm = req.into();
+                    return RuntimeHostVm::Offchain(OffchainContext::RandomSeed(
+                        OffchainRandomSeed { inner: self },
+                    ));
+                }
+                host::HostVm::OffchainSubmitTransaction(req) => {
+                    self.vm = req.into();
+                    return RuntimeHostVm::Offchain(OffchainContext::SubmitTransaction(
+                        OffchainSubmitTransaction { inner: self },
+                    ));
                 }
             }
         }

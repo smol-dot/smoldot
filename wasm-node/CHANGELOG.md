@@ -6,6 +6,39 @@
 
 - A limit of one simultaneous request per peer is now enforced in order to limit the load that a light client induces on each full node it is connected to. This limit is theoretically part of the Polkadot networking protocol but in practice isn't properly enforced. Consequently, requests that were previously being executed in parallel might now execute more one after the other. ([#779](https://github.com/smol-dot/smoldot/pull/779))
 
+## 1.0.12 - 2023-07-10
+
+### Changed
+
+- The runtime code of the finalized block is now stored in the database. At initialization, smoldot now only downloads the hash of the runtime and compares it with the one in cache. If the hashes match (which is the case if no runtime update has happened on the chain since the database has been created), smoldot doesn't download the runtime code but uses the value in the cache. This saves a relatively heavy download (typically around 1 MiB to 1.5 MiB depending on the chain) and speeds up the loading time. ([#863](https://github.com/smol-dot/smoldot/pull/863))
+- The `chainHead_unstable_storage` JSON-RPC function now supports a `type` equal to `closest-descendant-merkle-value` and no longer supports `closest-ancestor-merkle-value`, in accordance with the latest changes in the JSON-RPC API specification. ([#824](https://github.com/smol-dot/smoldot/pull/824))
+- Blocks are now reported to `chain_subscribeAllHeads` and `chain_subscribeNewHeads` subscribers only after they have been put in the cache, preventing race conditions where JSON-RPC clients suffer from a cache miss if they ask information about these blocks too quickly. ([#854](https://github.com/smol-dot/smoldot/pull/854))
+- Runtime updates are now always reported to `state_subscribeRuntimeVersion` subscribers immediately after the `chain_subscribeNewHeads` notification corresponding to the block containing the runtime update. They were previously reported in a pseudo-random order. ([#854](https://github.com/smol-dot/smoldot/pull/854))
+- All the storage subscriptions made using `state_subscribeStorage` are now queried together into a single networking request per block, instead of sending one networking query per storage key and per subscription. ([#854](https://github.com/smol-dot/smoldot/pull/854))
+- An `AddChainError` is now thrown if the `databaseContent` parameter is not of type `string`. The database was previously silently ignored. ([#861](https://github.com/smol-dot/smoldot/pull/861))
+
+### Fixed
+
+- Fix downloading the runtime code twice during the warp syncing process. ([#863](https://github.com/smol-dot/smoldot/pull/863))
+- Fix a "One or more entries are missing from the call proof" error when validating some transactions. ([#879](https://github.com/smol-dot/smoldot/pull/879))
+
+## 1.0.11 - 2023-06-25
+
+### Changed
+
+- The runtime specification yielded by the `chainHead_unstable_follow` JSON-RPC function no longer includes the `authoringVersion` field, in accordance with the latest changes in the JSON-RPC API specification. ([#815](https://github.com/smol-dot/smoldot/pull/815))
+- The `chainHead_unstable_unpin` JSON-RPC function now accepts either a single hash or an array of hashes, in accordance with the latest changes in the JSON-RPC API specification. ([#814](https://github.com/smol-dot/smoldot/pull/814))
+- Add support for the `descendants-values`, `descendants-hashes`, and `closest-ancestor-merkle-value` types for the `chainHead_unstable_storage` JSON-RPC function. ([#813](https://github.com/smol-dot/smoldot/pull/813))
+- The `chainHead_unstable_storage` JSON-RPC function now accepts an array of `items` as parameter instead of a `key` and `type`, in accordance with the latest changes in the JSON-RPC API specification. ([#813](https://github.com/smol-dot/smoldot/pull/813))
+- The `chainHead_unstable_storage` JSON-RPC function now generates `items` notifications containin an array of multiple `items`, in accordance with the latest changes in the JSON-RPC API specification. ([#813](https://github.com/smol-dot/smoldot/pull/813))
+
+### Fixed
+
+- Fix not absorbing the JavaScript exception triggered by the browser when connecting to a `ws://` node when smoldot is embedded in a web page served over `https://`. ([#795](https://github.com/smol-dot/smoldot/pull/795), [#800](https://github.com/smol-dot/smoldot/pull/800))
+- Fix potential panic due to race condition when smoldot wants to abort connecting to a peer that we have just failed connecting to. ([#801](https://github.com/smol-dot/smoldot/pull/801))
+- Smoldot no longer calls `close()` on WebSockets that aren't fully established yet (even though it is legal to do so according to the WHATWG specification) in order to avoid browsers printing warnings in the console when you do so. ([#799](https://github.com/smol-dot/smoldot/pull/799))
+- Fix panic-inducing race condition when a networking event happens right when the warp syncing finishes. ([#808](https://github.com/smol-dot/smoldot/pull/808))
+
 ## 1.0.10 - 2023-06-19
 
 ### Changed

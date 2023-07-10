@@ -19,7 +19,6 @@
 
 import { Client, ClientOptionsWithBytecode } from './public-types.js'
 import { start as innerStart, Connection, ConnectionConfig } from './internals/client.js'
-import { multibaseBase64Decode } from './internals/base64.js'
 
 export {
     AddChainError,
@@ -81,11 +80,23 @@ export function startWithBytecode(options: ClientOptionsWithBytecode): Client {
  */
 function connect(config: ConnectionConfig): Connection {
     if (config.address.ty === "websocket") {
-        const connection = new WebSocket(config.address.url);
-        connection.binaryType = 'arraybuffer';
+        // Even though the WHATWG specification (<https://websockets.spec.whatwg.org/#dom-websocket-websocket>)
+        // doesn't mention it, `new WebSocket` can throw an exception if the URL is forbidden
+        // for security reasons. We absord this exception as soon as it is thrown.
+        // `connection` can be either a `WebSocket` object (the normal case), or a string
+        // indicating an error message that must be propagated with `onConnectionReset` as soon
+        // as possible, or `null` if the API user considers the connection as reset.
+        let connection: WebSocket | string | null;
+        try {
+            connection = new WebSocket(config.address.url);
+        } catch(error) {
+            connection = error instanceof Error ? error.toString() : "Exception thrown by new WebSocket";
+        }
 
         const bufferedAmountCheck = { quenedUnreportedBytes: 0, nextTimeout: 10 };
         const checkBufferedAmount = () => {
+            if (!(connection instanceof WebSocket))
+                return;
             if (connection.readyState != 1)
                 return;
             // Note that we might expect `bufferedAmount` to always be <= the sum of the lengths
@@ -107,31 +118,56 @@ function connect(config: ConnectionConfig): Connection {
                 config.onWritableBytes(wasSent);
         };
 
-        connection.onopen = () => {
-            config.onOpen({
-                type: 'single-stream', handshake: 'multistream-select-noise-yamux',
-                initialWritableBytes: 1024 * 1024, writeClosable: false,
-            });
-        };
-        connection.onclose = (event) => {
-            const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
-            config.onConnectionReset(message);
-        };
-        connection.onmessage = (msg) => {
-            config.onMessage(new Uint8Array(msg.data as ArrayBuffer));
-        };
+        if (connection instanceof WebSocket) {
+            connection.binaryType = 'arraybuffer';
+
+            connection.onopen = () => {
+                config.onOpen({
+                    type: 'single-stream', handshake: 'multistream-select-noise-yamux',
+                    initialWritableBytes: 1024 * 1024
+                });
+            };
+            connection.onclose = (event) => {
+                const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
+                config.onConnectionReset(message);
+            };
+            connection.onmessage = (msg) => {
+                config.onMessage(new Uint8Array(msg.data as ArrayBuffer));
+            };
+        } else {
+            setTimeout(() => {
+                if (connection && !(connection instanceof WebSocket)) {
+                    config.onConnectionReset(connection);
+                    connection = null;
+                }
+            }, 1)
+        }
 
         return {
             reset: (): void => {
-                connection.onopen = null;
-                connection.onclose = null;
-                connection.onmessage = null;
-                connection.onerror = null;
-                connection.close();
+                if (connection instanceof WebSocket) {
+                    connection.onopen = null;
+                    connection.onclose = null;
+                    connection.onmessage = null;
+                    connection.onerror = null;
+
+                    // According to the WebSocket specification, calling `close()` when a WebSocket
+                    // isn't fully opened yet is completely legal and seemingly a normal thing to
+                    // do (see <https://websockets.spec.whatwg.org/#dom-websocket-close>).
+                    // Unfortunately, browsers print a warning in the console if you do that. To
+                    // avoid these warnings, we only call `close()` if the connection is fully
+                    // opened. According to <https://websockets.spec.whatwg.org/#garbage-collection>,
+                    // removing all the event listeners will cause the WebSocket to be garbage
+                    // collected, which should have the same effect as `close()`.
+                    if (connection.readyState == WebSocket.OPEN)
+                        connection.close();
+                }
+
+                connection = null;
             },
 
             send: (data: Uint8Array): void => {
-                connection.send(data);
+                (connection as WebSocket).send(data);
                 if (bufferedAmountCheck.quenedUnreportedBytes == 0) {
                     bufferedAmountCheck.nextTimeout = 10;
                     setTimeout(checkBufferedAmount, 10);
@@ -143,15 +179,8 @@ function connect(config: ConnectionConfig): Connection {
             openOutSubstream: () => { throw new Error('Wrong connection type') }
         };
     } else if (config.address.ty === "webrtc") {
-        const { targetPort, ipVersion, targetIp, remoteCertMultibase } =
+        const { targetPort, ipVersion, targetIp, remoteTlsCertificateSha256 } =
             config.address;
-
-        // The payload of `/certhash` is the hash of the self-generated certificate that the
-        // server presents.
-        // This function throws an exception if the certhash isn't correct. For this reason, this call
-        // is performed as part of the parsing of the multiaddr.
-        const remoteCertMultihash = multibaseBase64Decode(remoteCertMultibase);
-        const remoteCertSha256Hash = multihashToSha256(remoteCertMultihash);
 
         // TODO: detect localhost for Firefox? https://bugzilla.mozilla.org/show_bug.cgi?id=1659672
 
@@ -167,10 +196,10 @@ function connect(config: ConnectionConfig): Connection {
         // to smoldot. This data channel is stored in this variable. Once it is reported to smoldot,
         // it is inserted in `dataChannels`.
         let handshakeDataChannel: RTCDataChannel | undefined;
-        // Multihash-encoded DTLS certificate of the local node. Unknown as long as it hasn't been
+        // SHA256 hash of the DTLS certificate of the local node. Unknown as long as it hasn't been
         // generated.
         // TODO: could be merged with `pc` in one variable, and maybe even the other fields as well
-        let localTlsCertificateMultihash: Uint8Array | undefined;
+        let localTlsCertificateSha256: Uint8Array | undefined;
 
         // Kills all the JavaScript objects (the connection and all its substreams), ensuring that no
         // callback will be called again. Doesn't report anything to smoldot, as this should be done
@@ -228,8 +257,8 @@ function connect(config: ConnectionConfig): Connection {
                         handshake: 'webrtc',
                         // `addChannel` can never be called before the local certificate is generated, so this
                         // value is always defined.
-                        localTlsCertificateMultihash: localTlsCertificateMultihash!,
-                        remoteTlsCertificateMultihash: remoteCertMultihash
+                        localTlsCertificateSha256: localTlsCertificateSha256!,
+                        remoteTlsCertificateSha256,
                     });
                 } else {
                     console.assert(direction !== 'outbound' || !handshakeDataChannel, "handshakeDataChannel still defined");
@@ -336,9 +365,8 @@ function connect(config: ConnectionConfig): Connection {
                 config.onConnectionReset('Failed to obtain the browser certificate fingerprint');
                 return;
             }
-            localTlsCertificateMultihash = new Uint8Array(34);
-            localTlsCertificateMultihash.set([0x12, 32], 0);
-            localTlsCertificateMultihash.set(localTlsCertificateHex!.split(':').map((s) => parseInt(s, 16)), 2);
+            localTlsCertificateSha256 = new Uint8Array(32);
+            localTlsCertificateSha256.set(localTlsCertificateHex!.split(':').map((s) => parseInt(s, 16)), 0);
 
             // `onconnectionstatechange` is used to detect when the connection has closed or has failed
             // to open.
@@ -376,7 +404,7 @@ function connect(config: ConnectionConfig): Connection {
                 await pc!.setLocalDescription({ type: 'offer', sdp: sdpOffer });
 
                 // Transform certificate hash into fingerprint (upper-hex; each byte separated by ":").
-                const fingerprint = Array.from(remoteCertSha256Hash).map((n) => ("0" + n.toString(16)).slice(-2).toUpperCase()).join(':');
+                const fingerprint = Array.from(remoteTlsCertificateSha256).map((n) => ("0" + n.toString(16)).slice(-2).toUpperCase()).join(':');
 
                 // Note that the trailing line feed is important, as otherwise Chrome
                 // fails to parse the payload.
@@ -404,7 +432,7 @@ function connect(config: ConnectionConfig): Connection {
                     // The `<fmt>` component must always be `webrtc-datachannel` for WebRTC.
                     // The rest of the SDP payload adds attributes to this specific media stream.
                     // RFCs: 8839, 8866, 8841
-                    "m=application " + targetPort + " " + "UDP/DTLS/SCTP webrtc-datachannel" + "\n" +
+                    "m=application " + String(targetPort) + " " + "UDP/DTLS/SCTP webrtc-datachannel" + "\n" +
                     // Indicates the IP address of the remote.
                     // Note that "IN" means "Internet" (and not "input").
                     "c=IN IP" + ipVersion + " " + targetIp + "\n" +
@@ -435,7 +463,7 @@ function connect(config: ConnectionConfig): Connection {
                     "a=max-message-size:16384" + "\n" +
                     // A transport address for a candidate that can be used for connectivity
                     // checks (RFC8839).
-                    "a=candidate:1 1 UDP 1 " + targetIp + " " + targetPort + " typ host" + "\n";
+                    "a=candidate:1 1 UDP 1 " + targetIp + " " + String(targetPort) + " typ host" + "\n";
 
                 await pc!.setRemoteDescription({ type: "answer", sdp: remoteSdp });
             };
@@ -512,15 +540,4 @@ function connect(config: ConnectionConfig): Connection {
         // we don't support.
         throw new Error();
     }
-}
-
-/// Parses a multihash-multibase-encoded string into a SHA256 hash.
-///
-/// Throws an exception if the multihash algorithm isn't SHA256.
-const multihashToSha256 = (certMultihash: Uint8Array): Uint8Array => {
-    if (certMultihash.length != 34 || certMultihash[0] != 0x12 || certMultihash[1] != 32) {
-        throw new Error('Certificate multihash is not SHA-256');
-    }
-
-    return new Uint8Array(certMultihash.slice(2));
 }

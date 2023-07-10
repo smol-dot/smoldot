@@ -144,11 +144,10 @@ where
             .collect::<hashbrown::HashSet<_, fnv::FnvBuildHasher>>();
         for (hash, (_, proof_entry_range)) in merkle_values.iter() {
             let node_value = &config.proof.as_ref()[proof_entry_range.clone()];
-            let Ok(decoded) = trie_node::decode(node_value)
-                else {
-                    maybe_trie_roots.remove(hash);
-                    continue
-                };
+            let Ok(decoded) = trie_node::decode(node_value) else {
+                maybe_trie_roots.remove(hash);
+                continue;
+            };
             for child in decoded.children.into_iter().flatten() {
                 if let Ok(child) = &<[u8; 32]>::try_from(child) {
                     maybe_trie_roots.remove(child);
@@ -595,7 +594,8 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
         Children { children }
     }
 
-    /// Returns the closest ancestor to the given key. If `key` is in the proof, returns `key`.
+    /// Returns the closest ancestor to the given key that can be found in the proof. If `key` is
+    /// in the proof, returns `key`.
     fn closest_ancestor<'a>(
         &'a self,
         trie_root_merkle_value: &[u8; 32],
@@ -665,6 +665,18 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                 }
             }
         }
+    }
+
+    /// Returns the key of the closest ancestor to the given key that can be found in the proof.
+    /// If `key` is in the proof, returns `key`.
+    pub fn closest_ancestor_in_proof<'a>(
+        &'a self,
+        trie_root_merkle_value: &[u8; 32],
+        key: &[nibble::Nibble],
+    ) -> Result<Option<&'a [nibble::Nibble]>, IncompleteProofError> {
+        Ok(self
+            .closest_ancestor(trie_root_merkle_value, key)?
+            .map(|(key, _)| key))
     }
 
     /// Returns information about a trie node.
@@ -917,12 +929,11 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                         // `ancestor_key`.
                         key_before.truncate(ancestor_key.len());
                         loop {
-                            let Some(nibble) = key_before.pop()
-                                else {
-                                    // `key_before` is equal to `0xffff...` and thus can't
-                                    // have any next sibling.
-                                    return Ok(None)
-                                };
+                            let Some(nibble) = key_before.pop() else {
+                                // `key_before` is equal to `0xffff...` and thus can't
+                                // have any next sibling.
+                                return Ok(None);
+                            };
                             if let Some(new_nibble) = nibble.checked_add(1) {
                                 key_before.push(new_nibble);
                                 break;
@@ -974,7 +985,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                 if parent_key.len() == key.len() - 1 =>
             {
                 // Exact match, meaning that `parent_key` is precisely one less nibble than `key`.
-                // This means that there's no need between `parent_key` and `key`. Consequently,
+                // This means that there's no node between `parent_key` and `key`. Consequently,
                 // the closest-descendant-or-equal of `key` is also the strict-closest-descendant
                 // of `parent_key`, and its Merkle value can be found in `parent_key`'s node
                 // value.
@@ -1138,6 +1149,17 @@ pub enum Child<'a> {
     },
     /// Child doesn't exist.
     NoChild,
+}
+
+impl<'a> Child<'a> {
+    /// Returns the Merkle value of this child. `None` if the child doesn't exist.
+    pub fn merkle_value(&self) -> Option<&'a [u8]> {
+        match self {
+            Child::InProof { merkle_value, .. } => Some(merkle_value),
+            Child::AbsentFromProof { merkle_value } => Some(merkle_value),
+            Child::NoChild => None,
+        }
+    }
 }
 
 impl<'a> Children<'a> {

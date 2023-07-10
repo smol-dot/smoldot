@@ -30,15 +30,16 @@ use crate::{network_service, platform::PlatformRef, runtime_service};
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use async_lock::Mutex;
-use core::{fmt, num::NonZeroU32, time::Duration};
+use core::{fmt, mem, num::NonZeroU32, time::Duration};
 use futures_channel::{mpsc, oneshot};
 use futures_util::{stream, SinkExt as _};
+use rand::seq::IteratorRandom as _;
 use smoldot::{
     chain,
     executor::host,
     libp2p::PeerId,
     network::{protocol, service},
-    trie::{self, prefix_proof, proof_decode},
+    trie::{self, prefix_proof, proof_decode, Nibble},
 };
 
 mod parachain;
@@ -69,12 +70,41 @@ pub struct Config<TPlat: PlatformRef> {
     /// [`network_service::NetworkService::new`].
     pub network_events_receiver: stream::BoxStream<'static, network_service::Event>,
 
-    /// Extra fields used when the chain is a parachain.
-    /// If `None`, this chain is a standalone chain or a relay chain.
-    pub parachain: Option<ConfigParachain<TPlat>>,
+    /// Extra fields depending on whether the chain is a relay chain or a parachain.
+    pub chain_type: ConfigChainType<TPlat>,
 }
 
-/// See [`Config::parachain`].
+/// See [`Config::chain_type`].
+pub enum ConfigChainType<TPlat: PlatformRef> {
+    /// Chain is a relay chain.
+    RelayChain(ConfigRelayChain),
+    /// Chain is a parachain.
+    Parachain(ConfigParachain<TPlat>),
+}
+
+/// See [`ConfigChainType::RelayChain`].
+pub struct ConfigRelayChain {
+    /// Known valid Merkle value and storage value combination for the `:code` key.
+    ///
+    /// If provided, the warp syncing algorithm will first fetch the Merkle value of `:code`, and
+    /// if it matches the Merkle value provided in the hint, use the storage value in the hint
+    /// instead of downloading it. If the hint doesn't match, an extra round-trip will be needed,
+    /// but if the hint matches it saves a big download.
+    pub runtime_code_hint: Option<ConfigRelayChainRuntimeCodeHint>,
+}
+
+/// See [`ConfigRelayChain::runtime_code_hint`].
+pub struct ConfigRelayChainRuntimeCodeHint {
+    /// Storage value of the `:code` trie node corresponding to
+    /// [`ConfigRelayChainRuntimeCodeHint::merkle_value`].
+    pub storage_value: Vec<u8>,
+    /// Merkle value of the `:code` trie node in the storage main trie.
+    pub merkle_value: Vec<u8>,
+    /// Closest ancestor of the `:code` key except for `:code` itself.
+    pub closest_ancestor_excluding: Vec<Nibble>,
+}
+
+/// See [`ConfigChainType::Parachain`].
 pub struct ConfigParachain<TPlat: PlatformRef> {
     /// Runtime service that synchronizes the relay chain of this parachain.
     pub relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
@@ -114,36 +144,40 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
 
         let log_target = format!("sync-service-{}", config.log_name);
 
-        if let Some(config_parachain) = config.parachain {
-            config.platform.spawn_task(
-                log_target.clone().into(),
-                Box::pin(parachain::start_parachain(
-                    log_target,
-                    config.platform.clone(),
-                    config.chain_information,
-                    config.block_number_bytes,
-                    config_parachain.relay_chain_sync.clone(),
-                    config_parachain.relay_chain_block_number_bytes,
-                    config_parachain.parachain_id,
-                    from_foreground,
-                    config.network_service.1,
-                    config.network_events_receiver,
-                )),
-            );
-        } else {
-            config.platform.spawn_task(
-                log_target.clone().into(),
-                Box::pin(standalone::start_standalone_chain(
-                    log_target,
-                    config.platform.clone(),
-                    config.chain_information,
-                    config.block_number_bytes,
-                    from_foreground,
-                    config.network_service.0.clone(),
-                    config.network_service.1,
-                    config.network_events_receiver,
-                )),
-            );
+        match config.chain_type {
+            ConfigChainType::Parachain(config_parachain) => {
+                config.platform.spawn_task(
+                    log_target.clone().into(),
+                    Box::pin(parachain::start_parachain(
+                        log_target,
+                        config.platform.clone(),
+                        config.chain_information,
+                        config.block_number_bytes,
+                        config_parachain.relay_chain_sync.clone(),
+                        config_parachain.relay_chain_block_number_bytes,
+                        config_parachain.parachain_id,
+                        from_foreground,
+                        config.network_service.1,
+                        config.network_events_receiver,
+                    )),
+                );
+            }
+            ConfigChainType::RelayChain(config_relay_chain) => {
+                config.platform.spawn_task(
+                    log_target.clone().into(),
+                    Box::pin(standalone::start_standalone_chain(
+                        log_target,
+                        config.platform.clone(),
+                        config.chain_information,
+                        config.block_number_bytes,
+                        config_relay_chain.runtime_code_hint,
+                        from_foreground,
+                        config.network_service.0.clone(),
+                        config.network_service.1,
+                        config.network_events_receiver,
+                    )),
+                );
+            }
         }
 
         SyncService {
@@ -399,54 +433,137 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         Err(())
     }
 
-    /// Performs one or more storage proof requests in order to find the value of the given
-    /// `requested_keys`.
+    /// Performs one or more storage proof requests in order to fulfill the `requests` passed as
+    /// parameter.
     ///
     /// Must be passed a block hash, a block number, and the Merkle value of the root node of the
     /// storage trie of this same block. The value of `block_number` corresponds to the value
-    /// in the [`smoldot::header::HeaderRef::number`] field, and the value of `storage_trie_root`
+    /// in the [`smoldot::header::HeaderRef::number`] field, and the value of `main_trie_root_hash`
     /// corresponds to the value in the [`smoldot::header::HeaderRef::state_root`] field.
     ///
-    /// Returns the storage values of `requested_keys` in the storage of the block, or an error if
-    /// it couldn't be determined. If `Ok`, the `Vec` is guaranteed to have the same number of
-    /// elements as `requested_keys`.
+    /// The result will contain items corresponding to the requests, but in no particular order.
     ///
-    /// This function is equivalent to calling
-    /// [`network_service::NetworkService::storage_proof_request`] and verifying the proof,
-    /// potentially multiple times until it succeeds. The number of attempts and the selection of
-    /// peers is done through reasonable heuristics.
+    /// See the documentation of [`StorageRequestItem`] and [`StorageResultItem`] for more
+    /// information.
+    // TODO: should return the items in a streaming way, so that we don't need to wait for all the queries to have finished
     pub async fn storage_query(
         self: Arc<Self>,
         block_number: u64,
         block_hash: &[u8; 32],
-        storage_trie_root: &[u8; 32],
-        requested_keys: impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone,
-        mut total_attempts: u32,
+        main_trie_root_hash: &[u8; 32],
+        requests: impl Iterator<Item = StorageRequestItem>,
+        total_attempts: u32,
         timeout_per_request: Duration,
         _max_parallel: NonZeroU32,
-    ) -> Result<Vec<Option<Vec<u8>>>, StorageQueryError> {
-        let mut outcome_errors =
-            Vec::with_capacity(usize::try_from(total_attempts).unwrap_or(usize::max_value()));
-
+    ) -> Result<Vec<StorageResultItem>, StorageQueryError> {
+        // TODO: this should probably be extracted to a state machine in `/lib`, with unit tests
+        // TODO: big requests should be split into multiple smaller ones
         // TODO: handle max_parallel
-        // TODO: shuffle peers ; don't just take the first
-        // TODO: slowly increase number of peers dynamically if no peer is immediately available
+        enum RequestImpl {
+            PrefixScan {
+                requested_key: Vec<u8>,
+                scan: prefix_proof::PrefixScan,
+            },
+            ValueOrHash {
+                key: Vec<u8>,
+                hash: bool,
+            },
+            ClosestDescendantMerkleValue {
+                key: Vec<u8>,
+            },
+        }
+
+        let mut requests_remaining = requests
+            .map(|request| match request.ty {
+                StorageRequestItemTy::DescendantsHashes
+                | StorageRequestItemTy::DescendantsValues => RequestImpl::PrefixScan {
+                    scan: prefix_proof::prefix_scan(prefix_proof::Config {
+                        prefix: &request.key,
+                        trie_root_hash: *main_trie_root_hash,
+                        full_storage_values_required: matches!(
+                            request.ty,
+                            StorageRequestItemTy::DescendantsValues
+                        ),
+                    }),
+                    requested_key: request.key,
+                },
+                StorageRequestItemTy::Value => RequestImpl::ValueOrHash {
+                    key: request.key,
+                    hash: false,
+                },
+                StorageRequestItemTy::Hash => RequestImpl::ValueOrHash {
+                    key: request.key,
+                    hash: true,
+                },
+                StorageRequestItemTy::ClosestDescendantMerkleValue => {
+                    RequestImpl::ClosestDescendantMerkleValue { key: request.key }
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let total_attempts = usize::try_from(total_attempts).unwrap_or(usize::max_value());
+        let mut outcome_errors = Vec::with_capacity(total_attempts);
+
+        let mut final_results =
+            Vec::<StorageResultItem>::with_capacity(requests_remaining.len() * 4);
+
         loop {
-            if total_attempts == 0 {
-                break;
+            // Check if we're done.
+            if requests_remaining.is_empty() {
+                return Ok(final_results);
             }
 
-            let peers_assumed_know_blocks = self
-                .peers_assumed_know_blocks(block_number, block_hash)
-                .await;
+            if outcome_errors.len() >= total_attempts {
+                return Err(StorageQueryError {
+                    errors: outcome_errors,
+                });
+            }
 
+            // Choose peer to query.
+            let peers_assumed_know_blocks = self
+                .peers_assumed_know_blocks(block_number, &block_hash)
+                .await;
+            if peers_assumed_know_blocks.is_empty() {
+                return Err(StorageQueryError {
+                    errors: outcome_errors,
+                });
+            }
             let request_lock = self
                 .network_service
                 .clone()
                 .lock_any_for_request(peers_assumed_know_blocks.into_iter().collect())
                 .await;
 
-            total_attempts -= 1;
+            // Build the list of keys to request.
+            let keys_to_request = {
+                let mut keys = hashbrown::HashSet::with_capacity_and_hasher(
+                    requests_remaining.len() * 4,
+                    fnv::FnvBuildHasher::default(),
+                );
+
+                for request in &requests_remaining {
+                    match request {
+                        RequestImpl::PrefixScan { scan, .. } => {
+                            keys.extend(scan.requested_keys().map(|nibbles| {
+                                trie::nibbles_to_bytes_suffix_extend(nibbles).collect::<Vec<_>>()
+                            }));
+                        }
+                        RequestImpl::ValueOrHash { key, .. } => {
+                            keys.insert(key.clone());
+                        }
+                        RequestImpl::ClosestDescendantMerkleValue { key } => {
+                            // We query the parent of `key`.
+                            if key.is_empty() {
+                                keys.insert(Vec::new());
+                            } else {
+                                keys.insert(key[..key.len() - 1].to_owned());
+                            }
+                        }
+                    }
+                }
+
+                keys
+            };
 
             let result = self
                 .network_service
@@ -456,135 +573,180 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     request_lock,
                     protocol::StorageProofRequestConfig {
                         block_hash: *block_hash,
-                        keys: requested_keys.clone(),
+                        keys: keys_to_request.into_iter(),
                     },
                     timeout_per_request,
                 )
-                .await
-                .map_err(StorageQueryErrorDetail::Network)
-                .and_then(|outcome| {
-                    let decoded = outcome.decode();
-                    let decoded = proof_decode::decode_and_verify_proof(proof_decode::Config {
-                        proof: decoded,
-                    })
-                    .map_err(StorageQueryErrorDetail::ProofVerification)?;
+                .await;
 
-                    let mut result = Vec::with_capacity(requested_keys.clone().count());
-                    for key in requested_keys.clone() {
-                        result.push(
-                            decoded
-                                .storage_value(storage_trie_root, key.as_ref())
-                                .map_err(|_| StorageQueryErrorDetail::MissingProofEntry)?
-                                .map(|(v, _)| v.to_owned()),
-                        );
-                    }
-                    debug_assert_eq!(result.len(), result.capacity());
-                    Ok(result)
-                });
-
-            match result {
-                Ok(values) => return Ok(values),
+            let proof = match result {
+                Ok(r) => r,
                 Err(err) => {
-                    outcome_errors.push(err);
+                    outcome_errors.push(StorageQueryErrorDetail::Network(err));
+                    continue;
                 }
-            }
-        }
+            };
 
-        Err(StorageQueryError {
-            errors: outcome_errors,
-        })
-    }
-
-    pub async fn storage_prefix_keys_query(
-        self: Arc<Self>,
-        block_number: u64,
-        block_hash: &[u8; 32],
-        prefix: &[u8],
-        storage_trie_root: &[u8; 32],
-        mut total_attempts: u32,
-        timeout_per_request: Duration,
-        _max_parallel: NonZeroU32,
-    ) -> Result<Vec<Vec<u8>>, StorageQueryError> {
-        let mut prefix_scan = prefix_proof::prefix_scan(prefix_proof::Config {
-            prefix,
-            trie_root_hash: *storage_trie_root,
-        });
-
-        'main_scan: loop {
-            let mut outcome_errors =
-                Vec::with_capacity(usize::try_from(total_attempts).unwrap_or(usize::max_value()));
-
-            // TODO: handle max_parallel
-            // TODO: shuffle peers ; don't just take the first
-            // TODO: slowly increase number of peers dynamically if no peer is immediately available
-            // TODO: if the number of keys is large, split into multiple requests
-            loop {
-                if total_attempts == 0 {
-                    break;
+            let decoded_proof = match proof_decode::decode_and_verify_proof(proof_decode::Config {
+                proof: proof.decode(),
+            }) {
+                Ok(d) => d,
+                Err(err) => {
+                    outcome_errors.push(StorageQueryErrorDetail::ProofVerification(err));
+                    continue;
                 }
+            };
 
-                let peers_assumed_know_blocks = self
-                    .peers_assumed_know_blocks(block_number, block_hash)
-                    .await;
-
-                let request_lock = self
-                    .network_service
-                    .clone()
-                    .lock_any_for_request(peers_assumed_know_blocks.into_iter().collect())
-                    .await;
-
-                total_attempts -= 1;
-
-                let result = self
-                    .network_service
-                    .clone()
-                    .storage_proof_request(
-                        self.network_chain_index,
-                        request_lock,
-                        protocol::StorageProofRequestConfig {
-                            block_hash: *block_hash,
-                            keys: prefix_scan.requested_keys().map(|nibbles| {
-                                trie::nibbles_to_bytes_suffix_extend(nibbles).collect::<Vec<_>>()
-                            }),
-                        },
-                        timeout_per_request,
-                    )
-                    .await
-                    .map_err(StorageQueryErrorDetail::Network);
-
-                match result {
-                    Ok(proof) => {
-                        match prefix_scan.resume(proof.decode()) {
+            for request in mem::take(&mut requests_remaining) {
+                match request {
+                    RequestImpl::PrefixScan {
+                        scan,
+                        requested_key,
+                    } => {
+                        match scan.resume(proof.decode()) {
                             Ok(prefix_proof::ResumeOutcome::InProgress(scan)) => {
-                                // Continue next step of the proof.
-                                prefix_scan = scan;
-                                continue 'main_scan;
-                            }
-                            Ok(prefix_proof::ResumeOutcome::Success { keys }) => {
-                                return Ok(keys);
-                            }
-                            Err((scan, err)) => {
-                                prefix_scan = scan;
-                                outcome_errors.push(match err {
-                                    prefix_proof::Error::InvalidProof(err) => {
-                                        StorageQueryErrorDetail::ProofVerification(err)
-                                    }
-                                    prefix_proof::Error::MissingProofEntry => {
-                                        StorageQueryErrorDetail::MissingProofEntry
-                                    }
+                                requests_remaining.push(RequestImpl::PrefixScan {
+                                    scan,
+                                    requested_key,
                                 });
+                            }
+                            Ok(prefix_proof::ResumeOutcome::Success {
+                                entries,
+                                full_storage_values_required,
+                            }) => {
+                                // The value of `full_storage_values_required` determines whether
+                                // we wanted full values (`true`) or hashes (`false`).
+                                for (key, value) in entries {
+                                    match value {
+                                        prefix_proof::StorageValue::Hash(hash) => {
+                                            debug_assert!(!full_storage_values_required);
+                                            final_results.push(StorageResultItem::DescendantHash {
+                                                key,
+                                                hash,
+                                                requested_key: requested_key.clone(),
+                                            });
+                                        }
+                                        prefix_proof::StorageValue::Value(value)
+                                            if full_storage_values_required =>
+                                        {
+                                            final_results.push(
+                                                StorageResultItem::DescendantValue {
+                                                    requested_key: requested_key.clone(),
+                                                    key,
+                                                    value,
+                                                },
+                                            );
+                                        }
+                                        prefix_proof::StorageValue::Value(value) => {
+                                            let hashed_value =
+                                                blake2_rfc::blake2b::blake2b(32, &[], &value);
+                                            final_results.push(StorageResultItem::DescendantHash {
+                                                key,
+                                                hash: *<&[u8; 32]>::try_from(
+                                                    hashed_value.as_bytes(),
+                                                )
+                                                .unwrap(),
+                                                requested_key: requested_key.clone(),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                            Err((_, prefix_proof::Error::InvalidProof(err))) => {
+                                // Since we decode the proof above, this is never supposed to
+                                // be reachable.
+                                debug_assert!(false);
+                                outcome_errors
+                                    .push(StorageQueryErrorDetail::ProofVerification(err));
+                            }
+                            Err((_, prefix_proof::Error::MissingProofEntry)) => {
+                                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
                             }
                         }
                     }
-                    Err(err) => {
-                        outcome_errors.push(err);
+                    RequestImpl::ValueOrHash { key, hash } => {
+                        // TODO: overhead
+                        match decoded_proof.trie_node_info(
+                            main_trie_root_hash,
+                            &trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>(),
+                        ) {
+                            Ok(node_info) => match node_info.storage_value {
+                                proof_decode::StorageValue::HashKnownValueMissing(h) if hash => {
+                                    final_results.push(StorageResultItem::Hash {
+                                        key,
+                                        hash: Some(*h),
+                                    });
+                                }
+                                proof_decode::StorageValue::HashKnownValueMissing(_) => {
+                                    outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                                }
+                                proof_decode::StorageValue::Known { value, .. } => {
+                                    if hash {
+                                        let hashed_value =
+                                            blake2_rfc::blake2b::blake2b(32, &[], value);
+                                        final_results.push(StorageResultItem::Hash {
+                                            key,
+                                            hash: Some(
+                                                *<&[u8; 32]>::try_from(hashed_value.as_bytes())
+                                                    .unwrap(),
+                                            ),
+                                        });
+                                    } else {
+                                        final_results.push(StorageResultItem::Value {
+                                            key,
+                                            value: Some(value.to_vec()),
+                                        });
+                                    }
+                                }
+                                proof_decode::StorageValue::None => {
+                                    if hash {
+                                        final_results
+                                            .push(StorageResultItem::Hash { key, hash: None });
+                                    } else {
+                                        final_results
+                                            .push(StorageResultItem::Value { key, value: None });
+                                    }
+                                }
+                            },
+                            Err(proof_decode::IncompleteProofError { .. }) => {
+                                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                            }
+                        }
+                    }
+                    RequestImpl::ClosestDescendantMerkleValue { key } => {
+                        let key_nibbles =
+                            &trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>();
+
+                        let closest_descendant_merkle_value = match decoded_proof
+                            .closest_descendant_merkle_value(main_trie_root_hash, &key_nibbles)
+                        {
+                            Ok(Some(merkle_value)) => Some(merkle_value.as_ref().to_vec()),
+                            Ok(None) => None,
+                            Err(proof_decode::IncompleteProofError { .. }) => {
+                                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                                continue;
+                            }
+                        };
+
+                        let found_closest_ancestor_excluding = match decoded_proof
+                            .closest_ancestor_in_proof(main_trie_root_hash, &key_nibbles)
+                        {
+                            Ok(Some(ancestor)) => Some(ancestor.to_vec()),
+                            Ok(None) => None,
+                            Err(proof_decode::IncompleteProofError { .. }) => {
+                                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                                continue;
+                            }
+                        };
+
+                        final_results.push(StorageResultItem::ClosestDescendantMerkleValue {
+                            requested_key: key,
+                            closest_descendant_merkle_value,
+                            found_closest_ancestor_excluding,
+                        })
                     }
                 }
             }
-
-            return Err(StorageQueryError {
-                errors: outcome_errors,
-            });
         }
     }
 
@@ -655,6 +817,102 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             errors: outcome_errors,
         })
     }
+}
+
+/// An item requested with [`SyncService::storage_query`].
+#[derive(Debug, Clone)]
+pub struct StorageRequestItem {
+    /// Key to request. Exactly what is requested depends on [`StorageRequestItem::ty`].
+    pub key: Vec<u8>,
+    /// Detail about what is being requested.
+    pub ty: StorageRequestItemTy,
+}
+
+/// See [`StorageRequestItem::ty`].
+#[derive(Debug, Clone)]
+pub enum StorageRequestItemTy {
+    /// The storage value associated to the [`StorageRequestItem::key`] is requested.
+    /// A [`StorageResultItem::Value`] will be returned containing the potential value.
+    Value,
+
+    /// The hash of the storage value associated to the [`StorageRequestItem::key`] is requested.
+    /// A [`StorageResultItem::Hash`] will be returned containing the potential hash.
+    Hash,
+
+    /// The list of the descendants of the [`StorageRequestItem::key`] (including the `key`
+    /// itself) that have a storage value is requested.
+    ///
+    /// Zero or more [`StorageResultItem::DescendantValue`] will be returned where the
+    /// [`StorageResultItem::DescendantValue::requested_key`] is equal to
+    /// [`StorageRequestItem::key`].
+    DescendantsValues,
+
+    /// The list of the descendants of the [`StorageRequestItem::key`] (including the `key`
+    /// itself) that have a storage value is requested.
+    ///
+    /// Zero or more [`StorageResultItem::DescendantHash`] will be returned where the
+    /// [`StorageResultItem::DescendantHash::requested_key`] is equal to
+    /// [`StorageRequestItem::key`].
+    DescendantsHashes,
+
+    /// The Merkle value of the trie node that is the closest ancestor to
+    /// [`StorageRequestItem::key`] is requested.
+    /// A [`StorageResultItem::ClosestDescendantMerkleValue`] will be returned where
+    /// [`StorageResultItem::ClosestDescendantMerkleValue::requested_key`] is equal to
+    /// [`StorageRequestItem::key`].
+    ClosestDescendantMerkleValue,
+}
+
+/// An item returned by [`SyncService::storage_query`].
+#[derive(Debug, Clone)]
+pub enum StorageResultItem {
+    /// Corresponds to a [`StorageRequestItemTy::Value`].
+    Value {
+        /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
+        key: Vec<u8>,
+        /// Storage value of the key, or `None` if there is no storage value associated with that
+        /// key.
+        value: Option<Vec<u8>>,
+    },
+    /// Corresponds to a [`StorageRequestItemTy::Hash`].
+    Hash {
+        /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
+        key: Vec<u8>,
+        /// Hash of the storage value of the key, or `None` if there is no storage value
+        /// associated with that key.
+        hash: Option<[u8; 32]>,
+    },
+    /// Corresponds to a [`StorageRequestItemTy::DescendantsValues`].
+    DescendantValue {
+        /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
+        requested_key: Vec<u8>,
+        /// Equal or a descendant of [`StorageResultItem::DescendantValue::requested_key`].
+        key: Vec<u8>,
+        /// Storage value associated with [`StorageResultItem::DescendantValue::key`].
+        value: Vec<u8>,
+    },
+    /// Corresponds to a [`StorageRequestItemTy::DescendantsHashes`].
+    DescendantHash {
+        /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
+        requested_key: Vec<u8>,
+        /// Equal or a descendant of [`StorageResultItem::DescendantHash::requested_key`].
+        key: Vec<u8>,
+        /// Hash of the storage value associated with [`StorageResultItem::DescendantHash::key`].
+        hash: [u8; 32],
+    },
+    /// Corresponds to a [`StorageRequestItemTy::ClosestDescendantMerkleValue`].
+    ClosestDescendantMerkleValue {
+        /// Key that was requested. Equal to the value of [`StorageRequestItem::key`].
+        requested_key: Vec<u8>,
+        /// Closest ancestor to the requested key that was found in the proof. If
+        /// [`StorageResultItem::ClosestDescendantMerkleValue::closest_descendant_merkle_value`]
+        /// is `Some`, then this is always the parent of the requested key.
+        found_closest_ancestor_excluding: Option<Vec<Nibble>>,
+        /// Merkle value of the closest descendant of
+        /// [`StorageResultItem::DescendantValue::requested_key`]. The key that corresponds
+        /// to this Merkle value is not included. `None` if the key has no descendant.
+        closest_descendant_merkle_value: Option<Vec<u8>>,
+    },
 }
 
 /// Error that can happen when calling [`SyncService::storage_query`].
@@ -785,6 +1043,12 @@ pub struct FinalizedBlockRuntime {
 
     /// Storage value at the `:heappages` key.
     pub storage_heap_pages: Option<Vec<u8>>,
+
+    /// Merkle value of the `:code` key.
+    pub code_merkle_value: Option<Vec<u8>>,
+
+    /// Closest ancestor of the `:code` key except for `:code` itself.
+    pub closest_ancestor_excluding: Option<Vec<Nibble>>,
 }
 
 /// Notification about a new block or a new finalized block.

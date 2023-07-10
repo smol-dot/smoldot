@@ -23,7 +23,7 @@ use alloc::{borrow::Cow, format, string::ToString as _, sync::Arc, vec::Vec};
 use core::num::NonZeroUsize;
 use smoldot::{
     header,
-    json_rpc::{methods, requests_subscriptions},
+    json_rpc::{methods, service},
     network::protocol,
 };
 
@@ -31,7 +31,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::chain_getFinalizedHead`].
     pub(super) async fn chain_get_finalized_head(
         self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
+        request: service::RequestProcess,
     ) {
         let finalized_hash = header::hash_from_scale_encoded_header(
             self.runtime_service
@@ -40,145 +40,80 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 .finalized_block_scale_encoded_header,
         );
 
-        let response =
-            methods::Response::chain_getFinalizedHead(methods::HashHexString(finalized_hash))
-                .to_json_response(request_id.0);
-
-        self.requests_subscriptions
-            .respond(request_id.1, response)
-            .await;
+        request.respond(methods::Response::chain_getFinalizedHead(
+            methods::HashHexString(finalized_hash),
+        ));
     }
 
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_genesisHash`].
     pub(super) async fn chain_head_unstable_genesis_hash(
         self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
+        request: service::RequestProcess,
     ) {
-        self.requests_subscriptions
-            .respond(
-                request_id.1,
-                methods::Response::chainHead_unstable_genesisHash(methods::HashHexString(
-                    self.genesis_block_hash,
-                ))
-                .to_json_response(request_id.0),
-            )
-            .await;
+        request.respond(methods::Response::chainHead_unstable_genesisHash(
+            methods::HashHexString(self.genesis_block_hash),
+        ));
     }
 
     /// Handles a call to [`methods::MethodCall::chainSpec_unstable_chainName`].
     pub(super) async fn chain_spec_unstable_chain_name(
         self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
+        request: service::RequestProcess,
     ) {
-        self.requests_subscriptions
-            .respond(
-                request_id.1,
-                methods::Response::chainSpec_unstable_chainName((&self.chain_name).into())
-                    .to_json_response(request_id.0),
-            )
-            .await;
+        request.respond(methods::Response::chainSpec_unstable_chainName(
+            (&self.chain_name).into(),
+        ));
     }
 
     /// Handles a call to [`methods::MethodCall::chainSpec_unstable_genesisHash`].
     pub(super) async fn chain_spec_unstable_genesis_hash(
         self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
+        request: service::RequestProcess,
     ) {
-        self.requests_subscriptions
-            .respond(
-                request_id.1,
-                methods::Response::chainSpec_unstable_genesisHash(methods::HashHexString(
-                    self.genesis_block_hash,
-                ))
-                .to_json_response(request_id.0),
-            )
-            .await;
+        request.respond(methods::Response::chainSpec_unstable_genesisHash(
+            methods::HashHexString(self.genesis_block_hash),
+        ));
     }
 
     /// Handles a call to [`methods::MethodCall::chainSpec_unstable_properties`].
     pub(super) async fn chain_spec_unstable_properties(
         self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
+        request: service::RequestProcess,
     ) {
-        self.requests_subscriptions
-            .respond(
-                request_id.1,
-                methods::Response::chainSpec_unstable_properties(
-                    serde_json::from_str(&self.chain_properties_json).unwrap(),
-                )
-                .to_json_response(request_id.0),
-            )
-            .await;
+        request.respond(methods::Response::chainSpec_unstable_properties(
+            serde_json::from_str(&self.chain_properties_json).unwrap(),
+        ));
     }
 
     /// Handles a call to [`methods::MethodCall::rpc_methods`].
-    pub(super) async fn rpc_methods(
-        self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
-    ) {
-        self.requests_subscriptions
-            .respond(
-                request_id.1,
-                methods::Response::rpc_methods(methods::RpcMethods {
-                    methods: methods::MethodCall::method_names()
-                        .map(|n| n.into())
-                        .collect(),
-                })
-                .to_json_response(request_id.0),
-            )
-            .await;
+    pub(super) async fn rpc_methods(self: &Arc<Self>, request: service::RequestProcess) {
+        request.respond(methods::Response::rpc_methods(methods::RpcMethods {
+            methods: methods::MethodCall::method_names()
+                .map(|n| n.into())
+                .collect(),
+        }));
     }
 
     /// Handles a call to [`methods::MethodCall::sudo_unstable_version`].
-    pub(super) async fn sudo_unstable_version(
-        self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
-    ) {
-        self.requests_subscriptions
-            .respond(
-                request_id.1,
-                methods::Response::sudo_unstable_version(
-                    format!("{} {}", self.system_name, self.system_version).into(),
-                )
-                .to_json_response(request_id.0),
-            )
-            .await;
+    pub(super) async fn sudo_unstable_version(self: &Arc<Self>, request: service::RequestProcess) {
+        request.respond(methods::Response::sudo_unstable_version(
+            format!("{} {}", self.system_name, self.system_version).into(),
+        ));
     }
 
     /// Handles a call to [`methods::MethodCall::system_chain`].
-    pub(super) async fn system_chain(
-        self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
-    ) {
-        self.requests_subscriptions
-            .respond(
-                request_id.1,
-                methods::Response::system_chain((&self.chain_name).into())
-                    .to_json_response(request_id.0),
-            )
-            .await;
+    pub(super) async fn system_chain(self: &Arc<Self>, request: service::RequestProcess) {
+        request.respond(methods::Response::system_chain((&self.chain_name).into()));
     }
 
     /// Handles a call to [`methods::MethodCall::system_chainType`].
-    pub(super) async fn system_chain_type(
-        self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
-    ) {
-        self.requests_subscriptions
-            .respond(
-                request_id.1,
-                methods::Response::system_chainType((&self.chain_ty).into())
-                    .to_json_response(request_id.0),
-            )
-            .await;
+    pub(super) async fn system_chain_type(self: &Arc<Self>, request: service::RequestProcess) {
+        request.respond(methods::Response::system_chainType((&self.chain_ty).into()));
     }
 
     /// Handles a call to [`methods::MethodCall::system_health`].
-    pub(super) async fn system_health(
-        self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
-    ) {
-        let response = methods::Response::system_health(methods::SystemHealth {
+    pub(super) async fn system_health(self: &Arc<Self>, request: service::RequestProcess) {
+        request.respond(methods::Response::system_health(methods::SystemHealth {
             // In smoldot, `is_syncing` equal to `false` means that GrandPa warp sync
             // is finished and that the block notifications report blocks that are
             // believed to be near the head of the chain.
@@ -186,76 +121,40 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             peers: u64::try_from(self.sync_service.syncing_peers().await.len())
                 .unwrap_or(u64::max_value()),
             should_have_peers: self.chain_is_live,
-        })
-        .to_json_response(request_id.0);
-        self.requests_subscriptions
-            .respond(request_id.1, response)
-            .await;
+        }));
     }
 
     /// Handles a call to [`methods::MethodCall::system_localListenAddresses`].
     pub(super) async fn system_local_listen_addresses(
         self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
+        request: service::RequestProcess,
     ) {
         // Wasm node never listens on any address.
-        self.requests_subscriptions
-            .respond(
-                request_id.1,
-                methods::Response::system_localListenAddresses(Vec::new())
-                    .to_json_response(request_id.0),
-            )
-            .await;
+        request.respond(methods::Response::system_localListenAddresses(Vec::new()));
     }
 
     /// Handles a call to [`methods::MethodCall::system_localPeerId`].
-    pub(super) async fn system_local_peer_id(
-        self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
-    ) {
-        self.requests_subscriptions
-            .respond(
-                request_id.1,
-                methods::Response::system_localPeerId((&self.peer_id_base58).into())
-                    .to_json_response(request_id.0),
-            )
-            .await;
+    pub(super) async fn system_local_peer_id(self: &Arc<Self>, request: service::RequestProcess) {
+        request.respond(methods::Response::system_localPeerId(
+            (&self.peer_id_base58).into(),
+        ));
     }
 
     /// Handles a call to [`methods::MethodCall::system_name`].
-    pub(super) async fn system_name(
-        self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
-    ) {
-        self.requests_subscriptions
-            .respond(
-                request_id.1,
-                methods::Response::system_name((&self.system_name).into())
-                    .to_json_response(request_id.0),
-            )
-            .await;
+    pub(super) async fn system_name(self: &Arc<Self>, request: service::RequestProcess) {
+        request.respond(methods::Response::system_name((&self.system_name).into()));
     }
 
     /// Handles a call to [`methods::MethodCall::system_nodeRoles`].
-    pub(super) async fn system_node_roles(
-        self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
-    ) {
-        self.requests_subscriptions
-            .respond(
-                request_id.1,
-                methods::Response::system_nodeRoles(Cow::Borrowed(&[methods::NodeRole::Light]))
-                    .to_json_response(request_id.0),
-            )
-            .await;
+    pub(super) async fn system_node_roles(self: &Arc<Self>, request: service::RequestProcess) {
+        request.respond(methods::Response::system_nodeRoles(Cow::Borrowed(&[
+            methods::NodeRole::Light,
+        ])));
     }
 
     /// Handles a call to [`methods::MethodCall::system_peers`].
-    pub(super) async fn system_peers(
-        self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
-    ) {
-        let response = methods::Response::system_peers(
+    pub(super) async fn system_peers(self: &Arc<Self>, request: service::RequestProcess) {
+        request.respond(methods::Response::system_peers(
             self.sync_service
                 .syncing_peers()
                 .await
@@ -272,40 +171,46 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     },
                 )
                 .collect(),
-        )
-        .to_json_response(request_id.0);
-        self.requests_subscriptions
-            .respond(request_id.1, response)
-            .await;
+        ));
     }
 
     /// Handles a call to [`methods::MethodCall::system_properties`].
-    pub(super) async fn system_properties(
-        self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
-    ) {
-        self.requests_subscriptions
-            .respond(
-                request_id.1,
-                methods::Response::system_properties(
-                    serde_json::from_str(&self.chain_properties_json).unwrap(),
-                )
-                .to_json_response(request_id.0),
-            )
-            .await;
+    pub(super) async fn system_properties(self: &Arc<Self>, request: service::RequestProcess) {
+        request.respond(methods::Response::system_properties(
+            serde_json::from_str(&self.chain_properties_json).unwrap(),
+        ));
     }
 
     /// Handles a call to [`methods::MethodCall::system_version`].
-    pub(super) async fn system_version(
+    pub(super) async fn system_version(self: &Arc<Self>, request: service::RequestProcess) {
+        request.respond(methods::Response::system_version(
+            (&self.system_version).into(),
+        ));
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_finalizedDatabase`].
+    pub(super) async fn chain_head_unstable_finalized_database(
         self: &Arc<Self>,
-        request_id: (&str, &requests_subscriptions::RequestId),
+        request: service::RequestProcess,
     ) {
-        self.requests_subscriptions
-            .respond(
-                request_id.1,
-                methods::Response::system_version((&self.system_version).into())
-                    .to_json_response(request_id.0),
-            )
-            .await;
+        let methods::MethodCall::chainHead_unstable_finalizedDatabase { max_size_bytes } =
+            request.request()
+        else {
+            unreachable!()
+        };
+
+        let response = crate::database::encode_database(
+            &self.network_service.0,
+            &self.sync_service,
+            &self.runtime_service,
+            &self.genesis_block_hash,
+            usize::try_from(max_size_bytes.unwrap_or(u64::max_value()))
+                .unwrap_or(usize::max_value()),
+        )
+        .await;
+
+        request.respond(methods::Response::chainHead_unstable_finalizedDatabase(
+            response.into(),
+        ));
     }
 }

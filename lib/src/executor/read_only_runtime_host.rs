@@ -163,8 +163,9 @@ impl StorageGet {
         match &self.inner.vm {
             host::HostVm::ExternalStorageGet(req) => either::Left(req.key()),
             host::HostVm::ExternalStorageRoot(req) => {
-                let Some(child_trie) = req.child_trie()
-                    else { unreachable!() };
+                let Some(child_trie) = req.child_trie() else {
+                    unreachable!()
+                };
                 // TODO: allocation here, but probably not problematic
                 const PREFIX: &[u8] = b":child_storage:default:";
                 let mut key = Vec::with_capacity(PREFIX.len() + child_trie.as_ref().len());

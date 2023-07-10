@@ -19,20 +19,15 @@
 #![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
 use super::{
-    ConnectError, PlatformConnection, PlatformRef, PlatformSubstreamDirection, ReadBuffer,
+    Address, ConnectError, ConnectionType, IpAddr, MultiStreamAddress, MultiStreamWebRtcConnection,
+    PlatformRef, ReadBuffer, SubstreamDirection,
 };
 
 use alloc::{borrow::Cow, collections::VecDeque, sync::Arc};
 use core::{ops, pin::Pin, str, task::Poll, time::Duration};
 use futures_util::{future, AsyncRead, AsyncWrite, FutureExt as _};
-use smoldot::libp2p::{
-    multiaddr::{Multiaddr, ProtocolRef},
-    websocket,
-};
-use std::{
-    io::IoSlice,
-    net::{IpAddr, SocketAddr},
-};
+use smoldot::libp2p::websocket;
+use std::{io::IoSlice, net::SocketAddr};
 
 /// Implementation of the [`PlatformRef`] trait that leverages the operating system.
 pub struct DefaultPlatform {
@@ -51,17 +46,16 @@ impl DefaultPlatform {
 
 impl PlatformRef for Arc<DefaultPlatform> {
     type Delay = future::BoxFuture<'static, ()>;
-    type Yield = future::Ready<()>;
     type Instant = std::time::Instant;
     type MultiStream = std::convert::Infallible;
     type Stream = Stream;
-    type ConnectFuture = future::BoxFuture<
+    type StreamConnectFuture = future::BoxFuture<'static, Result<Self::Stream, ConnectError>>;
+    type MultiStreamConnectFuture = future::BoxFuture<
         'static,
-        Result<PlatformConnection<Self::Stream, Self::MultiStream>, ConnectError>,
+        Result<MultiStreamWebRtcConnection<Self::MultiStream>, ConnectError>,
     >;
     type StreamUpdateFuture<'a> = future::BoxFuture<'a, ()>;
-    type NextSubstreamFuture<'a> =
-        future::Pending<Option<(Self::Stream, PlatformSubstreamDirection)>>;
+    type NextSubstreamFuture<'a> = future::Pending<Option<(Self::Stream, SubstreamDirection)>>;
 
     fn now_from_unix_epoch(&self) -> Duration {
         // Intentionally panic if the time is configured earlier than the UNIX EPOCH.
@@ -97,85 +91,60 @@ impl PlatformRef for Arc<DefaultPlatform> {
         Cow::Borrowed(&self.client_version)
     }
 
-    fn yield_after_cpu_intensive(&self) -> Self::Yield {
-        // No-op.
-        future::ready(())
+    fn supports_connection_type(&self, connection_type: ConnectionType) -> bool {
+        // TODO: support WebSocket secure
+        matches!(
+            connection_type,
+            ConnectionType::Tcp | ConnectionType::WebSocket { secure: false, .. }
+        )
     }
 
-    fn connect(&self, multiaddr: &str) -> Self::ConnectFuture {
-        // We simply copy the address to own it. We could be more zero-cost here, but doing so
-        // would considerably complicate the implementation.
-        let multiaddr = multiaddr.to_owned();
-
-        Box::pin(async move {
-            let addr = multiaddr.parse::<Multiaddr>().map_err(|_| ConnectError {
-                is_bad_addr: true,
-                message: "Failed to parse address".to_string(),
-            })?;
-
-            let mut iter = addr.iter().fuse();
-            let proto1 = iter.next().ok_or(ConnectError {
-                is_bad_addr: true,
-                message: "Unknown protocols combination".to_string(),
-            })?;
-            let proto2 = iter.next().ok_or(ConnectError {
-                is_bad_addr: true,
-                message: "Unknown protocols combination".to_string(),
-            })?;
-            let proto3 = iter.next();
-
-            if iter.next().is_some() {
-                return Err(ConnectError {
-                    is_bad_addr: true,
-                    message: "Unknown protocols combination".to_string(),
-                });
+    fn connect_stream(&self, multiaddr: Address) -> Self::StreamConnectFuture {
+        let (tcp_socket_addr, host_if_websocket): (
+            either::Either<SocketAddr, (String, u16)>,
+            Option<String>,
+        ) = match multiaddr {
+            Address::TcpDns { hostname, port } => {
+                (either::Right((hostname.to_string(), port)), None)
+            }
+            Address::TcpIp {
+                ip: IpAddr::V4(ip),
+                port,
+            } => (either::Left(SocketAddr::from((ip, port))), None),
+            Address::TcpIp {
+                ip: IpAddr::V6(ip),
+                port,
+            } => (either::Left(SocketAddr::from((ip, port))), None),
+            Address::WebSocketDns {
+                hostname,
+                port,
+                secure: false,
+            } => (
+                either::Right((hostname.to_string(), port)),
+                Some(format!("{}:{}", hostname, port)),
+            ),
+            Address::WebSocketIp {
+                ip: IpAddr::V4(ip),
+                port,
+            } => {
+                let addr = SocketAddr::from((ip, port));
+                (either::Left(addr), Some(addr.to_string()))
+            }
+            Address::WebSocketIp {
+                ip: IpAddr::V6(ip),
+                port,
+            } => {
+                let addr = SocketAddr::from((ip, port));
+                (either::Left(addr), Some(addr.to_string()))
             }
 
-            // TODO: doesn't support WebSocket secure connections
+            // The API user of the `PlatformRef` trait is never supposed to open connections of
+            // a type that isn't supported.
+            _ => unreachable!(),
+        };
 
-            // Ensure ahead of time that the multiaddress is supported.
-            let (addr, host_if_websocket) = match (&proto1, &proto2, &proto3) {
-                (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port), None) => (
-                    either::Left(SocketAddr::new(IpAddr::V4((*ip).into()), *port)),
-                    None,
-                ),
-                (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port), None) => (
-                    either::Left(SocketAddr::new(IpAddr::V6((*ip).into()), *port)),
-                    None,
-                ),
-                (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port), Some(ProtocolRef::Ws)) => {
-                    let addr = SocketAddr::new(IpAddr::V4((*ip).into()), *port);
-                    (either::Left(addr), Some(addr.to_string()))
-                }
-                (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port), Some(ProtocolRef::Ws)) => {
-                    let addr = SocketAddr::new(IpAddr::V6((*ip).into()), *port);
-                    (either::Left(addr), Some(addr.to_string()))
-                }
-
-                // TODO: we don't care about the differences between Dns, Dns4, and Dns6
-                (
-                    ProtocolRef::Dns(addr) | ProtocolRef::Dns4(addr) | ProtocolRef::Dns6(addr),
-                    ProtocolRef::Tcp(port),
-                    None,
-                ) => (either::Right((addr.to_string(), *port)), None),
-                (
-                    ProtocolRef::Dns(addr) | ProtocolRef::Dns4(addr) | ProtocolRef::Dns6(addr),
-                    ProtocolRef::Tcp(port),
-                    Some(ProtocolRef::Ws),
-                ) => (
-                    either::Right((addr.to_string(), *port)),
-                    Some(format!("{}:{}", addr, *port)),
-                ),
-
-                _ => {
-                    return Err(ConnectError {
-                        is_bad_addr: true,
-                        message: "Unknown protocols combination".to_string(),
-                    })
-                }
-            };
-
-            let tcp_socket = match addr {
+        Box::pin(async move {
+            let tcp_socket = match tcp_socket_addr {
                 either::Left(socket_addr) => smol::net::TcpStream::connect(socket_addr).await,
                 either::Right((dns, port)) => smol::net::TcpStream::connect((&dns[..], port)).await,
             };
@@ -194,35 +163,35 @@ impl PlatformRef for Arc<DefaultPlatform> {
                     .await
                     .map_err(|err| ConnectError {
                         message: format!("Failed to negotiate WebSocket: {err}"),
-                        is_bad_addr: false,
                     })?,
                 ),
                 (Ok(tcp_socket), None) => future::Either::Left(tcp_socket),
                 (Err(err), _) => {
                     return Err(ConnectError {
-                        is_bad_addr: false,
                         message: format!("Failed to reach peer: {err}"),
                     })
                 }
             };
 
-            Ok(PlatformConnection::SingleStreamMultistreamSelectNoiseYamux(
-                Stream {
-                    socket,
-                    buffers: Some((
-                        StreamReadBuffer::Open {
-                            buffer: vec![0; 16384],
-                            cursor: 0..0,
-                        },
-                        StreamWriteBuffer::Open {
-                            buffer: VecDeque::with_capacity(16384),
-                            must_close: false,
-                            must_flush: false,
-                        },
-                    )),
-                },
-            ))
+            Ok(Stream {
+                socket,
+                buffers: Some((
+                    StreamReadBuffer::Open {
+                        buffer: vec![0; 16384],
+                        cursor: 0..0,
+                    },
+                    StreamWriteBuffer::Open {
+                        buffer: VecDeque::with_capacity(16384),
+                        must_close: false,
+                        must_flush: false,
+                    },
+                )),
+            })
         })
+    }
+
+    fn connect_multistream(&self, _address: MultiStreamAddress) -> Self::MultiStreamConnectFuture {
+        panic!()
     }
 
     fn open_out_substream(&self, c: &mut Self::MultiStream) {
@@ -239,7 +208,9 @@ impl PlatformRef for Arc<DefaultPlatform> {
 
     fn update_stream<'a>(&self, stream: &'a mut Self::Stream) -> Self::StreamUpdateFuture<'a> {
         Box::pin(future::poll_fn(|cx| {
-            let Some((read_buffer, write_buffer)) = stream.buffers.as_mut() else { return Poll::Pending };
+            let Some((read_buffer, write_buffer)) = stream.buffers.as_mut() else {
+                return Poll::Pending;
+            };
 
             // Whether the future returned by `update_stream` should return `Ready` or `Pending`.
             let mut update_stream_future_ready = false;
@@ -368,7 +339,7 @@ impl PlatformRef for Arc<DefaultPlatform> {
             stream.buffers.as_mut().map(|(r, _)| r)
         else {
             assert_eq!(extra_bytes, 0);
-            return
+            return;
         };
 
         assert!(cursor.start + extra_bytes <= cursor.end);
@@ -376,8 +347,14 @@ impl PlatformRef for Arc<DefaultPlatform> {
     }
 
     fn writable_bytes(&self, stream: &mut Self::Stream) -> usize {
-        let Some(StreamWriteBuffer::Open { ref mut buffer, must_close: false, ..}) =
-            stream.buffers.as_mut().map(|(_, w)| w) else { return 0 };
+        let Some(StreamWriteBuffer::Open {
+            ref mut buffer,
+            must_close: false,
+            ..
+        }) = stream.buffers.as_mut().map(|(_, w)| w)
+        else {
+            return 0;
+        };
         buffer.capacity() - buffer.len()
     }
 
@@ -387,15 +364,20 @@ impl PlatformRef for Arc<DefaultPlatform> {
         // Because `writable_bytes` returns 0 if the writing side is closed, and because `data`
         // must always have a size inferior or equal to `writable_bytes`, we know for sure that
         // the writing side isn't closed.
-        let Some(StreamWriteBuffer::Open { ref mut buffer, .. } )=
-            stream.buffers.as_mut().map(|(_, w)| w) else { panic!() };
+        let Some(StreamWriteBuffer::Open { ref mut buffer, .. }) =
+            stream.buffers.as_mut().map(|(_, w)| w)
+        else {
+            panic!()
+        };
         buffer.reserve(data.len());
         buffer.extend(data.iter().copied());
     }
 
     fn close_send(&self, stream: &mut Self::Stream) {
         // It is not illegal to call this on an already-reset stream.
-        let Some((_, write_buffer)) = stream.buffers.as_mut() else { return };
+        let Some((_, write_buffer)) = stream.buffers.as_mut() else {
+            return;
+        };
 
         match write_buffer {
             StreamWriteBuffer::Open {

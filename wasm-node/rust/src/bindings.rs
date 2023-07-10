@@ -143,28 +143,49 @@ extern "C" {
     /// `milliseconds` never contains a negative number, `NaN` or infinite.
     pub fn start_timer(milliseconds: f64);
 
-    /// Must initialize a new connection that tries to connect to the given multiaddress.
+    /// Must return the host supports connecting to a certain type of address.
     ///
-    /// The multiaddress is a UTF-8 string found in the WebAssembly memory at offset `addr_ptr`
-    /// and with `addr_len` bytes. The string is a multiaddress such as `/ip4/1.2.3.4/tcp/5/ws`.
+    /// The `ty` parameter is equal to the first byte of the encoded address that would be passed
+    /// to [`connection_new`]. See [`connection_new`] for more information.
+    ///
+    /// An additional `ty` value of `7` is supported, and means "non-secure WebSocket connection
+    /// to localhost".
+    ///
+    /// Returns a non-zero value if the address is supported. Returns `0` if the address isn't
+    /// supported.
+    pub fn connection_type_supported(ty: u8) -> u32;
+
+    /// Must initialize a new connection that tries to connect to the given address.
+    ///
+    /// The address to connect to is in the WebAssembly memory at offset `addr_ptr` and with
+    /// `addr_len` bytes. The format is as follows:
+    ///
+    /// - One `type` byte (see below).
+    /// - Two big-endian bytes representing the port (either TCP or UDP depending on the `type`)
+    /// to connect to.
+    /// - (optional) The 32 bytes SHA-256 hash of the certificate of the remote.
+    /// - An UTF-8-encoded IP address or domain name. Use the `addr_len` parameter to determine
+    /// its length. When using an IPv4, it is encoded as `a.b.c.d`. When using an IPv6, it is
+    /// encoded according to RFC5952.
+    ///
+    /// The `type` byte defines the type of connection and whether the optional field is present:
+    ///
+    /// - `0`: TCP/IPv4 connection, with a port and an IPv4 address.
+    /// - `1`: TCP/IPv6 connection, with a port and an IPv6 address.
+    /// - `2`: TCP/IP connection, with a port and a domain name.
+    /// - `4`: WebSocket connection, with a port and an IPv4 address.
+    /// - `5`: WebSocket connection, with a port and an IPv6 address.
+    /// - `6`: WebSocket connection, with a port and a domain name.
+    /// - `14`: WebSocket secure connection, with a port and a domaine name.
+    /// - `16`: WebRTC connection, with a port, an IPv4 address, and a remote certificate hash.
+    /// - `17`: WebRTC connection, with a port, an IPv6 address, and a remote certificate hash.
+    ///
+    /// > **Note**: While these numbers seem arbitrary, they actually loosely follow a certain
+    /// >           scheme. The lowest 2 bits indicate the type of IP address, while the highest
+    /// >           bits indicate the type of connection.
     ///
     /// The `id` parameter is an identifier for this connection, as chosen by the Rust code. It
     /// must be passed on every interaction with this connection.
-    ///
-    /// Returns 0 to indicate success, or 1 to indicate that an error happened. If an error is
-    /// returned, the `id` doesn't correspond to anything.
-    ///
-    /// > **Note**: If you implement this function using for example `new WebSocket()`, please
-    /// >           keep in mind that exceptions should be caught and turned into an error code.
-    ///
-    /// If an error happened, assign a so-called "buffer index" (a `u32`) representing the buffer
-    /// containing the UTF-8 error message, then write this buffer index as little-endian to the
-    /// memory of the WebAssembly indicated by `error_buffer_index_ptr`. The Rust code will call
-    /// [`buffer_size`] and [`buffer_copy`] in order to obtain the content of this buffer. The
-    /// buffer index should remain assigned and buffer alive until the next time the JavaScript
-    /// code retains control. Then, write at location `error_buffer_index_ptr + 4` a `1` if the
-    /// error is caused by the address being forbidden or unsupported, and `0` otherwise. If no
-    /// error happens, nothing should be written to `error_buffer_index_ptr`.
     ///
     /// At any time, a connection can be in one of the three following states:
     ///
@@ -179,19 +200,14 @@ extern "C" {
     ///
     /// Initially in the `Opening` state, the connection can transition to the `Open` state if the
     /// remote accepts the connection. When that happens, [`connection_open_single_stream`] or
-    /// [`connection_open_multi_stream`] must be called.
+    /// [`connection_open_multi_stream`] must be called depending on the type of connection.
     ///
     /// There exists two kind of connections: single-stream and multi-stream. Single-stream
     /// connections are assumed to have a single stream open at all time and the encryption and
     /// multiplexing are handled internally by smoldot. Multi-stream connections open and close
     /// streams over time using [`connection_stream_opened`] and [`stream_reset`], and the
     /// encryption and multiplexing are handled by the user of these bindings.
-    pub fn connection_new(
-        id: u32,
-        addr_ptr: u32,
-        addr_len: u32,
-        error_buffer_index_ptr: u32,
-    ) -> u32;
+    pub fn connection_new(id: u32, addr_ptr: u32, addr_len: u32);
 
     /// Abruptly close a connection previously initialized with [`connection_new`].
     ///
@@ -407,8 +423,7 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 /// This function returns:
 /// - 0 on success.
 /// - 1 if the request couldn't be parsed as a valid JSON-RPC request.
-/// - 2 if the chain is currently overloaded with JSON-RPC requests and refuses to queue another
-/// one.
+/// - 2 if the chain has too many pending JSON-RPC requests and refuses to queue another one.
 ///
 #[no_mangle]
 pub extern "C" fn json_rpc_send(text_buffer_index: u32, chain_id: u32) -> u32 {
@@ -473,25 +488,9 @@ pub extern "C" fn timer_finished() {
 ///
 /// When in the `Open` state, the connection can receive messages. Use [`stream_message`] in order
 /// to provide to the Rust code the messages received by the connection.
-///
-/// The `handshake_ty` parameter indicates the type of handshake. It must always be 0 at the
-/// moment, indicating a multistream-select+Noise+Yamux handshake.
-///
-/// `write_closable` must be non-zero if and only if it makes sense to call [`stream_send_close`]
-/// on this connection. If zero, then [`stream_send_close`] will never be called.
 #[no_mangle]
-pub extern "C" fn connection_open_single_stream(
-    connection_id: u32,
-    handshake_ty: u32,
-    initial_writable_bytes: u32,
-    write_closable: u32,
-) {
-    crate::platform::connection_open_single_stream(
-        connection_id,
-        handshake_ty,
-        initial_writable_bytes,
-        write_closable,
-    );
+pub extern "C" fn connection_open_single_stream(connection_id: u32, initial_writable_bytes: u32) {
+    crate::platform::connection_open_single_stream(connection_id, initial_writable_bytes);
 }
 
 /// Called by the JavaScript code if the connection switches to the `Open` state. The connection
@@ -506,9 +505,9 @@ pub extern "C" fn connection_open_single_stream(
 /// and [`buffer_copy`] in order to obtain the content of this buffer. The buffer index can be
 /// de-assigned and buffer destroyed once this function returns.
 ///
-/// The buffer must contain a single 0 byte (indicating WebRTC), followed with the multihash
-/// representation of the hash of the local node's TLS certificate, followed with the multihash
-/// representation of the hash of the remote node's TLS certificate.
+/// The buffer must contain a single 0 byte (indicating WebRTC), followed with the SHA-256 hash of
+/// the local node's TLS certificate, followed with the SHA-256 hash of the remote node's TLS
+/// certificate.
 #[no_mangle]
 pub extern "C" fn connection_open_multi_stream(connection_id: u32, handshake_ty_buffer_index: u32) {
     crate::platform::connection_open_multi_stream(

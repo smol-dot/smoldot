@@ -27,7 +27,6 @@ export interface PlatformBindings {
      * Tries to open a new connection using the given configuration.
      *
      * @see Connection
-     * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
      */
     connect(config: ConnectionConfig): Connection;
 
@@ -147,12 +146,12 @@ export interface ConnectionConfig {
     onOpen: (info:
         {
             type: 'single-stream', handshake: 'multistream-select-noise-yamux',
-            initialWritableBytes: number, writeClosable: boolean
+            initialWritableBytes: number
         } |
         {
             type: 'multi-stream', handshake: 'webrtc',
-            localTlsCertificateMultihash: Uint8Array,
-            remoteTlsCertificateMultihash: Uint8Array,
+            localTlsCertificateSha256: Uint8Array,
+            remoteTlsCertificateSha256: Uint8Array,
         }
     ) => void;
 
@@ -247,10 +246,6 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
         // For each chain object returned by `addChain`, the associated internal chain id.
         // Immediately cleared when `remove()` is called on a chain.
         chainIds: WeakMap<Chain, number>,
-        // Task currently being executed by the Wasm. Used for diagnostic about when a panic
-        // happens.
-        // TODO: consider moving this to raw-instance and report the name as part of the wasm-panic event
-        currentTaskName: string | null,
         // List of all active connections. Keys are IDs assigned by the instance.
         connections: Map<number, Connection>,
         // FIFO queue. When `addChain` is called, an entry is added to this queue. When the
@@ -267,7 +262,6 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
     } = {
         instance: { status: "not-created" },
         chainIds: new WeakMap(),
-        currentTaskName: null,
         connections: new Map(),
         addChainResults: [],
         onExecutorShutdownOrWasmPanic: () => {},
@@ -280,7 +274,7 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
             case "wasm-panic": {
                 console.error(
                     "Smoldot has panicked" +
-                    (state.currentTaskName ? (" while executing task `" + state.currentTaskName + "`") : "") +
+                    (event.currentTask ? (" while executing task `" + event.currentTask + "`") : "") +
                     ". This is a bug in smoldot. Please open an issue at " +
                     "https://github.com/smol-dot/smoldot/issues with the following message:\n" +
                     event.message
@@ -307,8 +301,6 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 }
                 state.chains.clear();
 
-                state.currentTaskName = null;
-
                 const cb = state.onExecutorShutdownOrWasmPanic;
                 state.onExecutorShutdownOrWasmPanic = () => {};
                 cb();
@@ -334,10 +326,6 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 while (callbacks.length !== 0) {
                     (callbacks.shift()!)();
                 }
-                break;
-            }
-            case "current-task": {
-                state.currentTaskName = event.taskName;
                 break;
             }
             case "new-connection": {
@@ -511,11 +499,15 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 jsonRpcMaxSubscriptions = 0xffffffff
             }
 
+            // Sanitize `databaseContent`.
+            if (options.databaseContent !== undefined && typeof options.databaseContent !== 'string')
+                throw new AddChainError("`databaseContent` is not a string");
+
             const promise = new Promise<{ success: true, chainId: number } | { success: false, error: string }>((resolve) => state.addChainResults.push(resolve));
 
             state.instance.instance.addChain(
                 options.chainSpec,
-                typeof options.databaseContent === 'string' ? options.databaseContent : "",
+                options.databaseContent || "",
                 potentialRelayChainsIds,
                 !!options.disableJsonRpc,
                 jsonRpcMaxPendingRequests,
@@ -619,7 +611,6 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 chain.jsonRpcResponsesPromises = [];
             }
             state.chains.clear();
-            state.currentTaskName = null;
 
             // Wait for the `executor-shutdown` event to be generated.
             await new Promise<void>((resolve) => state.onExecutorShutdownOrWasmPanic = resolve);

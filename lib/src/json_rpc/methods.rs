@@ -35,37 +35,27 @@ use hashbrown::HashMap;
 ///
 /// On success, returns a JSON-encoded identifier for that request that must be passed back when
 /// emitting the response.
-pub fn parse_json_call(message: &str) -> Result<(&str, MethodCall), ParseError> {
-    let call_def = parse::parse_call(message).map_err(ParseError::JsonRpcParse)?;
+pub fn parse_json_call(message: &str) -> Result<(&str, MethodCall), ParseCallError> {
+    let call_def = parse::parse_call(message).map_err(ParseCallError::JsonRpcParse)?;
 
     // No notification is supported by this server. If the `id` field is missing in the request,
     // assuming that this is a notification and return an appropriate error.
     let request_id = match call_def.id_json {
         Some(id) => id,
-        None => return Err(ParseError::UnknownNotification(call_def.method)),
+        None => return Err(ParseCallError::UnknownNotification(call_def.method)),
     };
 
     let call = match MethodCall::from_defs(call_def.method, call_def.params_json) {
         Ok(c) => c,
-        Err(error) => return Err(ParseError::Method { request_id, error }),
+        Err(error) => return Err(ParseCallError::Method { request_id, error }),
     };
 
     Ok((request_id, call))
 }
 
-/// Builds a JSON call, to send it to a JSON-RPC server.
-///
-/// # Panic
-///
-/// Panics if the `id_json` isn't valid JSON.
-///
-pub fn build_json_call_object_parameters(id_json: Option<&str>, method: MethodCall) -> String {
-    method.to_json_call_object_parameters(id_json)
-}
-
 /// Error produced by [`parse_json_call`].
 #[derive(Debug, derive_more::Display)]
-pub enum ParseError<'a> {
+pub enum ParseCallError<'a> {
     /// Could not parse the body of the message as a valid JSON-RPC message.
     JsonRpcParse(parse::ParseError),
     /// Call concerns a notification that isn't recognized.
@@ -80,7 +70,36 @@ pub enum ParseError<'a> {
     },
 }
 
-/// See [`ParseError::Method`].
+/// Parses a JSON notification.
+pub fn parse_notification(message: &str) -> Result<ServerToClient, ParseNotificationError> {
+    let call_def = parse::parse_call(message).map_err(ParseNotificationError::JsonRpcParse)?;
+    let call = ServerToClient::from_defs(call_def.method, call_def.params_json)
+        .map_err(ParseNotificationError::Method)?;
+    Ok(call)
+}
+
+/// Error produced by [`parse_notification`].
+#[derive(Debug, derive_more::Display)]
+pub enum ParseNotificationError<'a> {
+    /// Could not parse the body of the message as a valid JSON-RPC message.
+    #[display(fmt = "{_0}")]
+    JsonRpcParse(parse::ParseError),
+    /// JSON-RPC request is valid, but there is a problem related to the method being called.
+    #[display(fmt = "{_0}")]
+    Method(MethodError<'a>),
+}
+
+/// Builds a JSON call, to send it to a JSON-RPC server.
+///
+/// # Panic
+///
+/// Panics if the `id_json` isn't valid JSON.
+///
+pub fn build_json_call_object_parameters(id_json: Option<&str>, method: MethodCall) -> String {
+    method.to_json_call_object_parameters(id_json)
+}
+
+/// See [`ParseCallError::Method`] or [`ParseNotificationError::Method`].
 #[derive(Debug, derive_more::Display)]
 pub enum MethodError<'a> {
     /// Call concerns a method that isn't recognized.
@@ -459,9 +478,8 @@ define_methods! {
     chainHead_unstable_storage(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString,
-        key: HexString,
+        items: Vec<ChainHeadStorageRequestItem>,
         #[rename = "childTrie"] child_trie: Option<HexString>,
-        #[rename = "type"] ty: ChainHeadStorageType,
         #[rename = "networkConfig"] network_config: Option<NetworkConfig>
     ) -> Cow<'a, str>,
     chainHead_unstable_storageContinue(
@@ -472,7 +490,7 @@ define_methods! {
     ) -> (),
     chainHead_unstable_unpin(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
-        hash: HashHexString
+        hash: HashHexStringSingleOrArray
     ) -> (),
 
     chainSpec_unstable_chainName() -> Cow<'a, str>,
@@ -580,6 +598,13 @@ impl<'a> serde::Deserialize<'a> for HashHexString {
         out.copy_from_slice(&bytes);
         Ok(HashHexString(out))
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum HashHexStringSingleOrArray {
+    Single(HashHexString),
+    Array(Vec<HashHexString>),
 }
 
 /// Removes the length prefix at the beginning of `metadata`. Used for the `Metadata_metadata`
@@ -716,13 +741,34 @@ pub enum ChainHeadCallEvent<'a> {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ChainHeadStorageRequestItem {
+    pub key: HexString,
+    #[serde(rename = "type")]
+    pub ty: ChainHeadStorageType,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ChainHeadStorageResponseItem {
+    pub key: HexString,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<HexString>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<HexString>,
+    #[serde(
+        rename = "closest-descendant-merkle-value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub closest_descendant_merkle_value: Option<HexString>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ChainHeadStorageType {
     #[serde(rename = "value")]
     Value,
     #[serde(rename = "hash")]
     Hash,
-    #[serde(rename = "closest-ancestor-merkle-value")]
-    ClosestAncestorMerkleValue,
+    #[serde(rename = "closest-descendant-merkle-value")]
+    ClosestDescendantMerkleValue,
     #[serde(rename = "descendants-values")]
     DescendantsValues,
     #[serde(rename = "descendants-hashes")]
@@ -732,15 +778,9 @@ pub enum ChainHeadStorageType {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event")]
 pub enum ChainHeadStorageEvent<'a> {
-    #[serde(rename = "item")]
-    Item {
-        key: HexString,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        value: Option<HexString>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<HexString>,
-        #[serde(rename = "merkle-value", skip_serializing_if = "Option::is_none")]
-        merkle_value: Option<HexString>,
+    #[serde(rename = "items")]
+    Items {
+        items: Vec<ChainHeadStorageResponseItem>,
     },
     #[serde(rename = "done")]
     Done,
@@ -999,15 +1039,12 @@ pub struct RuntimeSpec<'a> {
     pub spec_name: Cow<'a, str>,
     #[serde(rename = "implName")]
     pub impl_name: Cow<'a, str>,
-    #[serde(rename = "authoringVersion")]
-    pub authoring_version: u32,
     #[serde(rename = "specVersion")]
     pub spec_version: u32,
     #[serde(rename = "implVersion")]
     pub impl_version: u32,
     #[serde(rename = "transactionVersion", skip_serializing_if = "Option::is_none")]
     pub transaction_version: Option<u32>,
-    // TODO: add `state_version`? would need a JSON-RPC API interface spec change
     pub apis: HashMap<HexString, u32, fnv::FnvBuildHasher>,
 }
 
@@ -1258,7 +1295,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            Err(super::ParseError::Method {
+            Err(super::ParseCallError::Method {
                 request_id: "2",
                 error: super::MethodError::MissingParameters {
                     rpc_method: "chainHead_unstable_follow"

@@ -246,7 +246,7 @@ fn json_rpc_send(json_rpc_request: Vec<u8>, chain_id: u32) -> u32 {
     {
         Ok(()) => 0,
         Err(HandleRpcError::MalformedJsonRpc(_)) => 1,
-        Err(HandleRpcError::Overloaded { .. }) => 2,
+        Err(HandleRpcError::TooManyPendingRequests { .. }) => 2,
     }
 }
 
@@ -401,8 +401,11 @@ fn advance_execution() {
             }
             ExecutionState::NotReady => return,
             ExecutionState::Ready(_) => {
-                let ExecutionState::Ready(runnable) = mem::replace(&mut *executor_execute_guard, ExecutionState::NotReady)
-                    else { unreachable!() };
+                let ExecutionState::Ready(runnable) =
+                    mem::replace(&mut *executor_execute_guard, ExecutionState::NotReady)
+                else {
+                    unreachable!()
+                };
                 runnable
             }
         }

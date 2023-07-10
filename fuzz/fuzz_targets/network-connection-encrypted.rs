@@ -25,7 +25,7 @@ use smoldot::libp2p::{
     read_write::ReadWrite,
 };
 
-use core::{iter, time::Duration};
+use core::{cmp, time::Duration};
 
 // This fuzzing target simulates an incoming or outgoing connection whose handshake has succeeded.
 // The remote endpoint of that connection sends the fuzzing data to smoldot after it has been
@@ -160,15 +160,18 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     // We now encrypt the fuzzing data and add it to the buffer to send to the remote. This is
     // done all in one go.
     {
-        // Need to find the size that the encrypted data will occupy. This is done in a rather
-        // inefficient way because this is a test.
-        let mut size = 4096;
-        while remote.encrypt_size_conv(size) < data.len() {
-            size *= 2;
+        let mut encrypted = vec![0; 65536];
+        let mut encrypt = remote.encrypt((&mut encrypted, &mut [])).unwrap();
+        let mut num_written = 0;
+        for buffer in encrypt.unencrypted_write_buffers() {
+            let to_copy = cmp::min(data.len(), buffer.len());
+            if to_copy == 0 {
+                break;
+            }
+            buffer[..to_copy].copy_from_slice(&data[..to_copy]);
+            num_written += to_copy;
         }
-        let mut encrypted = vec![0; size];
-        let (read, written) = remote.encrypt(iter::once(data), (&mut encrypted, &mut []));
-        assert_eq!(read, data.len());
+        let written = encrypt.encrypt(num_written);
         remote_to_local_buffer.extend_from_slice(&encrypted[..written]);
     }
 

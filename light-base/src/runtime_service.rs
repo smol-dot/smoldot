@@ -80,7 +80,7 @@ use smoldot::{
     executor, header,
     informant::{BytesDisplay, HashDisplay},
     network::protocol,
-    trie::{self, proof_decode, TrieEntryVersion},
+    trie::{self, proof_decode, Nibble, TrieEntryVersion},
 };
 
 /// Configuration for a runtime service.
@@ -107,9 +107,6 @@ pub struct PinnedRuntimeId(Arc<Runtime>);
 
 /// See [the module-level documentation](..).
 pub struct RuntimeService<TPlat: PlatformRef> {
-    /// See [`Config::platform`].
-    platform: TPlat,
-
     /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService<TPlat>>,
 
@@ -177,7 +174,6 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         });
 
         RuntimeService {
-            platform: config.platform,
             sync_service: config.sync_service,
             guarded,
             background_task_abort,
@@ -424,6 +420,28 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         }
     }
 
+    /// Returns the storage value and Merkle value of the `:code` key of the finalized block.
+    ///
+    /// Returns `None` if the runtime of the current finalized block is not known yet.
+    // TODO: this function has a bad API but is hopefully temporary
+    pub async fn finalized_runtime_storage_merkle_values(
+        &self,
+    ) -> Option<(Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<Nibble>>)> {
+        let mut guarded = self.guarded.lock().await;
+        let guarded = &mut *guarded;
+
+        if let GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } = &guarded.tree {
+            let runtime = &tree.output_finalized_async_user_data();
+            Some((
+                runtime.runtime_code.clone(),
+                runtime.code_merkle_value.clone(),
+                runtime.closest_ancestor_excluding.clone(),
+            ))
+        } else {
+            None
+        }
+    }
+
     /// Lock the runtime service and prepare a call to a runtime entry point.
     ///
     /// The hash of the block passed as parameter corresponds to the block whose runtime to use
@@ -517,6 +535,8 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         &self,
         storage_code: Option<Vec<u8>>,
         storage_heap_pages: Option<Vec<u8>>,
+        code_merkle_value: Option<Vec<u8>>,
+        closest_ancestor_excluding: Option<Vec<Nibble>>,
     ) -> PinnedRuntimeId {
         let mut guarded = self.guarded.lock().await;
 
@@ -531,15 +551,13 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             existing_runtime
         } else {
             // No identical runtime was found. Try compiling the new runtime.
-            let runtime = SuccessfulRuntime::from_storage::<TPlat>(
-                &self.platform,
-                &storage_code,
-                &storage_heap_pages,
-            )
-            .await;
+            let runtime =
+                SuccessfulRuntime::from_storage::<TPlat>(&storage_code, &storage_heap_pages).await;
             let runtime = Arc::new(Runtime {
                 heap_pages: storage_heap_pages,
                 runtime_code: storage_code,
+                code_merkle_value,
+                closest_ancestor_excluding,
                 runtime,
             });
             guarded.runtimes.insert(Arc::downgrade(&runtime));
@@ -1219,6 +1237,8 @@ async fn run_background<TPlat: PlatformRef>(
                 let runtime = Arc::new(Runtime {
                     runtime_code: finalized_block_runtime.storage_code,
                     heap_pages: finalized_block_runtime.storage_heap_pages,
+                    code_merkle_value: finalized_block_runtime.code_merkle_value,
+                    closest_ancestor_excluding: finalized_block_runtime.closest_ancestor_excluding,
                     runtime: Ok(SuccessfulRuntime {
                         runtime_spec: finalized_block_runtime
                             .virtual_machine
@@ -1493,7 +1513,7 @@ async fn run_background<TPlat: PlatformRef>(
                     }.format_with(", ", |block, fmt| fmt(&HashDisplay(&block.hash))).to_string();
 
                     match download_result {
-                        Ok((storage_code, storage_heap_pages)) => {
+                        Ok((storage_code, storage_heap_pages, code_merkle_value, closest_ancestor_excluding)) => {
                             log::debug!(
                                 target: &log_target,
                                 "Worker <= SuccessfulDownload(blocks=[{}])",
@@ -1504,7 +1524,7 @@ async fn run_background<TPlat: PlatformRef>(
                             guarded.best_near_head_of_chain = true;
                             drop(guarded);
 
-                            background.runtime_download_finished(async_op_id, storage_code, storage_heap_pages).await;
+                            background.runtime_download_finished(async_op_id, storage_code, storage_heap_pages, code_merkle_value, closest_ancestor_excluding).await;
                         }
                         Err(error) => {
                             log::debug!(
@@ -1577,14 +1597,22 @@ struct Background<TPlat: PlatformRef> {
     blocks_stream: Pin<Box<dyn Stream<Item = sync_service::Notification> + Send>>,
 
     /// List of runtimes currently being downloaded from the network.
-    /// For each item, the download id, storage value of `:code`, and storage value of
-    /// `:heappages`.
+    /// For each item, the download id, storage value of `:code`, storage value of `:heappages`,
+    /// and Merkle value and closest ancestor of `:code`.
     runtime_downloads: stream::FuturesUnordered<
         future::BoxFuture<
             'static,
             (
                 async_tree::AsyncOpId,
-                Result<(Option<Vec<u8>>, Option<Vec<u8>>), RuntimeDownloadError>,
+                Result<
+                    (
+                        Option<Vec<u8>>,
+                        Option<Vec<u8>>,
+                        Option<Vec<u8>>,
+                        Option<Vec<Nibble>>,
+                    ),
+                    RuntimeDownloadError,
+                >,
             ),
         >,
     >,
@@ -1600,6 +1628,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         async_op_id: async_tree::AsyncOpId,
         storage_code: Option<Vec<u8>>,
         storage_heap_pages: Option<Vec<u8>>,
+        code_merkle_value: Option<Vec<u8>>,
+        closest_ancestor_excluding: Option<Vec<Nibble>>,
     ) {
         let mut guarded = self.guarded.lock().await;
 
@@ -1616,12 +1646,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let runtime = if let Some(existing_runtime) = existing_runtime {
             existing_runtime
         } else {
-            let runtime = SuccessfulRuntime::from_storage::<TPlat>(
-                &self.platform,
-                &storage_code,
-                &storage_heap_pages,
-            )
-            .await;
+            let runtime =
+                SuccessfulRuntime::from_storage::<TPlat>(&storage_code, &storage_heap_pages).await;
             match &runtime {
                 Ok(runtime) => {
                     log::info!(
@@ -1646,6 +1672,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 heap_pages: storage_heap_pages,
                 runtime_code: storage_code,
                 runtime,
+                code_merkle_value,
+                closest_ancestor_excluding,
             });
 
             guarded.runtimes.insert(Arc::downgrade(&runtime));
@@ -1977,7 +2005,21 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                     block_number,
                                     &block_hash,
                                     &state_root,
-                                    iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
+                                    [
+                                        sync_service::StorageRequestItem {
+                                            key: b":code".to_vec(),
+                                            ty: sync_service::StorageRequestItemTy::ClosestDescendantMerkleValue,
+                                        },
+                                        sync_service::StorageRequestItem {
+                                            key: b":code".to_vec(),
+                                            ty: sync_service::StorageRequestItemTy::Value,
+                                        },
+                                        sync_service::StorageRequestItem {
+                                            key: b":heappages".to_vec(),
+                                            ty: sync_service::StorageRequestItemTy::Value,
+                                        },
+                                    ]
+                                    .into_iter(),
                                     3,
                                     Duration::from_secs(20),
                                     NonZeroU32::new(3).unwrap(),
@@ -1985,10 +2027,49 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                 .await;
 
                             let result = match result {
-                                Ok(mut c) => {
-                                    let heap_pages = c.pop().unwrap();
-                                    let code = c.pop().unwrap();
-                                    Ok((code, heap_pages))
+                                Ok(entries) => {
+                                    let heap_pages = entries
+                                        .iter()
+                                        .find_map(|entry| match entry {
+                                            sync_service::StorageResultItem::Value {
+                                                key,
+                                                value,
+                                            } if key == b":heappages" => {
+                                                Some(value.clone()) // TODO: overhead
+                                            }
+                                            _ => None,
+                                        })
+                                        .unwrap();
+                                    let code = entries
+                                        .iter()
+                                        .find_map(|entry| match entry {
+                                            sync_service::StorageResultItem::Value {
+                                                key,
+                                                value,
+                                            } if key == b":code" => {
+                                                Some(value.clone()) // TODO: overhead
+                                            }
+                                            _ => None,
+                                        })
+                                        .unwrap();
+                                    let (code_merkle_value, code_closest_ancestor) = if code.is_some() {
+                                        entries
+                                            .iter()
+                                            .find_map(|entry| match entry {
+                                                sync_service::StorageResultItem::ClosestDescendantMerkleValue {
+                                                    requested_key,
+                                                    found_closest_ancestor_excluding,
+                                                    closest_descendant_merkle_value,
+                                                } if requested_key == b":code" => {
+                                                    Some((closest_descendant_merkle_value.clone(), found_closest_ancestor_excluding.clone())) // TODO overhead
+                                                }
+                                                _ => None
+                                            })
+                                            .unwrap()
+                                    } else {
+                                        (None, None)
+                                    };
+                                    Ok((code, heap_pages, code_merkle_value, code_closest_ancestor))
                                 }
                                 Err(error) => Err(RuntimeDownloadError::StorageQuery(error)),
                             };
@@ -2063,6 +2144,15 @@ struct Runtime {
     /// happened, including a problem when obtaining the runtime specs.
     runtime: Result<SuccessfulRuntime, RuntimeError>,
 
+    /// Merkle value of the `:code` trie node.
+    ///
+    /// Can be `None` if the storage is empty, in which case the runtime will have failed to
+    /// build.
+    code_merkle_value: Option<Vec<u8>>,
+
+    /// Closest ancestor of the `:code` key except for `:code` itself.
+    closest_ancestor_excluding: Option<Vec<Nibble>>,
+
     /// Undecoded storage value of `:code` corresponding to the [`Runtime::runtime`]
     /// field.
     ///
@@ -2092,12 +2182,11 @@ struct SuccessfulRuntime {
 
 impl SuccessfulRuntime {
     async fn from_storage<TPlat: PlatformRef>(
-        platform: &TPlat,
         code: &Option<Vec<u8>>,
         heap_pages: &Option<Vec<u8>>,
     ) -> Result<Self, RuntimeError> {
         // Since compiling the runtime is a CPU-intensive operation, we yield once before.
-        platform.yield_after_cpu_intensive().await;
+        futures_lite::future::yield_now().await;
 
         // Parameters for `HostVmPrototype::new`.
         let module = code.as_ref().ok_or(RuntimeError::CodeNotFound)?;

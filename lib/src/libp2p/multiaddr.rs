@@ -410,6 +410,13 @@ impl<'a> fmt::Display for ProtocolRef<'a> {
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DomainNameRef<'a>(&'a str);
 
+impl<'a> DomainNameRef<'a> {
+    /// Returns the underlying bytes of the domain name.
+    pub fn into_bytes(self) -> &'a [u8] {
+        self.0.as_bytes()
+    }
+}
+
 impl<'a> TryFrom<&'a str> for DomainNameRef<'a> {
     type Error = ParseError;
 

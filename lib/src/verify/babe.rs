@@ -180,6 +180,9 @@ pub struct VerifySuccess {
     /// >           block.
     pub slot_number: u64,
 
+    /// `true` if the claimed slot is a primary slot. `false` if it is a secondary slot.
+    pub is_primary_slot: bool,
+
     /// If `Some`, the verified block contains an epoch transition describing the new "next epoch".
     /// When verifying blocks that are children of this one, the value in this field must be
     /// provided as [`VerifyConfig::parent_block_next_epoch`], and the value previously in
@@ -235,7 +238,7 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
     // TODO: handle OnDisabled
 
     // Gather the BABE-related information from the header.
-    let (authority_index, slot_number, primary_slot_claim, vrf_output_and_proof) =
+    let (authority_index, slot_number, is_primary_slot, vrf_output_and_proof) =
         match config.header.digest.babe_pre_runtime() {
             Some(header::BabePreDigestRef::Primary(digest)) => (
                 digest.authority_index,
@@ -328,7 +331,7 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
     // Check that the claim is one of the allowed slot types.
     match (
         block_epoch_info.allowed_slots,
-        primary_slot_claim,
+        is_primary_slot,
         vrf_output_and_proof,
     ) {
         (_, true, None) => unreachable!(),
@@ -439,7 +442,7 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
 
         // If this is a primary slot claim, we need to make sure that the VRF output is below
         // a certain threshold, otherwise all the authorities could claim all the slots.
-        if primary_slot_claim {
+        if is_primary_slot {
             let threshold = calculate_primary_threshold(
                 block_epoch_info.c,
                 block_epoch_info.authorities.clone().map(|a| a.weight),
@@ -452,13 +455,13 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
             }
         }
     } else {
-        debug_assert!(!primary_slot_claim);
+        debug_assert!(!is_primary_slot);
     }
 
     // Each slot can be claimed by one specific authority in what is called a secondary slot
     // claim. If the block is a secondary slot claim, we need to make sure that the author
     // is indeed the one that is expected.
-    if !primary_slot_claim {
+    if !is_primary_slot {
         // Expected author is determined based on `blake2(randomness | slot_number)`.
         let hash = {
             let mut hash = blake2_rfc::blake2b::Blake2b::new(32);
@@ -483,6 +486,7 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
     // Success! 🚀
     Ok(VerifySuccess {
         slot_number,
+        is_primary_slot,
         epoch_transition_target,
     })
 }

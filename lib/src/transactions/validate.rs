@@ -27,6 +27,8 @@ use core::{iter, num::NonZeroU64};
 
 pub use runtime_host::{Nibble, TrieEntryVersion};
 
+mod tests;
+
 /// Configuration for a transaction validation process.
 pub struct Config<'a, TTx> {
     /// Runtime used to get the validate the transaction. Must be built using the Wasm code found
@@ -213,6 +215,8 @@ pub enum Error {
     /// the runtime to always provide a non-empty list of tags. This error is consequently a bug
     /// in the runtime.
     EmptyProvidedTags,
+    /// Runtime called a forbidden host function.
+    ForbiddenHostCall,
 }
 
 /// Error that can happen during the decoding.
@@ -333,8 +337,8 @@ pub fn validate_transaction(
                 }
                 .scale_encoding(config.block_number_bytes),
                 storage_main_trie_changes: storage_diff::TrieDiff::empty(),
-                offchain_storage_changes: Default::default(),
                 max_log_level: config.max_log_level,
+                calculate_trie_changes: false,
             });
 
             // Information used later, after `Core_initialize_block` is done.
@@ -370,8 +374,8 @@ pub fn validate_transaction(
                     &header::hash_from_scale_encoded_header(config.scale_encoded_header),
                 ),
                 storage_main_trie_changes: storage_diff::TrieDiff::empty(),
-                offchain_storage_changes: Default::default(),
                 max_log_level: config.max_log_level,
+                calculate_trie_changes: false,
             });
 
             match vm {
@@ -459,8 +463,8 @@ impl Query {
                             info.transaction_source,
                         ),
                         storage_main_trie_changes: success.storage_changes.into_main_trie_diff(),
-                        offchain_storage_changes: success.offchain_storage_changes,
                         max_log_level: info.max_log_level,
+                        calculate_trie_changes: false,
                     });
 
                     match vm {
@@ -490,6 +494,15 @@ impl Query {
                     inner = sig.verify_and_resume();
                     continue;
                 }
+                runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
+                    // Ignore the offchain storage write.
+                    inner = req.resume();
+                    continue;
+                }
+                runtime_host::RuntimeHostVm::Offchain(ctx) => Query::Finished {
+                    result: Err(Error::ForbiddenHostCall),
+                    virtual_machine: ctx.into_prototype(),
+                },
             };
         }
     }
@@ -550,6 +563,15 @@ impl Query {
                     inner = sig.verify_and_resume();
                     continue;
                 }
+                runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
+                    // Ignore the offchain storage write.
+                    inner = req.resume();
+                    continue;
+                }
+                runtime_host::RuntimeHostVm::Offchain(ctx) => Query::Finished {
+                    result: Err(Error::ForbiddenHostCall),
+                    virtual_machine: ctx.into_prototype(),
+                },
             };
         }
     }

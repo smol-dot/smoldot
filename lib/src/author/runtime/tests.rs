@@ -41,6 +41,7 @@ fn block_building_works() {
             slot_number: 1234u64,
         }),
         max_log_level: 0,
+        calculate_trie_changes: false,
     });
 
     loop {
@@ -66,6 +67,9 @@ fn block_building_works() {
             }
             super::BlockBuild::ClosestDescendantMerkleValue(req) => {
                 builder = req.resume_unknown();
+            }
+            super::BlockBuild::OffchainStorageSet(req) => {
+                builder = req.resume();
             }
             super::BlockBuild::NextKey(req) => {
                 let mut search = trie::branch_search::BranchSearch::NextKey(

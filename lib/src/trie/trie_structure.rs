@@ -792,8 +792,9 @@ impl<TUd> TrieStructure<TUd> {
                     // `iter` is strictly inferior to `start_key`, and all of its children will
                     // also be strictly inferior to `start_key`.
                     // Stop the search immediately after the current node in the parent.
-                    let Some((parent, parent_nibble)) = iter_node.parent
-                        else { return either::Right(iter::empty()); };
+                    let Some((parent, parent_nibble)) = iter_node.parent else {
+                        return either::Right(iter::empty());
+                    };
                     let next_nibble = parent_nibble.checked_add(1);
                     if iter_key_nibbles_extra == 0 {
                         return either::Right(iter::empty());
@@ -940,7 +941,9 @@ impl<TUd> TrieStructure<TUd> {
                         return None;
                     }
 
-                    let Some((parent_node_index, parent_nibble_direction)) = node.parent else { return None; };
+                    let Some((parent_node_index, parent_nibble_direction)) = node.parent else {
+                        return None;
+                    };
                     iter_key_nibbles_extra -= 2;
                     iter_key_nibbles_extra -= node.partial_key.len();
                     let next_sibling_nibble = parent_nibble_direction.checked_add(1);

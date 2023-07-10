@@ -40,23 +40,6 @@ pub struct Config<'a, TBody> {
     /// The hash of this header must be the one referenced in [`Config::block_header`].
     pub parent_block_header: header::HeaderRef<'a>,
 
-    /// Configuration items related to the consensus engine.
-    pub consensus: ConfigConsensus<'a>,
-
-    /// If `false`, digest items with an unknown consensus engine lead to an error.
-    ///
-    /// Note that blocks must always contain digest items that are relevant to the current
-    /// consensus algorithm. This option controls what happens when blocks contain additional
-    /// digest items that aren't recognized by the implementation.
-    ///
-    /// Passing `true` can lead to blocks being considered as valid when they shouldn't, as these
-    /// additional digest items could have some logic attached to them that restricts which blocks
-    /// are valid and which are not.
-    ///
-    /// However, since a recognized consensus engine must always be present, both `true` and
-    /// `false` guarantee that the number of authorable blocks over the network is bounded.
-    pub allow_unknown_consensus_engines: bool,
-
     /// Time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time) (i.e.
     /// 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
     pub now_from_unix_epoch: Duration,
@@ -80,6 +63,10 @@ pub struct Config<'a, TBody> {
     /// >           "off", `1` for "error", `2` for "warn", `3` for "info", `4` for "debug",
     /// >           and `5` for "trace".
     pub max_log_level: u32,
+
+    /// If `true`, then [`StorageChanges::trie_changes_iter_ordered`] will return `Some`.
+    /// Passing `None` requires fewer calculation and fewer storage accesses.
+    pub calculate_trie_changes: bool,
 }
 
 /// Extra items of [`Config`] that are dependant on the consensus engine of the chain.
@@ -121,18 +108,12 @@ pub struct Success {
     /// the new runtime.
     pub new_runtime: Option<host::HostVmPrototype>,
 
-    /// Extra items in [`Success`] relevant to the consensus engine.
-    pub consensus: SuccessConsensus,
-
     /// List of changes to the storage main trie that the block performs.
     pub storage_changes: StorageChanges,
 
     /// State trie version indicated by the runtime. All the storage changes indicated by
     /// [`Success::storage_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
-
-    /// List of changes to the off-chain storage that this block performs.
-    pub offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
 
     /// Concatenation of all the log messages printed by the runtime.
     pub logs: String,
@@ -213,104 +194,15 @@ pub enum Error {
     /// Block has modified the `:heappages` key in a way that fails to parse.
     #[display(fmt = "Block has modified `:heappages` key in invalid way: {_0}")]
     HeapPagesParseError(executor::InvalidHeapPagesError),
+    /// Runtime called a forbidden host function.
+    ForbiddenHostCall,
 }
 
-/// Verifies whether a block is valid.
+/// Verifies whether a block body is valid.
 pub fn verify(
     config: Config<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone>,
 ) -> Verify {
-    // Fail verification if there is any digest log item with an unrecognized consensus engine.
-    if !config.allow_unknown_consensus_engines {
-        if let Some(engine) = config
-            .block_header
-            .digest
-            .logs()
-            .find_map(|item| match item {
-                header::DigestItemRef::UnknownConsensus { engine, .. }
-                | header::DigestItemRef::UnknownSeal { engine, .. }
-                | header::DigestItemRef::UnknownPreRuntime { engine, .. } => Some(engine),
-                _ => None,
-            })
-        {
-            return Verify::Finished(Err((
-                Error::UnknownConsensusEngine { engine },
-                config.parent_runtime,
-            )));
-        }
-    }
-
-    // Start the consensus engine verification process.
-    let consensus_success = match &config.consensus {
-        ConfigConsensus::Aura {
-            current_authorities,
-            slot_duration,
-        } => {
-            if config.block_header.digest.has_any_babe() {
-                return Verify::Finished(Err((
-                    Error::MultipleConsensusEngines,
-                    config.parent_runtime,
-                )));
-            }
-
-            let result = aura::verify_header(aura::VerifyConfig {
-                header: config.block_header.clone(),
-                block_number_bytes: config.block_number_bytes,
-                parent_block_header: config.parent_block_header,
-                now_from_unix_epoch: config.now_from_unix_epoch,
-                current_authorities: current_authorities.clone(),
-                slot_duration: *slot_duration,
-            });
-
-            match result {
-                Ok(s) => SuccessConsensus::Aura {
-                    authorities_change: s.authorities_change,
-                },
-                Err(err) => {
-                    return Verify::Finished(Err((
-                        Error::AuraVerification(err),
-                        config.parent_runtime,
-                    )))
-                }
-            }
-        }
-        ConfigConsensus::Babe {
-            parent_block_epoch,
-            parent_block_next_epoch,
-            slots_per_epoch,
-        } => {
-            if config.block_header.digest.has_any_aura() {
-                return Verify::Finished(Err((
-                    Error::MultipleConsensusEngines,
-                    config.parent_runtime,
-                )));
-            }
-
-            let result = babe::verify_header(babe::VerifyConfig {
-                header: config.block_header.clone(),
-                block_number_bytes: config.block_number_bytes,
-                parent_block_header: config.parent_block_header,
-                parent_block_next_epoch: parent_block_next_epoch.clone(),
-                parent_block_epoch: parent_block_epoch.clone(),
-                slots_per_epoch: *slots_per_epoch,
-                now_from_unix_epoch: config.now_from_unix_epoch,
-            });
-
-            match result {
-                Ok(s) => SuccessConsensus::Babe {
-                    epoch_transition_target: s.epoch_transition_target,
-                    slot_number: s.slot_number,
-                },
-                Err(err) => {
-                    return Verify::Finished(Err((
-                        Error::BabeVerification(err),
-                        config.parent_runtime,
-                    )))
-                }
-            }
-        }
-    };
-
-    // Now that we have verified the header, we need to call two runtime functions:
+    // We need to call two runtime functions:
     //
     // - `BlockBuilder_check_inherents`, which does some basic verification of the inherents
     //   contained in the block.
@@ -372,8 +264,9 @@ pub fn verify(
                     .chain(encoded_list.map(either::Right))
             },
             storage_main_trie_changes: Default::default(),
-            offchain_storage_changes: Default::default(),
             max_log_level: config.max_log_level,
+            // Calculating the trie changes is done at the next step.
+            calculate_trie_changes: false,
         });
 
         match vm {
@@ -389,7 +282,7 @@ pub fn verify(
         phase: VerifyInnerPhase::CheckInherents {
             execute_block_parameters,
         },
-        consensus_success,
+        calculate_trie_changes: config.calculate_trie_changes,
     }
     .run()
 }
@@ -414,12 +307,14 @@ pub enum Verify {
     StorageClosestDescendantMerkleValue(StorageClosestDescendantMerkleValue),
     /// Fetching the key that follows a given one is required in order to continue.
     StorageNextKey(StorageNextKey),
+    /// Setting the value of an offchain storage value is required.
+    OffchainStorageSet(OffchainStorageSet),
 }
 
 struct VerifyInner {
     inner: runtime_host::RuntimeHostVm,
     phase: VerifyInnerPhase,
-    consensus_success: SuccessConsensus,
+    calculate_trie_changes: bool,
 }
 
 enum VerifyInnerPhase {
@@ -467,8 +362,8 @@ impl VerifyInner {
                             storage_main_trie_changes: success
                                 .storage_changes
                                 .into_main_trie_diff(),
-                            offchain_storage_changes: success.offchain_storage_changes,
                             max_log_level: 0,
+                            calculate_trie_changes: self.calculate_trie_changes,
                         });
 
                         match vm {
@@ -480,9 +375,9 @@ impl VerifyInner {
                     };
 
                     self = VerifyInner {
-                        consensus_success: self.consensus_success,
                         phase: VerifyInnerPhase::ExecuteBlock { parent_code: None },
                         inner: import_process,
+                        calculate_trie_changes: self.calculate_trie_changes,
                     };
                 }
 
@@ -513,8 +408,10 @@ impl VerifyInner {
                         }
                         (None, None, Some(_)) => {
                             break Verify::StorageGet(StorageGet {
-                                inner: StorageGetInner::ParentCode { success },
-                                consensus_success: self.consensus_success,
+                                inner: StorageGetInner::ParentCode {
+                                    success,
+                                    calculate_trie_changes: self.calculate_trie_changes,
+                                },
                             })
                         }
                         (None, Some(None), _) => {
@@ -543,12 +440,10 @@ impl VerifyInner {
                             };
 
                             return Verify::RuntimeCompilation(RuntimeCompilation {
-                                consensus_success: self.consensus_success,
                                 parent_runtime,
                                 heap_pages,
                                 parent_code,
                                 logs: success.logs,
-                                offchain_storage_changes: success.offchain_storage_changes,
                                 storage_changes: success.storage_changes,
                                 state_trie_version: success.state_trie_version,
                             });
@@ -558,18 +453,19 @@ impl VerifyInner {
                     break Verify::Finished(Ok(Success {
                         parent_runtime: success.virtual_machine.into_prototype(),
                         new_runtime: None,
-                        consensus: self.consensus_success,
                         storage_changes: success.storage_changes,
                         state_trie_version: success.state_trie_version,
-                        offchain_storage_changes: success.offchain_storage_changes,
                         logs: success.logs,
                     }));
                 }
 
                 (runtime_host::RuntimeHostVm::StorageGet(inner), phase) => {
                     break Verify::StorageGet(StorageGet {
-                        inner: StorageGetInner::Execution { inner, phase },
-                        consensus_success: self.consensus_success,
+                        inner: StorageGetInner::Execution {
+                            inner,
+                            phase,
+                            calculate_trie_changes: self.calculate_trie_changes,
+                        },
                     })
                 }
                 (runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(inner), phase) => {
@@ -577,7 +473,7 @@ impl VerifyInner {
                         StorageClosestDescendantMerkleValue {
                             inner,
                             phase,
-                            consensus_success: self.consensus_success,
+                            calculate_trie_changes: self.calculate_trie_changes,
                         },
                     )
                 }
@@ -585,12 +481,22 @@ impl VerifyInner {
                     break Verify::StorageNextKey(StorageNextKey {
                         inner,
                         phase,
-                        consensus_success: self.consensus_success,
+                        calculate_trie_changes: self.calculate_trie_changes,
+                    })
+                }
+                (runtime_host::RuntimeHostVm::OffchainStorageSet(inner), phase) => {
+                    break Verify::OffchainStorageSet(OffchainStorageSet {
+                        inner,
+                        phase,
+                        calculate_trie_changes: self.calculate_trie_changes,
                     })
                 }
                 (runtime_host::RuntimeHostVm::SignatureVerification(sig), phase) => {
                     self.inner = sig.verify_and_resume();
                     self.phase = phase;
+                }
+                (runtime_host::RuntimeHostVm::Offchain(ctx), _phase) => {
+                    return Verify::Finished(Err((Error::ForbiddenHostCall, ctx.into_prototype())))
                 }
             }
         }
@@ -601,7 +507,6 @@ impl VerifyInner {
 #[must_use]
 pub struct StorageGet {
     inner: StorageGetInner,
-    consensus_success: SuccessConsensus,
 }
 
 enum StorageGetInner {
@@ -609,9 +514,11 @@ enum StorageGetInner {
         inner: runtime_host::StorageGet,
         /// See [`VerifyInner::phase`].
         phase: VerifyInnerPhase,
+        calculate_trie_changes: bool,
     },
     ParentCode {
         success: runtime_host::Success,
+        calculate_trie_changes: bool,
     },
 }
 
@@ -638,13 +545,20 @@ impl StorageGet {
         value: Option<(impl Iterator<Item = impl AsRef<[u8]>>, TrieEntryVersion)>,
     ) -> Verify {
         match self.inner {
-            StorageGetInner::Execution { inner, phase } => VerifyInner {
+            StorageGetInner::Execution {
+                inner,
+                phase,
+                calculate_trie_changes,
+            } => VerifyInner {
                 inner: inner.inject_value(value),
                 phase,
-                consensus_success: self.consensus_success,
+                calculate_trie_changes,
             }
             .run(),
-            StorageGetInner::ParentCode { success } => VerifyInner {
+            StorageGetInner::ParentCode {
+                success,
+                calculate_trie_changes,
+            } => VerifyInner {
                 inner: runtime_host::RuntimeHostVm::Finished(Ok(success)),
                 phase: VerifyInnerPhase::ExecuteBlock {
                     parent_code: Some(value.map(|(val_iter, _)| {
@@ -654,7 +568,7 @@ impl StorageGet {
                         })
                     })),
                 },
-                consensus_success: self.consensus_success,
+                calculate_trie_changes,
             }
             .run(),
         }
@@ -668,7 +582,7 @@ pub struct StorageClosestDescendantMerkleValue {
     inner: runtime_host::ClosestDescendantMerkleValue,
     /// See [`VerifyInner::phase`].
     phase: VerifyInnerPhase,
-    consensus_success: SuccessConsensus,
+    calculate_trie_changes: bool,
 }
 
 impl StorageClosestDescendantMerkleValue {
@@ -690,7 +604,7 @@ impl StorageClosestDescendantMerkleValue {
         VerifyInner {
             inner: self.inner.resume_unknown(),
             phase: self.phase,
-            consensus_success: self.consensus_success,
+            calculate_trie_changes: self.calculate_trie_changes,
         }
         .run()
     }
@@ -703,7 +617,7 @@ impl StorageClosestDescendantMerkleValue {
         VerifyInner {
             inner: self.inner.inject_merkle_value(merkle_value),
             phase: self.phase,
-            consensus_success: self.consensus_success,
+            calculate_trie_changes: self.calculate_trie_changes,
         }
         .run()
     }
@@ -715,7 +629,7 @@ pub struct StorageNextKey {
     inner: runtime_host::NextKey,
     /// See [`VerifyInner::phase`].
     phase: VerifyInnerPhase,
-    consensus_success: SuccessConsensus,
+    calculate_trie_changes: bool,
 }
 
 impl StorageNextKey {
@@ -757,7 +671,40 @@ impl StorageNextKey {
         VerifyInner {
             inner: self.inner.inject_key(key),
             phase: self.phase,
-            consensus_success: self.consensus_success,
+            calculate_trie_changes: self.calculate_trie_changes,
+        }
+        .run()
+    }
+}
+
+/// Setting the value of an offchain storage value is required.
+#[must_use]
+pub struct OffchainStorageSet {
+    inner: runtime_host::OffchainStorageSet,
+    /// See [`VerifyInner::phase`].
+    phase: VerifyInnerPhase,
+    calculate_trie_changes: bool,
+}
+
+impl OffchainStorageSet {
+    /// Returns the key whose value must be set.
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+        self.inner.key()
+    }
+
+    /// Returns the value to set.
+    ///
+    /// If `None` is returned, the key should be removed from the storage entirely.
+    pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.inner.value()
+    }
+
+    /// Resumes execution after having set the value.
+    pub fn resume(self) -> Verify {
+        VerifyInner {
+            inner: self.inner.resume(),
+            phase: self.phase,
+            calculate_trie_changes: self.calculate_trie_changes,
         }
         .run()
     }
@@ -772,11 +719,9 @@ pub struct RuntimeCompilation {
     parent_runtime: host::HostVmPrototype,
     storage_changes: StorageChanges,
     state_trie_version: TrieEntryVersion,
-    offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
     logs: String,
     heap_pages: vm::HeapPages,
     parent_code: Option<Option<Vec<u8>>>,
-    consensus_success: SuccessConsensus,
 }
 
 impl RuntimeCompilation {
@@ -808,10 +753,8 @@ impl RuntimeCompilation {
         Verify::Finished(Ok(Success {
             parent_runtime: self.parent_runtime,
             new_runtime: Some(new_runtime),
-            consensus: self.consensus_success,
             storage_changes: self.storage_changes,
             state_trie_version: self.state_trie_version,
-            offchain_storage_changes: self.offchain_storage_changes,
             logs: self.logs,
         }))
     }

@@ -448,7 +448,7 @@ type ClientToServer =
     { ty: "accept-more-json-rpc-answers", chainId: number } |
     { ty: "shutdown" } |
     { ty: "connection-reset", connectionId: number, message: string } |
-    { ty: "connection-opened", connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number, writeClosable: boolean } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateMultihash: Uint8Array, remoteTlsCertificateMultihash: Uint8Array } } |
+    { ty: "connection-opened", connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateSha256: Uint8Array, remoteTlsCertificateSha256: Uint8Array } } |
     { ty: "stream-message", connectionId: number, streamId?: number, message: Uint8Array } |
     { ty: "stream-opened", connectionId: number, streamId: number, direction: "inbound" | "outbound", initialWritableBytes: number } |
     { ty: "stream-writable-bytes", connectionId: number, streamId?: number, numExtra: number } |
