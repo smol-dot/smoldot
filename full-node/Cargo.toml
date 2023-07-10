@@ -24,6 +24,7 @@ either = { version = "1.8.1", default-features = false }
 event-listener = "2.5.3"
 fnv = { version = "1.0.7", default-features = false }
 futures-channel = "0.3.27"
+futures-lite = { version = "1.13.0", default-features = false, features = ["alloc"] }
 futures-util = { version = "0.3.27", default-features = false }
 hashbrown = { version = "0.14.0", default-features = false }
 hex = { version = "0.4.3", default-features = false }

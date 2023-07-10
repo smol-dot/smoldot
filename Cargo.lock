@@ -2386,6 +2386,7 @@ dependencies = [
  "event-listener",
  "fnv",
  "futures-channel",
+ "futures-lite",
  "futures-util",
  "hashbrown 0.14.0",
  "hex",
