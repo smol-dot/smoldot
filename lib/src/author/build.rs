@@ -233,6 +233,7 @@ impl AuthoringStart {
                 }
             },
             max_log_level: config.max_log_level,
+            calculate_trie_changes: config.calculate_trie_changes,
         });
 
         let inherent_data = inherents::InherentData {
@@ -283,6 +284,10 @@ pub struct AuthoringStartConfig<'a> {
     /// >           "off", `1` for "error", `2` for "warn", `3` for "info", `4` for "debug",
     /// >           and `5` for "trace".
     pub max_log_level: u32,
+
+    /// If `true`, then [`StorageChanges::trie_changes_iter_ordered`] will return `Some`.
+    /// Passing `None` requires fewer calculation and fewer storage accesses.
+    pub calculate_trie_changes: bool,
 }
 
 /// More transactions can be added.

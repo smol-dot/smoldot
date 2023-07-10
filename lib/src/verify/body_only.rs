@@ -63,6 +63,10 @@ pub struct Config<'a, TBody> {
     /// >           "off", `1` for "error", `2` for "warn", `3` for "info", `4` for "debug",
     /// >           and `5` for "trace".
     pub max_log_level: u32,
+
+    /// If `true`, then [`StorageChanges::trie_changes_iter_ordered`] will return `Some`.
+    /// Passing `None` requires fewer calculation and fewer storage accesses.
+    pub calculate_trie_changes: bool,
 }
 
 /// Extra items of [`Config`] that are dependant on the consensus engine of the chain.
@@ -263,6 +267,8 @@ pub fn verify(
             storage_main_trie_changes: Default::default(),
             offchain_storage_changes: Default::default(),
             max_log_level: config.max_log_level,
+            // Calculating the trie changes is done at the next step.
+            calculate_trie_changes: false,
         });
 
         match vm {
@@ -278,6 +284,7 @@ pub fn verify(
         phase: VerifyInnerPhase::CheckInherents {
             execute_block_parameters,
         },
+        calculate_trie_changes: config.calculate_trie_changes,
     }
     .run()
 }
@@ -307,6 +314,7 @@ pub enum Verify {
 struct VerifyInner {
     inner: runtime_host::RuntimeHostVm,
     phase: VerifyInnerPhase,
+    calculate_trie_changes: bool,
 }
 
 enum VerifyInnerPhase {
@@ -356,6 +364,7 @@ impl VerifyInner {
                                 .into_main_trie_diff(),
                             offchain_storage_changes: success.offchain_storage_changes,
                             max_log_level: 0,
+                            calculate_trie_changes: self.calculate_trie_changes,
                         });
 
                         match vm {
@@ -369,6 +378,7 @@ impl VerifyInner {
                     self = VerifyInner {
                         phase: VerifyInnerPhase::ExecuteBlock { parent_code: None },
                         inner: import_process,
+                        calculate_trie_changes: self.calculate_trie_changes,
                     };
                 }
 
@@ -399,7 +409,10 @@ impl VerifyInner {
                         }
                         (None, None, Some(_)) => {
                             break Verify::StorageGet(StorageGet {
-                                inner: StorageGetInner::ParentCode { success },
+                                inner: StorageGetInner::ParentCode {
+                                    success,
+                                    calculate_trie_changes: self.calculate_trie_changes,
+                                },
                             })
                         }
                         (None, Some(None), _) => {
@@ -451,16 +464,28 @@ impl VerifyInner {
 
                 (runtime_host::RuntimeHostVm::StorageGet(inner), phase) => {
                     break Verify::StorageGet(StorageGet {
-                        inner: StorageGetInner::Execution { inner, phase },
+                        inner: StorageGetInner::Execution {
+                            inner,
+                            phase,
+                            calculate_trie_changes: self.calculate_trie_changes,
+                        },
                     })
                 }
                 (runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(inner), phase) => {
                     break Verify::StorageClosestDescendantMerkleValue(
-                        StorageClosestDescendantMerkleValue { inner, phase },
+                        StorageClosestDescendantMerkleValue {
+                            inner,
+                            phase,
+                            calculate_trie_changes: self.calculate_trie_changes,
+                        },
                     )
                 }
                 (runtime_host::RuntimeHostVm::NextKey(inner), phase) => {
-                    break Verify::StorageNextKey(StorageNextKey { inner, phase })
+                    break Verify::StorageNextKey(StorageNextKey {
+                        inner,
+                        phase,
+                        calculate_trie_changes: self.calculate_trie_changes,
+                    })
                 }
                 (runtime_host::RuntimeHostVm::SignatureVerification(sig), phase) => {
                     self.inner = sig.verify_and_resume();
@@ -482,9 +507,11 @@ enum StorageGetInner {
         inner: runtime_host::StorageGet,
         /// See [`VerifyInner::phase`].
         phase: VerifyInnerPhase,
+        calculate_trie_changes: bool,
     },
     ParentCode {
         success: runtime_host::Success,
+        calculate_trie_changes: bool,
     },
 }
 
@@ -511,12 +538,20 @@ impl StorageGet {
         value: Option<(impl Iterator<Item = impl AsRef<[u8]>>, TrieEntryVersion)>,
     ) -> Verify {
         match self.inner {
-            StorageGetInner::Execution { inner, phase } => VerifyInner {
+            StorageGetInner::Execution {
+                inner,
+                phase,
+                calculate_trie_changes,
+            } => VerifyInner {
                 inner: inner.inject_value(value),
                 phase,
+                calculate_trie_changes,
             }
             .run(),
-            StorageGetInner::ParentCode { success } => VerifyInner {
+            StorageGetInner::ParentCode {
+                success,
+                calculate_trie_changes,
+            } => VerifyInner {
                 inner: runtime_host::RuntimeHostVm::Finished(Ok(success)),
                 phase: VerifyInnerPhase::ExecuteBlock {
                     parent_code: Some(value.map(|(val_iter, _)| {
@@ -526,6 +561,7 @@ impl StorageGet {
                         })
                     })),
                 },
+                calculate_trie_changes,
             }
             .run(),
         }
@@ -539,6 +575,7 @@ pub struct StorageClosestDescendantMerkleValue {
     inner: runtime_host::ClosestDescendantMerkleValue,
     /// See [`VerifyInner::phase`].
     phase: VerifyInnerPhase,
+    calculate_trie_changes: bool,
 }
 
 impl StorageClosestDescendantMerkleValue {
@@ -560,6 +597,7 @@ impl StorageClosestDescendantMerkleValue {
         VerifyInner {
             inner: self.inner.resume_unknown(),
             phase: self.phase,
+            calculate_trie_changes: self.calculate_trie_changes,
         }
         .run()
     }
@@ -572,6 +610,7 @@ impl StorageClosestDescendantMerkleValue {
         VerifyInner {
             inner: self.inner.inject_merkle_value(merkle_value),
             phase: self.phase,
+            calculate_trie_changes: self.calculate_trie_changes,
         }
         .run()
     }
@@ -583,6 +622,7 @@ pub struct StorageNextKey {
     inner: runtime_host::NextKey,
     /// See [`VerifyInner::phase`].
     phase: VerifyInnerPhase,
+    calculate_trie_changes: bool,
 }
 
 impl StorageNextKey {
@@ -624,6 +664,7 @@ impl StorageNextKey {
         VerifyInner {
             inner: self.inner.inject_key(key),
             phase: self.phase,
+            calculate_trie_changes: self.calculate_trie_changes,
         }
         .run()
     }

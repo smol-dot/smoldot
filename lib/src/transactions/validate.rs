@@ -337,6 +337,7 @@ pub fn validate_transaction(
                 storage_main_trie_changes: storage_diff::TrieDiff::empty(),
                 offchain_storage_changes: Default::default(),
                 max_log_level: config.max_log_level,
+                calculate_trie_changes: false,
             });
 
             // Information used later, after `Core_initialize_block` is done.
@@ -374,6 +375,7 @@ pub fn validate_transaction(
                 storage_main_trie_changes: storage_diff::TrieDiff::empty(),
                 offchain_storage_changes: Default::default(),
                 max_log_level: config.max_log_level,
+                calculate_trie_changes: false,
             });
 
             match vm {
@@ -463,6 +465,7 @@ impl Query {
                         storage_main_trie_changes: success.storage_changes.into_main_trie_diff(),
                         offchain_storage_changes: success.offchain_storage_changes,
                         max_log_level: info.max_log_level,
+                        calculate_trie_changes: false,
                     });
 
                     match vm {

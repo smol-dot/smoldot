@@ -95,6 +95,10 @@ pub struct Config<'a> {
     /// >           "off", `1` for "error", `2` for "warn", `3` for "info", `4` for "debug",
     /// >           and `5` for "trace".
     pub max_log_level: u32,
+
+    /// If `true`, then [`StorageChanges::trie_changes_iter_ordered`] will return `Some`.
+    /// Passing `None` requires fewer calculation and fewer storage accesses.
+    pub calculate_trie_changes: bool,
 }
 
 /// Extra configuration depending on the consensus algorithm.
@@ -192,6 +196,7 @@ pub fn build_block(config: Config) -> BlockBuild {
         storage_main_trie_changes: Default::default(),
         offchain_storage_changes: Default::default(),
         max_log_level: config.max_log_level,
+        calculate_trie_changes: config.calculate_trie_changes,
     });
 
     let vm = match init_result {
@@ -204,6 +209,7 @@ pub fn build_block(config: Config) -> BlockBuild {
         block_body: Vec::with_capacity(config.block_body_capacity),
         logs: String::new(),
         max_log_level: config.max_log_level,
+        calculate_trie_changes: config.calculate_trie_changes,
     };
 
     BlockBuild::from_inner(vm, shared)
@@ -342,6 +348,7 @@ impl BlockBuild {
                         storage_main_trie_changes: success.storage_changes.into_main_trie_diff(),
                         offchain_storage_changes: success.offchain_storage_changes,
                         max_log_level: shared.max_log_level,
+                        calculate_trie_changes: shared.calculate_trie_changes,
                     });
 
                     inner = Inner::Runtime(match init_result {
@@ -479,6 +486,8 @@ struct Shared {
     logs: String,
     /// Value provided by [`Config::max_log_level`].
     max_log_level: u32,
+    /// Value provided by [`Config::calculate_trie_changes`].
+    calculate_trie_changes: bool,
 }
 
 /// The block building process is separated into multiple stages.
@@ -546,6 +555,7 @@ impl InherentExtrinsics {
             storage_main_trie_changes: self.storage_changes.into_main_trie_diff(),
             offchain_storage_changes: self.offchain_storage_changes,
             max_log_level: self.shared.max_log_level,
+            calculate_trie_changes: self.shared.calculate_trie_changes,
         });
 
         let vm = match init_result {
@@ -578,6 +588,7 @@ impl ApplyExtrinsic {
             storage_main_trie_changes: self.storage_changes.into_main_trie_diff(),
             offchain_storage_changes: self.offchain_storage_changes,
             max_log_level: self.shared.max_log_level,
+            calculate_trie_changes: self.shared.calculate_trie_changes,
         });
 
         self.shared.stage = Stage::ApplyExtrinsic(extrinsic);
@@ -601,6 +612,7 @@ impl ApplyExtrinsic {
             storage_main_trie_changes: self.storage_changes.into_main_trie_diff(),
             offchain_storage_changes: self.offchain_storage_changes,
             max_log_level: self.shared.max_log_level,
+            calculate_trie_changes: self.shared.calculate_trie_changes,
         });
 
         let vm = match init_result {

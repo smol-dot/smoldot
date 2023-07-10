@@ -41,6 +41,7 @@ fn block_building_works() {
             slot_number: 1234u64,
         }),
         max_log_level: 0,
+        calculate_trie_changes: false,
     });
 
     loop {

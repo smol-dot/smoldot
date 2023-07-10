@@ -1188,6 +1188,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             offchain_storage_changes: Default::default(),
                             storage_main_trie_changes: Default::default(),
                             max_log_level: 0,
+                            calculate_trie_changes: false,
                         }) {
                             Err((error, prototype)) => {
                                 runtime_call_lock.unlock(prototype);

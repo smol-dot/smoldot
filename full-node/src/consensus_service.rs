@@ -774,6 +774,7 @@ impl SyncBackground {
                     parent_runtime,
                     block_body_capacity: 0, // TODO: could be set to the size of the tx pool
                     max_log_level: 0,
+                    calculate_trie_changes: true,
                 })
             };
 
@@ -1254,6 +1255,7 @@ impl SyncBackground {
                         .scale_encoded_extrinsics()
                         .unwrap(),
                     max_log_level: 3,
+                    calculate_trie_changes: true,
                 });
 
                 // TODO: check this block against the chain spec's badBlocks
@@ -1296,7 +1298,7 @@ impl SyncBackground {
                                             &scale_encoded_header,
                                             is_new_best,
                                             iter::empty::<Vec<u8>>(), // TODO:,no /!\
-                                            storage_changes.trie_changes_iter_ordered().filter_map(
+                                            storage_changes.trie_changes_iter_ordered().unwrap().filter_map(
                                                 |(_child_trie, key, change)| {
                                                     let body_only::TrieChange::InsertUpdate {
                                                         new_merkle_value,
