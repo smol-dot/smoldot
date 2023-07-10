@@ -123,8 +123,6 @@ pub struct Success {
     /// State trie version indicated by the runtime. All the storage changes indicated by
     /// [`Success::storage_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
-    /// List of changes to the off-chain storage that this block performs.
-    pub offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
     /// Concatenation of all the log messages printed by the runtime.
     pub logs: String,
 }
@@ -194,7 +192,6 @@ pub fn build_block(config: Config) -> BlockBuild {
         },
         virtual_machine: config.parent_runtime,
         storage_main_trie_changes: Default::default(),
-        offchain_storage_changes: Default::default(),
         max_log_level: config.max_log_level,
         calculate_trie_changes: config.calculate_trie_changes,
     });
@@ -259,6 +256,9 @@ pub enum BlockBuild {
     /// Fetching the key that follows a given one in the parent storage is required in order to
     /// continue.
     NextKey(NextKey),
+
+    /// Setting an offchain storage value is required in order to continue.
+    OffchainStorageSet(OffchainStorageSet),
 }
 
 impl BlockBuild {
@@ -291,6 +291,9 @@ impl BlockBuild {
                 (Inner::Runtime(runtime_host::RuntimeHostVm::NextKey(inner)), _) => {
                     return BlockBuild::NextKey(NextKey(inner, shared))
                 }
+                (Inner::Runtime(runtime_host::RuntimeHostVm::OffchainStorageSet(inner)), _) => {
+                    return BlockBuild::OffchainStorageSet(OffchainStorageSet(inner, shared))
+                }
 
                 (
                     Inner::Runtime(runtime_host::RuntimeHostVm::Finished(Ok(success))),
@@ -310,7 +313,6 @@ impl BlockBuild {
                         shared,
                         parent_runtime: success.virtual_machine.into_prototype(),
                         storage_changes: success.storage_changes,
-                        offchain_storage_changes: success.offchain_storage_changes,
                     });
                 }
 
@@ -346,7 +348,6 @@ impl BlockBuild {
                         function_to_call: "BlockBuilder_apply_extrinsic",
                         parameter: iter::once(extrinsic),
                         storage_main_trie_changes: success.storage_changes.into_main_trie_diff(),
-                        offchain_storage_changes: success.offchain_storage_changes,
                         max_log_level: shared.max_log_level,
                         calculate_trie_changes: shared.calculate_trie_changes,
                     });
@@ -364,7 +365,6 @@ impl BlockBuild {
                         shared,
                         parent_runtime: success.virtual_machine.into_prototype(),
                         storage_changes: success.storage_changes,
-                        offchain_storage_changes: success.offchain_storage_changes,
                     });
                 }
 
@@ -447,7 +447,6 @@ impl BlockBuild {
                             shared,
                             parent_runtime: success.virtual_machine.into_prototype(),
                             storage_changes: success.storage_changes,
-                            offchain_storage_changes: success.offchain_storage_changes,
                         },
                     };
                 }
@@ -464,7 +463,6 @@ impl BlockBuild {
                         parent_runtime: success.virtual_machine.into_prototype(),
                         storage_changes: success.storage_changes,
                         state_trie_version: success.state_trie_version,
-                        offchain_storage_changes: success.offchain_storage_changes,
                         logs: shared.logs,
                     }));
                 }
@@ -510,7 +508,6 @@ pub struct InherentExtrinsics {
     shared: Shared,
     parent_runtime: host::HostVmPrototype,
     storage_changes: StorageChanges,
-    offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
 }
 
 impl InherentExtrinsics {
@@ -553,7 +550,6 @@ impl InherentExtrinsics {
                     .chain(encoded_list.map(either::Right))
             },
             storage_main_trie_changes: self.storage_changes.into_main_trie_diff(),
-            offchain_storage_changes: self.offchain_storage_changes,
             max_log_level: self.shared.max_log_level,
             calculate_trie_changes: self.shared.calculate_trie_changes,
         });
@@ -573,7 +569,6 @@ pub struct ApplyExtrinsic {
     shared: Shared,
     parent_runtime: host::HostVmPrototype,
     storage_changes: StorageChanges,
-    offchain_storage_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
 }
 
 impl ApplyExtrinsic {
@@ -586,7 +581,6 @@ impl ApplyExtrinsic {
             function_to_call: "BlockBuilder_apply_extrinsic",
             parameter: iter::once(&extrinsic),
             storage_main_trie_changes: self.storage_changes.into_main_trie_diff(),
-            offchain_storage_changes: self.offchain_storage_changes,
             max_log_level: self.shared.max_log_level,
             calculate_trie_changes: self.shared.calculate_trie_changes,
         });
@@ -610,7 +604,6 @@ impl ApplyExtrinsic {
             function_to_call: "BlockBuilder_finalize_block",
             parameter: iter::empty::<&[u8]>(),
             storage_main_trie_changes: self.storage_changes.into_main_trie_diff(),
-            offchain_storage_changes: self.offchain_storage_changes,
             max_log_level: self.shared.max_log_level,
             calculate_trie_changes: self.shared.calculate_trie_changes,
         });
@@ -724,6 +717,29 @@ impl NextKey {
     ///
     pub fn inject_key(self, key: Option<impl Iterator<Item = Nibble>>) -> BlockBuild {
         BlockBuild::from_inner(self.0.inject_key(key), self.1)
+    }
+}
+
+/// Setting the value of an offchain storage value is required.
+#[must_use]
+pub struct OffchainStorageSet(runtime_host::OffchainStorageSet, Shared);
+
+impl OffchainStorageSet {
+    /// Returns the key whose value must be set.
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+        self.0.key()
+    }
+
+    /// Returns the value to set.
+    ///
+    /// If `None` is returned, the key should be removed from the storage entirely.
+    pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.0.value()
+    }
+
+    /// Resumes execution after having set the value.
+    pub fn resume(self) -> BlockBuild {
+        BlockBuild::from_inner(self.0.resume(), self.1)
     }
 }
 

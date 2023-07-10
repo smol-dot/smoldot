@@ -68,6 +68,9 @@ fn block_building_works() {
             super::BlockBuild::ClosestDescendantMerkleValue(req) => {
                 builder = req.resume_unknown();
             }
+            super::BlockBuild::OffchainStorageSet(req) => {
+                builder = req.resume();
+            }
             super::BlockBuild::NextKey(req) => {
                 let mut search = trie::branch_search::BranchSearch::NextKey(
                     trie::branch_search::start_branch_search(trie::branch_search::Config {

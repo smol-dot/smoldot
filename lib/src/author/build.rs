@@ -152,6 +152,9 @@ pub enum BuilderAuthoring {
     /// continue.
     NextKey(NextKey),
 
+    /// Setting the value of an offchain storage value is required.
+    OffchainStorageSet(OffchainStorageSet),
+
     /// Block has been produced by the runtime and must now be sealed.
     Seal(Seal),
 }
@@ -416,6 +419,29 @@ impl NextKey {
     }
 }
 
+/// Setting the value of an offchain storage value is required.
+#[must_use]
+pub struct OffchainStorageSet(runtime::OffchainStorageSet, Shared);
+
+impl OffchainStorageSet {
+    /// Returns the key whose value must be set.
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+        self.0.key()
+    }
+
+    /// Returns the value to set.
+    ///
+    /// If `None` is returned, the key should be removed from the storage entirely.
+    pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.0.value()
+    }
+
+    /// Resumes execution after having set the value.
+    pub fn resume(self) -> BuilderAuthoring {
+        self.1.with_runtime_inner(self.0.resume())
+    }
+}
+
 /// Block has been produced and must now be sealed.
 #[must_use]
 pub struct Seal {
@@ -562,6 +588,9 @@ impl Shared {
                 }
                 runtime::BlockBuild::NextKey(inner) => {
                     break BuilderAuthoring::NextKey(NextKey(inner, self))
+                }
+                runtime::BlockBuild::OffchainStorageSet(inner) => {
+                    break BuilderAuthoring::OffchainStorageSet(OffchainStorageSet(inner, self))
                 }
             }
         }
