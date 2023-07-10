@@ -27,6 +27,8 @@ use core::{iter, num::NonZeroU64};
 
 pub use runtime_host::{Nibble, TrieEntryVersion};
 
+mod tests;
+
 /// Configuration for a transaction validation process.
 pub struct Config<'a, TTx> {
     /// Runtime used to get the validate the transaction. Must be built using the Wasm code found
