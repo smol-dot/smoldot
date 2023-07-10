@@ -16,9 +16,12 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::Shared;
-use crate::platform::{PlatformConnection, PlatformRef, PlatformSubstreamDirection, ReadBuffer};
+use crate::platform::{
+    address_parse, ConnectError, MultiStreamWebRtcConnection, PlatformRef, ReadBuffer,
+    SubstreamDirection,
+};
 
-use alloc::{string::ToString as _, sync::Arc, vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::{cmp, iter, pin};
 use futures_channel::mpsc;
 use futures_lite::FutureExt as _;
@@ -39,49 +42,70 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
     )>,
     is_important: bool,
 ) {
-    // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d/ws`)
-    // into a `Future<dyn Output = Result<TcpStream, ...>>`.
+    log::debug!(
+        target: "connections",
+        "Pending({:?}, {}) started: {}",
+        start_connect.id, start_connect.expected_peer_id,
+        start_connect.multiaddr
+    );
+
+    // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d/ws`) into a future.
+    // The future returns an error if the multiaddr isn't supported.
     let socket = {
-        log::debug!(
-            target: "connections",
-            "Pending({:?}, {}) started: {}",
-            start_connect.id, start_connect.expected_peer_id,
-            start_connect.multiaddr
-        );
-        shared
-            .platform
-            .connect(&start_connect.multiaddr.to_string())
+        let address = address_parse::multiaddr_to_address(&start_connect.multiaddr)
+            .ok()
+            .filter(|addr| {
+                shared.platform.supports_connection_type(match &addr {
+                    address_parse::AddressOrMultiStreamAddress::Address(addr) => From::from(addr),
+                    address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(addr) => {
+                        From::from(addr)
+                    }
+                })
+            });
+        let socket = address.map(|addr| match addr {
+            address_parse::AddressOrMultiStreamAddress::Address(addr) => either::Left(
+                shared
+                    .platform
+                    .connect_stream(addr)
+                    .map(|res| res.map(either::Left)),
+            ),
+            address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(addr) => either::Right(
+                shared
+                    .platform
+                    .connect_multistream(addr)
+                    .map(|res| res.map(either::Right)),
+            ),
+        });
+        async move {
+            if let Some(socket) = socket {
+                socket.await.map_err(|err| (err, false))
+            } else {
+                Err((
+                    ConnectError {
+                        message: "Invalid multiaddr".into(),
+                    },
+                    true,
+                ))
+            }
+        }
     };
 
     let socket = {
-        let mut socket = pin::pin!(socket.fuse());
-        let mut timeout = shared.platform.sleep_until(start_connect.timeout).fuse();
-
-        let result = futures_util::select! {
-            _ = timeout => Err(None),
-            result = socket => result.map_err(Some),
+        let timeout = async {
+            shared.platform.sleep_until(start_connect.timeout).await;
+            Err((
+                ConnectError {
+                    message: "Timeout reached".into(),
+                },
+                false,
+            ))
         };
+
+        let result = socket.or(timeout).await;
 
         match (&result, is_important) {
             (Ok(_), _) => {}
-            (Err(None), true) => {
-                log::warn!(
-                    target: "connections",
-                    "Timeout when trying to reach bootnode {} through {}. Because bootnodes \
-                    constitue the access point of a chain, they are expected to be online at all \
-                    time.",
-                    start_connect.expected_peer_id, start_connect.multiaddr
-                );
-            }
-            (Err(None), false) => {
-                log::debug!(
-                    target: "connections",
-                    "Pending({:?}, {}) => Timeout({})",
-                    start_connect.id, start_connect.expected_peer_id,
-                    start_connect.multiaddr
-                );
-            }
-            (Err(Some(err)), true) if !err.is_bad_addr => {
+            (Err((err, false)), true) => {
                 log::warn!(
                     target: "connections",
                     "Failed to reach bootnode {} through {}: {}. Because bootnodes constitue the \
@@ -90,24 +114,23 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
                     err.message
                 );
             }
-            (Err(Some(err)), _) => {
+            (Err((err, is_bad_addr)), _) => {
                 log::debug!(
                     target: "connections",
                     "Pending({:?}, {}) => ReachFailed(addr={}, known-unreachable={:?}, error={:?})",
                     start_connect.id, start_connect.expected_peer_id,
-                    start_connect.multiaddr, err.is_bad_addr, err.message
+                    start_connect.multiaddr, is_bad_addr, err.message
                 );
             }
         }
 
         match result {
             Ok(connection) => connection,
-            Err(err) => {
+            Err((_, is_bad_addr)) => {
                 let mut guarded = shared.guarded.lock().await;
-                guarded.network.pending_outcome_err(
-                    start_connect.id,
-                    err.map_or(false, |err| err.is_bad_addr),
-                );
+                guarded
+                    .network
+                    .pending_outcome_err(start_connect.id, is_bad_addr);
 
                 for chain_index in 0..guarded.network.num_chains() {
                     guarded.unassign_slot_and_ban(
@@ -133,18 +156,27 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
     // is done by the user of the smoldot crate rather than by the smoldot crate itself.
     let mut guarded = shared.guarded.lock().await;
     let (connection_id, socket_and_task) = match socket {
-        PlatformConnection::SingleStreamMultistreamSelectNoiseYamux(socket) => {
+        either::Left(socket) => {
             let (id, task) = guarded.network.pending_outcome_ok_single_stream(
                 start_connect.id,
                 service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
             );
             (id, either::Left((socket, task)))
         }
-        PlatformConnection::MultiStreamWebRtc {
+        either::Right(MultiStreamWebRtcConnection {
             connection,
-            local_tls_certificate_multihash,
-            remote_tls_certificate_multihash,
-        } => {
+            local_tls_certificate_sha256,
+            remote_tls_certificate_sha256,
+        }) => {
+            // Convert the SHA256 hashes into multihashes.
+            let local_tls_certificate_multihash = [12u8, 32]
+                .into_iter()
+                .chain(local_tls_certificate_sha256.into_iter())
+                .collect();
+            let remote_tls_certificate_multihash = [12u8, 32]
+                .into_iter()
+                .chain(remote_tls_certificate_sha256.into_iter())
+                .collect();
             let (id, task) = guarded.network.pending_outcome_ok_multi_stream(
                 start_connect.id,
                 service::MultiStreamHandshakeKind::WebRtc {
@@ -455,8 +487,8 @@ async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
         // substream. Notify the `connection_task` state machine.
         if let Some((stream, direction)) = newly_open_substream.take() {
             let outbound = match direction {
-                PlatformSubstreamDirection::Outbound => true,
-                PlatformSubstreamDirection::Inbound => false,
+                SubstreamDirection::Outbound => true,
+                SubstreamDirection::Inbound => false,
             };
             let id = open_substreams.insert((stream, true));
             connection_task.add_substream(id, outbound);

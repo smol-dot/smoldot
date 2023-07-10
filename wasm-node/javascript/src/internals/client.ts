@@ -146,12 +146,12 @@ export interface ConnectionConfig {
     onOpen: (info:
         {
             type: 'single-stream', handshake: 'multistream-select-noise-yamux',
-            initialWritableBytes: number, writeClosable: boolean
+            initialWritableBytes: number
         } |
         {
             type: 'multi-stream', handshake: 'webrtc',
-            localTlsCertificateMultihash: Uint8Array,
-            remoteTlsCertificateMultihash: Uint8Array,
+            localTlsCertificateSha256: Uint8Array,
+            remoteTlsCertificateSha256: Uint8Array,
         }
     ) => void;
 
