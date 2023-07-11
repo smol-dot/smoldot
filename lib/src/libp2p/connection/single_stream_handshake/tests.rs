@@ -22,11 +22,11 @@ use super::{super::super::read_write::ReadWrite, Handshake, NoiseKey};
 #[test]
 fn handshake_basic_works() {
     fn test_with_buffer_sizes(size1: usize, size2: usize) {
-        let key1 = NoiseKey::new(&rand::random());
-        let key2 = NoiseKey::new(&rand::random());
+        let key1 = NoiseKey::new(&rand::random(), &rand::random());
+        let key2 = NoiseKey::new(&rand::random(), &rand::random());
 
-        let mut handshake1 = Handshake::noise_yamux(&key1, true);
-        let mut handshake2 = Handshake::noise_yamux(&key2, false);
+        let mut handshake1 = Handshake::noise_yamux(&key1, &rand::random(), true);
+        let mut handshake2 = Handshake::noise_yamux(&key2, &rand::random(), false);
 
         let mut buf_1_to_2 = Vec::new();
         let mut buf_2_to_1 = Vec::new();

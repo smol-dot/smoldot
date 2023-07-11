@@ -111,7 +111,7 @@ pub const PROTOCOL_NAME: &str = "/noise";
 /// device.
 ///
 pub struct NoiseKey {
-    private_key: x25519_dalek::ReusableSecret,
+    private_key: x25519_dalek::StaticSecret,
     public_key: x25519_dalek::PublicKey,
     /// Handshake to encrypt then send on the wire.
     handshake_message: Vec<u8>,
@@ -120,9 +120,9 @@ pub struct NoiseKey {
 }
 
 impl NoiseKey {
-    /// Generates a new private and public key pair signed with the given libp2p Ed25519 key.
-    pub fn new(libp2p_ed25519_private_key: &[u8; 32]) -> Self {
-        let unsigned = UnsignedNoiseKey::random();
+    /// Turns a libp2p private key and a Noise static private key into a [`NoiseKey`].
+    pub fn new(libp2p_ed25519_private_key: &[u8; 32], noise_static_private_key: &[u8; 32]) -> Self {
+        let unsigned = UnsignedNoiseKey::from_private_key(noise_static_private_key);
 
         let (libp2p_public_key, signature) = {
             // Creating a `SecretKey` can fail only if the length isn't 32 bytes.
@@ -155,15 +155,14 @@ impl Drop for NoiseKey {
 ///
 /// For simple cases, prefer using [`NoiseKey::new`].
 pub struct UnsignedNoiseKey {
-    private_key: Option<x25519_dalek::ReusableSecret>,
+    private_key: Option<x25519_dalek::StaticSecret>,
     public_key: x25519_dalek::PublicKey,
 }
 
 impl UnsignedNoiseKey {
-    /// Generates a new private and public key pair.
-    pub fn random() -> Self {
-        // TODO: let the API user pass the key
-        let private_key = x25519_dalek::ReusableSecret::random_from_rng(&mut rand::thread_rng());
+    /// Turns a private key into an [`UnsignedNoiseKey`].
+    pub fn from_private_key(private_key: &[u8; 32]) -> Self {
+        let private_key = x25519_dalek::StaticSecret::from(*private_key);
         let public_key = x25519_dalek::PublicKey::from(&private_key);
         UnsignedNoiseKey {
             private_key: Some(private_key),
@@ -234,6 +233,10 @@ impl Drop for UnsignedNoiseKey {
 pub struct Config<'a> {
     /// Key to use during the handshake.
     pub key: &'a NoiseKey,
+
+    /// Secret key to use for that specific handshake. Must be randomly generated. Must never be
+    /// re-used between multiple handshakes.
+    pub ephemeral_secret_key: &'a [u8; 32],
 
     /// `true` if this side of the handshake has initiated the connection or substream onto which
     /// the handshake is performed.
@@ -592,13 +595,13 @@ struct HandshakeInProgressInner {
     ///
     /// Corresponds to the `e` field of the `HandshakeState` in the Noise specification.
     /// See <https://noiseprotocol.org/noise.html#the-handshakestate-object>.
-    local_ephemeral_private_key: x25519_dalek::ReusableSecret,
+    local_ephemeral_private_key: x25519_dalek::StaticSecret,
 
     /// Local static key. Corresponds to a [`NoiseKey`].
     ///
     /// Corresponds to the `s` field of the `HandshakeState` in the Noise specification.
     /// See <https://noiseprotocol.org/noise.html#the-handshakestate-object>.
-    local_static_private_key: x25519_dalek::ReusableSecret,
+    local_static_private_key: x25519_dalek::StaticSecret,
 
     /// Public key corresponding to [`HandshakeInProgressInner::local_static_private_key`].
     local_static_public_key: x25519_dalek::PublicKey,
@@ -637,9 +640,9 @@ impl HandshakeInProgress {
     /// Initializes a new noise handshake state machine.
     pub fn new(config: Config) -> Self {
         // Generate a new ephemeral key for this handshake.
-        // TODO: get key from API user?
+        // TODO: is it zeroize-safe to call `from([u8; 32])`?
         let local_ephemeral_private_key =
-            x25519_dalek::ReusableSecret::random_from_rng(&mut rand::thread_rng());
+            x25519_dalek::StaticSecret::from(*config.ephemeral_secret_key);
 
         // Initialize the hash.
         let mut hash = [0u8; 32];
@@ -1634,18 +1637,20 @@ mod tests {
     #[test]
     fn handshake_basic_works() {
         fn test_with_buffer_sizes(size1: usize, size2: usize) {
-            let key1 = NoiseKey::new(&rand::random());
-            let key2 = NoiseKey::new(&rand::random());
+            let key1 = NoiseKey::new(&rand::random(), &rand::random());
+            let key2 = NoiseKey::new(&rand::random(), &rand::random());
 
             let mut handshake1 = NoiseHandshake::new(Config {
                 key: &key1,
                 is_initiator: true,
                 prologue: &[],
+                ephemeral_secret_key: &rand::random(),
             });
             let mut handshake2 = NoiseHandshake::new(Config {
                 key: &key2,
                 is_initiator: false,
                 prologue: &[],
+                ephemeral_secret_key: &rand::random(),
             });
 
             let mut buf_1_to_2 = Vec::new();

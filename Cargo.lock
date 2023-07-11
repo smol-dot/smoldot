@@ -2416,6 +2416,7 @@ dependencies = [
  "slab",
  "smol",
  "smoldot",
+ "zeroize",
 ]
 
 [[package]]

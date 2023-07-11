@@ -27,7 +27,7 @@ use core::{
     ops::{Add, Sub},
     time::Duration,
 };
-use rand::{Rng as _, SeedableRng as _};
+use rand_chacha::rand_core::{RngCore as _, SeedableRng as _};
 
 pub use crate::libp2p::{
     collection::ReadWrite,
@@ -276,11 +276,19 @@ where
                 Chain {
                     in_peers: hashbrown::HashSet::with_capacity_and_hasher(
                         usize::try_from(chain.in_slots).unwrap_or(0),
-                        SipHasherBuild::new(randomness.gen()),
+                        SipHasherBuild::new({
+                            let mut seed = [0; 16];
+                            randomness.fill_bytes(&mut seed);
+                            seed
+                        }),
                     ),
                     out_peers: hashbrown::HashSet::with_capacity_and_hasher(
                         usize::try_from(chain.out_slots).unwrap_or(0),
-                        SipHasherBuild::new(randomness.gen()),
+                        SipHasherBuild::new({
+                            let mut seed = [0; 16];
+                            randomness.fill_bytes(&mut seed);
+                            seed
+                        }),
                     ),
                     chain_config: chain,
                     kbuckets: kademlia::kbuckets::KBuckets::new(
@@ -310,22 +318,38 @@ where
                 max_inbound_substreams,
                 request_response_protocols,
                 noise_key: config.noise_key,
-                randomness_seed: randomness.sample(rand::distributions::Standard),
+                randomness_seed: {
+                    let mut seed = [0; 32];
+                    randomness.fill_bytes(&mut seed);
+                    seed
+                },
                 notification_protocols,
                 ping_protocol: "/ipfs/ping/1.0.0".into(),
                 handshake_timeout: config.handshake_timeout,
             }),
             open_chains: hashbrown::HashSet::with_capacity_and_hasher(
                 config.peers_capacity * chains.len(),
-                SipHasherBuild::new(randomness.gen()),
+                SipHasherBuild::new({
+                    let mut seed = [0; 16];
+                    randomness.fill_bytes(&mut seed);
+                    seed
+                }),
             ),
             kbuckets_peers: hashbrown::HashMap::with_capacity_and_hasher(
                 config.peers_capacity,
-                SipHasherBuild::new(randomness.gen()),
+                SipHasherBuild::new({
+                    let mut seed = [0; 16];
+                    randomness.fill_bytes(&mut seed);
+                    seed
+                }),
             ),
             num_pending_per_peer: hashbrown::HashMap::with_capacity_and_hasher(
                 config.peers_capacity,
-                SipHasherBuild::new(randomness.gen()),
+                SipHasherBuild::new({
+                    let mut seed = [0; 16];
+                    randomness.fill_bytes(&mut seed);
+                    seed
+                }),
             ),
             pending_ids: slab::Slab::with_capacity(config.peers_capacity),
             next_kademlia_operation_id: KademliaOperationId(0),
