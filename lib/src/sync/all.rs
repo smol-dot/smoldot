@@ -35,6 +35,7 @@ use crate::{
     executor::host,
     header,
     sync::{all_forks, optimistic, warp_sync},
+    trie::Nibble,
     verify,
 };
 
@@ -47,7 +48,9 @@ use core::{
 };
 
 pub use crate::executor::vm::ExecHint;
-pub use warp_sync::{FragmentError as WarpSyncFragmentError, WarpSyncFragment};
+pub use warp_sync::{
+    ConfigCodeTrieNodeHint, FragmentError as WarpSyncFragmentError, WarpSyncFragment,
+};
 
 /// Configuration for the [`AllSync`].
 // TODO: review these fields
@@ -109,6 +112,15 @@ pub struct Config {
     /// verified.
     // TODO: change this now that we don't verify block bodies here
     pub full_mode: bool,
+
+    /// Known valid Merkle value and storage value combination for the `:code` key.
+    ///
+    /// If provided, the warp syncing algorithm will first fetch the Merkle value of `:code`, and
+    /// if it matches the Merkle value provided in the hint, use the storage value in the hint
+    /// instead of downloading it. If the hint doesn't match, an extra round-trip will be needed,
+    /// but if the hint matches it saves a big download.
+    // TODO: provide only in non-full mode?
+    pub code_trie_node_hint: Option<ConfigCodeTrieNodeHint>,
 }
 
 /// Identifier for a source in the [`AllSync`].
@@ -185,6 +197,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     block_number_bytes: config.block_number_bytes,
                     sources_capacity: config.sources_capacity,
                     requests_capacity: config.sources_capacity, // TODO: ?! add as config?
+                    code_trie_node_hint: config.code_trie_node_hint,
                 }) {
                     Ok(inner) => AllSyncInner::GrandpaWarpSync {
                         inner: warp_sync::WarpSync::InProgress(inner),
@@ -1306,6 +1319,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     finalized_block_runtime,
                     finalized_storage_code,
                     finalized_storage_heap_pages,
+                    finalized_storage_code_merkle_value,
+                    finalized_storage_code_closest_ancestor_excluding,
                 ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
                 self.inner = AllSyncInner::AllForks(new_inner);
                 ProcessOne::WarpSyncFinished {
@@ -1313,6 +1328,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     finalized_block_runtime,
                     finalized_storage_code,
                     finalized_storage_heap_pages,
+                    finalized_storage_code_merkle_value,
+                    finalized_storage_code_closest_ancestor_excluding,
                 }
             }
             AllSyncInner::AllForks(sync) => match sync.process_one() {
@@ -2299,6 +2316,13 @@ pub enum ProcessOne<TRq, TSrc, TBl> {
 
         /// Storage value at the `:heappages` key of the finalized block.
         finalized_storage_heap_pages: Option<Vec<u8>>,
+
+        /// Merkle value of the `:code` trie node of the finalized block.
+        finalized_storage_code_merkle_value: Option<Vec<u8>>,
+
+        /// Closest ancestor of the `:code` trie node of the finalized block excluding `:code`
+        /// itself.
+        finalized_storage_code_closest_ancestor_excluding: Option<Vec<Nibble>>,
     },
 
     /// Ready to start verifying a block.
@@ -2970,6 +2994,8 @@ impl<TRq> Shared<TRq> {
         host::HostVmPrototype,
         Option<Vec<u8>>,
         Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<Vec<Nibble>>,
     ) {
         let mut all_forks = all_forks::AllForksSync::new(all_forks::Config {
             chain_information: grandpa.chain_information,
@@ -3073,6 +3099,8 @@ impl<TRq> Shared<TRq> {
             grandpa.finalized_runtime,
             grandpa.finalized_storage_code,
             grandpa.finalized_storage_heap_pages,
+            grandpa.finalized_storage_code_merkle_value,
+            grandpa.finalized_storage_code_closest_ancestor_excluding,
         )
     }
 }

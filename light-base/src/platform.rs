@@ -15,10 +15,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use alloc::{borrow::Cow, string::String, vec::Vec};
+use alloc::{borrow::Cow, string::String};
 use core::{future::Future, ops, str, time::Duration};
 use futures_util::future;
 
+pub mod address_parse;
 pub mod default;
 
 /// Access to a platform's capabilities.
@@ -26,6 +27,7 @@ pub mod default;
 /// Implementations of this trait are expected to be cheaply-clonable "handles". All clones of the
 /// same platform share the same objects. For instance, it is legal to create clone a platform,
 /// then create a connection on one clone, then access this connection on the other clone.
+// TODO: remove `Unpin` trait bounds
 pub trait PlatformRef: Clone + Send + Sync + 'static {
     type Delay: Future<Output = ()> + Unpin + Send + 'static;
     type Instant: Clone
@@ -52,12 +54,16 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// should be abruptly dropped (i.e. RST) as well, unless its reading and writing sides
     /// have been gracefully closed in the past.
     type Stream: Send + 'static;
-    type ConnectFuture: Future<Output = Result<PlatformConnection<Self::Stream, Self::MultiStream>, ConnectError>>
+    type StreamConnectFuture: Future<Output = Result<Self::Stream, ConnectError>>
+        + Unpin
+        + Send
+        + 'static;
+    type MultiStreamConnectFuture: Future<Output = Result<MultiStreamWebRtcConnection<Self::MultiStream>, ConnectError>>
         + Unpin
         + Send
         + 'static;
     type StreamUpdateFuture<'a>: Future<Output = ()> + Unpin + Send + 'a;
-    type NextSubstreamFuture<'a>: Future<Output = Option<(Self::Stream, PlatformSubstreamDirection)>>
+    type NextSubstreamFuture<'a>: Future<Output = Option<(Self::Stream, SubstreamDirection)>>
         + Unpin
         + Send
         + 'a;
@@ -100,11 +106,31 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// performs an identification request. Reasonable value is `env!("CARGO_PKG_VERSION")`.
     fn client_version(&self) -> Cow<str>;
 
+    /// Returns `true` if [`PlatformRef::connect_stream`] or [`PlatformRef::connect_multistream`]
+    /// accepts a connection of the corresponding type.
+    ///
+    /// > **Note**: This function is meant to be pure. Implementations are expected to always
+    /// >           return the same value for the same [`ConnectionType`] input. Enabling or
+    /// >           disabling certain connection types after start-up is not supported.
+    fn supports_connection_type(&self, connection_type: ConnectionType) -> bool;
+
     /// Starts a connection attempt to the given multiaddress.
     ///
-    /// The multiaddress is passed as a string. If the string can't be parsed, an error should be
-    /// returned where [`ConnectError::is_bad_addr`] is `true`.
-    fn connect(&self, url: &str) -> Self::ConnectFuture;
+    /// # Panic
+    ///
+    /// The function implementation panics if [`Address`] is of a type for which
+    /// [`PlatformRef::supports_connection_type`] returns `false`.
+    ///
+    fn connect_stream(&self, address: Address) -> Self::StreamConnectFuture;
+
+    /// Starts a connection attempt to the given multiaddress.
+    ///
+    /// # Panic
+    ///
+    /// The function implementation panics if [`MultiStreamAddress`] is of a type for which
+    /// [`PlatformRef::supports_connection_type`] returns `false`.
+    ///
+    fn connect_multistream(&self, address: MultiStreamAddress) -> Self::MultiStreamConnectFuture;
 
     /// Queues the opening of an additional outbound substream.
     ///
@@ -183,7 +209,7 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
 
     /// Queues the given bytes to be sent out on the given stream.
     ///
-    /// > **Note**: In the case of [`PlatformConnection::MultiStreamWebRtc`], be aware that there
+    /// > **Note**: In the case of [`MultiStreamAddress::WebRtc`], be aware that there
     /// >           exists a limit to the amount of data to send in a single packet. The `data`
     /// >           parameter is guaranteed to fit within that limit. Due to the existence of this
     /// >           limit, the implementation of this function shouldn't attempt to save function
@@ -206,44 +232,171 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     ///
     /// Panics if [`PlatformRef::close_send`] has already been called on this stream.
     ///
+    // TODO: consider not calling this function at all for WebSocket
     fn close_send(&self, stream: &mut Self::Stream);
 }
 
-/// Type of opened connection. See [`PlatformRef::connect`].
+/// Established multistream connection information. See [`PlatformRef::connect_multistream`].
 #[derive(Debug)]
-pub enum PlatformConnection<TStream, TConnection> {
-    /// The connection is a single stream on top of which Noise encryption and Yamux multiplexing
-    /// should be negotiated. The division in multiple substreams is handled internally.
-    SingleStreamMultistreamSelectNoiseYamux(TStream),
-    /// The connection is made of multiple substreams. The encryption and multiplexing are handled
-    /// externally. The reading and writing sides of substreams must never close, and substreams
-    /// can only be abruptly closed by either side.
-    MultiStreamWebRtc {
-        /// Object representing the WebRTC connection.
-        connection: TConnection,
-        /// Multihash encoding of the TLS certificate used by the local node at the DTLS layer.
-        local_tls_certificate_multihash: Vec<u8>,
-        /// Multihash encoding of the TLS certificate used by the remote node at the DTLS layer.
-        remote_tls_certificate_multihash: Vec<u8>,
-    },
+pub struct MultiStreamWebRtcConnection<TConnection> {
+    /// Object representing the WebRTC connection.
+    pub connection: TConnection,
+    /// SHA256 hash of the TLS certificate used by the local node at the DTLS layer.
+    pub local_tls_certificate_sha256: [u8; 32],
+    /// SHA256 hash of the TLS certificate used by the remote node at the DTLS layer.
+    // TODO: consider caching the information that was passed in the address instead of passing it back
+    pub remote_tls_certificate_sha256: [u8; 32],
 }
 
 /// Direction in which a substream has been opened. See [`PlatformRef::next_substream`].
 #[derive(Debug)]
-pub enum PlatformSubstreamDirection {
+pub enum SubstreamDirection {
     /// Substream has been opened by the remote.
     Inbound,
     /// Substream has been opened locally in response to [`PlatformRef::open_out_substream`].
     Outbound,
 }
 
-/// Error potentially returned by [`PlatformRef::connect`].
+/// Connection type passed to [`PlatformRef::supports_connection_type`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ConnectionType {
+    /// TCP/IP connections.
+    Tcp,
+    /// WebSocket connections.
+    WebSocket {
+        /// `true` for WebSocket secure connections.
+        secure: bool,
+        /// `true` if the target of the connection is `localhost`.
+        ///
+        /// > **Note**: Some platforms (namely browsers) sometimes only accept non-secure WebSocket
+        /// >           connections only towards `localhost`.
+        remote_is_localhost: bool,
+    },
+    /// Libp2p-specific WebRTC flavour.
+    WebRtc,
+}
+
+impl<'a> From<&'a Address<'a>> for ConnectionType {
+    fn from(address: &'a Address<'a>) -> ConnectionType {
+        match address {
+            Address::TcpDns { .. } | Address::TcpIp { .. } => ConnectionType::Tcp,
+            Address::WebSocketIp {
+                ip: IpAddr::V4(ip), ..
+            } => ConnectionType::WebSocket {
+                secure: false,
+                remote_is_localhost: no_std_net::Ipv4Addr::from(*ip).is_loopback(),
+            },
+            Address::WebSocketIp {
+                ip: IpAddr::V6(ip), ..
+            } => ConnectionType::WebSocket {
+                secure: false,
+                remote_is_localhost: no_std_net::Ipv6Addr::from(*ip).is_loopback(),
+            },
+            Address::WebSocketDns {
+                hostname, secure, ..
+            } => ConnectionType::WebSocket {
+                secure: *secure,
+                remote_is_localhost: hostname.eq_ignore_ascii_case("localhost"),
+            },
+        }
+    }
+}
+
+impl<'a> From<&'a MultiStreamAddress> for ConnectionType {
+    fn from(address: &'a MultiStreamAddress) -> ConnectionType {
+        match address {
+            MultiStreamAddress::WebRtc { .. } => ConnectionType::WebRtc,
+        }
+    }
+}
+
+/// Address passed to [`PlatformRef::connect_stream`].
+// TODO: we don't differentiate between Dns4 and Dns6
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum Address<'a> {
+    /// TCP/IP connection with a domain name.
+    TcpDns {
+        /// DNS hostname to connect to.
+        ///
+        /// > **Note**: According to RFC2181 section 11, a domain name is not necessarily an UTF-8
+        /// >           string. Any binary data can be used as a domain name, provided it follows
+        /// >           a few restrictions (notably its length). However, in the context of the
+        /// >           [`PlatformRef`] trait, we automatically consider as non-supported a
+        /// >           multiaddress that contains a non-UTF-8 domain name, for the sake of
+        /// >           simplicity.
+        hostname: &'a str,
+        /// TCP port to connect to.
+        port: u16,
+    },
+
+    /// TCP/IP connection with an IP address.
+    TcpIp {
+        /// IP address to connect to.
+        ip: IpAddr,
+        /// TCP port to connect to.
+        port: u16,
+    },
+
+    /// WebSocket connection with an IP address.
+    WebSocketIp {
+        /// IP address to connect to.
+        ip: IpAddr,
+        /// TCP port to connect to.
+        port: u16,
+    },
+
+    /// WebSocket connection with a domain name.
+    WebSocketDns {
+        /// DNS hostname to connect to.
+        ///
+        /// > **Note**: According to RFC2181 section 11, a domain name is not necessarily an UTF-8
+        /// >           string. Any binary data can be used as a domain name, provided it follows
+        /// >           a few restrictions (notably its length). However, in the context of the
+        /// >           [`PlatformRef`] trait, we automatically consider as non-supported a
+        /// >           multiaddress that contains a non-UTF-8 domain name, for the sake of
+        /// >           simplicity.
+        hostname: &'a str,
+        /// TCP port to connect to.
+        port: u16,
+        /// `true` for WebSocket secure connections.
+        secure: bool,
+    },
+}
+
+/// Address passed to [`PlatformRef::connect_multistream`].
+// TODO: we don't differentiate between Dns4 and Dns6
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum MultiStreamAddress {
+    /// Libp2p-specific WebRTC flavour.
+    ///
+    /// The implementation the [`PlatformRef`] trait is responsible for opening the SCTP
+    /// connection. The API user of the [`PlatformRef`] trait is responsible for opening the first
+    /// data channel and performing the Noise handshake.
+    // TODO: maybe explain more what the implementation is supposed to do?
+    WebRtc {
+        /// IP address to connect to.
+        ip: IpAddr,
+        /// UDP port to connect to.
+        port: u16,
+        /// SHA-256 hash of the target's WebRTC certificate.
+        // TODO: consider providing a reference here; right now there's some issues with multiaddr preventing that
+        remote_certificate_sha256: [u8; 32],
+    },
+}
+
+/// Either an IPv4 or IPv6 address.
+// TODO: replace this with `core::net::IpAddr` once it's stable: https://github.com/rust-lang/rust/issues/108443
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum IpAddr {
+    V4([u8; 4]),
+    V6([u8; 16]),
+}
+
+/// Error potentially returned by [`PlatformRef::connect_stream`] or
+/// [`PlatformRef::connect_multistream`].
 pub struct ConnectError {
     /// Human-readable error message.
     pub message: String,
-
-    /// `true` if the error is caused by the address to connect to being forbidden or unsupported.
-    pub is_bad_addr: bool,
 }
 
 /// State of the read buffer, as returned by [`PlatformRef::read_buffer`].
@@ -255,7 +408,7 @@ pub enum ReadBuffer<'a> {
     /// The reading side of the stream has been closed by the remote.
     ///
     /// Note that this is forbidden for connections of
-    /// type [`PlatformConnection::MultiStreamWebRtc`].
+    /// type [`MultiStreamAddress::WebRtc`].
     Closed,
 
     /// The stream has been abruptly closed by the remote.

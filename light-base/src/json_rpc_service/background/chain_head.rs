@@ -31,12 +31,11 @@ use alloc::{
 use core::{
     cmp, iter,
     num::{NonZeroU32, NonZeroUsize},
-    pin,
     time::Duration,
 };
 use futures_channel::mpsc;
 use futures_lite::FutureExt as _;
-use futures_util::{future, FutureExt as _, StreamExt as _};
+use futures_util::{FutureExt as _, StreamExt as _};
 use hashbrown::HashMap;
 use smoldot::{
     chain::fork_tree,
@@ -527,25 +526,27 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
     ) {
         loop {
             let outcome = {
-                let next_block = pin::pin!(match &mut self.subscription {
-                    Subscription::WithRuntime { notifications, .. } => {
-                        future::Either::Left(notifications.next().map(either::Left))
+                let next_block = async {
+                    match &mut self.subscription {
+                        Subscription::WithRuntime { notifications, .. } => {
+                            Some(either::Left(either::Left(notifications.next().await)))
+                        }
+                        Subscription::WithoutRuntime(notifications) => {
+                            Some(either::Left(either::Right(notifications.next().await)))
+                        }
                     }
-                    Subscription::WithoutRuntime(notifications) => {
-                        future::Either::Right(notifications.next().map(either::Right))
-                    }
-                });
-                let next_message = pin::pin!(messages_rx.next());
+                };
 
-                match future::select(
-                    future::select(next_block, next_message),
-                    pin::pin!(subscription.wait_until_stale()),
-                )
-                .await
+                match next_block
+                    .or(async { Some(either::Right(messages_rx.next().await)) })
+                    .or(async {
+                        subscription.wait_until_stale().await;
+                        None
+                    })
+                    .await
                 {
-                    future::Either::Left((future::Either::Left((v, _)), _)) => either::Left(v),
-                    future::Either::Left((future::Either::Right((v, _)), _)) => either::Right(v),
-                    future::Either::Right(((), _)) => return,
+                    Some(outcome) => outcome,
+                    None => return,
                 }
             };
 
@@ -1038,7 +1039,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             closest_descendant_merkle_value: None,
                                         })
                                     }
-                                    sync_service::StorageResultItem::ClosestDescendantMerkleValue { requested_key, closest_descendant_merkle_value: merkle_value } => {
+                                    sync_service::StorageResultItem::ClosestDescendantMerkleValue { requested_key, closest_descendant_merkle_value: merkle_value, .. } => {
                                         Some(methods::ChainHeadStorageResponseItem {
                                             key: methods::HexString(requested_key),
                                             value: None,
@@ -1184,9 +1185,9 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             virtual_machine,
                             function_to_call: &function_to_call,
                             parameter: iter::once(&call_parameters),
-                            offchain_storage_changes: Default::default(),
                             storage_main_trie_changes: Default::default(),
                             max_log_level: 0,
+                            calculate_trie_changes: false,
                         }) {
                             Err((error, prototype)) => {
                                 runtime_call_lock.unlock(prototype);
@@ -1311,8 +1312,21 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             };
                                             runtime_call = nk.inject_key(next_key.map(|k| k.iter().copied()));
                                         }
+                                        runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
+                                            runtime_call = req.resume();
+                                        }
                                         runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
                                             runtime_call = sig.verify_and_resume();
+                                        }
+                                        runtime_host::RuntimeHostVm::Offchain(ctx) => {
+                                            runtime_call_lock.unlock(runtime_host::RuntimeHostVm::Offchain(ctx).into_prototype());
+                                            subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
+                                                subscription: (&subscription_id).into(),
+                                                result: methods::ChainHeadCallEvent::Error {
+                                                    error: "Runtime has called an offchain host function".to_string().into(),
+                                                },
+                                            }).await;
+                                            break;
                                         }
                                     }
                                 }

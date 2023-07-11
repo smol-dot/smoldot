@@ -1,11 +1,12 @@
 [package]
 name = "smoldot-light"
-version = "0.6.0"
+version = "0.7.0"
 description = "Browser bindings to a light client for Substrate-based blockchains"
 authors.workspace = true
 license.workspace = true
 edition.workspace = true
 repository.workspace = true
+include.workspace = true
 
 [[example]]
 name = "basic"
@@ -14,6 +15,7 @@ required-features = ["std"]
 [dependencies]
 async-channel = { version = "1.8.0", default-features = false }  # TODO: no-std-ize; this is has been done and is just waiting for a release: https://github.com/smol-rs/event-listener/pull/34
 async-lock = { version = "2.7.0", default-features = false }  # TODO: no-std-ize; this is has been done and is just waiting for a release: https://github.com/smol-rs/event-listener/pull/34
+base64 = { version = "0.21.2", default-features = false, features = ["alloc"] }
 blake2-rfc = { version = "0.2.18", default-features = false }
 derive_more = "0.99.17"
 either = { version = "1.8.1", default-features = false }
@@ -27,12 +29,13 @@ hex = { version = "0.4.3", default-features = false }
 itertools = "0.11.0"
 log = { version = "0.4.18", default-features = false }
 lru = { version = "0.10.0", default-features = false }
+no-std-net = { version = "0.6.0", default-features = false }
 rand = { version = "0.8.5", default-features = false }
-serde = { version = "1.0.166", default-features = false, features = ["alloc", "derive"] }
+serde = { version = "1.0.167", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0.100", default-features = false, features = ["alloc"] }
 siphasher = { version = "0.3.10", default-features = false }
 slab = { version = "0.4.8", default-features = false }
-smoldot = { version = "0.8.0", path = "../lib", default-features = false }
+smoldot = { version = "0.9.0", path = "../lib", default-features = false }
 
 # `std` feature
 # Add here the crates that cannot function without the help of the operating system or environment.

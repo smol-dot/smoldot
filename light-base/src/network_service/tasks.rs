@@ -16,11 +16,15 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::Shared;
-use crate::platform::{PlatformConnection, PlatformRef, PlatformSubstreamDirection, ReadBuffer};
+use crate::platform::{
+    address_parse, ConnectError, MultiStreamWebRtcConnection, PlatformRef, ReadBuffer,
+    SubstreamDirection,
+};
 
-use alloc::{string::ToString as _, sync::Arc, vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::{cmp, iter, pin};
 use futures_channel::mpsc;
+use futures_lite::FutureExt as _;
 use futures_util::{future, FutureExt as _, StreamExt as _};
 use smoldot::{
     libp2p::{collection::SubstreamFate, read_write::ReadWrite},
@@ -38,49 +42,70 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
     )>,
     is_important: bool,
 ) {
-    // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d/ws`)
-    // into a `Future<dyn Output = Result<TcpStream, ...>>`.
+    log::debug!(
+        target: "connections",
+        "Pending({:?}, {}) started: {}",
+        start_connect.id, start_connect.expected_peer_id,
+        start_connect.multiaddr
+    );
+
+    // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d/ws`) into a future.
+    // The future returns an error if the multiaddr isn't supported.
     let socket = {
-        log::debug!(
-            target: "connections",
-            "Pending({:?}, {}) started: {}",
-            start_connect.id, start_connect.expected_peer_id,
-            start_connect.multiaddr
-        );
-        shared
-            .platform
-            .connect(&start_connect.multiaddr.to_string())
+        let address = address_parse::multiaddr_to_address(&start_connect.multiaddr)
+            .ok()
+            .filter(|addr| {
+                shared.platform.supports_connection_type(match &addr {
+                    address_parse::AddressOrMultiStreamAddress::Address(addr) => From::from(addr),
+                    address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(addr) => {
+                        From::from(addr)
+                    }
+                })
+            });
+        let socket = address.map(|addr| match addr {
+            address_parse::AddressOrMultiStreamAddress::Address(addr) => either::Left(
+                shared
+                    .platform
+                    .connect_stream(addr)
+                    .map(|res| res.map(either::Left)),
+            ),
+            address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(addr) => either::Right(
+                shared
+                    .platform
+                    .connect_multistream(addr)
+                    .map(|res| res.map(either::Right)),
+            ),
+        });
+        async move {
+            if let Some(socket) = socket {
+                socket.await.map_err(|err| (err, false))
+            } else {
+                Err((
+                    ConnectError {
+                        message: "Invalid multiaddr".into(),
+                    },
+                    true,
+                ))
+            }
+        }
     };
 
     let socket = {
-        let mut socket = pin::pin!(socket.fuse());
-        let mut timeout = shared.platform.sleep_until(start_connect.timeout).fuse();
-
-        let result = futures_util::select! {
-            _ = timeout => Err(None),
-            result = socket => result.map_err(Some),
+        let timeout = async {
+            shared.platform.sleep_until(start_connect.timeout).await;
+            Err((
+                ConnectError {
+                    message: "Timeout reached".into(),
+                },
+                false,
+            ))
         };
+
+        let result = socket.or(timeout).await;
 
         match (&result, is_important) {
             (Ok(_), _) => {}
-            (Err(None), true) => {
-                log::warn!(
-                    target: "connections",
-                    "Timeout when trying to reach bootnode {} through {}. Because bootnodes \
-                    constitue the access point of a chain, they are expected to be online at all \
-                    time.",
-                    start_connect.expected_peer_id, start_connect.multiaddr
-                );
-            }
-            (Err(None), false) => {
-                log::debug!(
-                    target: "connections",
-                    "Pending({:?}, {}) => Timeout({})",
-                    start_connect.id, start_connect.expected_peer_id,
-                    start_connect.multiaddr
-                );
-            }
-            (Err(Some(err)), true) if !err.is_bad_addr => {
+            (Err((err, false)), true) => {
                 log::warn!(
                     target: "connections",
                     "Failed to reach bootnode {} through {}: {}. Because bootnodes constitue the \
@@ -89,24 +114,23 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
                     err.message
                 );
             }
-            (Err(Some(err)), _) => {
+            (Err((err, is_bad_addr)), _) => {
                 log::debug!(
                     target: "connections",
                     "Pending({:?}, {}) => ReachFailed(addr={}, known-unreachable={:?}, error={:?})",
                     start_connect.id, start_connect.expected_peer_id,
-                    start_connect.multiaddr, err.is_bad_addr, err.message
+                    start_connect.multiaddr, is_bad_addr, err.message
                 );
             }
         }
 
         match result {
             Ok(connection) => connection,
-            Err(err) => {
+            Err((_, is_bad_addr)) => {
                 let mut guarded = shared.guarded.lock().await;
-                guarded.network.pending_outcome_err(
-                    start_connect.id,
-                    err.map_or(false, |err| err.is_bad_addr),
-                );
+                guarded
+                    .network
+                    .pending_outcome_err(start_connect.id, is_bad_addr);
 
                 for chain_index in 0..guarded.network.num_chains() {
                     guarded.unassign_slot_and_ban(
@@ -132,18 +156,27 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
     // is done by the user of the smoldot crate rather than by the smoldot crate itself.
     let mut guarded = shared.guarded.lock().await;
     let (connection_id, socket_and_task) = match socket {
-        PlatformConnection::SingleStreamMultistreamSelectNoiseYamux(socket) => {
+        either::Left(socket) => {
             let (id, task) = guarded.network.pending_outcome_ok_single_stream(
                 start_connect.id,
                 service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
             );
             (id, either::Left((socket, task)))
         }
-        PlatformConnection::MultiStreamWebRtc {
+        either::Right(MultiStreamWebRtcConnection {
             connection,
-            local_tls_certificate_multihash,
-            remote_tls_certificate_multihash,
-        } => {
+            local_tls_certificate_sha256,
+            remote_tls_certificate_sha256,
+        }) => {
+            // Convert the SHA256 hashes into multihashes.
+            let local_tls_certificate_multihash = [12u8, 32]
+                .into_iter()
+                .chain(local_tls_certificate_sha256.into_iter())
+                .collect();
+            let remote_tls_certificate_multihash = [12u8, 32]
+                .into_iter()
+                .chain(remote_tls_certificate_sha256.into_iter())
+                .collect();
             let (id, task) = guarded.network.pending_outcome_ok_multi_stream(
                 start_connect.id,
                 service::MultiStreamHandshakeKind::WebRtc {
@@ -369,29 +402,33 @@ async fn single_stream_connection_task<TPlat: PlatformRef>(
         // Starting from here, we block the current task until more processing needs to happen.
 
         // Future ready when the timeout indicated by the connection state machine is reached.
-        let poll_after = if let Some(wake_up) = wake_up_after {
-            if wake_up > now {
-                let dur = wake_up - now;
-                future::Either::Left(shared.platform.sleep(dur))
-            } else {
-                // "Wake up" immediately.
-                continue;
-            }
+        let poll_after = if wake_up_after
+            .as_ref()
+            .map_or(false, |wake_up_after| *wake_up_after <= now)
+        {
+            // "Wake up" immediately.
+            continue;
         } else {
-            future::Either::Right(future::pending())
-        }
-        .fuse();
+            async {
+                if let Some(wake_up_after) = wake_up_after {
+                    shared.platform.sleep_until(wake_up_after).await
+                } else {
+                    future::pending().await
+                }
+            }
+        };
         // Future that is woken up when new data is ready on the socket or more data is writable.
-        let stream_update = pin::pin!(shared.platform.update_stream(&mut connection));
+        let stream_update = shared.platform.update_stream(&mut connection);
         // Future that is woken up when a new message is coming from the coordinator.
-        let message_from_coordinator = pin::Pin::new(&mut coordinator_to_connection).peek();
+        let message_from_coordinator = async {
+            pin::Pin::new(&mut coordinator_to_connection).peek().await;
+        };
 
         // Combines the three futures above into one.
-        future::select(
-            future::select(stream_update, message_from_coordinator),
-            poll_after,
-        )
-        .await;
+        stream_update
+            .or(message_from_coordinator)
+            .or(poll_after)
+            .await;
     }
 }
 
@@ -450,8 +487,8 @@ async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
         // substream. Notify the `connection_task` state machine.
         if let Some((stream, direction)) = newly_open_substream.take() {
             let outbound = match direction {
-                PlatformSubstreamDirection::Outbound => true,
-                PlatformSubstreamDirection::Inbound => false,
+                SubstreamDirection::Outbound => true,
+                SubstreamDirection::Inbound => false,
             };
             let id = open_substreams.insert((stream, true));
             connection_task.add_substream(id, outbound);
@@ -617,45 +654,66 @@ async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
         // Starting from here, we block the current task until more processing needs to happen.
 
         // Future ready when the timeout indicated by the connection state machine is reached.
-        let mut poll_after = if let Some(wake_up) = wake_up_after.clone() {
-            if wake_up > now {
-                let dur = wake_up - now;
-                future::Either::Left(shared.platform.sleep(dur))
-            } else {
-                // "Wake up" immediately.
-                continue;
-            }
+        let poll_after = if wake_up_after
+            .as_ref()
+            .map_or(false, |wake_up_after| *wake_up_after <= now)
+        {
+            // "Wake up" immediately.
+            continue;
         } else {
-            future::Either::Right(future::pending())
-        }
-        .fuse();
+            async {
+                if let Some(wake_up_after) = wake_up_after {
+                    shared.platform.sleep_until(wake_up_after).await
+                } else {
+                    future::pending().await
+                }
+                None
+            }
+        };
 
         // Future that is woken up when new data is ready on any of the streams.
-        let streams_updated = iter::once(future::Either::Right(future::pending()))
-            .chain(open_substreams.iter_mut().map(|(_, (stream, _))| {
-                future::Either::Left(shared.platform.update_stream(stream))
-            }))
-            .collect::<future::SelectAll<_>>();
+        let streams_updated = {
+            let list = iter::once(future::Either::Right(future::pending()))
+                .chain(open_substreams.iter_mut().map(|(_, (stream, _))| {
+                    future::Either::Left(shared.platform.update_stream(stream))
+                }))
+                .collect::<future::SelectAll<_>>();
+            async move {
+                list.await;
+                None
+            }
+        };
 
         // Future that is woken up when a new message is coming from the coordinator.
-        let mut message_from_coordinator = pin::Pin::new(&mut coordinator_to_connection).peek();
+        let message_from_coordinator = async {
+            pin::Pin::new(&mut coordinator_to_connection).peek().await;
+            None
+        };
+
+        // Future that is woken up when a new substream is available.
+        let next_substream = async {
+            if remote_has_reset {
+                future::pending().await
+            } else {
+                Some(shared.platform.next_substream(&mut connection).await)
+            }
+        };
 
         // Do the actual waiting.
         debug_assert!(newly_open_substream.is_none());
-        futures_util::select! {
-            _ = message_from_coordinator => {}
-            substream = if remote_has_reset { either::Right(future::pending()) } else { either::Left(shared.platform.next_substream(&mut connection)) }.fuse() => {
-                match substream {
-                    Some(s) => newly_open_substream = Some(s),
-                    None => {
-                        // `None` is returned if the remote has force-closed the connection.
-                        connection_task.reset();
-                        remote_has_reset = true;
-                    }
-                }
+        match poll_after
+            .or(message_from_coordinator)
+            .or(streams_updated)
+            .or(next_substream)
+            .await
+        {
+            None => {}
+            Some(Some(s)) => newly_open_substream = Some(s),
+            Some(None) => {
+                // `None` is returned if the remote has force-closed the connection.
+                connection_task.reset();
+                remote_has_reset = true;
             }
-            _ = poll_after => {}
-            _ = streams_updated.fuse() => {}
         }
     }
 }

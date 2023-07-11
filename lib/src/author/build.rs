@@ -27,7 +27,7 @@ use crate::{
 use alloc::vec::Vec;
 use core::{num::NonZeroU64, time::Duration};
 
-pub use runtime::{Nibble, TrieEntryVersion};
+pub use runtime::{Nibble, StorageChanges, TrieEntryVersion};
 
 /// Configuration for a block generation.
 pub struct Config<'a, TLocAuth> {
@@ -152,6 +152,9 @@ pub enum BuilderAuthoring {
     /// continue.
     NextKey(NextKey),
 
+    /// Setting the value of an offchain storage value is required.
+    OffchainStorageSet(OffchainStorageSet),
+
     /// Block has been produced by the runtime and must now be sealed.
     Seal(Seal),
 }
@@ -233,6 +236,7 @@ impl AuthoringStart {
                 }
             },
             max_log_level: config.max_log_level,
+            calculate_trie_changes: config.calculate_trie_changes,
         });
 
         let inherent_data = inherents::InherentData {
@@ -283,6 +287,10 @@ pub struct AuthoringStartConfig<'a> {
     /// >           "off", `1` for "error", `2` for "warn", `3` for "info", `4` for "debug",
     /// >           and `5` for "trace".
     pub max_log_level: u32,
+
+    /// If `true`, then [`StorageChanges::trie_changes_iter_ordered`] will return `Some`.
+    /// Passing `None` requires fewer calculation and fewer storage accesses.
+    pub calculate_trie_changes: bool,
 }
 
 /// More transactions can be added.
@@ -408,6 +416,29 @@ impl NextKey {
     ///
     pub fn inject_key(self, key: Option<impl Iterator<Item = Nibble>>) -> BuilderAuthoring {
         self.1.with_runtime_inner(self.0.inject_key(key))
+    }
+}
+
+/// Setting the value of an offchain storage value is required.
+#[must_use]
+pub struct OffchainStorageSet(runtime::OffchainStorageSet, Shared);
+
+impl OffchainStorageSet {
+    /// Returns the key whose value must be set.
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+        self.0.key()
+    }
+
+    /// Returns the value to set.
+    ///
+    /// If `None` is returned, the key should be removed from the storage entirely.
+    pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.0.value()
+    }
+
+    /// Resumes execution after having set the value.
+    pub fn resume(self) -> BuilderAuthoring {
+        self.1.with_runtime_inner(self.0.resume())
     }
 }
 
@@ -557,6 +588,9 @@ impl Shared {
                 }
                 runtime::BlockBuild::NextKey(inner) => {
                     break BuilderAuthoring::NextKey(NextKey(inner, self))
+                }
+                runtime::BlockBuild::OffchainStorageSet(inner) => {
+                    break BuilderAuthoring::OffchainStorageSet(OffchainStorageSet(inner, self))
                 }
             }
         }

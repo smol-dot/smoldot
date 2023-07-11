@@ -241,6 +241,7 @@ impl ConsensusService {
                 NonZeroU32::new(2000).unwrap()
             },
             full_mode: true,
+            code_trie_node_hint: None,
         });
 
         let finalized_runtime = {
@@ -773,6 +774,7 @@ impl SyncBackground {
                     parent_runtime,
                     block_body_capacity: 0, // TODO: could be set to the size of the tx pool
                     max_log_level: 0,
+                    calculate_trie_changes: true,
                 })
             };
 
@@ -946,6 +948,10 @@ impl SyncBackground {
                             .inject_key(next_key.map(|k| {
                                 k.into_iter().map(|b| trie::Nibble::try_from(b).unwrap())
                             }));
+                    }
+                    author::build::BuilderAuthoring::OffchainStorageSet(req) => {
+                        // Ignore offchain storage writes at the moment.
+                        block_authoring = req.resume();
                     }
                 }
             }
@@ -1253,6 +1259,7 @@ impl SyncBackground {
                         .scale_encoded_extrinsics()
                         .unwrap(),
                     max_log_level: 3,
+                    calculate_trie_changes: true,
                 });
 
                 // TODO: check this block against the chain spec's badBlocks
@@ -1295,7 +1302,7 @@ impl SyncBackground {
                                             &scale_encoded_header,
                                             is_new_best,
                                             iter::empty::<Vec<u8>>(), // TODO:,no /!\
-                                            storage_changes.trie_changes_iter_ordered().filter_map(
+                                            storage_changes.trie_changes_iter_ordered().unwrap().filter_map(
                                                 |(_child_trie, key, change)| {
                                                     let body_only::TrieChange::InsertUpdate {
                                                         new_merkle_value,
@@ -1558,6 +1565,10 @@ impl SyncBackground {
                             body_verification = req.inject_key(next_key.map(|k| {
                                 k.into_iter().map(|b| trie::Nibble::try_from(b).unwrap())
                             }));
+                        }
+                        body_only::Verify::OffchainStorageSet(req) => {
+                            // Ignore offchain storage writes at the moment.
+                            body_verification = req.resume();
                         }
                         body_only::Verify::RuntimeCompilation(rt) => {
                             let before_runtime_build = Instant::now();

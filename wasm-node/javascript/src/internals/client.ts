@@ -146,12 +146,12 @@ export interface ConnectionConfig {
     onOpen: (info:
         {
             type: 'single-stream', handshake: 'multistream-select-noise-yamux',
-            initialWritableBytes: number, writeClosable: boolean
+            initialWritableBytes: number
         } |
         {
             type: 'multi-stream', handshake: 'webrtc',
-            localTlsCertificateMultihash: Uint8Array,
-            remoteTlsCertificateMultihash: Uint8Array,
+            localTlsCertificateSha256: Uint8Array,
+            remoteTlsCertificateSha256: Uint8Array,
         }
     ) => void;
 
@@ -499,11 +499,15 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 jsonRpcMaxSubscriptions = 0xffffffff
             }
 
+            // Sanitize `databaseContent`.
+            if (options.databaseContent !== undefined && typeof options.databaseContent !== 'string')
+                throw new AddChainError("`databaseContent` is not a string");
+
             const promise = new Promise<{ success: true, chainId: number } | { success: false, error: string }>((resolve) => state.addChainResults.push(resolve));
 
             state.instance.instance.addChain(
                 options.chainSpec,
-                typeof options.databaseContent === 'string' ? options.databaseContent : "",
+                options.databaseContent || "",
                 potentialRelayChainsIds,
                 !!options.disableJsonRpc,
                 jsonRpcMaxPendingRequests,

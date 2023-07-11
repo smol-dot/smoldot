@@ -27,14 +27,13 @@ use alloc::{
 };
 use async_lock::Mutex;
 use core::{
-    cmp, fmt, mem,
+    cmp, fmt, future, mem,
     num::{NonZeroU32, NonZeroUsize},
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
-    task::Poll,
+    task::{ready, Poll},
 };
 use futures_channel::mpsc;
-use futures_lite::FutureExt as _;
-use futures_util::{future, StreamExt as _};
+use futures_lite::{FutureExt as _, StreamExt as _};
 use slab::Slab;
 
 pub use crate::json_rpc::parse::{ErrorResponse, ParseError};
@@ -221,7 +220,10 @@ impl ClientMainTask {
             let what_happened = {
                 let when_ready_to_send = future::poll_fn(|cx| {
                     if !self.inner.pending_serialized_responses_queue.is_empty() {
-                        self.inner.serialized_rp_sender.poll_ready(cx)
+                        Poll::Ready(
+                            ready!(self.inner.serialized_rp_sender.poll_ready(cx))
+                                .map(|()| WhatHappened::CanSendToSocket),
+                        )
                     } else {
                         Poll::Pending
                     }
@@ -235,7 +237,7 @@ impl ClientMainTask {
                                 .serialized_requests_queue
                                 .on_pulled
                                 .notify(usize::max_value());
-                            break elem;
+                            break Ok(WhatHappened::NewRequest(elem));
                         }
                         if let Some(wait) = wait.take() {
                             wait.await
@@ -249,7 +251,7 @@ impl ClientMainTask {
                     let mut wait = None;
                     loop {
                         if let Some(elem) = self.inner.responses_notifications_queue.queue.pop() {
-                            break elem;
+                            break Ok(WhatHappened::Message(elem));
                         }
                         if let Some(wait) = wait.take() {
                             wait.await
@@ -260,22 +262,13 @@ impl ClientMainTask {
                     }
                 };
 
-                match future::select(
-                    future::select(when_ready_to_send, core::pin::pin!(next_serialized_request)),
-                    core::pin::pin!(response_notif),
-                )
-                .await
+                match when_ready_to_send
+                    .or(next_serialized_request)
+                    .or(response_notif)
+                    .await
                 {
-                    future::Either::Left((future::Either::Left((Ok(()), _)), _)) => {
-                        WhatHappened::CanSendToSocket
-                    }
-                    future::Either::Left((future::Either::Left((Err(_), _)), _)) => {
-                        return Event::SerializedRequestsIoClosed
-                    }
-                    future::Either::Left((future::Either::Right((request, _)), _)) => {
-                        WhatHappened::NewRequest(request)
-                    }
-                    future::Either::Right((message, _)) => WhatHappened::Message(message),
+                    Ok(what_happened) => what_happened,
+                    Err(_) => return Event::SerializedRequestsIoClosed,
                 }
             };
 
