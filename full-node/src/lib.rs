@@ -18,8 +18,7 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 // TODO: #![deny(unused_crate_dependencies)] doesn't work because some deps are used only by the binary, figure if this can be fixed?
 
-use futures_channel::oneshot;
-use futures_util::{future, stream, FutureExt as _, StreamExt as _};
+use futures_util::{future, StreamExt as _};
 use rand::RngCore as _;
 use smol::lock::Mutex;
 use smoldot::{
@@ -34,10 +33,7 @@ use smoldot::{
     },
     trie,
 };
-use std::{
-    array, borrow::Cow, iter, mem, net::SocketAddr, path::PathBuf, sync::Arc, thread,
-    time::Duration,
-};
+use std::{array, borrow::Cow, iter, mem, net::SocketAddr, path::PathBuf, sync::Arc};
 
 mod consensus_service;
 mod database_thread;
@@ -66,8 +62,6 @@ pub struct Config<'a> {
     pub log_callback: Arc<dyn LogCallback + Send + Sync>,
     /// Address of a Jaeger agent to send traces to. If `None`, do not send Jaeger traces.
     pub jaeger_agent: Option<SocketAddr>,
-    // TODO: option is a bit weird
-    pub show_informant: bool,
 }
 
 /// See [`Config::json_rpc`].
@@ -207,7 +201,6 @@ pub async fn start(mut config: Config<'_>) -> Client {
             genesis_chain_information.as_ref(),
             config.chain.sqlite_database_path,
             config.chain.sqlite_cache_size,
-            config.show_informant,
         )
         .await;
 
@@ -221,7 +214,6 @@ pub async fn start(mut config: Config<'_>) -> Client {
                 relay_genesis_chain_information.as_ref().unwrap().as_ref(),
                 relay_chain.sqlite_database_path.clone(),
                 relay_chain.sqlite_cache_size,
-                config.show_informant,
             )
             .await
             .0,
@@ -572,22 +564,25 @@ pub async fn start(mut config: Config<'_>) -> Client {
 /// Panics if the database can't be open. This function is expected to be called from the `main`
 /// function.
 ///
-// TODO: `show_progress` option should be moved to the CLI
 async fn open_database(
     chain_spec: &chain_spec::ChainSpec,
     genesis_chain_information: chain::chain_information::ChainInformationRef<'_>,
     db_path: Option<PathBuf>,
     sqlite_cache_size: usize,
-    show_progress: bool,
 ) -> (full_sqlite::SqliteFullDatabase, bool) {
     // The `unwrap()` here can panic for example in case of access denied.
-    match background_open_database(
-        db_path.clone(),
-        chain_spec.block_number_bytes().into(),
-        sqlite_cache_size,
-        show_progress,
-    )
-    .await
+    match full_sqlite::open(full_sqlite::Config {
+        block_number_bytes: sqlite_cache_size,
+        cache_size: sqlite_cache_size,
+        ty: if let Some(path) = &db_path {
+            full_sqlite::ConfigTy::Disk {
+                path,
+                memory_map_size: 1000000000, // TODO: make configurable
+            }
+        } else {
+            full_sqlite::ConfigTy::Memory
+        },
+    })
     .unwrap()
     {
         // Database already exists and contains data.
@@ -770,71 +765,6 @@ async fn open_database(
                 )
                 .unwrap();
             (database, false)
-        }
-    }
-}
-
-/// Since opening the database can take a long time, this utility function performs this operation
-/// in the background while showing a small progress bar to the user.
-///
-/// If `path` is `None`, the database is opened in memory.
-async fn background_open_database(
-    path: Option<PathBuf>,
-    block_number_bytes: usize,
-    sqlite_cache_size: usize,
-    show_progress: bool,
-) -> Result<full_sqlite::DatabaseOpen, full_sqlite::InternalError> {
-    let (tx, rx) = oneshot::channel();
-    let mut rx = rx.fuse();
-
-    let thread_spawn_result = thread::Builder::new().name("database-open".into()).spawn({
-        let path = path.clone();
-        move || {
-            let result = full_sqlite::open(full_sqlite::Config {
-                block_number_bytes,
-                cache_size: sqlite_cache_size,
-                ty: if let Some(path) = &path {
-                    full_sqlite::ConfigTy::Disk {
-                        path,
-                        memory_map_size: 1000000000, // TODO: make configurable
-                    }
-                } else {
-                    full_sqlite::ConfigTy::Memory
-                },
-            });
-            let _ = tx.send(result);
-        }
-    });
-
-    // Fall back to opening the database on the same thread if the thread spawn failed.
-    if thread_spawn_result.is_err() {
-        return full_sqlite::open(full_sqlite::Config {
-            block_number_bytes,
-            cache_size: sqlite_cache_size,
-            ty: if let Some(path) = &path {
-                full_sqlite::ConfigTy::Disk {
-                    path,
-                    memory_map_size: 1000000000, // TODO: make configurable
-                }
-            } else {
-                full_sqlite::ConfigTy::Memory
-            },
-        });
-    }
-
-    let mut progress_timer =
-        stream::StreamExt::fuse(smol::Timer::after(Duration::from_millis(200)));
-
-    let mut next_progress_icon = ['-', '\\', '|', '/'].iter().copied().cycle();
-
-    loop {
-        futures_util::select! {
-            res = rx => return res.unwrap(),
-            _ = progress_timer.next() => {
-                if show_progress {
-                    eprint!("    Opening database... {}\r", next_progress_icon.next().unwrap());
-                }
-            }
         }
     }
 }
