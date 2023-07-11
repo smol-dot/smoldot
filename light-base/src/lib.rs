@@ -77,6 +77,7 @@ use core::{num::NonZeroU32, ops, pin};
 use futures_util::{future, FutureExt as _};
 use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
+use rand::RngCore as _;
 use smoldot::{
     chain, chain_spec, header,
     informant::HashDisplay,
