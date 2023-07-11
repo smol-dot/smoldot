@@ -20,6 +20,7 @@
 
 use futures_channel::oneshot;
 use futures_util::{future, stream, FutureExt as _, StreamExt as _};
+use rand::RngCore as _;
 use smol::lock::Mutex;
 use smoldot::{
     chain, chain_spec,
@@ -245,7 +246,11 @@ pub async fn start(mut config: Config<'_>) -> Client {
     .unwrap()
     .number;
 
-    let noise_key = connection::NoiseKey::new(&config.libp2p_key);
+    let noise_key = {
+        let mut noise_static_key = zeroize::Zeroizing::new([0u8; 32]);
+        rand::thread_rng().fill_bytes(&mut *noise_static_key);
+        connection::NoiseKey::new(&config.libp2p_key, &*noise_static_key)
+    };
     zeroize::Zeroize::zeroize(&mut *config.libp2p_key);
     let local_peer_id =
         peer_id::PublicKey::Ed25519(*noise_key.libp2p_public_ed25519_key()).into_peer_id();

@@ -19,8 +19,10 @@ use crate::finality::justification::decode;
 
 use alloc::vec::Vec;
 use core::{cmp, iter, mem};
-use rand::Rng as _;
-use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
+use rand_chacha::{
+    rand_core::{RngCore as _, SeedableRng as _},
+    ChaCha20Rng,
+};
 
 /// Configuration for a justification verification process.
 #[derive(Debug)]
@@ -64,7 +66,11 @@ pub fn verify(config: Config<impl Iterator<Item = impl AsRef<[u8]>> + Clone>) ->
     // duplicates.
     let mut seen_pub_keys = hashbrown::HashSet::with_capacity_and_hasher(
         num_precommits,
-        crate::util::SipHasherBuild::new(randomness.gen()),
+        crate::util::SipHasherBuild::new({
+            let mut seed = [0; 16];
+            randomness.fill_bytes(&mut seed);
+            seed
+        }),
     );
 
     // Verifying all the signatures together brings better performances than verifying them one

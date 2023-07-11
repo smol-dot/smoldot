@@ -29,7 +29,7 @@ use core::{
     ops::{Add, Index, IndexMut, Sub},
     time::Duration,
 };
-use rand::{Rng as _, SeedableRng as _};
+use rand_chacha::rand_core::{RngCore as _, SeedableRng as _};
 
 pub use substream::InboundTy;
 
@@ -130,7 +130,11 @@ where
             },
             in_substreams: hashbrown::HashMap::with_capacity_and_hasher(
                 config.substreams_capacity,
-                util::SipHasherBuild::new(randomness.sample(rand::distributions::Standard)),
+                util::SipHasherBuild::new({
+                    let mut seed = [0; 16];
+                    randomness.fill_bytes(&mut seed);
+                    seed
+                }),
             ),
             out_in_substreams_map: hashbrown::HashMap::with_capacity_and_hasher(
                 config.substreams_capacity,
@@ -292,9 +296,8 @@ where
         // Reading/writing the ping substream is used to queue new outgoing pings.
         if Some(substream_id) == self.ping_substream.as_ref() {
             if read_write.now >= self.next_ping {
-                let payload = self
-                    .ping_payload_randomness
-                    .sample(rand::distributions::Standard);
+                let mut payload = [0u8; 32];
+                self.ping_payload_randomness.fill_bytes(&mut payload);
                 substream
                     .inner
                     .as_mut()

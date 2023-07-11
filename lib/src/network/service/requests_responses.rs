@@ -737,7 +737,8 @@ where
         chain_index: usize,
     ) -> KademliaOperationId {
         let random_peer_id = {
-            let pub_key = self.randomness.sample(rand::distributions::Standard);
+            let mut pub_key = [0; 32];
+            self.randomness.fill_bytes(&mut pub_key);
             PeerId::from_public_key(&peer_id::PublicKey::Ed25519(pub_key))
         };
 
