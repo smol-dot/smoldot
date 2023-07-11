@@ -401,7 +401,6 @@ async fn run(cli_options: cli::CliOptionsRun) {
         },
         log_callback: log_callback.clone(),
         jaeger_agent: cli_options.jaeger,
-        show_informant: matches!(cli_output, cli::Output::Informant),
     })
     .await;
 
