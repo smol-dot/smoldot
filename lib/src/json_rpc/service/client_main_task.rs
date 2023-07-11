@@ -32,7 +32,6 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
     task::{ready, Poll},
 };
-use futures_channel::mpsc;
 use futures_lite::{FutureExt as _, StreamExt as _};
 use slab::Slab;
 
@@ -72,9 +71,8 @@ struct Inner {
     /// subscription start requests are automatically denied.
     max_active_subscriptions: u32,
 
-    /// Structure shared with the [`SerializedRequestsIo`]. The requests received are guaranteed
-    /// to be a valid request JSON, but not necessarily to use a known method.
-    serialized_requests_queue: Arc<SerializedRequestsQueue>,
+    /// Structure shared with the [`SerializedRequestsIo`].
+    serialized_io: Arc<SerializedIo>,
     /// Channel connected to the [`SerializedRequestsIo`].
     serialized_rp_sender: mpsc::Sender<String>,
 
@@ -89,15 +87,18 @@ struct InnerSubscription {
     unsubscribe_response: Option<String>,
 }
 
-struct SerializedRequestsQueue {
-    /// The actual queue.
-    queue: crossbeam_queue::SegQueue<String>,
+struct SerializedIo {
+    /// Queue of requests. The requests are guaranteed to be a valid request JSON, but not
+    /// necessarily to use a known method.
+    requests_queue: crossbeam_queue::SegQueue<String>,
 
-    /// Event notified after an element from [`SerializedRequestsQueue::queue`] has been pushed.
-    on_pushed: event_listener::Event,
+    /// Event notified after an element from [`SerializedRequestsQueue::requests_queue`] has been
+    /// pushed.
+    on_request_pushed: event_listener::Event,
 
-    /// Event notified after an element from [`SerializedRequestsQueue::queue`] has been pulled.
-    on_pulled: event_listener::Event,
+    /// Event notified after an element from [`SerializedRequestsQueue::requests_queue`] has been
+    /// pulled.
+    on_request_pulled: event_listener::Event,
 
     /// Number of requests that have have been received from the client but whose answer hasn't
     /// been sent back to the client yet. Includes requests whose response is still in
@@ -105,7 +106,7 @@ struct SerializedRequestsQueue {
     num_requests_in_fly: AtomicU32,
 
     /// Maximum value that [`SerializedRequestsQueue::num_requests_in_fly`] is allowed to reach.
-    /// Beyond this, no more request should be added to [`SerializedRequestsQueue::queue`].
+    /// Beyond this, no more request should be added to [`SerializedRequestsQueue::requests_queue`].
     max_requests_in_fly: NonZeroU32,
 }
 
@@ -182,10 +183,10 @@ pub fn client_main_task(config: Config) -> (ClientMainTask, SerializedRequestsIo
                 Default::default(),
             ),
             max_active_subscriptions: config.max_active_subscriptions,
-            serialized_requests_queue: Arc::new(SerializedRequestsQueue {
-                queue: crossbeam_queue::SegQueue::new(),
-                on_pushed: event_listener::Event::new(),
-                on_pulled: event_listener::Event::new(),
+            serialized_io: Arc::new(SerializedIo {
+                requests_queue: crossbeam_queue::SegQueue::new(),
+                on_request_pushed: event_listener::Event::new(),
+                on_request_pulled: event_listener::Event::new(),
                 num_requests_in_fly: AtomicU32::new(0),
                 max_requests_in_fly: config.max_pending_requests,
             }),
@@ -200,7 +201,7 @@ pub fn client_main_task(config: Config) -> (ClientMainTask, SerializedRequestsIo
     };
 
     let serialized_requests_io = SerializedRequestsIo {
-        serialized_requests_queue: Arc::downgrade(&task.inner.serialized_requests_queue),
+        serialized_io: Arc::downgrade(&task.inner.serialized_io),
         responses_receiver: Mutex::new(serialized_rp_receiver),
     };
 
@@ -232,17 +233,17 @@ impl ClientMainTask {
                 let next_serialized_request = async {
                     let mut wait = None;
                     loop {
-                        if let Some(elem) = self.inner.serialized_requests_queue.queue.pop() {
+                        if let Some(elem) = self.inner.serialized_io.requests_queue.pop() {
                             self.inner
-                                .serialized_requests_queue
-                                .on_pulled
+                                .serialized_io
+                                .on_request_pulled
                                 .notify(usize::max_value());
                             break Ok(WhatHappened::NewRequest(elem));
                         }
                         if let Some(wait) = wait.take() {
                             wait.await
                         } else {
-                            wait = Some(self.inner.serialized_requests_queue.on_pushed.listen());
+                            wait = Some(self.inner.serialized_io.on_request_pushed.listen());
                         }
                     }
                 };
@@ -296,7 +297,7 @@ impl ClientMainTask {
                     if is_response {
                         let _prev_val = self
                             .inner
-                            .serialized_requests_queue
+                            .serialized_io
                             .num_requests_in_fly
                             .fetch_sub(1, Ordering::Release);
                         debug_assert_ne!(_prev_val, u32::max_value()); // Check underflows.
@@ -752,7 +753,7 @@ pub enum Event {
 /// Object connected to the [`ClientMainTask`] that allows sending requests to the task and
 /// receiving responses.
 pub struct SerializedRequestsIo {
-    serialized_requests_queue: Weak<SerializedRequestsQueue>,
+    serialized_io: Weak<SerializedIo>,
     // TODO: instead of using a channel we could do things manually, which would lead to less waker registrations
     responses_receiver: Mutex<mpsc::Receiver<String>>,
 }
@@ -790,7 +791,7 @@ impl SerializedRequestsIo {
             });
         }
 
-        let Some(queue) = self.serialized_requests_queue.upgrade() else {
+        let Some(queue) = self.serialized_io.upgrade() else {
             return Err(SendRequestError {
                 request,
                 cause: SendRequestErrorCause::ClientMainTaskDestroyed,
@@ -820,13 +821,13 @@ impl SerializedRequestsIo {
             if let Some(wait) = wait.take() {
                 wait.await;
             } else {
-                wait = Some(queue.on_pulled.listen());
+                wait = Some(queue.on_request_pulled.listen());
             }
         }
 
         // Everything successful.
-        queue.queue.push(request);
-        queue.on_pushed.notify(usize::max_value());
+        queue.requests_queue.push(request);
+        queue.on_request_pushed.notify(usize::max_value());
         Ok(())
     }
 
@@ -845,7 +846,7 @@ impl SerializedRequestsIo {
             });
         }
 
-        let Some(queue) = self.serialized_requests_queue.upgrade() else {
+        let Some(queue) = self.serialized_io.upgrade() else {
             return Err(TrySendRequestError {
                 request,
                 cause: TrySendRequestErrorCause::ClientMainTaskDestroyed,
@@ -874,8 +875,8 @@ impl SerializedRequestsIo {
         }
 
         // Everything successful.
-        queue.queue.push(request);
-        queue.on_pushed.notify(usize::max_value());
+        queue.requests_queue.push(request);
+        queue.on_request_pushed.notify(usize::max_value());
         Ok(())
     }
 }
