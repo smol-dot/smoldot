@@ -48,7 +48,7 @@ use alloc::{
     string::{String, ToString as _},
     sync::Arc,
 };
-use core::num::{NonZeroU32, NonZeroUsize};
+use core::num::NonZeroU32;
 use smoldot::{
     chain_spec,
     json_rpc::{self, service},
@@ -97,7 +97,6 @@ pub fn service(config: Config) -> (Frontend, ServicePrototype) {
         service::client_main_task(service::Config {
             max_active_subscriptions: config.max_subscriptions,
             max_pending_requests: config.max_pending_requests,
-            serialized_requests_io_channel_size_hint: NonZeroUsize::new(4).unwrap(),
         });
 
     let frontend = Frontend {

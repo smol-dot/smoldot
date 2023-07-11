@@ -26,7 +26,7 @@ use std::{
     future::Future,
     io, mem,
     net::SocketAddr,
-    num::{NonZeroU32, NonZeroUsize},
+    num::NonZeroU32,
     pin::Pin,
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -233,7 +233,6 @@ impl JsonRpcBackground {
             let (client_main_task, io) = service::client_main_task(service::Config {
                 max_active_subscriptions: 128,
                 max_pending_requests: NonZeroU32::new(64).unwrap(),
-                serialized_requests_io_channel_size_hint: NonZeroUsize::new(8).unwrap(),
             });
             spawn_client_io_task(
                 &self.tasks_executor,

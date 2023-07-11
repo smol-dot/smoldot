@@ -50,7 +50,6 @@ either = { version = "1.8.1", default-features = false }
 event-listener = { version = "2.5.3" }  # TODO: no-std-ize
 fnv = { version = "1.0.7", default-features = false }
 futures-lite = { version = "1.13.0", default-features = false, features = ["alloc"] }
-futures-channel = { version = "0.3.27", features = ["std", "sink"] }   # TODO: no-std-ize and remove "sink"
 hashbrown = { version = "0.14.0", default-features = false, features = ["serde"] }   # TODO: remove serde feature
 hex = { version = "0.4.3", default-features = false }
 hmac = { version = "0.12.1", default-features = false }
