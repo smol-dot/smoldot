@@ -779,45 +779,48 @@ impl SerializedRequestsIo {
                 return Err(WaitNextResponseError::ClientMainTaskDestroyed);
             };
 
-            let mut responses_queue = queue.responses_queue.lock().await;
-
-            if let Some(response_index) = responses_queue
-                .pending_serialized_responses_queue
-                .pop_front()
+            // Lock the responses queue.
             {
-                let (response_or_notif, is_response) = responses_queue
-                    .pending_serialized_responses
-                    .remove(response_index);
+                let mut responses_queue = queue.responses_queue.lock().await;
 
-                if is_response {
-                    let _prev_val = queue.num_requests_in_fly.fetch_sub(1, Ordering::Release);
-                    debug_assert_ne!(_prev_val, u32::max_value()); // Check underflows.
-                }
-
-                // Shrink containers if necessary in order to reduce memory usage after a
-                // burst of requests.
-                if responses_queue.pending_serialized_responses.capacity()
-                    > responses_queue
-                        .pending_serialized_responses
-                        .len()
-                        .saturating_mul(4)
-                {
-                    responses_queue.pending_serialized_responses.shrink_to_fit();
-                }
-                if responses_queue
+                if let Some(response_index) = responses_queue
                     .pending_serialized_responses_queue
-                    .capacity()
-                    > responses_queue
-                        .pending_serialized_responses_queue
-                        .len()
-                        .saturating_mul(4)
+                    .pop_front()
                 {
-                    responses_queue
-                        .pending_serialized_responses_queue
-                        .shrink_to_fit();
-                }
+                    let (response_or_notif, is_response) = responses_queue
+                        .pending_serialized_responses
+                        .remove(response_index);
 
-                return Ok(response_or_notif);
+                    if is_response {
+                        let _prev_val = queue.num_requests_in_fly.fetch_sub(1, Ordering::Release);
+                        debug_assert_ne!(_prev_val, u32::max_value()); // Check underflows.
+                    }
+
+                    // Shrink containers if necessary in order to reduce memory usage after a
+                    // burst of requests.
+                    if responses_queue.pending_serialized_responses.capacity()
+                        > responses_queue
+                            .pending_serialized_responses
+                            .len()
+                            .saturating_mul(4)
+                    {
+                        responses_queue.pending_serialized_responses.shrink_to_fit();
+                    }
+                    if responses_queue
+                        .pending_serialized_responses_queue
+                        .capacity()
+                        > responses_queue
+                            .pending_serialized_responses_queue
+                            .len()
+                            .saturating_mul(4)
+                    {
+                        responses_queue
+                            .pending_serialized_responses_queue
+                            .shrink_to_fit();
+                    }
+
+                    return Ok(response_or_notif);
+                }
             }
 
             if let Some(wait) = wait.take() {
