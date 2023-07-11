@@ -859,11 +859,6 @@ pub struct RuntimeCall<'a> {
 }
 
 impl<'a> RuntimeCall<'a> {
-    /// Returns the storage root of the block the call is being made against.
-    pub fn block_storage_root(&self) -> &[u8; 32] {
-        &self.block_state_root_hash
-    }
-
     /// Finds the given key in the call proof and returns the associated storage value.
     ///
     /// If `child_trie` is `Some`, look for the key in the given child trie. If it is `None`, look
