@@ -62,8 +62,12 @@ pub enum Handshake {
 
 impl Handshake {
     /// Shortcut for [`HealthyHandshake::noise_yamux`] wrapped in a [`Handshake`].
-    pub fn noise_yamux(noise_key: &NoiseKey, is_initiator: bool) -> Self {
-        HealthyHandshake::noise_yamux(noise_key, is_initiator).into()
+    pub fn noise_yamux(
+        noise_key: &NoiseKey,
+        noise_ephemeral_secret_key: &[u8; 32],
+        is_initiator: bool,
+    ) -> Self {
+        HealthyHandshake::noise_yamux(noise_key, noise_ephemeral_secret_key, is_initiator).into()
     }
 }
 
@@ -95,7 +99,13 @@ impl HealthyHandshake {
     ///
     /// Must pass `true` for `is_initiator` if the connection has been opened by the local machine,
     /// or `false` if it has been opened by the remote.
-    pub fn noise_yamux(noise_key: &NoiseKey, is_initiator: bool) -> Self {
+    ///
+    /// The Noise ephemeral secret key must never be re-used.
+    pub fn noise_yamux(
+        noise_key: &NoiseKey,
+        noise_ephemeral_secret_key: &[u8; 32],
+        is_initiator: bool,
+    ) -> Self {
         let negotiation = multistream_select::InProgress::new(if is_initiator {
             multistream_select::Config::Dialer {
                 requested_protocol: noise::PROTOCOL_NAME,
@@ -113,6 +123,7 @@ impl HealthyHandshake {
                     key: noise_key,
                     is_initiator,
                     prologue: &[],
+                    ephemeral_secret_key: noise_ephemeral_secret_key,
                 }),
             },
         }

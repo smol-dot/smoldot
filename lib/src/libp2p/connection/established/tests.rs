@@ -48,11 +48,12 @@ fn perform_handshake(
     assert_ne!(alice_to_bob_buffer_size, 0);
     assert_ne!(bob_to_alice_buffer_size, 0);
 
-    let alice_key = NoiseKey::new(&rand::random());
-    let bob_key = NoiseKey::new(&rand::random());
+    let alice_key = NoiseKey::new(&rand::random(), &rand::random());
+    let bob_key = NoiseKey::new(&rand::random(), &rand::random());
 
-    let mut alice = single_stream_handshake::Handshake::noise_yamux(&alice_key, true);
-    let mut bob = single_stream_handshake::Handshake::noise_yamux(&bob_key, false);
+    let mut alice =
+        single_stream_handshake::Handshake::noise_yamux(&alice_key, &rand::random(), true);
+    let mut bob = single_stream_handshake::Handshake::noise_yamux(&bob_key, &rand::random(), false);
 
     let mut alice_to_bob_buffer = Vec::with_capacity(alice_to_bob_buffer_size);
     let mut bob_to_alice_buffer = Vec::with_capacity(bob_to_alice_buffer_size);

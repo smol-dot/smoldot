@@ -30,7 +30,7 @@ use hashbrown::HashMap;
 use itertools::Itertools as _;
 use smoldot::{
     chain::{self, async_tree},
-    executor::{host, read_only_runtime_host},
+    executor::{host, runtime_host},
     header,
     informant::HashDisplay,
     libp2p::PeerId,
@@ -1143,7 +1143,7 @@ async fn parahead<TPlat: PlatformRef>(
 
     // TODO: move the logic below in the `para` module
 
-    let mut runtime_call = match read_only_runtime_host::run(read_only_runtime_host::Config {
+    let mut runtime_call = match runtime_host::run(runtime_host::Config {
         virtual_machine,
         function_to_call: para::PERSISTED_VALIDATION_FUNCTION_NAME,
         parameter: para::persisted_validation_data_parameters(
@@ -1151,6 +1151,8 @@ async fn parahead<TPlat: PlatformRef>(
             para::OccupiedCoreAssumption::TimedOut,
         ),
         max_log_level: 0,
+        storage_main_trie_changes: Default::default(),
+        calculate_trie_changes: false,
     }) {
         Ok(vm) => vm,
         Err((err, prototype)) => {
@@ -1161,43 +1163,55 @@ async fn parahead<TPlat: PlatformRef>(
 
     let output = loop {
         match runtime_call {
-            read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+            runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
                 let output = success.virtual_machine.value().as_ref().to_owned();
                 runtime_call_lock.unlock(success.virtual_machine.into_prototype());
                 break output;
             }
-            read_only_runtime_host::RuntimeHostVm::Finished(Err(error)) => {
+            runtime_host::RuntimeHostVm::Finished(Err(error)) => {
                 runtime_call_lock.unlock(error.prototype);
-                return Err(ParaheadError::ReadOnlyRuntime(error.detail));
+                return Err(ParaheadError::Runtime(error.detail));
             }
-            read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
+            runtime_host::RuntimeHostVm::StorageGet(get) => {
                 let storage_value = {
                     let child_trie = get.child_trie();
                     runtime_call_lock
                         .storage_entry(child_trie.as_ref().map(|c| c.as_ref()), get.key().as_ref())
                 };
                 let storage_value = match storage_value {
-                    Ok(v) => v.map(|(v, _)| v),
+                    Ok(v) => v,
                     Err(err) => {
-                        runtime_call_lock.unlock(
-                            read_only_runtime_host::RuntimeHostVm::StorageGet(get).into_prototype(),
-                        );
+                        runtime_call_lock
+                            .unlock(runtime_host::RuntimeHostVm::StorageGet(get).into_prototype());
                         return Err(ParaheadError::Call(err));
                     }
                 };
-                runtime_call = get.inject_value(storage_value.map(iter::once));
+                runtime_call =
+                    get.inject_value(storage_value.map(|(val, ver)| (iter::once(val), ver)));
             }
-            read_only_runtime_host::RuntimeHostVm::NextKey(nk) => {
+            runtime_host::RuntimeHostVm::NextKey(nk) => {
                 // TODO:
-                runtime_call_lock
-                    .unlock(read_only_runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
-                return Err(ParaheadError::NextKeyForbidden);
+                runtime_call_lock.unlock(runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
+                return Err(ParaheadError::NextKeyMerkleValueForbidden);
             }
-            read_only_runtime_host::RuntimeHostVm::StorageRoot(storage_root) => {
-                runtime_call = storage_root.resume(runtime_call_lock.block_storage_root());
+            runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv) => {
+                // TODO:
+                runtime_call_lock.unlock(
+                    runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv).into_prototype(),
+                );
+                return Err(ParaheadError::NextKeyMerkleValueForbidden);
             }
-            read_only_runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
+            runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
                 runtime_call = sig.verify_and_resume();
+            }
+            runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
+                // Do nothing.
+                runtime_call = req.resume();
+            }
+            runtime_host::RuntimeHostVm::Offchain(req) => {
+                runtime_call_lock
+                    .unlock(runtime_host::RuntimeHostVm::Offchain(req).into_prototype());
+                return Err(ParaheadError::OffchainWorkerHostFunction);
             }
         }
     };
@@ -1225,7 +1239,7 @@ enum ParaheadError {
     StartError(host::StartErr),
     /// Error during the execution of the virtual machine to verify call proof.
     #[display(fmt = "Error during the call proof verification: {_0}")]
-    ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
+    Runtime(runtime_host::ErrorDetail),
     /// Parachain doesn't have a core in the relay chain.
     NoCore,
     /// Error while decoding the output of the call.
@@ -1233,8 +1247,11 @@ enum ParaheadError {
     /// This indicates some kind of incompatibility between smoldot and the relay chain.
     #[display(fmt = "Error while decoding the output of the call: {_0}")]
     InvalidRuntimeOutput(para::Error),
-    /// Fetching following keys is not supported by call proofs.
-    NextKeyForbidden,
+    /// Fetching following keys or Merkle values is not supported yet.
+    // TODO: implement and remove
+    NextKeyMerkleValueForbidden,
+    /// Runtime has called an offchain worker host function.
+    OffchainWorkerHostFunction,
     /// Runtime service subscription is no longer valid.
     ObsoleteSubscription,
 }
@@ -1246,10 +1263,11 @@ impl ParaheadError {
         match self {
             ParaheadError::Call(err) => err.is_network_problem(),
             ParaheadError::StartError(_) => false,
-            ParaheadError::ReadOnlyRuntime(_) => false,
+            ParaheadError::Runtime(_) => false,
             ParaheadError::NoCore => false,
             ParaheadError::InvalidRuntimeOutput(_) => false,
-            ParaheadError::NextKeyForbidden => false,
+            ParaheadError::NextKeyMerkleValueForbidden => false,
+            ParaheadError::OffchainWorkerHostFunction => false,
             ParaheadError::ObsoleteSubscription => false,
         }
     }

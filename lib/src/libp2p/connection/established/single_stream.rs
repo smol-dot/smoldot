@@ -63,7 +63,7 @@ use core::{
     ops::{Add, Index, IndexMut, Sub},
     time::Duration,
 };
-use rand::{Rng as _, SeedableRng as _};
+use rand_chacha::rand_core::{RngCore as _, SeedableRng as _};
 
 pub use substream::InboundTy;
 
@@ -177,10 +177,8 @@ where
             // It might be that the remote has reset the ping substream, in which case the out ping
             // substream no longer exists and we immediately consider the ping as failed.
             if self.inner.yamux.has_substream(self.inner.outgoing_pings) {
-                let payload = self
-                    .inner
-                    .ping_payload_randomness
-                    .sample(rand::distributions::Standard);
+                let mut payload = [0u8; 32];
+                self.inner.ping_payload_randomness.fill_bytes(&mut payload);
                 self.inner
                     .yamux
                     .user_data_mut(self.inner.outgoing_pings)
@@ -1134,7 +1132,11 @@ impl ConnectionPrototype {
         let mut yamux = yamux::Yamux::new(yamux::Config {
             is_initiator: self.encryption.is_initiator(),
             capacity: config.substreams_capacity,
-            randomness_seed: randomness.sample(rand::distributions::Standard),
+            randomness_seed: {
+                let mut seed = [0; 32];
+                randomness.fill_bytes(&mut seed);
+                seed
+            },
             max_out_data_frame_size: NonZeroU32::new(8192).unwrap(), // TODO: make configurable?
             max_simultaneous_queued_pongs: NonZeroUsize::new(4).unwrap(),
             max_simultaneous_rst_substreams: NonZeroUsize::new(1024).unwrap(),

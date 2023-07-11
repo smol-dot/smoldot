@@ -1589,7 +1589,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                         let proof = calls.get(&get.call_in_progress()).unwrap();
                         let value =
                             match proof.storage_value(&header.state_root, get.key().as_ref()) {
-                                Ok(v) => v.map(|(v, _)| v),
+                                Ok(v) => v,
                                 Err(proof_decode::IncompleteProofError { .. }) => {
                                     self.inner.phase = Phase::DownloadFragments {
                                         previous_verifier_values: Some((
@@ -1604,7 +1604,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                 }
                             };
 
-                        match get.inject_value(value.map(iter::once)) {
+                        match get.inject_value(value.map(|(val, ver)| (iter::once(val), ver))) {
                             chain_information::build::ChainInformationBuild::Finished {
                                 result: Ok(chain_information),
                                 virtual_machine,
@@ -1660,7 +1660,8 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                             }
                         }
                     }
-                    chain_information::build::InProgress::NextKey(_) => {
+                    chain_information::build::InProgress::NextKey(_)
+                    | chain_information::build::InProgress::ClosestDescendantMerkleValue(_) => {
                         // TODO: implement
                         self.inner.phase = Phase::DownloadFragments {
                             previous_verifier_values: Some((

@@ -55,7 +55,7 @@ use core::{
     ops::{self, Add, Sub},
     time::Duration,
 };
-use rand::{Rng as _, SeedableRng as _};
+use rand_chacha::rand_core::{RngCore as _, SeedableRng as _};
 
 pub use collection::{
     ConfigRequestResponse, ConfigRequestResponseIn, ConnectionId, ConnectionToCoordinator,
@@ -251,13 +251,21 @@ where
                 request_response_protocols: config.request_response_protocols,
                 ping_protocol: config.ping_protocol,
                 handshake_timeout: config.handshake_timeout,
-                randomness_seed: randomness.sample(rand::distributions::Standard),
+                randomness_seed: {
+                    let mut seed = [0; 32];
+                    randomness.fill_bytes(&mut seed);
+                    seed
+                },
             }),
             noise_key: config.noise_key,
             connections_by_peer: BTreeSet::new(),
             peer_indices: hashbrown::HashMap::with_capacity_and_hasher(
                 config.peers_capacity,
-                SipHasherBuild::new(randomness.sample(rand::distributions::Standard)),
+                SipHasherBuild::new({
+                    let mut seed = [0; 16];
+                    randomness.fill_bytes(&mut seed);
+                    seed
+                }),
             ),
             peers: slab::Slab::with_capacity(config.peers_capacity),
             unfulfilled_desired_peers: hashbrown::HashSet::with_capacity_and_hasher(

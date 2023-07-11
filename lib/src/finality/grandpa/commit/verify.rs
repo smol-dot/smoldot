@@ -19,8 +19,10 @@ use crate::finality::grandpa::commit::decode;
 
 use alloc::vec::Vec;
 use core::{cmp, iter, mem};
-use rand::Rng as _;
-use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
+use rand_chacha::{
+    rand_core::{RngCore as _, SeedableRng as _},
+    ChaCha20Rng,
+};
 
 /// Configuration for a commit verification process.
 #[derive(Debug)]
@@ -83,7 +85,11 @@ pub fn verify<C: AsRef<[u8]>>(config: Config<C>) -> InProgress<C> {
     {
         let mut unique = hashbrown::HashSet::with_capacity_and_hasher(
             decoded_commit.message.auth_data.len(),
-            crate::util::SipHasherBuild::new(randomness.gen()),
+            crate::util::SipHasherBuild::new({
+                let mut seed = [0; 16];
+                randomness.fill_bytes(&mut seed);
+                seed
+            }),
         );
         if let Some((_, faulty_pub_key)) = decoded_commit
             .message
