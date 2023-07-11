@@ -83,28 +83,25 @@ struct SerializedIo {
     /// necessarily to use a known method.
     requests_queue: crossbeam_queue::SegQueue<String>,
 
-    /// Event notified after an element from [`SerializedRequestsQueue::requests_queue`] has been
-    /// pushed.
+    /// Event notified after an element has been pushed to [`SerializedIo::requests_queue`].
     on_request_pushed: event_listener::Event,
 
-    /// Event notified after an element from [`SerializedRequestsQueue::requests_queue`] has been
-    /// pulled.
+    /// Event notified after an element from [`SerializedIo::requests_queue`] has been pulled.
     on_request_pulled_or_task_destroyed: event_listener::Event,
 
     /// Number of requests that have have been received from the client but whose answer hasn't
-    /// been sent back to the client yet. Includes requests whose response is still in
-    /// [`Inner::pending_serialized_responses`].
+    /// been pulled out from [`SerializedIo::requests_queue`] yet.
     num_requests_in_fly: AtomicU32,
 
-    /// Maximum value that [`SerializedRequestsQueue::num_requests_in_fly`] is allowed to reach.
-    /// Beyond this, no more request should be added to [`SerializedRequestsQueue::requests_queue`].
+    /// Maximum value that [`SerializedIo::num_requests_in_fly`] is allowed to reach.
+    /// Beyond this, no more request should be added to [`SerializedIo::requests_queue`].
     max_requests_in_fly: NonZeroU32,
 
     /// Queue of responses.
     responses_queue: Mutex<SerializedIoResponses>,
 
-    /// Event notified after an element from [`SerializedRequestsQueue::responses_queue`] has been
-    /// pushed, or when the [`ClientMainTask`] has been destroyed.
+    /// Event notified after an element has been pushed to [`SerializedIo::responses_queue`], or
+    /// when the [`ClientMainTask`] has been destroyed.
     on_response_pushed_or_task_destroyed: event_listener::Event,
 }
 
@@ -116,7 +113,7 @@ struct SerializedIoResponses {
     pending_serialized_responses: Slab<(String, bool)>,
 
     /// Ordered list of responses and notifications to send back to the client, as indices within
-    /// [`Inner::pending_serialized_responses`].
+    /// [`SerializedIoResponses::pending_serialized_responses`].
     pending_serialized_responses_queue: VecDeque<usize>,
 }
 
