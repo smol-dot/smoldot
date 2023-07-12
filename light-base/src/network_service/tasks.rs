@@ -304,33 +304,33 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
             // but this is intentional and serves as a back-pressure mechanism.
             // However, it is important to continue processing the messages coming from the
             // coordinator, otherwise this could result in a deadlock.
-
-            // We do this by waiting for `connection_to_coordinator` to be ready to accept
-            // an element. Due to the way channels work, once a channel is ready it will
-            // always remain ready until we push an element. While waiting, we process
-            // incoming messages.
-            loop {
-                futures_util::select! {
-                    _ = future::poll_fn(|cx| connection_to_coordinator.poll_ready(cx)).fuse() => break,
-                    message = coordinator_to_connection.next() => {
-                        if let Some(message) = message {
-                            if let Some(task_update) = &mut task_update {
-                                task_update.inject_coordinator_message(message);
-                            }
-                        } else {
-                            return;
+            let process_in = async {
+                loop {
+                    if let Some(message) = coordinator_to_connection.next().await {
+                        if let Some(task_update) = &mut task_update {
+                            task_update.inject_coordinator_message(message);
                         }
+                    } else {
+                        break Err(());
                     }
                 }
-            }
-            let result = connection_to_coordinator.try_send(ToBackground::ConnectionMessage {
-                connection_id,
-                message,
-            });
-            shared.wake_up_main_background_task.notify(1);
-            if result.is_err() {
+            };
+
+            let send_out = async {
+                connection_to_coordinator
+                    .send(ToBackground::ConnectionMessage {
+                        connection_id,
+                        message,
+                    })
+                    .await
+                    .map_err(|_| ())
+            };
+
+            if send_out.or(process_in).await.is_err() {
                 return;
             }
+
+            shared.wake_up_main_background_task.notify(1);
         }
 
         if let Some(task_update) = task_update {
@@ -549,33 +549,33 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                 // but this is intentional and serves as a back-pressure mechanism.
                 // However, it is important to continue processing the messages coming from the
                 // coordinator, otherwise this could result in a deadlock.
-
-                // We do this by waiting for `connection_to_coordinator` to be ready to accept
-                // an element. Due to the way channels work, once a channel is ready it will
-                // always remain ready until we push an element. While waiting, we process
-                // incoming messages.
-                loop {
-                    futures_util::select! {
-                        _ = future::poll_fn(|cx| connection_to_coordinator.poll_ready(cx)).fuse() => break,
-                        message = coordinator_to_connection.next() => {
-                            if let Some(message) = message {
-                                if let Some(task_update) = &mut task_update {
-                                    task_update.inject_coordinator_message(message);
-                                }
-                            } else {
-                                return;
+                let process_in = async {
+                    loop {
+                        if let Some(message) = coordinator_to_connection.next().await {
+                            if let Some(task_update) = &mut task_update {
+                                task_update.inject_coordinator_message(message);
                             }
+                        } else {
+                            break Err(());
                         }
                     }
-                }
-                let result = connection_to_coordinator.try_send(ToBackground::ConnectionMessage {
-                    connection_id,
-                    message,
-                });
-                shared.wake_up_main_background_task.notify(1);
-                if result.is_err() {
+                };
+
+                let send_out = async {
+                    connection_to_coordinator
+                        .send(ToBackground::ConnectionMessage {
+                            connection_id,
+                            message,
+                        })
+                        .await
+                        .map_err(|_| ())
+                };
+
+                if send_out.or(process_in).await.is_err() {
                     return;
                 }
+
+                shared.wake_up_main_background_task.notify(1);
             }
 
             if let Some(task_update) = task_update {
