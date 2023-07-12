@@ -15,15 +15,14 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use super::Shared;
+use super::ToBackground;
 use crate::platform::{
     address_parse, ConnectError, MultiStreamWebRtcConnection, PlatformRef, ReadBuffer,
     SubstreamDirection,
 };
 
-use alloc::{sync::Arc, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 use core::{cmp, iter, pin};
-use futures_channel::mpsc;
 use futures_lite::FutureExt as _;
 use futures_util::{future, FutureExt as _, StreamExt as _};
 use smoldot::{
@@ -35,11 +34,8 @@ use smoldot::{
 /// processing of the connection after it's been open.
 pub(super) async fn connection_task<TPlat: PlatformRef>(
     start_connect: service::StartConnect<TPlat::Instant>,
-    shared: Arc<Shared<TPlat>>,
-    connection_to_coordinator_tx: mpsc::Sender<(
-        service::ConnectionId,
-        service::ConnectionToCoordinator,
-    )>,
+    platform: TPlat,
+    messages_tx: async_channel::Sender<ToBackground<TPlat>>,
     is_important: bool,
 ) {
     log::debug!(
@@ -55,7 +51,7 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
         let address = address_parse::multiaddr_to_address(&start_connect.multiaddr)
             .ok()
             .filter(|addr| {
-                shared.platform.supports_connection_type(match &addr {
+                platform.supports_connection_type(match &addr {
                     address_parse::AddressOrMultiStreamAddress::Address(addr) => From::from(addr),
                     address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(addr) => {
                         From::from(addr)
@@ -64,14 +60,12 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
             });
         let socket = address.map(|addr| match addr {
             address_parse::AddressOrMultiStreamAddress::Address(addr) => either::Left(
-                shared
-                    .platform
+                platform
                     .connect_stream(addr)
                     .map(|res| res.map(either::Left)),
             ),
             address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(addr) => either::Right(
-                shared
-                    .platform
+                platform
                     .connect_multistream(addr)
                     .map(|res| res.map(either::Right)),
             ),
@@ -92,7 +86,7 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
 
     let socket = {
         let timeout = async {
-            shared.platform.sleep_until(start_connect.timeout).await;
+            platform.sleep_until(start_connect.timeout).await;
             Err((
                 ConnectError {
                     message: "Timeout reached".into(),
@@ -127,22 +121,14 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
         match result {
             Ok(connection) => connection,
             Err((_, is_bad_addr)) => {
-                let mut guarded = shared.guarded.lock().await;
-                guarded
-                    .network
-                    .pending_outcome_err(start_connect.id, is_bad_addr);
-
-                for chain_index in 0..guarded.network.num_chains() {
-                    guarded.unassign_slot_and_ban(
-                        &shared.platform,
-                        chain_index,
-                        start_connect.expected_peer_id.clone(),
-                    );
-                }
-
-                // We wake up the background task so that the slot can potentially be
-                // assigned to a different peer.
-                shared.wake_up_main_background_task.notify(1);
+                messages_tx
+                    .send(ToBackground::ConnectionAttemptErr {
+                        pending_id: start_connect.id,
+                        expected_peer_id: start_connect.expected_peer_id,
+                        is_bad_addr,
+                    })
+                    .await
+                    .unwrap();
 
                 // Stop the task.
                 return;
@@ -150,18 +136,22 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
         }
     };
 
-    // Connection process is successful. Notify the network state machine.
+    // Connection process is successful. Notify the background task.
     // There exists two different kind of connections: "single stream" (for example TCP) that is
     // then divided into substreams internally, or "multi stream" where the substreams management
     // is done by the user of the smoldot crate rather than by the smoldot crate itself.
-    let mut guarded = shared.guarded.lock().await;
-    let (connection_id, socket_and_task) = match socket {
-        either::Left(socket) => {
-            let (id, task) = guarded.network.pending_outcome_ok_single_stream(
-                start_connect.id,
-                service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
-            );
-            (id, either::Left((socket, task)))
+    match socket {
+        either::Left(connection) => {
+            messages_tx
+                .send(ToBackground::ConnectionAttemptOkSingleStream {
+                    pending_id: start_connect.id,
+                    connection,
+                    expected_peer_id: start_connect.expected_peer_id,
+                    multiaddr: start_connect.multiaddr,
+                    handshake_kind: service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
+                })
+                .await
+                .unwrap();
         }
         either::Right(MultiStreamWebRtcConnection {
             connection,
@@ -177,70 +167,34 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
                 .into_iter()
                 .chain(remote_tls_certificate_sha256.into_iter())
                 .collect();
-            let (id, task) = guarded.network.pending_outcome_ok_multi_stream(
-                start_connect.id,
-                service::MultiStreamHandshakeKind::WebRtc {
-                    local_tls_certificate_multihash,
-                    remote_tls_certificate_multihash,
-                },
-            );
-            (id, either::Right((connection, task)))
-        }
-    };
-    log::debug!(
-        target: "connections",
-        "Pending({:?}, {}) => Connection through {}",
-        start_connect.id,
-        start_connect.expected_peer_id,
-        start_connect.multiaddr
-    );
-
-    let (coordinator_to_connection_tx, coordinator_to_connection_rx) = mpsc::channel(8);
-    let _prev_value = guarded
-        .active_connections
-        .insert(connection_id, coordinator_to_connection_tx);
-    debug_assert!(_prev_value.is_none());
-
-    drop(guarded);
-
-    match socket_and_task {
-        either::Left((socket, task)) => {
-            single_stream_connection_task::<TPlat>(
-                socket,
-                shared.clone(),
-                connection_id,
-                task,
-                coordinator_to_connection_rx,
-                connection_to_coordinator_tx,
-            )
-            .await
-        }
-        either::Right((socket, task)) => {
-            webrtc_multi_stream_connection_task::<TPlat>(
-                socket,
-                shared.clone(),
-                connection_id,
-                task,
-                coordinator_to_connection_rx,
-                connection_to_coordinator_tx,
-            )
-            .await
+            messages_tx
+                .send(ToBackground::ConnectionAttemptOkMultiStream {
+                    pending_id: start_connect.id,
+                    connection,
+                    expected_peer_id: start_connect.expected_peer_id,
+                    multiaddr: start_connect.multiaddr,
+                    handshake_kind: service::MultiStreamHandshakeKind::WebRtc {
+                        local_tls_certificate_multihash,
+                        remote_tls_certificate_multihash,
+                    },
+                })
+                .await
+                .unwrap();
         }
     }
 }
 
 /// Asynchronous task managing a specific single-stream connection after it's been open.
 // TODO: a lot of logging disappeared
-async fn single_stream_connection_task<TPlat: PlatformRef>(
+pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
     mut connection: TPlat::Stream,
-    shared: Arc<Shared<TPlat>>,
+    platform: TPlat,
     connection_id: service::ConnectionId,
     mut connection_task: service::SingleStreamConnectionTask<TPlat::Instant>,
-    coordinator_to_connection: mpsc::Receiver<service::CoordinatorToConnection<TPlat::Instant>>,
-    mut connection_to_coordinator: mpsc::Sender<(
-        service::ConnectionId,
-        service::ConnectionToCoordinator,
-    )>,
+    coordinator_to_connection: async_channel::Receiver<
+        service::CoordinatorToConnection<TPlat::Instant>,
+    >,
+    messages_tx: async_channel::Sender<ToBackground<TPlat>>,
 ) {
     // We need to use `peek()` on this future later down this function.
     let mut coordinator_to_connection = coordinator_to_connection.peekable();
@@ -266,16 +220,16 @@ async fn single_stream_connection_task<TPlat: PlatformRef>(
             connection_task.inject_coordinator_message(message);
         }
 
-        let now = shared.platform.now();
+        let now = platform.now();
 
         let (read_bytes, written_bytes, wake_up_after) = if !connection_task.is_reset_called() {
             let write_side_was_open = write_buffer.is_some();
             let writable_bytes = cmp::min(
-                shared.platform.writable_bytes(&mut connection),
+                platform.writable_bytes(&mut connection),
                 write_buffer.as_ref().map_or(0, |b| b.len()),
             );
 
-            let incoming_buffer = match shared.platform.read_buffer(&mut connection) {
+            let incoming_buffer = match platform.read_buffer(&mut connection) {
                 ReadBuffer::Reset => {
                     connection_task.reset();
                     continue;
@@ -312,19 +266,17 @@ async fn single_stream_connection_task<TPlat: PlatformRef>(
             if written_bytes != 0 {
                 // `written_bytes`non-zero when the writing side has been closed before
                 // doesn't make sense and would indicate a bug in the networking code
-                shared.platform.send(
+                platform.send(
                     &mut connection,
                     &write_buffer.as_mut().unwrap()[..written_bytes],
                 );
             }
             if write_size_closed {
-                shared.platform.close_send(&mut connection);
+                platform.close_send(&mut connection);
                 debug_assert!(write_buffer.is_some());
                 write_buffer = None;
             }
-            shared
-                .platform
-                .advance_read_cursor(&mut connection, read_bytes);
+            platform.advance_read_cursor(&mut connection, read_bytes);
 
             (read_bytes, written_bytes, wake_up_after)
         } else {
@@ -339,46 +291,35 @@ async fn single_stream_connection_task<TPlat: PlatformRef>(
         // this function.
         let (mut task_update, message) = connection_task.pull_message_to_coordinator();
 
-        // If `task_update` is `None`, the connection task is going to die as soon as the
-        // message reaches the coordinator. Before returning, we need to do a bit of clean up
-        // by removing the task from the list of active connections.
-        // This is done before the message is sent to the coordinator, in order to be sure
-        // that the connection id is still attributed to the current task, and not to a new
-        // connection that the coordinator has assigned after receiving the message.
-        if task_update.is_none() {
-            let mut guarded = shared.guarded.lock().await;
-            let _was_in = guarded.active_connections.remove(&connection_id);
-            debug_assert!(_was_in.is_some());
-        }
-
         let has_message = message.is_some();
         if let Some(message) = message {
             // Sending this message might take a long time (in case the coordinator is busy),
             // but this is intentional and serves as a back-pressure mechanism.
             // However, it is important to continue processing the messages coming from the
             // coordinator, otherwise this could result in a deadlock.
-
-            // We do this by waiting for `connection_to_coordinator` to be ready to accept
-            // an element. Due to the way channels work, once a channel is ready it will
-            // always remain ready until we push an element. While waiting, we process
-            // incoming messages.
-            loop {
-                futures_util::select! {
-                    _ = future::poll_fn(|cx| connection_to_coordinator.poll_ready(cx)).fuse() => break,
-                    message = coordinator_to_connection.next() => {
-                        if let Some(message) = message {
-                            if let Some(task_update) = &mut task_update {
-                                task_update.inject_coordinator_message(message);
-                            }
-                        } else {
-                            return;
+            let process_in = async {
+                loop {
+                    if let Some(message) = coordinator_to_connection.next().await {
+                        if let Some(task_update) = &mut task_update {
+                            task_update.inject_coordinator_message(message);
                         }
+                    } else {
+                        break Err(());
                     }
                 }
-            }
-            let result = connection_to_coordinator.try_send((connection_id, message));
-            shared.wake_up_main_background_task.notify(1);
-            if result.is_err() {
+            };
+
+            let send_out = async {
+                messages_tx
+                    .send(ToBackground::ConnectionMessage {
+                        connection_id,
+                        message,
+                    })
+                    .await
+                    .map_err(|_| ())
+            };
+
+            if send_out.or(process_in).await.is_err() {
                 return;
             }
         }
@@ -389,7 +330,7 @@ async fn single_stream_connection_task<TPlat: PlatformRef>(
             // As documented in `update_stream`, we call this function one last time in order to
             // give the possibility to the implementation to process closing the writing side
             // before the connection is dropped.
-            shared.platform.update_stream(&mut connection).await;
+            platform.update_stream(&mut connection).await;
             return;
         }
 
@@ -411,14 +352,14 @@ async fn single_stream_connection_task<TPlat: PlatformRef>(
         } else {
             async {
                 if let Some(wake_up_after) = wake_up_after {
-                    shared.platform.sleep_until(wake_up_after).await
+                    platform.sleep_until(wake_up_after).await
                 } else {
                     future::pending().await
                 }
             }
         };
         // Future that is woken up when new data is ready on the socket or more data is writable.
-        let stream_update = shared.platform.update_stream(&mut connection);
+        let stream_update = platform.update_stream(&mut connection);
         // Future that is woken up when a new message is coming from the coordinator.
         let message_from_coordinator = async {
             pin::Pin::new(&mut coordinator_to_connection).peek().await;
@@ -439,16 +380,15 @@ async fn single_stream_connection_task<TPlat: PlatformRef>(
 /// >           buffer to not go over the frame size limit of WebRTC. It can easily be made more
 /// >           general-purpose.
 // TODO: a lot of logging disappeared
-async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
+pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
     mut connection: TPlat::MultiStream,
-    shared: Arc<Shared<TPlat>>,
+    platform: TPlat,
     connection_id: service::ConnectionId,
     mut connection_task: service::MultiStreamConnectionTask<TPlat::Instant, usize>,
-    coordinator_to_connection: mpsc::Receiver<service::CoordinatorToConnection<TPlat::Instant>>,
-    mut connection_to_coordinator: mpsc::Sender<(
-        service::ConnectionId,
-        service::ConnectionToCoordinator,
-    )>,
+    coordinator_to_connection: async_channel::Receiver<
+        service::CoordinatorToConnection<TPlat::Instant>,
+    >,
+    messages_tx: async_channel::Sender<ToBackground<TPlat>>,
 ) {
     // We need to use `peek()` on this future later down this function.
     let mut coordinator_to_connection = coordinator_to_connection.peekable();
@@ -479,7 +419,7 @@ async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
             .desired_outbound_substreams()
             .saturating_sub(pending_opening_out_substreams)
         {
-            shared.platform.open_out_substream(&mut connection);
+            platform.open_out_substream(&mut connection);
             pending_opening_out_substreams += 1;
         }
 
@@ -506,7 +446,7 @@ async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
             connection_task.inject_coordinator_message(message);
         }
 
-        let now = shared.platform.now();
+        let now = platform.now();
 
         // When reading/writing substreams, the substream can ask to be woken up after a certain
         // time. This variable stores the earliest time when we should be waking up.
@@ -518,12 +458,10 @@ async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
             loop {
                 let (substream, write_side_was_open) = &mut open_substreams[substream_id];
 
-                let writable_bytes = cmp::min(
-                    shared.platform.writable_bytes(substream),
-                    write_buffer.len(),
-                );
+                let writable_bytes =
+                    cmp::min(platform.writable_bytes(substream), write_buffer.len());
 
-                let incoming_buffer = match shared.platform.read_buffer(substream) {
+                let incoming_buffer = match platform.read_buffer(substream) {
                     ReadBuffer::Open(buf) => buf,
                     ReadBuffer::Closed => panic!(), // Forbidden for WebRTC.
                     ReadBuffer::Reset => {
@@ -565,15 +503,13 @@ async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
 
                 // Now update the connection.
                 if written_bytes != 0 {
-                    shared
-                        .platform
-                        .send(substream, &write_buffer[..written_bytes]);
+                    platform.send(substream, &write_buffer[..written_bytes]);
                 }
                 if must_close_writing_side {
-                    shared.platform.close_send(substream);
+                    platform.close_send(substream);
                     *write_side_was_open = false;
                 }
-                shared.platform.advance_read_cursor(substream, read_bytes);
+                platform.advance_read_cursor(substream, read_bytes);
 
                 // If the `connection_task` requires this substream to be killed, we drop the
                 // `Stream` object.
@@ -596,46 +532,35 @@ async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
             // this function.
             let (mut task_update, message) = connection_task.pull_message_to_coordinator();
 
-            // If `task_update` is `None`, the connection task is going to die as soon as the
-            // message reaches the coordinator. Before returning, we need to do a bit of clean up
-            // by removing the task from the list of active connections.
-            // This is done before the message is sent to the coordinator, in order to be sure
-            // that the connection id is still attributed to the current task, and not to a new
-            // connection that the coordinator has assigned after receiving the message.
-            if task_update.is_none() {
-                let mut guarded = shared.guarded.lock().await;
-                let _was_in = guarded.active_connections.remove(&connection_id);
-                debug_assert!(_was_in.is_some());
-            }
-
             let has_message = message.is_some();
             if let Some(message) = message {
                 // Sending this message might take a long time (in case the coordinator is busy),
                 // but this is intentional and serves as a back-pressure mechanism.
                 // However, it is important to continue processing the messages coming from the
                 // coordinator, otherwise this could result in a deadlock.
-
-                // We do this by waiting for `connection_to_coordinator` to be ready to accept
-                // an element. Due to the way channels work, once a channel is ready it will
-                // always remain ready until we push an element. While waiting, we process
-                // incoming messages.
-                loop {
-                    futures_util::select! {
-                        _ = future::poll_fn(|cx| connection_to_coordinator.poll_ready(cx)).fuse() => break,
-                        message = coordinator_to_connection.next() => {
-                            if let Some(message) = message {
-                                if let Some(task_update) = &mut task_update {
-                                    task_update.inject_coordinator_message(message);
-                                }
-                            } else {
-                                return;
+                let process_in = async {
+                    loop {
+                        if let Some(message) = coordinator_to_connection.next().await {
+                            if let Some(task_update) = &mut task_update {
+                                task_update.inject_coordinator_message(message);
                             }
+                        } else {
+                            break Err(());
                         }
                     }
-                }
-                let result = connection_to_coordinator.try_send((connection_id, message));
-                shared.wake_up_main_background_task.notify(1);
-                if result.is_err() {
+                };
+
+                let send_out = async {
+                    messages_tx
+                        .send(ToBackground::ConnectionMessage {
+                            connection_id,
+                            message,
+                        })
+                        .await
+                        .map_err(|_| ())
+                };
+
+                if send_out.or(process_in).await.is_err() {
                     return;
                 }
             }
@@ -663,7 +588,7 @@ async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
         } else {
             async {
                 if let Some(wake_up_after) = wake_up_after {
-                    shared.platform.sleep_until(wake_up_after).await
+                    platform.sleep_until(wake_up_after).await
                 } else {
                     future::pending().await
                 }
@@ -673,11 +598,12 @@ async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
 
         // Future that is woken up when new data is ready on any of the streams.
         let streams_updated = {
-            let list = iter::once(future::Either::Right(future::pending()))
-                .chain(open_substreams.iter_mut().map(|(_, (stream, _))| {
-                    future::Either::Left(shared.platform.update_stream(stream))
-                }))
-                .collect::<future::SelectAll<_>>();
+            let list =
+                iter::once(future::Either::Right(future::pending()))
+                    .chain(open_substreams.iter_mut().map(|(_, (stream, _))| {
+                        future::Either::Left(platform.update_stream(stream))
+                    }))
+                    .collect::<future::SelectAll<_>>();
             async move {
                 list.await;
                 None
@@ -695,7 +621,7 @@ async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
             if remote_has_reset {
                 future::pending().await
             } else {
-                Some(shared.platform.next_substream(&mut connection).await)
+                Some(platform.next_substream(&mut connection).await)
             }
         };
 
