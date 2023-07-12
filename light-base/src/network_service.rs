@@ -158,9 +158,9 @@ struct SharedGuarded<TPlat: PlatformRef> {
     /// The values are the moment when the ban expires.
     slots_assign_backoff: HashMap<(PeerId, usize), TPlat::Instant, util::SipHasherBuild>,
 
-    messages_tx: mpsc::Sender<ToBackground>,
+    messages_tx: mpsc::Sender<ToBackground<TPlat>>,
 
-    messages_rx: mpsc::Receiver<ToBackground>,
+    messages_rx: mpsc::Receiver<ToBackground<TPlat>>,
 
     active_connections: HashMap<
         service::ConnectionId,
@@ -198,7 +198,7 @@ struct SharedGuarded<TPlat: PlatformRef> {
         HashMap<service::KademliaOperationId, usize, fnv::FnvBuildHasher>,
 }
 
-enum ToBackground {
+enum ToBackground<TPlat: PlatformRef> {
     ConnectionMessage {
         connection_id: service::ConnectionId,
         message: service::ConnectionToCoordinator,
@@ -257,6 +257,12 @@ enum ToBackground {
         scale_encoded_header: Vec<u8>,
         is_best: bool,
         result: oneshot::Sender<Result<(), QueueNotificationError>>,
+    },
+    Discover {
+        now: TPlat::Instant,
+        chain_index: usize,
+        list: vec::IntoIter<(PeerId, vec::IntoIter<Multiaddr>)>,
+        important_nodes: bool,
     },
 }
 
@@ -805,15 +811,26 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         list: impl IntoIterator<Item = (PeerId, impl IntoIterator<Item = Multiaddr>)>,
         important_nodes: bool,
     ) {
-        let mut guarded = self.shared.guarded.lock().await;
-
-        for (peer_id, addrs) in list {
-            if important_nodes {
-                guarded.important_nodes.insert(peer_id.clone());
-            }
-
-            guarded.network.discover(now, chain_index, peer_id, addrs);
-        }
+        self.shared
+            .guarded
+            .lock()
+            .await
+            .messages_tx
+            .send(ToBackground::Discover {
+                now: now.clone(), // TODO: overhead
+                chain_index,
+                // TODO: overhead
+                list: list
+                    .into_iter()
+                    .map(|(peer_id, addrs)| {
+                        (peer_id, addrs.into_iter().collect::<Vec<_>>().into_iter())
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+                important_nodes,
+            })
+            .await
+            .unwrap();
 
         self.shared.wake_up_main_background_task.notify(1);
     }
@@ -1223,6 +1240,20 @@ async fn update_round<TPlat: PlatformRef>(
                     .map_err(QueueNotificationError::Queue);
 
                 let _ = result.send(res);
+            }
+            Some(Some(ToBackground::Discover {
+                now,
+                chain_index,
+                list,
+                important_nodes,
+            })) => {
+                for (peer_id, addrs) in list {
+                    if important_nodes {
+                        guarded.important_nodes.insert(peer_id.clone());
+                    }
+
+                    guarded.network.discover(&now, chain_index, peer_id, addrs);
+                }
             }
             None | Some(None) => break,
         };
