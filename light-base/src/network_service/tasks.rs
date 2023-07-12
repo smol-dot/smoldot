@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use super::Shared;
+use super::{Shared, ToBackground};
 use crate::platform::{
     address_parse, ConnectError, MultiStreamWebRtcConnection, PlatformRef, ReadBuffer,
     SubstreamDirection,
@@ -36,10 +36,7 @@ use smoldot::{
 pub(super) async fn connection_task<TPlat: PlatformRef>(
     start_connect: service::StartConnect<TPlat::Instant>,
     shared: Arc<Shared<TPlat>>,
-    connection_to_coordinator_tx: mpsc::Sender<(
-        service::ConnectionId,
-        service::ConnectionToCoordinator,
-    )>,
+    connection_to_coordinator_tx: mpsc::Sender<ToBackground>,
     is_important: bool,
 ) {
     log::debug!(
@@ -237,10 +234,7 @@ async fn single_stream_connection_task<TPlat: PlatformRef>(
     connection_id: service::ConnectionId,
     mut connection_task: service::SingleStreamConnectionTask<TPlat::Instant>,
     coordinator_to_connection: mpsc::Receiver<service::CoordinatorToConnection<TPlat::Instant>>,
-    mut connection_to_coordinator: mpsc::Sender<(
-        service::ConnectionId,
-        service::ConnectionToCoordinator,
-    )>,
+    mut connection_to_coordinator: mpsc::Sender<ToBackground>,
 ) {
     // We need to use `peek()` on this future later down this function.
     let mut coordinator_to_connection = coordinator_to_connection.peekable();
@@ -376,7 +370,10 @@ async fn single_stream_connection_task<TPlat: PlatformRef>(
                     }
                 }
             }
-            let result = connection_to_coordinator.try_send((connection_id, message));
+            let result = connection_to_coordinator.try_send(ToBackground::ConnectionMessage {
+                connection_id,
+                message,
+            });
             shared.wake_up_main_background_task.notify(1);
             if result.is_err() {
                 return;
@@ -445,10 +442,7 @@ async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
     connection_id: service::ConnectionId,
     mut connection_task: service::MultiStreamConnectionTask<TPlat::Instant, usize>,
     coordinator_to_connection: mpsc::Receiver<service::CoordinatorToConnection<TPlat::Instant>>,
-    mut connection_to_coordinator: mpsc::Sender<(
-        service::ConnectionId,
-        service::ConnectionToCoordinator,
-    )>,
+    mut connection_to_coordinator: mpsc::Sender<ToBackground>,
 ) {
     // We need to use `peek()` on this future later down this function.
     let mut coordinator_to_connection = coordinator_to_connection.peekable();
@@ -633,7 +627,10 @@ async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                         }
                     }
                 }
-                let result = connection_to_coordinator.try_send((connection_id, message));
+                let result = connection_to_coordinator.try_send(ToBackground::ConnectionMessage {
+                    connection_id,
+                    message,
+                });
                 shared.wake_up_main_background_task.notify(1);
                 if result.is_err() {
                     return;

@@ -158,11 +158,9 @@ struct SharedGuarded<TPlat: PlatformRef> {
     /// The values are the moment when the ban expires.
     slots_assign_backoff: HashMap<(PeerId, usize), TPlat::Instant, util::SipHasherBuild>,
 
-    messages_from_connections_tx:
-        mpsc::Sender<(service::ConnectionId, service::ConnectionToCoordinator)>,
+    messages_tx: mpsc::Sender<ToBackground>,
 
-    messages_from_connections_rx:
-        mpsc::Receiver<(service::ConnectionId, service::ConnectionToCoordinator)>,
+    messages_rx: mpsc::Receiver<ToBackground>,
 
     active_connections: HashMap<
         service::ConnectionId,
@@ -198,6 +196,13 @@ struct SharedGuarded<TPlat: PlatformRef> {
 
     kademlia_discovery_operations:
         HashMap<service::KademliaOperationId, usize, fnv::FnvBuildHasher>,
+}
+
+enum ToBackground {
+    ConnectionMessage {
+        connection_id: service::ConnectionId,
+        message: service::ConnectionToCoordinator,
+    },
 }
 
 impl<TPlat: PlatformRef> NetworkService<TPlat> {
@@ -263,8 +268,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 ),
                 important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
                 active_connections: HashMap::with_capacity_and_hasher(32, Default::default()),
-                messages_from_connections_tx,
-                messages_from_connections_rx,
+                messages_tx: messages_from_connections_tx,
+                messages_rx: messages_from_connections_rx,
                 blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
                 grandpa_warp_sync_requests: HashMap::with_capacity_and_hasher(
                     8,
@@ -973,15 +978,17 @@ async fn update_round<TPlat: PlatformRef>(
 
     // Inject in the coordinator the messages that the connections have generated.
     loop {
-        let (connection_id, message) =
-            match guarded.messages_from_connections_rx.next().now_or_never() {
-                Some(Some(v)) => v,
-                _ => break,
-            };
-
-        guarded
-            .network
-            .inject_connection_message(connection_id, message);
+        match guarded.messages_rx.next().now_or_never() {
+            Some(Some(ToBackground::ConnectionMessage {
+                connection_id,
+                message,
+            })) => {
+                guarded
+                    .network
+                    .inject_connection_message(connection_id, message);
+            }
+            _ => break,
+        };
     }
 
     // Process the events that the coordinator has generated.
@@ -1410,7 +1417,7 @@ async fn update_round<TPlat: PlatformRef>(
         let task = tasks::connection_task(
             start_connect,
             shared.clone(),
-            guarded.messages_from_connections_tx.clone(),
+            guarded.messages_tx.clone(),
             is_important,
         );
 
