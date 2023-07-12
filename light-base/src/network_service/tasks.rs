@@ -35,7 +35,7 @@ use smoldot::{
 pub(super) async fn connection_task<TPlat: PlatformRef>(
     start_connect: service::StartConnect<TPlat::Instant>,
     platform: TPlat,
-    connection_to_coordinator_tx: async_channel::Sender<ToBackground<TPlat>>,
+    messages_tx: async_channel::Sender<ToBackground<TPlat>>,
     is_important: bool,
 ) {
     log::debug!(
@@ -121,7 +121,7 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
         match result {
             Ok(connection) => connection,
             Err((_, is_bad_addr)) => {
-                connection_to_coordinator_tx
+                messages_tx
                     .send(ToBackground::ConnectionAttemptErr {
                         pending_id: start_connect.id,
                         expected_peer_id: start_connect.expected_peer_id,
@@ -142,7 +142,7 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
     // is done by the user of the smoldot crate rather than by the smoldot crate itself.
     match socket {
         either::Left(connection) => {
-            connection_to_coordinator_tx
+            messages_tx
                 .send(ToBackground::ConnectionAttemptOkSingleStream {
                     pending_id: start_connect.id,
                     connection,
@@ -167,7 +167,7 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
                 .into_iter()
                 .chain(remote_tls_certificate_sha256.into_iter())
                 .collect();
-            connection_to_coordinator_tx
+            messages_tx
                 .send(ToBackground::ConnectionAttemptOkMultiStream {
                     pending_id: start_connect.id,
                     connection,
@@ -194,7 +194,7 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
     coordinator_to_connection: async_channel::Receiver<
         service::CoordinatorToConnection<TPlat::Instant>,
     >,
-    connection_to_coordinator: async_channel::Sender<ToBackground<TPlat>>,
+    messages_tx: async_channel::Sender<ToBackground<TPlat>>,
 ) {
     // We need to use `peek()` on this future later down this function.
     let mut coordinator_to_connection = coordinator_to_connection.peekable();
@@ -310,7 +310,7 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
             };
 
             let send_out = async {
-                connection_to_coordinator
+                messages_tx
                     .send(ToBackground::ConnectionMessage {
                         connection_id,
                         message,
@@ -388,7 +388,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
     coordinator_to_connection: async_channel::Receiver<
         service::CoordinatorToConnection<TPlat::Instant>,
     >,
-    connection_to_coordinator: async_channel::Sender<ToBackground<TPlat>>,
+    messages_tx: async_channel::Sender<ToBackground<TPlat>>,
 ) {
     // We need to use `peek()` on this future later down this function.
     let mut coordinator_to_connection = coordinator_to_connection.peekable();
@@ -551,7 +551,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                 };
 
                 let send_out = async {
-                    connection_to_coordinator
+                    messages_tx
                         .send(ToBackground::ConnectionMessage {
                             connection_id,
                             message,
