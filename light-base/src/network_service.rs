@@ -264,6 +264,13 @@ enum ToBackground<TPlat: PlatformRef> {
         list: vec::IntoIter<(PeerId, vec::IntoIter<Multiaddr>)>,
         important_nodes: bool,
     },
+    DiscoveredNodes {
+        chain_index: usize,
+        result: oneshot::Sender<Vec<(PeerId, Vec<Multiaddr>)>>,
+    },
+    PeersList {
+        result: oneshot::Sender<Vec<PeerId>>,
+    },
 }
 
 impl<TPlat: PlatformRef> NetworkService<TPlat> {
@@ -845,32 +852,47 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         &self,
         chain_index: usize,
     ) -> impl Iterator<Item = (PeerId, impl Iterator<Item = Multiaddr>)> {
-        let guarded = self.shared.guarded.lock().await;
-        guarded
-            .network
-            .discovered_nodes(chain_index)
-            .map(|(peer_id, addresses)| {
-                (
-                    peer_id.clone(),
-                    addresses.cloned().collect::<Vec<_>>().into_iter(),
-                )
-            })
-            .collect::<Vec<_>>()
+        let rx = {
+            let (tx, rx) = oneshot::channel();
+            self.shared
+                .guarded
+                .lock()
+                .await
+                .messages_tx
+                .send(ToBackground::DiscoveredNodes {
+                    chain_index,
+                    result: tx,
+                })
+                .await
+                .unwrap();
+            rx
+        };
+        self.shared.wake_up_main_background_task.notify(1);
+        rx.await
+            .unwrap()
             .into_iter()
+            .map(|(peer_id, addrs)| (peer_id, addrs.into_iter()))
     }
 
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
     /// with.
     pub async fn peers_list(&self) -> impl Iterator<Item = PeerId> {
-        self.shared
-            .guarded
-            .lock()
-            .await
-            .network
-            .peers_list()
-            .cloned()
-            .collect::<Vec<_>>()
-            .into_iter()
+        let rx = {
+            let (tx, rx) = oneshot::channel();
+            self.shared
+                .guarded
+                .lock()
+                .await
+                .messages_tx
+                .send(ToBackground::PeersList { result: tx })
+                .await
+                .unwrap();
+            rx
+        };
+
+        self.shared.wake_up_main_background_task.notify(1);
+
+        rx.await.unwrap().into_iter()
     }
 }
 
@@ -1254,6 +1276,23 @@ async fn update_round<TPlat: PlatformRef>(
 
                     guarded.network.discover(&now, chain_index, peer_id, addrs);
                 }
+            }
+            Some(Some(ToBackground::DiscoveredNodes {
+                chain_index,
+                result,
+            })) => {
+                let _ = result.send(
+                    guarded
+                        .network
+                        .discovered_nodes(chain_index)
+                        .map(|(peer_id, addresses)| {
+                            (peer_id.clone(), addresses.cloned().collect::<Vec<_>>())
+                        })
+                        .collect::<Vec<_>>(),
+                );
+            }
+            Some(Some(ToBackground::PeersList { result })) => {
+                let _ = result.send(guarded.network.peers_list().cloned().collect::<Vec<_>>());
             }
             None | Some(None) => break,
         };
