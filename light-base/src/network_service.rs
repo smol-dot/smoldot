@@ -1722,11 +1722,6 @@ async fn update_round<TPlat: PlatformRef>(
 
         // Dispatch the event to the various senders.
 
-        // Because the tasks processing the receivers might be waiting to acquire the lock, we
-        // need to unlock the lock before sending. This guarantees that the sending finishes at
-        // some point in the future.
-        drop(guarded);
-
         // This little `if` avoids having to do `event.clone()` if we don't have to.
         if event_senders.len() == 1 {
             let _ = event_senders[0].send(event).await;
@@ -1738,9 +1733,6 @@ async fn update_round<TPlat: PlatformRef>(
                 let _ = sender.send(event.clone()).await;
             }
         }
-
-        // Re-acquire lock to continue the function.
-        guarded = shared.guarded.lock().await;
     }
 
     // TODO: doc
