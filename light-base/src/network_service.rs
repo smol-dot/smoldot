@@ -246,6 +246,18 @@ enum ToBackground {
         chain_index: usize,
         grandpa_state: service::GrandpaState,
     },
+    AnnounceTransaction {
+        chain_index: usize,
+        transaction: Vec<u8>,
+        result: oneshot::Sender<Vec<PeerId>>,
+    },
+    SendBlockAnnounce {
+        target: PeerId,
+        chain_index: usize,
+        scale_encoded_header: Vec<u8>,
+        is_best: bool,
+        result: oneshot::Sender<Result<(), QueueNotificationError>>,
+    },
 }
 
 impl<TPlat: PlatformRef> NetworkService<TPlat> {
@@ -728,31 +740,26 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         chain_index: usize,
         transaction: &[u8],
     ) -> Vec<PeerId> {
-        let mut sent_peers = Vec::with_capacity(16); // TODO: capacity?
-
-        // TODO: keep track of which peer knows about which transaction, and don't send it again
-
-        let mut guarded = self.shared.guarded.lock().await;
-
-        // TODO: collecting in a Vec :-/
-        for peer in guarded
-            .network
-            .opened_transactions_substream(chain_index)
-            .cloned()
-            .collect::<Vec<_>>()
-        {
-            if guarded
-                .network
-                .announce_transaction(&peer, chain_index, transaction)
-                .is_ok()
-            {
-                sent_peers.push(peer);
-            };
-        }
+        let rx = {
+            let (tx, rx) = oneshot::channel();
+            self.shared
+                .guarded
+                .lock()
+                .await
+                .messages_tx
+                .send(ToBackground::AnnounceTransaction {
+                    chain_index,
+                    transaction: transaction.to_vec(), // TODO: ovheread
+                    result: tx,
+                })
+                .await
+                .unwrap();
+            rx
+        };
 
         self.shared.wake_up_main_background_task.notify(1);
 
-        sent_peers
+        rx.await.unwrap()
     }
 
     /// See [`service::ChainNetwork::send_block_announce`].
@@ -763,24 +770,28 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         scale_encoded_header: &[u8],
         is_best: bool,
     ) -> Result<(), QueueNotificationError> {
-        let mut guarded = self.shared.guarded.lock().await;
-
-        // The call to `send_block_announce` below panics if we have no active substream.
-        if !guarded
-            .network
-            .can_send_block_announces(target, chain_index)
-        {
-            return Err(QueueNotificationError::NoConnection);
-        }
-
-        let result = guarded
-            .network
-            .send_block_announce(target, chain_index, scale_encoded_header, is_best)
-            .map_err(QueueNotificationError::Queue);
+        let rx = {
+            let (tx, rx) = oneshot::channel();
+            self.shared
+                .guarded
+                .lock()
+                .await
+                .messages_tx
+                .send(ToBackground::SendBlockAnnounce {
+                    target: target.clone(), // TODO: overhead
+                    chain_index,
+                    scale_encoded_header: scale_encoded_header.to_vec(), // TODO: overhead
+                    is_best,
+                    result: tx,
+                })
+                .await
+                .unwrap();
+            rx
+        };
 
         self.shared.wake_up_main_background_task.notify(1);
 
-        result
+        rx.await.unwrap()
     }
 
     /// See [`service::ChainNetwork::discover`].
@@ -1163,7 +1174,57 @@ async fn update_round<TPlat: PlatformRef>(
                     .network
                     .set_local_grandpa_state(chain_index, grandpa_state)
             }
-            _ => break,
+            Some(Some(ToBackground::AnnounceTransaction {
+                chain_index,
+                transaction,
+                result,
+            })) => {
+                let mut sent_peers = Vec::with_capacity(16); // TODO: capacity?
+
+                // TODO: keep track of which peer knows about which transaction, and don't send it again
+
+                // TODO: collecting in a Vec :-/
+                for peer in guarded
+                    .network
+                    .opened_transactions_substream(chain_index)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                {
+                    if guarded
+                        .network
+                        .announce_transaction(&peer, chain_index, &transaction)
+                        .is_ok()
+                    {
+                        sent_peers.push(peer);
+                    };
+                }
+
+                let _ = result.send(sent_peers);
+            }
+            Some(Some(ToBackground::SendBlockAnnounce {
+                target,
+                chain_index,
+                scale_encoded_header,
+                is_best,
+                result,
+            })) => {
+                // The call to `send_block_announce` below panics if we have no active substream.
+                if !guarded
+                    .network
+                    .can_send_block_announces(&target, chain_index)
+                {
+                    let _ = result.send(Err(QueueNotificationError::NoConnection));
+                    continue;
+                }
+
+                let res = guarded
+                    .network
+                    .send_block_announce(&target, chain_index, &scale_encoded_header, is_best)
+                    .map_err(QueueNotificationError::Queue);
+
+                let _ = result.send(res);
+            }
+            None | Some(None) => break,
         };
     }
 
