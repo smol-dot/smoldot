@@ -81,6 +81,14 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// Returns an object that represents "now".
     fn now(&self) -> Self::Instant;
 
+    /// The given buffer must be completely filled with pseudo-random bytes.
+    ///
+    /// # Panic
+    ///
+    /// Must panic if for some reason it is not possible to fill the buffer.
+    ///
+    fn fill_random_bytes(&self, buffer: &mut [u8]);
+
     /// Creates a future that becomes ready after at least the given duration has elapsed.
     fn sleep(&self, duration: Duration) -> Self::Delay;
 

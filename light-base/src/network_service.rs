@@ -214,13 +214,21 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                         max_addresses_per_peer: NonZeroUsize::new(5).unwrap(),
                         noise_key: config.noise_key,
                         handshake_timeout: Duration::from_secs(8),
-                        randomness_seed: rand::random(),
+                        randomness_seed: {
+                            let mut seed = [0; 32];
+                            config.platform.fill_random_bytes(&mut seed);
+                            seed
+                        },
                     }),
                     platform: config.platform.clone(),
                     event_senders: either::Left(event_senders),
                     slots_assign_backoff: HashMap::with_capacity_and_hasher(
                         32,
-                        util::SipHasherBuild::new(rand::random()),
+                        util::SipHasherBuild::new({
+                            let mut seed = [0; 16];
+                            config.platform.fill_random_bytes(&mut seed);
+                            seed
+                        }),
                     ),
                     important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
                     active_connections: HashMap::with_capacity_and_hasher(32, Default::default()),

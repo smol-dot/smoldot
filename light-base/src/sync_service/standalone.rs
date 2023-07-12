@@ -106,7 +106,11 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         network_chain_index,
         peers_source_id_map: HashMap::with_capacity_and_hasher(
             0,
-            util::SipHasherBuild::new(rand::random()),
+            util::SipHasherBuild::new({
+                let mut seed = [0; 16];
+                platform.fill_random_bytes(&mut seed);
+                seed
+            }),
         ),
         platform,
     };
@@ -687,7 +691,11 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 // Grandpa warp sync fragment to verify.
                 let sender_peer_id = verify.proof_sender().1 .0.clone(); // TODO: unnecessary cloning most of the time
 
-                let (sync, result) = verify.perform(rand::random());
+                let (sync, result) = verify.perform({
+                    let mut seed = [0; 32];
+                    self.platform.fill_random_bytes(&mut seed);
+                    seed
+                });
                 self.sync = sync;
 
                 if let Err(err) = result {
@@ -861,7 +869,11 @@ impl<TPlat: PlatformRef> Task<TPlat> {
 
             all::ProcessOne::VerifyFinalityProof(verify) => {
                 // Finality proof to verify.
-                match verify.perform(rand::random()) {
+                match verify.perform({
+                    let mut seed = [0; 32];
+                    self.platform.fill_random_bytes(&mut seed);
+                    seed
+                }) {
                     (
                         sync,
                         all::FinalityProofVerifyOutcome::NewFinalized {

@@ -60,7 +60,6 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
 
         ParachainBackgroundTask {
             log_target,
-            platform,
             from_foreground,
             block_number_bytes,
             relay_chain_block_number_bytes,
@@ -76,7 +75,11 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
             obsolete_finalized_parahead,
             sync_sources_map: HashMap::with_capacity_and_hasher(
                 0,
-                util::SipHasherBuild::new(rand::random()),
+                util::SipHasherBuild::new({
+                    let mut seed = [0; 16];
+                    platform.fill_random_bytes(&mut seed);
+                    seed
+                }),
             ),
             subscription_state: ParachainBackgroundState::NotSubscribed {
                 all_subscriptions: Vec::new(),
@@ -94,6 +97,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 },
             },
             relay_chain_sync,
+            platform,
         }
     };
 

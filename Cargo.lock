@@ -2410,6 +2410,7 @@ dependencies = [
  "no-std-net",
  "parking_lot",
  "rand",
+ "rand_chacha",
  "serde",
  "serde_json",
  "siphasher",

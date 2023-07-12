@@ -77,7 +77,6 @@ use core::{num::NonZeroU32, ops, pin};
 use futures_util::{future, FutureExt as _};
 use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
-use rand::RngCore as _;
 use smoldot::{
     chain, chain_spec, header,
     informant::HashDisplay,
@@ -356,9 +355,13 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         config: AddChainConfig<'_, TChain, impl Iterator<Item = ChainId>>,
     ) -> Result<AddChainSuccess, AddChainError> {
         // `chains_by_key` is created lazily whenever needed.
-        let chains_by_key = self
-            .chains_by_key
-            .get_or_insert_with(|| HashMap::with_hasher(util::SipHasherBuild::new(rand::random())));
+        let chains_by_key = self.chains_by_key.get_or_insert_with(|| {
+            HashMap::with_hasher(util::SipHasherBuild::new({
+                let mut seed = [0; 16];
+                self.platform.fill_random_bytes(&mut seed);
+                seed
+            }))
+        });
 
         // Decode the chain specification.
         let chain_spec = match chain_spec::ChainSpec::from_json_bytes(config.specification) {
@@ -671,8 +674,10 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 // peer-to-peer network.
                 let network_noise_key = {
                     let mut noise_static_key = zeroize::Zeroizing::new([0u8; 32]);
-                    rand::thread_rng().fill_bytes(&mut *noise_static_key);
-                    connection::NoiseKey::new(&rand::random(), &*noise_static_key)
+                    self.platform.fill_random_bytes(&mut *noise_static_key);
+                    let mut libp2p_key = zeroize::Zeroizing::new([0u8; 32]);
+                    self.platform.fill_random_bytes(&mut *libp2p_key);
+                    connection::NoiseKey::new(&*libp2p_key, &*noise_static_key)
                 };
 
                 // Version of the client when requested through the networking.

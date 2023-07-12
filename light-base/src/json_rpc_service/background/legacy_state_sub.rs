@@ -170,7 +170,11 @@ pub(super) fn start_task<TPlat: PlatformRef>(
             ),
             storage_subscriptions_by_key: hashbrown::HashMap::with_capacity_and_hasher(
                 16,
-                crate::util::SipHasherBuild::new(rand::random()),
+                crate::util::SipHasherBuild::new({
+                    let mut seed = [0; 16];
+                    config.platform.fill_random_bytes(&mut seed);
+                    seed
+                }),
             ),
             stale_storage_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
                 16,
@@ -479,9 +483,11 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
 
                 // Build the list of keys that must be requested by aggregating the keys requested
                 // by all stale storage subscriptions.
-                let mut keys = hashbrown::HashSet::with_hasher(crate::util::SipHasherBuild::new(
-                    rand::random(),
-                ));
+                let mut keys = hashbrown::HashSet::with_hasher(crate::util::SipHasherBuild::new({
+                    let mut seed = [0; 16];
+                    task.platform.fill_random_bytes(&mut seed);
+                    seed
+                }));
                 keys.extend(
                     task.stale_storage_subscriptions
                         .iter()
