@@ -46,7 +46,7 @@ use alloc::{
     vec::{self, Vec},
 };
 use async_lock::Mutex;
-use core::{cmp, num::NonZeroUsize, task::Poll, time::Duration};
+use core::{cmp, mem, num::NonZeroUsize, pin::Pin, task::Poll, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::{future, stream, FutureExt as _, StreamExt as _};
@@ -155,7 +155,14 @@ struct SharedGuarded<TPlat: PlatformRef> {
     /// The values are the moment when the ban expires.
     slots_assign_backoff: HashMap<(PeerId, usize), TPlat::Instant, util::SipHasherBuild>,
 
-    event_senders: Vec<async_channel::Sender<Event>>,
+    /// Sending events through the public API.
+    ///
+    /// Contains either senders, or a `Future` that is currently sending an event and will yield
+    /// the senders back once it is finished.
+    event_senders: either::Either<
+        Vec<async_channel::Sender<Event>>,
+        Pin<Box<dyn future::Future<Output = Vec<async_channel::Sender<Event>>> + Send>>,
+    >,
 
     messages_rx: async_channel::Receiver<ToBackground<TPlat>>,
 
@@ -348,7 +355,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     handshake_timeout: Duration::from_secs(8),
                     randomness_seed: rand::random(),
                 }),
-                event_senders,
+                event_senders: either::Left(event_senders),
                 slots_assign_backoff: HashMap::with_capacity_and_hasher(
                     32,
                     util::SipHasherBuild::new(rand::random()),
@@ -994,13 +1001,18 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 connection_id: service::ConnectionId,
                 message: service::CoordinatorToConnection<TPlat::Instant>,
             },
+            EventSendersReady,
         }
 
         let what_happened = {
             let message_received =
                 async { WhatHappened::Message(guarded.messages_rx.next().await.unwrap()) };
+            let can_generate_event = matches!(guarded.event_senders, either::Left(_));
             let service_event = async {
-                if let Some(event) = guarded.network.next_event(shared.platform.now()) {
+                if let (true, Some(event)) = (
+                    can_generate_event,
+                    guarded.network.next_event(shared.platform.now()),
+                ) {
                     WhatHappened::NetworkEvent(event)
                 } else if let Some(start_connect) =
                     guarded.network.next_start_connect(|| shared.platform.now())
@@ -1017,11 +1029,27 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     future::pending().await
                 }
             };
+            let finished_sending_event = async {
+                if let either::Right(event_sending_future) = &mut guarded.event_senders {
+                    let event_senders = event_sending_future.await;
+                    guarded.event_senders = either::Left(event_senders);
+                    WhatHappened::EventSendersReady
+                } else {
+                    future::pending().await
+                }
+            };
 
-            message_received.or(service_event).await
+            message_received
+                .or(service_event)
+                .or(finished_sending_event)
+                .await
         };
 
         let event_to_dispatch = match what_happened {
+            WhatHappened::EventSendersReady => {
+                // Nothing to do. Just loop again, as we can now generate events.
+                continue;
+            }
             WhatHappened::Message(ToBackground::ConnectionAttemptOkSingleStream {
                 pending_id,
                 connection,
@@ -1807,17 +1835,27 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
 
         // Dispatch the event to the various senders.
         if let Some(event) = event_to_dispatch {
-            // This little `if` avoids having to do `event.clone()` if we don't have to.
-            if guarded.event_senders.len() == 1 {
-                let _ = guarded.event_senders[0].send(event).await;
-            } else {
-                for sender in guarded.event_senders.iter_mut() {
-                    // For simplicity we don't get rid of closed senders because senders aren't
-                    // supposed to close, and that leaving closed senders in the list doesn't have any
-                    // consequence other than one extra iteration every time.
-                    let _ = sender.send(event.clone()).await;
+            // We check this before generating an event.
+            let either::Left(event_senders) = &mut guarded.event_senders else {
+                unreachable!()
+            };
+            let mut event_senders = mem::take(event_senders);
+            guarded.event_senders = either::Right(Box::pin(async move {
+                // This little `if` avoids having to do `event.clone()` if we don't have to.
+                if event_senders.len() == 1 {
+                    let _ = event_senders[0].send(event).await;
+                } else {
+                    for sender in event_senders.iter_mut() {
+                        // For simplicity we don't get rid of closed senders because senders
+                        // aren't supposed to close, and that leaving closed senders in the
+                        // list doesn't have any consequence other than one extra iteration
+                        // every time.
+                        let _ = sender.send(event.clone()).await;
+                    }
                 }
-            }
+
+                event_senders
+            }));
         }
     }
 }
