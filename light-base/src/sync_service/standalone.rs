@@ -564,7 +564,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         peer_id,
                         network::protocol::CallProofRequestConfig {
                             block_hash,
-                            method: &function_name,
+                            method: function_name,
                             parameter_vectored: iter::once(parameter_vectored),
                         },
                         Duration::from_secs(16),

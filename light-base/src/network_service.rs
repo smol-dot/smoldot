@@ -43,7 +43,7 @@ use alloc::{
     format,
     string::{String, ToString as _},
     sync::Arc,
-    vec::Vec,
+    vec::{self, Vec},
 };
 use async_lock::Mutex;
 use core::{cmp, num::NonZeroUsize, task::Poll, time::Duration};
@@ -202,6 +202,40 @@ enum ToBackground {
     ConnectionMessage {
         connection_id: service::ConnectionId,
         message: service::ConnectionToCoordinator,
+    },
+    // TODO: serialize the request before sending over channel
+    StartBlocksRequest {
+        target: PeerId, // TODO: takes by value because of future longevity issue
+        chain_index: usize,
+        config: protocol::BlocksRequestConfig,
+        timeout: Duration,
+        result: oneshot::Sender<Result<Vec<protocol::BlockData>, BlocksRequestError>>,
+    },
+    // TODO: serialize the request before sending over channel
+    StartGrandpaWarpSyncRequest {
+        target: PeerId,
+        chain_index: usize,
+        begin_hash: [u8; 32],
+        timeout: Duration,
+        result: oneshot::Sender<
+            Result<service::EncodedGrandpaWarpSyncResponse, GrandpaWarpSyncRequestError>,
+        >,
+    },
+    // TODO: serialize the request before sending over channel
+    StartStorageProofRequest {
+        chain_index: usize,
+        target: PeerId,
+        config: protocol::StorageProofRequestConfig<vec::IntoIter<Vec<u8>>>,
+        timeout: Duration,
+        result: oneshot::Sender<Result<service::EncodedMerkleProof, StorageProofRequestError>>,
+    },
+    // TODO: serialize the request before sending over channel
+    StartCallProofRequest {
+        chain_index: usize,
+        target: PeerId, // TODO: takes by value because of futures longevity issue
+        config: protocol::CallProofRequestConfig<'static, vec::IntoIter<Vec<u8>>>,
+        timeout: Duration,
+        result: oneshot::Sender<Result<service::EncodedMerkleProof, CallProofRequestError>>,
     },
 }
 
@@ -364,7 +398,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     // TODO: more docs
     pub async fn blocks_request(
         self: Arc<Self>,
-        target: PeerId, // TODO: takes by value because of future longevity issue
+        target: PeerId,
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
         timeout: Duration,
@@ -372,48 +406,23 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         let rx = {
             let mut guarded = self.shared.guarded.lock().await;
 
-            // The call to `start_blocks_request` below panics if we have no active connection.
-            if !guarded.network.can_start_requests(&target) {
-                return Err(BlocksRequestError::NoConnection);
-            }
-
-            match &config.start {
-                protocol::BlocksRequestConfigStart::Hash(hash) => {
-                    log::debug!(
-                        target: "network",
-                        "Connection({}) <= BlocksRequest(chain={}, start={}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
-                        target, self.shared.log_chain_names[chain_index], HashDisplay(hash),
-                        config.desired_count.get(),
-                        matches!(config.direction, protocol::BlocksRequestDirection::Descending),
-                        config.fields.header, config.fields.body, config.fields.justifications
-                    );
-                }
-                protocol::BlocksRequestConfigStart::Number(number) => {
-                    log::debug!(
-                        target: "network",
-                        "Connection({}) <= BlocksRequest(chain={}, start=#{}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
-                        target, self.shared.log_chain_names[chain_index], number,
-                        config.desired_count.get(),
-                        matches!(config.direction, protocol::BlocksRequestDirection::Descending),
-                        config.fields.header, config.fields.body, config.fields.justifications
-                    );
-                }
-            }
-
-            let request_id = guarded.network.start_blocks_request(
-                self.shared.platform.now(),
-                &target,
-                chain_index,
-                config,
-                timeout,
-            );
-
-            self.shared.wake_up_main_background_task.notify(1);
-
             let (tx, rx) = oneshot::channel();
-            guarded.blocks_requests.insert(request_id, tx);
+            guarded
+                .messages_tx
+                .send(ToBackground::StartBlocksRequest {
+                    target: target.clone(),
+                    chain_index,
+                    config,
+                    timeout,
+                    result: tx,
+                })
+                .await
+                .unwrap();
+
             rx
         };
+
+        self.shared.wake_up_main_background_task.notify(1);
 
         let result = rx.await.unwrap();
 
@@ -470,7 +479,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     // TODO: more docs
     pub async fn grandpa_warp_sync_request(
         self: Arc<Self>,
-        target: PeerId, // TODO: takes by value because of future longevity issue
+        target: PeerId,
         chain_index: usize,
         begin_hash: [u8; 32],
         timeout: Duration,
@@ -478,31 +487,23 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         let rx = {
             let mut guarded = self.shared.guarded.lock().await;
 
-            // The call to `start_grandpa_warp_sync_request` below panics if we have no
-            // active connection.
-            if !guarded.network.can_start_requests(&target) {
-                return Err(GrandpaWarpSyncRequestError::NoConnection);
-            }
-
-            log::debug!(
-                target: "network", "Connection({}) <= GrandpaWarpSyncRequest(chain={}, start={})",
-                target, self.shared.log_chain_names[chain_index], HashDisplay(&begin_hash)
-            );
-
-            let request_id = guarded.network.start_grandpa_warp_sync_request(
-                self.shared.platform.now(),
-                &target,
-                chain_index,
-                begin_hash,
-                timeout,
-            );
-
-            self.shared.wake_up_main_background_task.notify(1);
-
             let (tx, rx) = oneshot::channel();
-            guarded.grandpa_warp_sync_requests.insert(request_id, tx);
+            guarded
+                .messages_tx
+                .send(ToBackground::StartGrandpaWarpSyncRequest {
+                    target: target.clone(),
+                    chain_index,
+                    begin_hash,
+                    timeout,
+                    result: tx,
+                })
+                .await
+                .unwrap();
+
             rx
         };
+
+        self.shared.wake_up_main_background_task.notify(1);
 
         let result = rx.await.unwrap();
 
@@ -582,40 +583,30 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         let rx = {
             let mut guarded = self.shared.guarded.lock().await;
 
-            // The call to `start_storage_proof_request` below panics if we have no active
-            // connection.
-            if !guarded.network.can_start_requests(&target) {
-                return Err(StorageProofRequestError::NoConnection);
-            }
-
-            log::debug!(
-                target: "network",
-                "Connection({}) <= StorageProofRequest(chain={}, block={})",
-                target,
-                self.shared.log_chain_names[chain_index],
-                HashDisplay(&config.block_hash)
-            );
-
-            let request_id = match guarded.network.start_storage_proof_request(
-                self.shared.platform.now(),
-                &target,
-                chain_index,
-                config,
-                timeout,
-            ) {
-                Ok(r) => r,
-                Err(service::StartRequestError::RequestTooLarge) => {
-                    // TODO: consider dealing with the problem of requests too large internally by sending multiple requests
-                    return Err(StorageProofRequestError::RequestTooLarge);
-                }
-            };
-
-            self.shared.wake_up_main_background_task.notify(1);
-
             let (tx, rx) = oneshot::channel();
-            guarded.storage_proof_requests.insert(request_id, tx);
+            guarded
+                .messages_tx
+                .send(ToBackground::StartStorageProofRequest {
+                    target: target.clone(),
+                    chain_index,
+                    config: protocol::StorageProofRequestConfig {
+                        block_hash: config.block_hash,
+                        keys: config
+                            .keys
+                            .map(|key| key.as_ref().to_vec()) // TODO: to_vec() overhead
+                            .collect::<Vec<_>>()
+                            .into_iter(),
+                    },
+                    timeout,
+                    result: tx,
+                })
+                .await
+                .unwrap();
+
             rx
         };
+
+        self.shared.wake_up_main_background_task.notify(1);
 
         let result = rx.await.unwrap();
 
@@ -658,39 +649,31 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         let rx = {
             let mut guarded = self.shared.guarded.lock().await;
 
-            // The call to `start_call_proof_request` below panics if we have no active connection.
-            if !guarded.network.can_start_requests(&target) {
-                return Err(CallProofRequestError::NoConnection);
-            }
-
-            log::debug!(
-                target: "network",
-                "Connection({}) <= CallProofRequest({}, {}, {})",
-                target,
-                self.shared.log_chain_names[chain_index],
-                HashDisplay(&config.block_hash),
-                config.method
-            );
-
-            let request_id = match guarded.network.start_call_proof_request(
-                self.shared.platform.now(),
-                &target,
-                chain_index,
-                config,
-                timeout,
-            ) {
-                Ok(r) => r,
-                Err(service::StartRequestError::RequestTooLarge) => {
-                    return Err(CallProofRequestError::RequestTooLarge)
-                }
-            };
-
-            self.shared.wake_up_main_background_task.notify(1);
-
             let (tx, rx) = oneshot::channel();
-            guarded.call_proof_requests.insert(request_id, tx);
+            guarded
+                .messages_tx
+                .send(ToBackground::StartCallProofRequest {
+                    target: target.clone(),
+                    chain_index,
+                    config: protocol::CallProofRequestConfig {
+                        block_hash: config.block_hash,
+                        method: config.method.into_owned().into(),
+                        parameter_vectored: config
+                            .parameter_vectored
+                            .map(|v| v.as_ref().to_vec()) // TODO: to_vec() overhead
+                            .collect::<Vec<_>>()
+                            .into_iter(),
+                    },
+                    timeout,
+                    result: tx,
+                })
+                .await
+                .unwrap();
+
             rx
         };
+
+        self.shared.wake_up_main_background_task.notify(1);
 
         let result = rx.await.unwrap();
 
@@ -988,6 +971,160 @@ async fn update_round<TPlat: PlatformRef>(
                 guarded
                     .network
                     .inject_connection_message(connection_id, message);
+            }
+            Some(Some(ToBackground::StartBlocksRequest {
+                target,
+                chain_index,
+                config,
+                timeout,
+                result,
+            })) => {
+                // The call to `start_blocks_request` below panics if we have no active connection.
+                if !guarded.network.can_start_requests(&target) {
+                    let _ = result.send(Err(BlocksRequestError::NoConnection));
+                    continue;
+                }
+
+                match &config.start {
+                    protocol::BlocksRequestConfigStart::Hash(hash) => {
+                        log::debug!(
+                            target: "network",
+                            "Connection({}) <= BlocksRequest(chain={}, start={}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
+                            target, shared.log_chain_names[chain_index], HashDisplay(hash),
+                            config.desired_count.get(),
+                            matches!(config.direction, protocol::BlocksRequestDirection::Descending),
+                            config.fields.header, config.fields.body, config.fields.justifications
+                        );
+                    }
+                    protocol::BlocksRequestConfigStart::Number(number) => {
+                        log::debug!(
+                            target: "network",
+                            "Connection({}) <= BlocksRequest(chain={}, start=#{}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
+                            target, shared.log_chain_names[chain_index], number,
+                            config.desired_count.get(),
+                            matches!(config.direction, protocol::BlocksRequestDirection::Descending),
+                            config.fields.header, config.fields.body, config.fields.justifications
+                        );
+                    }
+                }
+
+                let request_id = guarded.network.start_blocks_request(
+                    shared.platform.now(),
+                    &target,
+                    chain_index,
+                    config,
+                    timeout,
+                );
+
+                guarded.blocks_requests.insert(request_id, result);
+            }
+            Some(Some(ToBackground::StartGrandpaWarpSyncRequest {
+                target,
+                chain_index,
+                begin_hash,
+                timeout,
+                result,
+            })) => {
+                // The call to `start_grandpa_warp_sync_request` below panics if we have no
+                // active connection.
+                if !guarded.network.can_start_requests(&target) {
+                    let _ = result.send(Err(GrandpaWarpSyncRequestError::NoConnection));
+                    continue;
+                }
+
+                log::debug!(
+                    target: "network", "Connection({}) <= GrandpaWarpSyncRequest(chain={}, start={})",
+                    target, shared.log_chain_names[chain_index], HashDisplay(&begin_hash)
+                );
+
+                let request_id = guarded.network.start_grandpa_warp_sync_request(
+                    shared.platform.now(),
+                    &target,
+                    chain_index,
+                    begin_hash,
+                    timeout,
+                );
+
+                guarded
+                    .grandpa_warp_sync_requests
+                    .insert(request_id, result);
+            }
+            Some(Some(ToBackground::StartStorageProofRequest {
+                chain_index,
+                target,
+                config,
+                timeout,
+                result,
+            })) => {
+                // The call to `start_storage_proof_request` below panics if we have no active
+                // connection.
+                if !guarded.network.can_start_requests(&target) {
+                    let _ = result.send(Err(StorageProofRequestError::NoConnection));
+                    continue;
+                }
+
+                log::debug!(
+                    target: "network",
+                    "Connection({}) <= StorageProofRequest(chain={}, block={})",
+                    target,
+                    shared.log_chain_names[chain_index],
+                    HashDisplay(&config.block_hash)
+                );
+
+                let request_id = match guarded.network.start_storage_proof_request(
+                    shared.platform.now(),
+                    &target,
+                    chain_index,
+                    config,
+                    timeout,
+                ) {
+                    Ok(r) => r,
+                    Err(service::StartRequestError::RequestTooLarge) => {
+                        // TODO: consider dealing with the problem of requests too large internally by sending multiple requests
+                        let _ = result.send(Err(StorageProofRequestError::RequestTooLarge));
+                        continue;
+                    }
+                };
+
+                guarded.storage_proof_requests.insert(request_id, result);
+            }
+            Some(Some(ToBackground::StartCallProofRequest {
+                chain_index,
+                target,
+                config,
+                timeout,
+                result,
+            })) => {
+                // The call to `start_call_proof_request` below panics if we have no active connection.
+                if !guarded.network.can_start_requests(&target) {
+                    let _ = result.send(Err(CallProofRequestError::NoConnection));
+                    continue;
+                }
+
+                log::debug!(
+                    target: "network",
+                    "Connection({}) <= CallProofRequest({}, {}, {})",
+                    target,
+                    shared.log_chain_names[chain_index],
+                    HashDisplay(&config.block_hash),
+                    config.method
+                );
+
+                let request_id = match guarded.network.start_call_proof_request(
+                    shared.platform.now(),
+                    &target,
+                    chain_index,
+                    config,
+                    timeout,
+                ) {
+                    Ok(r) => r,
+                    Err(service::StartRequestError::RequestTooLarge) => {
+                        let _ = result.send(Err(CallProofRequestError::RequestTooLarge));
+                        continue;
+                    }
+                };
+
+                guarded.call_proof_requests.insert(request_id, result);
             }
             _ => break,
         };

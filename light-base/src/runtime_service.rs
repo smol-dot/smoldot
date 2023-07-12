@@ -812,7 +812,7 @@ impl<TPlat: PlatformRef> RuntimeAccess<TPlat> {
                 self.block_number,
                 protocol::CallProofRequestConfig {
                     block_hash: self.hash,
-                    method,
+                    method: method.into(),
                     parameter_vectored: parameter_vectored.clone(),
                 },
                 total_attempts,
