@@ -48,7 +48,7 @@ use alloc::{
 use core::{cmp, mem, num::NonZeroUsize, pin::Pin, task::Poll, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
-use futures_util::{future, stream, FutureExt as _, StreamExt as _};
+use futures_util::{future, stream, StreamExt as _};
 use hashbrown::{hash_map, HashMap, HashSet};
 use itertools::Itertools as _;
 use smoldot::{
@@ -122,8 +122,8 @@ pub struct NetworkService<TPlat: PlatformRef> {
     /// Channel to send messages to the background task.
     messages_tx: async_channel::Sender<ToBackground<TPlat>>,
 
-    /// List of handles that abort all the background tasks.
-    abort_handles: Vec<future::AbortHandle>,
+    /// Event notified when the [`NetworkService`] is destroyed.
+    on_service_killed: event_listener::Event,
 }
 
 struct BackgroundTask<TPlat: PlatformRef> {
@@ -335,7 +335,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             log_chain_names.push(chain.log_name);
         }
 
-        let mut abort_handles = Vec::new();
+        let on_service_killed = event_listener::Event::new();
 
         let (messages_tx, messages_rx) = async_channel::bounded(32);
 
@@ -346,7 +346,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             Box::pin({
                 let platform = config.platform.clone();
                 let messages_tx = messages_tx.clone();
-                let future = async move {
+                async move {
                     let mut next_discovery = Duration::from_secs(5);
 
                     loop {
@@ -361,19 +361,16 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                             break;
                         }
                     }
-                };
-
-                let (abortable, abort_handle) = future::abortable(future);
-                abort_handles.push(abort_handle);
-                abortable.map(|_| ())
+                }
+                .or(on_service_killed.listen())
             }),
         );
 
         // Spawn main task that processes the network service.
         config.platform.spawn_task(
             "network-service".into(),
-            Box::pin({
-                let background_task_state = BackgroundTask {
+            Box::pin(
+                background_task(BackgroundTask {
                     identify_agent_version: config.identify_agent_version,
                     log_chain_names: log_chain_names.clone(),
                     messages_tx: messages_tx.clone(),
@@ -410,21 +407,15 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                         2,
                         Default::default(),
                     ),
-                };
-
-                let future = background_task(background_task_state);
-
-                let (abortable, abort_handle) = future::abortable(future);
-                abort_handles.push(abort_handle);
-                abortable.map(|_| ())
-            }),
+                })
+                .or(on_service_killed.listen()),
+            ),
         );
 
-        abort_handles.shrink_to_fit();
         let final_network_service = Arc::new(NetworkService {
             log_chain_names,
             messages_tx,
-            abort_handles,
+            on_service_killed,
         });
 
         // Adjust the event receivers to keep the `final_network_service` alive.
@@ -833,9 +824,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 
 impl<TPlat: PlatformRef> Drop for NetworkService<TPlat> {
     fn drop(&mut self) {
-        for abort in &self.abort_handles {
-            abort.abort();
-        }
+        self.on_service_killed.notify(usize::max_value());
     }
 }
 
