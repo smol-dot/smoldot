@@ -33,7 +33,6 @@ use core::{
     num::{NonZeroU32, NonZeroUsize},
     time::Duration,
 };
-use futures_channel::mpsc;
 use futures_lite::FutureExt as _;
 use futures_util::{FutureExt as _, StreamExt as _};
 use hashbrown::HashMap;
@@ -512,7 +511,7 @@ enum Subscription<TPlat: PlatformRef> {
         subscription_id: runtime_service::SubscriptionId,
     },
     // TODO: better typing?
-    WithoutRuntime(mpsc::Receiver<sync_service::Notification>),
+    WithoutRuntime(async_channel::Receiver<sync_service::Notification>),
 }
 
 impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {

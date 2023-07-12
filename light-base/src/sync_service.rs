@@ -29,10 +29,9 @@
 use crate::{network_service, platform::PlatformRef, runtime_service};
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
-use async_lock::Mutex;
-use core::{fmt, mem, num::NonZeroU32, time::Duration};
-use futures_channel::{mpsc, oneshot};
-use futures_util::{stream, SinkExt as _};
+use core::{fmt, mem, num::NonZeroU32, pin::Pin, time::Duration};
+use futures_channel::oneshot;
+use futures_lite::stream;
 use rand::seq::IteratorRandom as _;
 use rand_chacha::rand_core::SeedableRng as _;
 use smoldot::{
@@ -69,7 +68,7 @@ pub struct Config<TPlat: PlatformRef> {
 
     /// Receiver for events coming from the network, as returned by
     /// [`network_service::NetworkService::new`].
-    pub network_events_receiver: stream::BoxStream<'static, network_service::Event>,
+    pub network_events_receiver: Pin<Box<dyn stream::Stream<Item = network_service::Event> + Send>>,
 
     /// Extra fields depending on whether the chain is a relay chain or a parachain.
     pub chain_type: ConfigChainType<TPlat>,
@@ -129,7 +128,7 @@ pub struct BlocksRequestId(usize);
 
 pub struct SyncService<TPlat: PlatformRef> {
     /// Sender of messages towards the background task.
-    to_background: Mutex<mpsc::Sender<ToBackground>>,
+    to_background: async_channel::Sender<ToBackground>,
 
     /// See [`Config::platform`].
     platform: TPlat,
@@ -144,7 +143,7 @@ pub struct SyncService<TPlat: PlatformRef> {
 
 impl<TPlat: PlatformRef> SyncService<TPlat> {
     pub async fn new(config: Config<TPlat>) -> Self {
-        let (to_background, from_foreground) = mpsc::channel(16);
+        let (to_background, from_foreground) = async_channel::bounded(16);
 
         let log_target = format!("sync-service-{}", config.log_name);
 
@@ -185,7 +184,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         }
 
         SyncService {
-            to_background: Mutex::new(to_background),
+            to_background,
             platform: config.platform,
             network_service: config.network_service.0,
             network_chain_index: config.network_service.1,
@@ -209,8 +208,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         let (send_back, rx) = oneshot::channel();
 
         self.to_background
-            .lock()
-            .await
             .send(ToBackground::SerializeChainInformation { send_back })
             .await
             .unwrap();
@@ -239,8 +236,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         let (send_back, rx) = oneshot::channel();
 
         self.to_background
-            .lock()
-            .await
             .send(ToBackground::SubscribeAll {
                 send_back,
                 buffer_size,
@@ -260,8 +255,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         let (send_back, rx) = oneshot::channel();
 
         self.to_background
-            .lock()
-            .await
             .send(ToBackground::IsNearHeadOfChainHeuristic { send_back })
             .await
             .unwrap();
@@ -283,8 +276,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         let (send_back, rx) = oneshot::channel();
 
         self.to_background
-            .lock()
-            .await
             .send(ToBackground::SyncingPeers { send_back })
             .await
             .unwrap();
@@ -311,8 +302,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         let (send_back, rx) = oneshot::channel();
 
         self.to_background
-            .lock()
-            .await
             .send(ToBackground::PeersAssumedKnowBlock {
                 send_back,
                 block_number,
@@ -1004,7 +993,7 @@ pub struct SubscribeAll {
 
     /// Channel onto which new blocks are sent. The channel gets closed if it is full when a new
     /// block needs to be reported.
-    pub new_blocks: mpsc::Receiver<Notification>,
+    pub new_blocks: async_channel::Receiver<Notification>,
 }
 
 /// See [`SubscribeAll::finalized_block_runtime`].
