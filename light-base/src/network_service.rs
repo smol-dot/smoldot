@@ -1045,7 +1045,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 .await
         };
 
-        let event_to_dispatch = match what_happened {
+        let event_to_dispatch: Event = match what_happened {
             WhatHappened::EventSendersReady => {
                 // Nothing to do. Just loop again, as we can now generate events.
                 continue;
@@ -1088,7 +1088,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     ),
                 );
 
-                None
+                continue;
             }
             WhatHappened::Message(ToBackground::ConnectionAttemptOkMultiStream {
                 pending_id,
@@ -1128,7 +1128,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     ),
                 );
 
-                None
+                continue;
             }
             WhatHappened::Message(ToBackground::ConnectionAttemptErr {
                 pending_id,
@@ -1143,7 +1143,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                         expected_peer_id.clone(),
                     );
                 }
-                None
+                continue;
             }
             WhatHappened::Message(ToBackground::ConnectionMessage {
                 connection_id,
@@ -1152,7 +1152,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 guarded
                     .network
                     .inject_connection_message(connection_id, message);
-                None
+                continue;
             }
             WhatHappened::Message(ToBackground::StartBlocksRequest {
                 target,
@@ -1199,7 +1199,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 );
 
                 guarded.blocks_requests.insert(request_id, result);
-                None
+                continue;
             }
             WhatHappened::Message(ToBackground::StartGrandpaWarpSyncRequest {
                 target,
@@ -1231,7 +1231,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 guarded
                     .grandpa_warp_sync_requests
                     .insert(request_id, result);
-                None
+                continue;
             }
             WhatHappened::Message(ToBackground::StartStorageProofRequest {
                 chain_index,
@@ -1271,7 +1271,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 };
 
                 guarded.storage_proof_requests.insert(request_id, result);
-                None
+                continue;
             }
             WhatHappened::Message(ToBackground::StartCallProofRequest {
                 chain_index,
@@ -1310,7 +1310,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 };
 
                 guarded.call_proof_requests.insert(request_id, result);
-                None
+                continue;
             }
             WhatHappened::Message(ToBackground::SetLocalBestBlock {
                 chain_index,
@@ -1320,7 +1320,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 guarded
                     .network
                     .set_local_best_block(chain_index, best_hash, best_number);
-                None
+                continue;
             }
             WhatHappened::Message(ToBackground::SetLocalGrandpaState {
                 chain_index,
@@ -1339,7 +1339,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 guarded
                     .network
                     .set_local_grandpa_state(chain_index, grandpa_state);
-                None
+                continue;
             }
             WhatHappened::Message(ToBackground::AnnounceTransaction {
                 chain_index,
@@ -1367,7 +1367,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 }
 
                 let _ = result.send(sent_peers);
-                None
+                continue;
             }
             WhatHappened::Message(ToBackground::SendBlockAnnounce {
                 target,
@@ -1391,7 +1391,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     .map_err(QueueNotificationError::Queue);
 
                 let _ = result.send(res);
-                None
+                continue;
             }
             WhatHappened::Message(ToBackground::Discover {
                 now,
@@ -1407,7 +1407,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     guarded.network.discover(&now, chain_index, peer_id, addrs);
                 }
 
-                None
+                continue;
             }
             WhatHappened::Message(ToBackground::DiscoveredNodes {
                 chain_index,
@@ -1423,11 +1423,11 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                         .collect::<Vec<_>>(),
                 );
 
-                None
+                continue;
             }
             WhatHappened::Message(ToBackground::PeersList { result }) => {
                 let _ = result.send(guarded.network.peers_list().cloned().collect::<Vec<_>>());
-                None
+                continue;
             }
             WhatHappened::Message(ToBackground::StartDiscovery) => {
                 for chain_index in 0..shared.log_chain_names.len() {
@@ -1441,11 +1441,11 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     debug_assert!(_prev_value.is_none());
                 }
 
-                None
+                continue;
             }
             WhatHappened::NetworkEvent(service::Event::Connected(peer_id)) => {
                 log::debug!(target: "network", "Connected({})", peer_id);
-                None
+                continue;
             }
             WhatHappened::NetworkEvent(service::Event::Disconnected {
                 peer_id,
@@ -1462,15 +1462,15 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                             &shared.log_chain_names[chain_indices[0]],
                         );
 
-                        Some(Event::Disconnected {
+                        Event::Disconnected {
                             peer_id,
                             chain_index: chain_indices[0],
-                        })
+                        }
                     } else {
                         todo!()
                     }
                 } else {
-                    None
+                    continue;
                 }
             }
             WhatHappened::NetworkEvent(service::Event::BlockAnnounce {
@@ -1486,11 +1486,11 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     HashDisplay(&header::hash_from_scale_encoded_header(announce.decode().scale_encoded_header)),
                     announce.decode().is_best
                 );
-                Some(Event::BlockAnnounce {
+                Event::BlockAnnounce {
                     chain_index,
                     peer_id,
                     announce,
-                })
+                }
             }
             WhatHappened::NetworkEvent(service::Event::ChainConnected {
                 peer_id,
@@ -1508,13 +1508,13 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     best_number,
                     HashDisplay(&best_hash)
                 );
-                Some(Event::Connected {
+                Event::Connected {
                     peer_id,
                     chain_index,
                     role,
                     best_block_number: best_number,
                     best_block_hash: best_hash,
-                })
+                }
             }
             WhatHappened::NetworkEvent(service::Event::ChainConnectAttemptFailed {
                 peer_id,
@@ -1539,7 +1539,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     peer_id
                 );
                 guarded.unassign_slot_and_ban(&shared.platform, chain_index, peer_id);
-                None
+                continue;
             }
             WhatHappened::NetworkEvent(service::Event::ChainDisconnected {
                 peer_id,
@@ -1563,10 +1563,10 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     peer_id
                 );
                 guarded.unassign_slot_and_ban(&shared.platform, chain_index, peer_id.clone());
-                Some(Event::Disconnected {
+                Event::Disconnected {
                     peer_id,
                     chain_index,
-                })
+                }
             }
             WhatHappened::NetworkEvent(service::Event::RequestResult {
                 request_id,
@@ -1577,7 +1577,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     .remove(&request_id)
                     .unwrap()
                     .send(response.map_err(BlocksRequestError::Request));
-                None
+                continue;
             }
             WhatHappened::NetworkEvent(service::Event::RequestResult {
                 request_id,
@@ -1588,7 +1588,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     .remove(&request_id)
                     .unwrap()
                     .send(response.map_err(GrandpaWarpSyncRequestError::Request));
-                None
+                continue;
             }
             WhatHappened::NetworkEvent(service::Event::RequestResult {
                 request_id,
@@ -1599,7 +1599,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     .remove(&request_id)
                     .unwrap()
                     .send(response.map_err(StorageProofRequestError::Request));
-                None
+                continue;
             }
             WhatHappened::NetworkEvent(service::Event::RequestResult {
                 request_id,
@@ -1610,7 +1610,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     .remove(&request_id)
                     .unwrap()
                     .send(response.map_err(CallProofRequestError::Request));
-                None
+                continue;
             }
             WhatHappened::NetworkEvent(service::Event::RequestResult { .. }) => {
                 // We never start any other kind of requests.
@@ -1702,7 +1702,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     }
                 }
 
-                None
+                continue;
             }
             WhatHappened::NetworkEvent(service::Event::InboundSlotAssigned {
                 peer_id,
@@ -1714,7 +1714,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     &shared.log_chain_names[chain_index],
                     peer_id
                 );
-                None
+                continue;
             }
             WhatHappened::NetworkEvent(service::Event::IdentifyRequestIn {
                 peer_id,
@@ -1728,7 +1728,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 guarded
                     .network
                     .respond_identify(request_id, &shared.identify_agent_version);
-                None
+                continue;
             }
             WhatHappened::NetworkEvent(service::Event::BlocksRequestIn { .. }) => unreachable!(),
             WhatHappened::NetworkEvent(service::Event::RequestInCancel { .. }) => {
@@ -1749,11 +1749,11 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     state.set_id,
                     state.commit_finalized_height,
                 );
-                Some(Event::GrandpaNeighborPacket {
+                Event::GrandpaNeighborPacket {
                     chain_index,
                     peer_id,
                     finalized_block_height: state.commit_finalized_height,
-                })
+                }
             }
             WhatHappened::NetworkEvent(service::Event::GrandpaCommitMessage {
                 chain_index,
@@ -1767,11 +1767,11 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     &shared.log_chain_names[chain_index],
                     HashDisplay(message.decode().message.target_hash),
                 );
-                Some(Event::GrandpaCommitMessage {
+                Event::GrandpaCommitMessage {
                     chain_index,
                     peer_id,
                     message,
-                })
+                }
             }
             WhatHappened::NetworkEvent(service::Event::ProtocolError { peer_id, error }) => {
                 // TODO: handle properly?
@@ -1785,7 +1785,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 for chain_index in 0..guarded.network.num_chains() {
                     guarded.unassign_slot_and_ban(&shared.platform, chain_index, peer_id.clone());
                 }
-                None
+                continue;
             }
             WhatHappened::StartConnect(start_connect) => {
                 // TODO: restore rate limiting
@@ -1810,7 +1810,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 // we don't really care about the state of anything anymore.
                 // The sending here is normally very quick.
                 shared.platform.spawn_task(task_name.into(), Box::pin(task));
-                None
+                continue;
             }
             WhatHappened::MessageToConnection {
                 connection_id,
@@ -1829,34 +1829,34 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     .send(message)
                     .await
                     .unwrap();
-                None
+                continue;
             }
         };
 
         // Dispatch the event to the various senders.
-        if let Some(event) = event_to_dispatch {
-            // We check this before generating an event.
-            let either::Left(event_senders) = &mut guarded.event_senders else {
-                unreachable!()
-            };
-            let mut event_senders = mem::take(event_senders);
-            guarded.event_senders = either::Right(Box::pin(async move {
-                // This little `if` avoids having to do `event.clone()` if we don't have to.
-                if event_senders.len() == 1 {
-                    let _ = event_senders[0].send(event).await;
-                } else {
-                    for sender in event_senders.iter_mut() {
-                        // For simplicity we don't get rid of closed senders because senders
-                        // aren't supposed to close, and that leaving closed senders in the
-                        // list doesn't have any consequence other than one extra iteration
-                        // every time.
-                        let _ = sender.send(event.clone()).await;
-                    }
-                }
 
-                event_senders
-            }));
-        }
+        // We made sure that the senders were ready before generating an event.
+        let either::Left(event_senders) = &mut guarded.event_senders else {
+            unreachable!()
+        };
+
+        let mut event_senders = mem::take(event_senders);
+        guarded.event_senders = either::Right(Box::pin(async move {
+            // This little `if` avoids having to do `event.clone()` if we don't have to.
+            if event_senders.len() == 1 {
+                let _ = event_senders[0].send(event_to_dispatch).await;
+            } else {
+                for sender in event_senders.iter_mut() {
+                    // For simplicity we don't get rid of closed senders because senders
+                    // aren't supposed to close, and that leaving closed senders in the
+                    // list doesn't have any consequence other than one extra iteration
+                    // every time.
+                    let _ = sender.send(event_to_dispatch.clone()).await;
+                }
+            }
+
+            event_senders
+        }));
     }
 }
 
