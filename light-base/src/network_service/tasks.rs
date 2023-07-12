@@ -333,18 +333,6 @@ async fn single_stream_connection_task<TPlat: PlatformRef>(
         // this function.
         let (mut task_update, message) = connection_task.pull_message_to_coordinator();
 
-        // If `task_update` is `None`, the connection task is going to die as soon as the
-        // message reaches the coordinator. Before returning, we need to do a bit of clean up
-        // by removing the task from the list of active connections.
-        // This is done before the message is sent to the coordinator, in order to be sure
-        // that the connection id is still attributed to the current task, and not to a new
-        // connection that the coordinator has assigned after receiving the message.
-        if task_update.is_none() {
-            let mut guarded = shared.guarded.lock().await;
-            let _was_in = guarded.active_connections.remove(&connection_id);
-            debug_assert!(_was_in.is_some());
-        }
-
         let has_message = message.is_some();
         if let Some(message) = message {
             // Sending this message might take a long time (in case the coordinator is busy),
@@ -589,18 +577,6 @@ async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
             // connection must be abruptly closed, which is what happens when we return from
             // this function.
             let (mut task_update, message) = connection_task.pull_message_to_coordinator();
-
-            // If `task_update` is `None`, the connection task is going to die as soon as the
-            // message reaches the coordinator. Before returning, we need to do a bit of clean up
-            // by removing the task from the list of active connections.
-            // This is done before the message is sent to the coordinator, in order to be sure
-            // that the connection id is still attributed to the current task, and not to a new
-            // connection that the coordinator has assigned after receiving the message.
-            if task_update.is_none() {
-                let mut guarded = shared.guarded.lock().await;
-                let _was_in = guarded.active_connections.remove(&connection_id);
-                debug_assert!(_was_in.is_some());
-            }
 
             let has_message = message.is_some();
             if let Some(message) = message {

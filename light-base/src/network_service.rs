@@ -1298,6 +1298,9 @@ async fn update_round<TPlat: PlatformRef>(
         };
     }
 
+    // TODO: this is hacky; instead, should be cleaned up as a response to an event from the service; no such event exists yet
+    guarded.active_connections.retain(|_, tx| !tx.is_closed());
+
     // Process the events that the coordinator has generated.
     'events_loop: loop {
         let event = loop {
