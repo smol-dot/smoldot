@@ -48,6 +48,7 @@ use alloc::{
 use async_lock::Mutex;
 use core::{cmp, num::NonZeroUsize, task::Poll, time::Duration};
 use futures_channel::oneshot;
+use futures_lite::FutureExt as _;
 use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use hashbrown::{hash_map, HashMap, HashSet};
 use itertools::Itertools as _;
@@ -988,17 +989,89 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
 
 async fn update_round<TPlat: PlatformRef>(shared: &Arc<Shared<TPlat>>) {
     let mut guarded = shared.guarded.lock().await;
+    let guarded = &mut *guarded;
 
-    // Inject in the coordinator the messages that the connections have generated.
     loop {
-        match guarded.messages_rx.next().now_or_never() {
-            Some(Some(ToBackground::ConnectionAttemptOkSingleStream {
+        // TODO: this is hacky; instead, should be cleaned up as a response to an event from the service; no such event exists yet
+        guarded.active_connections.retain(|_, tx| !tx.is_closed());
+
+        // TODO: handle differently
+        // TODO: doc
+        for chain_index in 0..shared.log_chain_names.len() {
+            let now = shared.platform.now();
+
+            // Clean up the content of `slots_assign_backoff`.
+            // TODO: the background task should be woken up when the ban expires
+            // TODO: O(n)
+            guarded
+                .slots_assign_backoff
+                .retain(|_, expiration| *expiration > now);
+
+            loop {
+                let peer_id = guarded
+                    .network
+                    .slots_to_assign(chain_index)
+                    .find(|peer_id| {
+                        !guarded
+                            .slots_assign_backoff
+                            .contains_key(&((**peer_id).clone(), chain_index)) // TODO: spurious cloning
+                    })
+                    .cloned();
+
+                let Some(peer_id) = peer_id else { break };
+                log::debug!(
+                    target: "connections",
+                    "OutSlots({}) ∋ {}",
+                    &shared.log_chain_names[chain_index],
+                    peer_id
+                );
+                guarded.network.assign_out_slot(chain_index, peer_id);
+            }
+        }
+
+        enum WhatHappened<TPlat: PlatformRef> {
+            Message(ToBackground<TPlat>),
+            NetworkEvent(service::Event),
+            StartConnect(service::StartConnect<TPlat::Instant>),
+            MessageToConnection {
+                connection_id: service::ConnectionId,
+                message: service::CoordinatorToConnection<TPlat::Instant>,
+            },
+        }
+
+        let what_happened = {
+            let message_received =
+                async { WhatHappened::Message(guarded.messages_rx.next().await.unwrap()) };
+            let service_event = async {
+                if let Some(event) = guarded.network.next_event(shared.platform.now()) {
+                    WhatHappened::NetworkEvent(event)
+                } else if let Some(start_connect) =
+                    guarded.network.next_start_connect(|| shared.platform.now())
+                {
+                    WhatHappened::StartConnect(start_connect)
+                } else if let Some((connection_id, message)) =
+                    guarded.network.pull_message_to_connection()
+                {
+                    WhatHappened::MessageToConnection {
+                        connection_id,
+                        message,
+                    }
+                } else {
+                    future::pending().await
+                }
+            };
+
+            message_received.or(service_event).await
+        };
+
+        let event_to_dispatch = match what_happened {
+            WhatHappened::Message(ToBackground::ConnectionAttemptOkSingleStream {
                 pending_id,
                 connection,
                 expected_peer_id,
                 multiaddr,
                 handshake_kind,
-            })) => {
+            }) => {
                 let (connection_id, task) = guarded
                     .network
                     .pending_outcome_ok_single_stream(pending_id, handshake_kind);
@@ -1029,14 +1102,16 @@ async fn update_round<TPlat: PlatformRef>(shared: &Arc<Shared<TPlat>>) {
                         shared.messages_tx.clone(),
                     ),
                 );
+
+                None
             }
-            Some(Some(ToBackground::ConnectionAttemptOkMultiStream {
+            WhatHappened::Message(ToBackground::ConnectionAttemptOkMultiStream {
                 pending_id,
                 connection,
                 expected_peer_id,
                 multiaddr,
                 handshake_kind,
-            })) => {
+            }) => {
                 let (connection_id, task) = guarded
                     .network
                     .pending_outcome_ok_multi_stream(pending_id, handshake_kind);
@@ -1067,12 +1142,14 @@ async fn update_round<TPlat: PlatformRef>(shared: &Arc<Shared<TPlat>>) {
                         shared.messages_tx.clone(),
                     ),
                 );
+
+                None
             }
-            Some(Some(ToBackground::ConnectionAttemptErr {
+            WhatHappened::Message(ToBackground::ConnectionAttemptErr {
                 pending_id,
                 expected_peer_id,
                 is_bad_addr,
-            })) => {
+            }) => {
                 guarded.network.pending_outcome_err(pending_id, is_bad_addr);
                 for chain_index in 0..guarded.network.num_chains() {
                     guarded.unassign_slot_and_ban(
@@ -1081,22 +1158,24 @@ async fn update_round<TPlat: PlatformRef>(shared: &Arc<Shared<TPlat>>) {
                         expected_peer_id.clone(),
                     );
                 }
+                None
             }
-            Some(Some(ToBackground::ConnectionMessage {
+            WhatHappened::Message(ToBackground::ConnectionMessage {
                 connection_id,
                 message,
-            })) => {
+            }) => {
                 guarded
                     .network
                     .inject_connection_message(connection_id, message);
+                None
             }
-            Some(Some(ToBackground::StartBlocksRequest {
+            WhatHappened::Message(ToBackground::StartBlocksRequest {
                 target,
                 chain_index,
                 config,
                 timeout,
                 result,
-            })) => {
+            }) => {
                 // The call to `start_blocks_request` below panics if we have no active connection.
                 if !guarded.network.can_start_requests(&target) {
                     let _ = result.send(Err(BlocksRequestError::NoConnection));
@@ -1135,14 +1214,15 @@ async fn update_round<TPlat: PlatformRef>(shared: &Arc<Shared<TPlat>>) {
                 );
 
                 guarded.blocks_requests.insert(request_id, result);
+                None
             }
-            Some(Some(ToBackground::StartGrandpaWarpSyncRequest {
+            WhatHappened::Message(ToBackground::StartGrandpaWarpSyncRequest {
                 target,
                 chain_index,
                 begin_hash,
                 timeout,
                 result,
-            })) => {
+            }) => {
                 // The call to `start_grandpa_warp_sync_request` below panics if we have no
                 // active connection.
                 if !guarded.network.can_start_requests(&target) {
@@ -1166,14 +1246,15 @@ async fn update_round<TPlat: PlatformRef>(shared: &Arc<Shared<TPlat>>) {
                 guarded
                     .grandpa_warp_sync_requests
                     .insert(request_id, result);
+                None
             }
-            Some(Some(ToBackground::StartStorageProofRequest {
+            WhatHappened::Message(ToBackground::StartStorageProofRequest {
                 chain_index,
                 target,
                 config,
                 timeout,
                 result,
-            })) => {
+            }) => {
                 // The call to `start_storage_proof_request` below panics if we have no active
                 // connection.
                 if !guarded.network.can_start_requests(&target) {
@@ -1205,14 +1286,15 @@ async fn update_round<TPlat: PlatformRef>(shared: &Arc<Shared<TPlat>>) {
                 };
 
                 guarded.storage_proof_requests.insert(request_id, result);
+                None
             }
-            Some(Some(ToBackground::StartCallProofRequest {
+            WhatHappened::Message(ToBackground::StartCallProofRequest {
                 chain_index,
                 target,
                 config,
                 timeout,
                 result,
-            })) => {
+            }) => {
                 // The call to `start_call_proof_request` below panics if we have no active connection.
                 if !guarded.network.can_start_requests(&target) {
                     let _ = result.send(Err(CallProofRequestError::NoConnection));
@@ -1243,18 +1325,22 @@ async fn update_round<TPlat: PlatformRef>(shared: &Arc<Shared<TPlat>>) {
                 };
 
                 guarded.call_proof_requests.insert(request_id, result);
+                None
             }
-            Some(Some(ToBackground::SetLocalBestBlock {
+            WhatHappened::Message(ToBackground::SetLocalBestBlock {
                 chain_index,
                 best_hash,
                 best_number,
-            })) => guarded
-                .network
-                .set_local_best_block(chain_index, best_hash, best_number),
-            Some(Some(ToBackground::SetLocalGrandpaState {
+            }) => {
+                guarded
+                    .network
+                    .set_local_best_block(chain_index, best_hash, best_number);
+                None
+            }
+            WhatHappened::Message(ToBackground::SetLocalGrandpaState {
                 chain_index,
                 grandpa_state,
-            })) => {
+            }) => {
                 log::debug!(
                     target: "network",
                     "Chain({}) <= SetLocalGrandpaState(set_id: {}, commit_finalized_height: {})",
@@ -1267,13 +1353,14 @@ async fn update_round<TPlat: PlatformRef>(shared: &Arc<Shared<TPlat>>) {
 
                 guarded
                     .network
-                    .set_local_grandpa_state(chain_index, grandpa_state)
+                    .set_local_grandpa_state(chain_index, grandpa_state);
+                None
             }
-            Some(Some(ToBackground::AnnounceTransaction {
+            WhatHappened::Message(ToBackground::AnnounceTransaction {
                 chain_index,
                 transaction,
                 result,
-            })) => {
+            }) => {
                 let mut sent_peers = Vec::with_capacity(16); // TODO: capacity?
 
                 // TODO: keep track of which peer knows about which transaction, and don't send it again
@@ -1295,14 +1382,15 @@ async fn update_round<TPlat: PlatformRef>(shared: &Arc<Shared<TPlat>>) {
                 }
 
                 let _ = result.send(sent_peers);
+                None
             }
-            Some(Some(ToBackground::SendBlockAnnounce {
+            WhatHappened::Message(ToBackground::SendBlockAnnounce {
                 target,
                 chain_index,
                 scale_encoded_header,
                 is_best,
                 result,
-            })) => {
+            }) => {
                 // The call to `send_block_announce` below panics if we have no active substream.
                 if !guarded
                     .network
@@ -1318,13 +1406,14 @@ async fn update_round<TPlat: PlatformRef>(shared: &Arc<Shared<TPlat>>) {
                     .map_err(QueueNotificationError::Queue);
 
                 let _ = result.send(res);
+                None
             }
-            Some(Some(ToBackground::Discover {
+            WhatHappened::Message(ToBackground::Discover {
                 now,
                 chain_index,
                 list,
                 important_nodes,
-            })) => {
+            }) => {
                 for (peer_id, addrs) in list {
                     if important_nodes {
                         guarded.important_nodes.insert(peer_id.clone());
@@ -1332,11 +1421,13 @@ async fn update_round<TPlat: PlatformRef>(shared: &Arc<Shared<TPlat>>) {
 
                     guarded.network.discover(&now, chain_index, peer_id, addrs);
                 }
+
+                None
             }
-            Some(Some(ToBackground::DiscoveredNodes {
+            WhatHappened::Message(ToBackground::DiscoveredNodes {
                 chain_index,
                 result,
-            })) => {
+            }) => {
                 let _ = result.send(
                     guarded
                         .network
@@ -1346,11 +1437,14 @@ async fn update_round<TPlat: PlatformRef>(shared: &Arc<Shared<TPlat>>) {
                         })
                         .collect::<Vec<_>>(),
                 );
+
+                None
             }
-            Some(Some(ToBackground::PeersList { result })) => {
+            WhatHappened::Message(ToBackground::PeersList { result }) => {
                 let _ = result.send(guarded.network.peers_list().cloned().collect::<Vec<_>>());
+                None
             }
-            Some(Some(ToBackground::StartDiscovery)) => {
+            WhatHappened::Message(ToBackground::StartDiscovery) => {
                 for chain_index in 0..shared.log_chain_names.len() {
                     let operation_id = guarded
                         .network
@@ -1361,463 +1455,416 @@ async fn update_round<TPlat: PlatformRef>(shared: &Arc<Shared<TPlat>>) {
                         .insert(operation_id, chain_index);
                     debug_assert!(_prev_value.is_none());
                 }
+
+                None
             }
-            None | Some(None) => break,
-        };
-    }
+            WhatHappened::NetworkEvent(service::Event::Connected(peer_id)) => {
+                log::debug!(target: "network", "Connected({})", peer_id);
+                None
+            }
+            WhatHappened::NetworkEvent(service::Event::Disconnected {
+                peer_id,
+                chain_indices,
+            }) => {
+                log::debug!(target: "network", "Disconnected({})", peer_id);
+                if !chain_indices.is_empty() {
+                    // TODO: properly implement when multiple chains
+                    if chain_indices.len() == 1 {
+                        log::debug!(
+                            target: "network",
+                            "Connection({}, {}) => ChainDisconnected",
+                            peer_id,
+                            &shared.log_chain_names[chain_indices[0]],
+                        );
 
-    // TODO: this is hacky; instead, should be cleaned up as a response to an event from the service; no such event exists yet
-    guarded.active_connections.retain(|_, tx| !tx.is_closed());
-
-    // Process the events that the coordinator has generated.
-    'events_loop: loop {
-        let event = loop {
-            let inner_event = match guarded.network.next_event(shared.platform.now()) {
-                Some(ev) => ev,
-                None => break 'events_loop,
-            };
-
-            match inner_event {
-                service::Event::Connected(peer_id) => {
-                    log::debug!(target: "network", "Connected({})", peer_id);
-                }
-                service::Event::Disconnected {
-                    peer_id,
-                    chain_indices,
-                } => {
-                    log::debug!(target: "network", "Disconnected({})", peer_id);
-                    if !chain_indices.is_empty() {
-                        // TODO: properly implement when multiple chains
-                        if chain_indices.len() == 1 {
-                            log::debug!(
-                                target: "network",
-                                "Connection({}, {}) => ChainDisconnected",
-                                peer_id,
-                                &shared.log_chain_names[chain_indices[0]],
-                            );
-
-                            break Event::Disconnected {
-                                peer_id,
-                                chain_index: chain_indices[0],
-                            };
-                        } else {
-                            todo!()
-                        }
+                        Some(Event::Disconnected {
+                            peer_id,
+                            chain_index: chain_indices[0],
+                        })
+                    } else {
+                        todo!()
                     }
+                } else {
+                    None
                 }
-                service::Event::BlockAnnounce {
+            }
+            WhatHappened::NetworkEvent(service::Event::BlockAnnounce {
+                chain_index,
+                peer_id,
+                announce,
+            }) => {
+                log::debug!(
+                    target: "network",
+                    "Connection({}, {}) => BlockAnnounce(best_hash={}, is_best={})",
+                    peer_id,
+                    &shared.log_chain_names[chain_index],
+                    HashDisplay(&header::hash_from_scale_encoded_header(announce.decode().scale_encoded_header)),
+                    announce.decode().is_best
+                );
+                Some(Event::BlockAnnounce {
                     chain_index,
                     peer_id,
                     announce,
-                } => {
-                    log::debug!(
-                        target: "network",
-                        "Connection({}, {}) => BlockAnnounce(best_hash={}, is_best={})",
-                        peer_id,
-                        &shared.log_chain_names[chain_index],
-                        HashDisplay(&header::hash_from_scale_encoded_header(announce.decode().scale_encoded_header)),
-                        announce.decode().is_best
-                    );
-                    break Event::BlockAnnounce {
-                        chain_index,
-                        peer_id,
-                        announce,
-                    };
-                }
-                service::Event::ChainConnected {
+                })
+            }
+            WhatHappened::NetworkEvent(service::Event::ChainConnected {
+                peer_id,
+                chain_index,
+                role,
+                best_number,
+                best_hash,
+                slot_ty: _,
+            }) => {
+                log::debug!(
+                    target: "network",
+                    "Connection({}, {}) => ChainConnected(best_height={}, best_hash={})",
+                    peer_id,
+                    &shared.log_chain_names[chain_index],
+                    best_number,
+                    HashDisplay(&best_hash)
+                );
+                Some(Event::Connected {
                     peer_id,
                     chain_index,
                     role,
-                    best_number,
-                    best_hash,
-                    slot_ty: _,
-                } => {
-                    log::debug!(
-                        target: "network",
-                        "Connection({}, {}) => ChainConnected(best_height={}, best_hash={})",
-                        peer_id,
-                        &shared.log_chain_names[chain_index],
-                        best_number,
-                        HashDisplay(&best_hash)
-                    );
-                    break Event::Connected {
-                        peer_id,
-                        chain_index,
-                        role,
-                        best_block_number: best_number,
-                        best_block_hash: best_hash,
-                    };
-                }
-                service::Event::ChainConnectAttemptFailed {
+                    best_block_number: best_number,
+                    best_block_hash: best_hash,
+                })
+            }
+            WhatHappened::NetworkEvent(service::Event::ChainConnectAttemptFailed {
+                peer_id,
+                chain_index,
+                unassigned_slot_ty,
+                error,
+            }) => {
+                log::debug!(
+                    target: "network",
+                    "Connection({}, {}) => ChainConnectAttemptFailed(error={:?})",
+                    &shared.log_chain_names[chain_index],
+                    peer_id, error,
+                );
+                log::debug!(
+                    target: "connections",
+                    "{}Slots({}) ∌ {}",
+                    match unassigned_slot_ty {
+                        service::SlotTy::Inbound => "In",
+                        service::SlotTy::Outbound => "Out",
+                    },
+                    &shared.log_chain_names[chain_index],
+                    peer_id
+                );
+                guarded.unassign_slot_and_ban(&shared.platform, chain_index, peer_id);
+                shared.wake_up_main_background_task.notify(1);
+                None
+            }
+            WhatHappened::NetworkEvent(service::Event::ChainDisconnected {
+                peer_id,
+                chain_index,
+                unassigned_slot_ty,
+            }) => {
+                log::debug!(
+                    target: "network",
+                    "Connection({}, {}) => ChainDisconnected",
+                    peer_id,
+                    &shared.log_chain_names[chain_index],
+                );
+                log::debug!(
+                    target: "connections",
+                    "{}Slots({}) ∌ {}",
+                    match unassigned_slot_ty {
+                        service::SlotTy::Inbound => "In",
+                        service::SlotTy::Outbound => "Out",
+                    },
+                    &shared.log_chain_names[chain_index],
+                    peer_id
+                );
+                guarded.unassign_slot_and_ban(&shared.platform, chain_index, peer_id.clone());
+                shared.wake_up_main_background_task.notify(1);
+                Some(Event::Disconnected {
                     peer_id,
                     chain_index,
-                    unassigned_slot_ty,
-                    error,
-                } => {
-                    log::debug!(
-                        target: "network",
-                        "Connection({}, {}) => ChainConnectAttemptFailed(error={:?})",
-                        &shared.log_chain_names[chain_index],
-                        peer_id, error,
-                    );
-                    log::debug!(
-                        target: "connections",
-                        "{}Slots({}) ∌ {}",
-                        match unassigned_slot_ty {
-                            service::SlotTy::Inbound => "In",
-                            service::SlotTy::Outbound => "Out",
-                        },
-                        &shared.log_chain_names[chain_index],
-                        peer_id
-                    );
-                    guarded.unassign_slot_and_ban(&shared.platform, chain_index, peer_id);
-                    shared.wake_up_main_background_task.notify(1);
-                }
-                service::Event::ChainDisconnected {
-                    peer_id,
-                    chain_index,
-                    unassigned_slot_ty,
-                } => {
-                    log::debug!(
-                        target: "network",
-                        "Connection({}, {}) => ChainDisconnected",
-                        peer_id,
-                        &shared.log_chain_names[chain_index],
-                    );
-                    log::debug!(
-                        target: "connections",
-                        "{}Slots({}) ∌ {}",
-                        match unassigned_slot_ty {
-                            service::SlotTy::Inbound => "In",
-                            service::SlotTy::Outbound => "Out",
-                        },
-                        &shared.log_chain_names[chain_index],
-                        peer_id
-                    );
-                    guarded.unassign_slot_and_ban(&shared.platform, chain_index, peer_id.clone());
-                    shared.wake_up_main_background_task.notify(1);
-                    break Event::Disconnected {
-                        peer_id,
-                        chain_index,
-                    };
-                }
-                service::Event::RequestResult {
-                    request_id,
-                    response: service::RequestResult::Blocks(response),
-                } => {
-                    let _ = guarded
-                        .blocks_requests
-                        .remove(&request_id)
-                        .unwrap()
-                        .send(response.map_err(BlocksRequestError::Request));
-                }
-                service::Event::RequestResult {
-                    request_id,
-                    response: service::RequestResult::GrandpaWarpSync(response),
-                } => {
-                    let _ = guarded
-                        .grandpa_warp_sync_requests
-                        .remove(&request_id)
-                        .unwrap()
-                        .send(response.map_err(GrandpaWarpSyncRequestError::Request));
-                }
-                service::Event::RequestResult {
-                    request_id,
-                    response: service::RequestResult::StorageProof(response),
-                } => {
-                    let _ = guarded
-                        .storage_proof_requests
-                        .remove(&request_id)
-                        .unwrap()
-                        .send(response.map_err(StorageProofRequestError::Request));
-                }
-                service::Event::RequestResult {
-                    request_id,
-                    response: service::RequestResult::CallProof(response),
-                } => {
-                    let _ = guarded
-                        .call_proof_requests
-                        .remove(&request_id)
-                        .unwrap()
-                        .send(response.map_err(CallProofRequestError::Request));
-                }
-                service::Event::RequestResult { .. } => {
-                    // We never start any other kind of requests.
-                    unreachable!()
-                }
-                service::Event::KademliaDiscoveryResult {
-                    operation_id,
-                    result,
-                } => {
-                    let chain_index = guarded
-                        .kademlia_discovery_operations
-                        .remove(&operation_id)
-                        .unwrap();
-                    match result {
-                        Ok(nodes) => {
-                            log::debug!(
-                                target: "connections", "On chain {}, discovered: {}",
-                                &shared.log_chain_names[chain_index],
-                                nodes.iter().map(|(p, _)| p.to_string()).join(", ")
-                            );
+                })
+            }
+            WhatHappened::NetworkEvent(service::Event::RequestResult {
+                request_id,
+                response: service::RequestResult::Blocks(response),
+            }) => {
+                let _ = guarded
+                    .blocks_requests
+                    .remove(&request_id)
+                    .unwrap()
+                    .send(response.map_err(BlocksRequestError::Request));
+                None
+            }
+            WhatHappened::NetworkEvent(service::Event::RequestResult {
+                request_id,
+                response: service::RequestResult::GrandpaWarpSync(response),
+            }) => {
+                let _ = guarded
+                    .grandpa_warp_sync_requests
+                    .remove(&request_id)
+                    .unwrap()
+                    .send(response.map_err(GrandpaWarpSyncRequestError::Request));
+                None
+            }
+            WhatHappened::NetworkEvent(service::Event::RequestResult {
+                request_id,
+                response: service::RequestResult::StorageProof(response),
+            }) => {
+                let _ = guarded
+                    .storage_proof_requests
+                    .remove(&request_id)
+                    .unwrap()
+                    .send(response.map_err(StorageProofRequestError::Request));
+                None
+            }
+            WhatHappened::NetworkEvent(service::Event::RequestResult {
+                request_id,
+                response: service::RequestResult::CallProof(response),
+            }) => {
+                let _ = guarded
+                    .call_proof_requests
+                    .remove(&request_id)
+                    .unwrap()
+                    .send(response.map_err(CallProofRequestError::Request));
+                None
+            }
+            WhatHappened::NetworkEvent(service::Event::RequestResult { .. }) => {
+                // We never start any other kind of requests.
+                unreachable!()
+            }
+            WhatHappened::NetworkEvent(service::Event::KademliaDiscoveryResult {
+                operation_id,
+                result,
+            }) => {
+                let chain_index = guarded
+                    .kademlia_discovery_operations
+                    .remove(&operation_id)
+                    .unwrap();
+                match result {
+                    Ok(nodes) => {
+                        log::debug!(
+                            target: "connections", "On chain {}, discovered: {}",
+                            &shared.log_chain_names[chain_index],
+                            nodes.iter().map(|(p, _)| p.to_string()).join(", ")
+                        );
 
-                            for (peer_id, addrs) in nodes {
-                                let mut valid_addrs = Vec::with_capacity(addrs.len());
-                                for addr in addrs {
-                                    match Multiaddr::try_from(addr) {
-                                        Ok(a) => valid_addrs.push(a),
-                                        Err(err) => {
-                                            log::debug!(
-                                                target: "connections",
-                                                "Discovery => InvalidAddress({})",
-                                                hex::encode(&err.addr)
-                                            );
-                                            continue;
-                                        }
+                        for (peer_id, addrs) in nodes {
+                            let mut valid_addrs = Vec::with_capacity(addrs.len());
+                            for addr in addrs {
+                                match Multiaddr::try_from(addr) {
+                                    Ok(a) => valid_addrs.push(a),
+                                    Err(err) => {
+                                        log::debug!(
+                                            target: "connections",
+                                            "Discovery => InvalidAddress({})",
+                                            hex::encode(&err.addr)
+                                        );
+                                        continue;
                                     }
                                 }
+                            }
 
-                                guarded.network.discover(
-                                    &shared.platform.now(),
-                                    chain_index,
-                                    peer_id,
-                                    valid_addrs,
+                            guarded.network.discover(
+                                &shared.platform.now(),
+                                chain_index,
+                                peer_id,
+                                valid_addrs,
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        log::debug!(
+                            target: "connections",
+                            "Discovery => {:?}",
+                            error
+                        );
+
+                        // No error is printed if the error is about the fact that we have
+                        // 0 peers, as this tends to happen quite frequently at initialization
+                        // and there is nothing that can be done against this error anyway.
+                        // No error is printed either if the request fails due to a benign
+                        // networking error such as an unresponsive peer.
+                        match error {
+                            service::DiscoveryError::NoPeer => {}
+                            service::DiscoveryError::FindNode(
+                                service::KademliaFindNodeError::RequestFailed(err),
+                            ) if !err.is_protocol_error() => {}
+                            service::DiscoveryError::FindNode(
+                                service::KademliaFindNodeError::RequestFailed(
+                                    peers::RequestError::Substream(
+                                        connection::established::RequestError::ProtocolNotAvailable,
+                                    ),
+                                ),
+                            ) => {
+                                // TODO: remove this warning in a long time
+                                log::warn!(
+                                    target: "connections",
+                                    "Problem during discovery on {}: protocol not available. \
+                                    This might indicate that the version of Substrate used by \
+                                    the chain doesn't include \
+                                    <https://github.com/paritytech/substrate/pull/12545>.",
+                                    &shared.log_chain_names[chain_index]
+                                );
+                            }
+                            _ => {
+                                log::warn!(
+                                    target: "connections",
+                                    "Problem during discovery on {}: {}",
+                                    &shared.log_chain_names[chain_index],
+                                    error
                                 );
                             }
                         }
-                        Err(error) => {
-                            log::debug!(
-                                target: "connections",
-                                "Discovery => {:?}",
-                                error
-                            );
-
-                            // No error is printed if the error is about the fact that we have
-                            // 0 peers, as this tends to happen quite frequently at initialization
-                            // and there is nothing that can be done against this error anyway.
-                            // No error is printed either if the request fails due to a benign
-                            // networking error such as an unresponsive peer.
-                            match error {
-                                service::DiscoveryError::NoPeer => {}
-                                service::DiscoveryError::FindNode(
-                                    service::KademliaFindNodeError::RequestFailed(err),
-                                ) if !err.is_protocol_error() => {}
-                                service::DiscoveryError::FindNode(
-                                    service::KademliaFindNodeError::RequestFailed(
-                                        peers::RequestError::Substream(connection::established::RequestError::ProtocolNotAvailable)
-                                    ))
-                                => {
-                                    // TODO: remove this warning in a long time
-                                    log::warn!(
-                                        target: "connections",
-                                        "Problem during discovery on {}: protocol not available. \
-                                        This might indicate that the version of Substrate used by \
-                                        the chain doesn't include \
-                                        <https://github.com/paritytech/substrate/pull/12545>.",
-                                        &shared.log_chain_names[chain_index]
-                                    );
-                                }
-                                _ => {
-                                    log::warn!(
-                                        target: "connections",
-                                        "Problem during discovery on {}: {}",
-                                        &shared.log_chain_names[chain_index],
-                                        error
-                                    );
-                                }
-                            }
-                        }
                     }
                 }
-                service::Event::InboundSlotAssigned {
+
+                None
+            }
+            WhatHappened::NetworkEvent(service::Event::InboundSlotAssigned {
+                peer_id,
+                chain_index,
+            }) => {
+                log::debug!(
+                    target: "connections",
+                    "InSlots({}) ∋ {}",
+                    &shared.log_chain_names[chain_index],
+                    peer_id
+                );
+                None
+            }
+            WhatHappened::NetworkEvent(service::Event::IdentifyRequestIn {
+                peer_id,
+                request_id,
+            }) => {
+                log::debug!(
+                    target: "network",
+                    "Connection({}) => IdentifyRequest",
                     peer_id,
+                );
+                guarded
+                    .network
+                    .respond_identify(request_id, &shared.identify_agent_version);
+                None
+            }
+            WhatHappened::NetworkEvent(service::Event::BlocksRequestIn { .. }) => unreachable!(),
+            WhatHappened::NetworkEvent(service::Event::RequestInCancel { .. }) => {
+                // All incoming requests are immediately answered.
+                unreachable!()
+            }
+            WhatHappened::NetworkEvent(service::Event::GrandpaNeighborPacket {
+                chain_index,
+                peer_id,
+                state,
+            }) => {
+                log::debug!(
+                    target: "network",
+                    "Connection({}, {}) => GrandpaNeighborPacket(round_number={}, set_id={}, commit_finalized_height={})",
+                    peer_id,
+                    &shared.log_chain_names[chain_index],
+                    state.round_number,
+                    state.set_id,
+                    state.commit_finalized_height,
+                );
+                Some(Event::GrandpaNeighborPacket {
                     chain_index,
-                } => {
-                    log::debug!(
-                        target: "connections",
-                        "InSlots({}) ∋ {}",
-                        &shared.log_chain_names[chain_index],
-                        peer_id
-                    );
-                }
-                service::Event::IdentifyRequestIn {
                     peer_id,
-                    request_id,
-                } => {
-                    log::debug!(
-                        target: "network",
-                        "Connection({}) => IdentifyRequest",
-                        peer_id,
-                    );
-                    guarded
-                        .network
-                        .respond_identify(request_id, &shared.identify_agent_version);
-                }
-                service::Event::BlocksRequestIn { .. } => unreachable!(),
-                service::Event::RequestInCancel { .. } => {
-                    // All incoming requests are immediately answered.
-                    unreachable!()
-                }
-                service::Event::GrandpaNeighborPacket {
-                    chain_index,
+                    finalized_block_height: state.commit_finalized_height,
+                })
+            }
+            WhatHappened::NetworkEvent(service::Event::GrandpaCommitMessage {
+                chain_index,
+                peer_id,
+                message,
+            }) => {
+                log::debug!(
+                    target: "network",
+                    "Connection({}, {}) => GrandpaCommitMessage(target_block_hash={})",
                     peer_id,
-                    state,
-                } => {
-                    log::debug!(
-                        target: "network",
-                        "Connection({}, {}) => GrandpaNeighborPacket(round_number={}, set_id={}, commit_finalized_height={})",
-                        peer_id,
-                        &shared.log_chain_names[chain_index],
-                        state.round_number,
-                        state.set_id,
-                        state.commit_finalized_height,
-                    );
-                    break Event::GrandpaNeighborPacket {
-                        chain_index,
-                        peer_id,
-                        finalized_block_height: state.commit_finalized_height,
-                    };
-                }
-                service::Event::GrandpaCommitMessage {
+                    &shared.log_chain_names[chain_index],
+                    HashDisplay(message.decode().message.target_hash),
+                );
+                Some(Event::GrandpaCommitMessage {
                     chain_index,
                     peer_id,
                     message,
-                } => {
-                    log::debug!(
-                        target: "network",
-                        "Connection({}, {}) => GrandpaCommitMessage(target_block_hash={})",
-                        peer_id,
-                        &shared.log_chain_names[chain_index],
-                        HashDisplay(message.decode().message.target_hash),
-                    );
-                    break Event::GrandpaCommitMessage {
-                        chain_index,
-                        peer_id,
-                        message,
-                    };
-                }
-                service::Event::ProtocolError { peer_id, error } => {
-                    // TODO: handle properly?
-                    log::warn!(
-                        target: "network",
-                        "Connection({}) => ProtocolError(error={:?})",
-                        peer_id,
-                        error,
-                    );
+                })
+            }
+            WhatHappened::NetworkEvent(service::Event::ProtocolError { peer_id, error }) => {
+                // TODO: handle properly?
+                log::warn!(
+                    target: "network",
+                    "Connection({}) => ProtocolError(error={:?})",
+                    peer_id,
+                    error,
+                );
 
-                    for chain_index in 0..guarded.network.num_chains() {
-                        guarded.unassign_slot_and_ban(
-                            &shared.platform,
-                            chain_index,
-                            peer_id.clone(),
-                        );
-                    }
-                    shared.wake_up_main_background_task.notify(1);
+                for chain_index in 0..guarded.network.num_chains() {
+                    guarded.unassign_slot_and_ban(&shared.platform, chain_index, peer_id.clone());
                 }
+                shared.wake_up_main_background_task.notify(1);
+                None
+            }
+            WhatHappened::StartConnect(start_connect) => {
+                // TODO: restore rate limiting
+                let is_important = guarded
+                    .important_nodes
+                    .contains(&start_connect.expected_peer_id);
+
+                let task_name = format!(
+                    "connection-{}-{}",
+                    start_connect.expected_peer_id, start_connect.multiaddr
+                );
+
+                // Perform the connection process in a separate task.
+                let task = tasks::connection_task(
+                    start_connect,
+                    shared.clone(),
+                    shared.messages_tx.clone(),
+                    is_important,
+                );
+
+                // Sending the new task might fail in case a shutdown is happening, in which case
+                // we don't really care about the state of anything anymore.
+                // The sending here is normally very quick.
+                shared.platform.spawn_task(task_name.into(), Box::pin(task));
+                None
+            }
+            WhatHappened::MessageToConnection {
+                connection_id,
+                message,
+            } => {
+                // Note that it is critical for the sending to not take too long here, in order to not
+                // block the process of the network service.
+                // In particular, if sending the message to the connection is blocked due to sending
+                // a message on the connection-to-coordinator channel, this will result in a deadlock.
+                // For this reason, the connection task is always ready to immediately accept a message
+                // on the coordinator-to-connection channel.
+                guarded
+                    .active_connections
+                    .get_mut(&connection_id)
+                    .unwrap()
+                    .send(message)
+                    .await
+                    .unwrap();
+                None
             }
         };
 
         // Dispatch the event to the various senders.
-
-        // This little `if` avoids having to do `event.clone()` if we don't have to.
-        if guarded.event_senders.len() == 1 {
-            let _ = guarded.event_senders[0].send(event).await;
-        } else {
-            for sender in guarded.event_senders.iter_mut() {
-                // For simplicity we don't get rid of closed senders because senders aren't
-                // supposed to close, and that leaving closed senders in the list doesn't have any
-                // consequence other than one extra iteration every time.
-                let _ = sender.send(event.clone()).await;
+        if let Some(event) = event_to_dispatch {
+            // This little `if` avoids having to do `event.clone()` if we don't have to.
+            if guarded.event_senders.len() == 1 {
+                let _ = guarded.event_senders[0].send(event).await;
+            } else {
+                for sender in guarded.event_senders.iter_mut() {
+                    // For simplicity we don't get rid of closed senders because senders aren't
+                    // supposed to close, and that leaving closed senders in the list doesn't have any
+                    // consequence other than one extra iteration every time.
+                    let _ = sender.send(event.clone()).await;
+                }
             }
         }
-    }
-
-    // TODO: doc
-    for chain_index in 0..shared.log_chain_names.len() {
-        let now = shared.platform.now();
-
-        // Clean up the content of `slots_assign_backoff`.
-        // TODO: the background task should be woken up when the ban expires
-        // TODO: O(n)
-        guarded
-            .slots_assign_backoff
-            .retain(|_, expiration| *expiration > now);
-
-        loop {
-            let peer_id = guarded
-                .network
-                .slots_to_assign(chain_index)
-                .find(|peer_id| {
-                    !guarded
-                        .slots_assign_backoff
-                        .contains_key(&((**peer_id).clone(), chain_index)) // TODO: spurious cloning
-                })
-                .cloned();
-
-            let Some(peer_id) = peer_id else { break };
-            log::debug!(
-                target: "connections",
-                "OutSlots({}) ∋ {}",
-                &shared.log_chain_names[chain_index],
-                peer_id
-            );
-            guarded.network.assign_out_slot(chain_index, peer_id);
-        }
-    }
-
-    // The networking service contains a list of connections that should be opened.
-    // Grab this list and start opening a connection for each.
-    // TODO: restore the rate limiting for connections openings
-    loop {
-        let start_connect = match guarded.network.next_start_connect(|| shared.platform.now()) {
-            Some(sc) => sc,
-            None => break,
-        };
-
-        let is_important = guarded
-            .important_nodes
-            .contains(&start_connect.expected_peer_id);
-
-        let task_name = format!(
-            "connection-{}-{}",
-            start_connect.expected_peer_id, start_connect.multiaddr
-        );
-
-        // Perform the connection process in a separate task.
-        let task = tasks::connection_task(
-            start_connect,
-            shared.clone(),
-            shared.messages_tx.clone(),
-            is_important,
-        );
-
-        // Sending the new task might fail in case a shutdown is happening, in which case
-        // we don't really care about the state of anything anymore.
-        // The sending here is normally very quick.
-        shared.platform.spawn_task(task_name.into(), Box::pin(task));
-    }
-
-    // Pull messages that the coordinator has generated in destination to the various
-    // connections.
-    loop {
-        let (connection_id, message) = match guarded.network.pull_message_to_connection() {
-            Some(m) => m,
-            None => break,
-        };
-
-        // Note that it is critical for the sending to not take too long here, in order to not
-        // block the process of the network service.
-        // In particular, if sending the message to the connection is blocked due to sending
-        // a message on the connection-to-coordinator channel, this will result in a deadlock.
-        // For this reason, the connection task is always ready to immediately accept a message
-        // on the coordinator-to-connection channel.
-        guarded
-            .active_connections
-            .get_mut(&connection_id)
-            .unwrap()
-            .send(message)
-            .await
-            .unwrap();
     }
 }
 
