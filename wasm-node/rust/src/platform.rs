@@ -83,6 +83,11 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         Instant::now()
     }
 
+    fn fill_random_bytes(&self, buffer: &mut [u8]) {
+        use rand::RngCore as _;
+        rand::thread_rng().fill_bytes(buffer);
+    }
+
     fn sleep(&self, duration: Duration) -> Self::Delay {
         Delay::new(duration)
     }

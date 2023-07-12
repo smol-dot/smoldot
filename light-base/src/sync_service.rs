@@ -34,6 +34,7 @@ use core::{fmt, mem, num::NonZeroU32, time::Duration};
 use futures_channel::{mpsc, oneshot};
 use futures_util::{stream, SinkExt as _};
 use rand::seq::IteratorRandom as _;
+use rand_chacha::rand_core::SeedableRng as _;
 use smoldot::{
     chain,
     executor::host,
@@ -130,6 +131,9 @@ pub struct SyncService<TPlat: PlatformRef> {
     /// Sender of messages towards the background task.
     to_background: Mutex<mpsc::Sender<ToBackground>>,
 
+    /// See [`Config::platform`].
+    platform: TPlat,
+
     /// See [`Config::network_service`].
     network_service: Arc<network_service::NetworkService<TPlat>>,
     /// See [`Config::network_service`].
@@ -182,6 +186,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
 
         SyncService {
             to_background: Mutex::new(to_background),
+            platform: config.platform,
             network_service: config.network_service.0,
             network_chain_index: config.network_service.1,
             block_number_bytes: config.block_number_bytes,
@@ -485,6 +490,12 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         let mut final_results =
             Vec::<StorageResultItem>::with_capacity(requests_remaining.len() * 4);
 
+        let mut randomness = rand_chacha::ChaCha20Rng::from_seed({
+            let mut seed = [0; 32];
+            self.platform.fill_random_bytes(&mut seed);
+            seed
+        });
+
         loop {
             // Check if we're done.
             if requests_remaining.is_empty() {
@@ -502,7 +513,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             let Some(target) = self
                 .peers_assumed_know_blocks(block_number, block_hash)
                 .await
-                .choose(&mut rand::thread_rng())
+                .choose(&mut randomness)
             else {
                 // No peer knows this block. Returning with a failure.
                 return Err(StorageQueryError {
