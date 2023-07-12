@@ -45,7 +45,6 @@ use alloc::{
     sync::Arc,
     vec::{self, Vec},
 };
-use async_lock::Mutex;
 use core::{cmp, mem, num::NonZeroUsize, pin::Pin, task::Poll, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
@@ -125,9 +124,6 @@ pub struct NetworkService<TPlat: PlatformRef> {
 
 /// Struct shared between the foreground and background.
 struct Shared<TPlat: PlatformRef> {
-    /// Fields protected by a mutex.
-    guarded: Mutex<SharedGuarded<TPlat>>,
-
     /// See [`Config::platform`].
     platform: TPlat,
 
@@ -142,7 +138,7 @@ struct Shared<TPlat: PlatformRef> {
     messages_tx: async_channel::Sender<ToBackground<TPlat>>,
 }
 
-struct SharedGuarded<TPlat: PlatformRef> {
+struct BackgroundTask<TPlat: PlatformRef> {
     /// Data structure holding the entire state of the networking.
     network: service::ChainNetwork<TPlat::Instant>,
 
@@ -344,37 +340,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             async_channel::bounded(32);
 
         let shared = Arc::new(Shared {
-            guarded: Mutex::new(SharedGuarded {
-                network: service::ChainNetwork::new(service::Config {
-                    now: config.platform.now(),
-                    chains,
-                    connections_capacity: 32,
-                    peers_capacity: 8,
-                    max_addresses_per_peer: NonZeroUsize::new(5).unwrap(),
-                    noise_key: config.noise_key,
-                    handshake_timeout: Duration::from_secs(8),
-                    randomness_seed: rand::random(),
-                }),
-                event_senders: either::Left(event_senders),
-                slots_assign_backoff: HashMap::with_capacity_and_hasher(
-                    32,
-                    util::SipHasherBuild::new(rand::random()),
-                ),
-                important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
-                active_connections: HashMap::with_capacity_and_hasher(32, Default::default()),
-                messages_rx: messages_from_connections_rx,
-                blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
-                grandpa_warp_sync_requests: HashMap::with_capacity_and_hasher(
-                    8,
-                    Default::default(),
-                ),
-                storage_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
-                call_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
-                kademlia_discovery_operations: HashMap::with_capacity_and_hasher(
-                    2,
-                    Default::default(),
-                ),
-            }),
             platform: config.platform,
             identify_agent_version: config.identify_agent_version,
             log_chain_names,
@@ -385,8 +350,42 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         shared.platform.spawn_task(
             "network-service".into(),
             Box::pin({
-                let shared = shared.clone();
-                let future = background_task(shared);
+                let background_task_state = BackgroundTask {
+                    network: service::ChainNetwork::new(service::Config {
+                        now: shared.platform.now(),
+                        chains,
+                        connections_capacity: 32,
+                        peers_capacity: 8,
+                        max_addresses_per_peer: NonZeroUsize::new(5).unwrap(),
+                        noise_key: config.noise_key,
+                        handshake_timeout: Duration::from_secs(8),
+                        randomness_seed: rand::random(),
+                    }),
+                    event_senders: either::Left(event_senders),
+                    slots_assign_backoff: HashMap::with_capacity_and_hasher(
+                        32,
+                        util::SipHasherBuild::new(rand::random()),
+                    ),
+                    important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
+                    active_connections: HashMap::with_capacity_and_hasher(32, Default::default()),
+                    messages_rx: messages_from_connections_rx,
+                    blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
+                    grandpa_warp_sync_requests: HashMap::with_capacity_and_hasher(
+                        8,
+                        Default::default(),
+                    ),
+                    storage_proof_requests: HashMap::with_capacity_and_hasher(
+                        8,
+                        Default::default(),
+                    ),
+                    call_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
+                    kademlia_discovery_operations: HashMap::with_capacity_and_hasher(
+                        2,
+                        Default::default(),
+                    ),
+                };
+
+                let future = background_task(shared.clone(), background_task_state);
 
                 let (abortable, abort_handle) = future::abortable(future);
                 abort_handles.push(abort_handle);
@@ -951,13 +950,13 @@ pub enum QueueNotificationError {
     Queue(peers::QueueNotificationError),
 }
 
-async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
-    let mut guarded = shared.guarded.lock().await;
-    let guarded = &mut *guarded;
-
+async fn background_task<TPlat: PlatformRef>(
+    shared: Arc<Shared<TPlat>>,
+    mut task: BackgroundTask<TPlat>,
+) {
     loop {
         // TODO: this is hacky; instead, should be cleaned up as a response to an event from the service; no such event exists yet
-        guarded.active_connections.retain(|_, tx| !tx.is_closed());
+        task.active_connections.retain(|_, tx| !tx.is_closed());
 
         // TODO: handle differently
         // TODO: doc
@@ -967,16 +966,15 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
             // Clean up the content of `slots_assign_backoff`.
             // TODO: the background task should be woken up when the ban expires
             // TODO: O(n)
-            guarded
-                .slots_assign_backoff
+            task.slots_assign_backoff
                 .retain(|_, expiration| *expiration > now);
 
             loop {
-                let peer_id = guarded
+                let peer_id = task
                     .network
                     .slots_to_assign(chain_index)
                     .find(|peer_id| {
-                        !guarded
+                        !task
                             .slots_assign_backoff
                             .contains_key(&((**peer_id).clone(), chain_index)) // TODO: spurious cloning
                     })
@@ -989,7 +987,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     &shared.log_chain_names[chain_index],
                     peer_id
                 );
-                guarded.network.assign_out_slot(chain_index, peer_id);
+                task.network.assign_out_slot(chain_index, peer_id);
             }
         }
 
@@ -1006,20 +1004,20 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
 
         let what_happened = {
             let message_received =
-                async { WhatHappened::Message(guarded.messages_rx.next().await.unwrap()) };
-            let can_generate_event = matches!(guarded.event_senders, either::Left(_));
+                async { WhatHappened::Message(task.messages_rx.next().await.unwrap()) };
+            let can_generate_event = matches!(task.event_senders, either::Left(_));
             let service_event = async {
                 if let (true, Some(event)) = (
                     can_generate_event,
-                    guarded.network.next_event(shared.platform.now()),
+                    task.network.next_event(shared.platform.now()),
                 ) {
                     WhatHappened::NetworkEvent(event)
                 } else if let Some(start_connect) =
-                    guarded.network.next_start_connect(|| shared.platform.now())
+                    task.network.next_start_connect(|| shared.platform.now())
                 {
                     WhatHappened::StartConnect(start_connect)
                 } else if let Some((connection_id, message)) =
-                    guarded.network.pull_message_to_connection()
+                    task.network.pull_message_to_connection()
                 {
                     WhatHappened::MessageToConnection {
                         connection_id,
@@ -1030,9 +1028,9 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 }
             };
             let finished_sending_event = async {
-                if let either::Right(event_sending_future) = &mut guarded.event_senders {
+                if let either::Right(event_sending_future) = &mut task.event_senders {
                     let event_senders = event_sending_future.await;
-                    guarded.event_senders = either::Left(event_senders);
+                    task.event_senders = either::Left(event_senders);
                     WhatHappened::EventSendersReady
                 } else {
                     future::pending().await
@@ -1057,7 +1055,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 multiaddr,
                 handshake_kind,
             }) => {
-                let (connection_id, task) = guarded
+                let (connection_id, connection_task) = task
                     .network
                     .pending_outcome_ok_single_stream(pending_id, handshake_kind);
                 log::debug!(
@@ -1070,7 +1068,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
 
                 let (coordinator_to_connection_tx, coordinator_to_connection_rx) =
                     async_channel::bounded(8);
-                let _prev_value = guarded
+                let _prev_value = task
                     .active_connections
                     .insert(connection_id, coordinator_to_connection_tx);
                 debug_assert!(_prev_value.is_none());
@@ -1082,7 +1080,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                         connection,
                         shared.clone(),
                         connection_id,
-                        task,
+                        connection_task,
                         coordinator_to_connection_rx,
                         shared.messages_tx.clone(),
                     ),
@@ -1097,7 +1095,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 multiaddr,
                 handshake_kind,
             }) => {
-                let (connection_id, task) = guarded
+                let (connection_id, connection_task) = task
                     .network
                     .pending_outcome_ok_multi_stream(pending_id, handshake_kind);
                 log::debug!(
@@ -1110,7 +1108,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
 
                 let (coordinator_to_connection_tx, coordinator_to_connection_rx) =
                     async_channel::bounded(8);
-                let _prev_value = guarded
+                let _prev_value = task
                     .active_connections
                     .insert(connection_id, coordinator_to_connection_tx);
                 debug_assert!(_prev_value.is_none());
@@ -1122,7 +1120,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                         connection,
                         shared.clone(),
                         connection_id,
-                        task,
+                        connection_task,
                         coordinator_to_connection_rx,
                         shared.messages_tx.clone(),
                     ),
@@ -1135,9 +1133,9 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 expected_peer_id,
                 is_bad_addr,
             }) => {
-                guarded.network.pending_outcome_err(pending_id, is_bad_addr);
-                for chain_index in 0..guarded.network.num_chains() {
-                    guarded.unassign_slot_and_ban(
+                task.network.pending_outcome_err(pending_id, is_bad_addr);
+                for chain_index in 0..task.network.num_chains() {
+                    task.unassign_slot_and_ban(
                         &shared.platform,
                         chain_index,
                         expected_peer_id.clone(),
@@ -1149,8 +1147,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 connection_id,
                 message,
             }) => {
-                guarded
-                    .network
+                task.network
                     .inject_connection_message(connection_id, message);
                 continue;
             }
@@ -1162,7 +1159,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 result,
             }) => {
                 // The call to `start_blocks_request` below panics if we have no active connection.
-                if !guarded.network.can_start_requests(&target) {
+                if !task.network.can_start_requests(&target) {
                     let _ = result.send(Err(BlocksRequestError::NoConnection));
                     continue;
                 }
@@ -1190,7 +1187,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     }
                 }
 
-                let request_id = guarded.network.start_blocks_request(
+                let request_id = task.network.start_blocks_request(
                     shared.platform.now(),
                     &target,
                     chain_index,
@@ -1198,7 +1195,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     timeout,
                 );
 
-                guarded.blocks_requests.insert(request_id, result);
+                task.blocks_requests.insert(request_id, result);
                 continue;
             }
             WhatHappened::Message(ToBackground::StartGrandpaWarpSyncRequest {
@@ -1210,7 +1207,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
             }) => {
                 // The call to `start_grandpa_warp_sync_request` below panics if we have no
                 // active connection.
-                if !guarded.network.can_start_requests(&target) {
+                if !task.network.can_start_requests(&target) {
                     let _ = result.send(Err(GrandpaWarpSyncRequestError::NoConnection));
                     continue;
                 }
@@ -1220,7 +1217,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     target, shared.log_chain_names[chain_index], HashDisplay(&begin_hash)
                 );
 
-                let request_id = guarded.network.start_grandpa_warp_sync_request(
+                let request_id = task.network.start_grandpa_warp_sync_request(
                     shared.platform.now(),
                     &target,
                     chain_index,
@@ -1228,9 +1225,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     timeout,
                 );
 
-                guarded
-                    .grandpa_warp_sync_requests
-                    .insert(request_id, result);
+                task.grandpa_warp_sync_requests.insert(request_id, result);
                 continue;
             }
             WhatHappened::Message(ToBackground::StartStorageProofRequest {
@@ -1242,7 +1237,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
             }) => {
                 // The call to `start_storage_proof_request` below panics if we have no active
                 // connection.
-                if !guarded.network.can_start_requests(&target) {
+                if !task.network.can_start_requests(&target) {
                     let _ = result.send(Err(StorageProofRequestError::NoConnection));
                     continue;
                 }
@@ -1255,7 +1250,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     HashDisplay(&config.block_hash)
                 );
 
-                let request_id = match guarded.network.start_storage_proof_request(
+                let request_id = match task.network.start_storage_proof_request(
                     shared.platform.now(),
                     &target,
                     chain_index,
@@ -1270,7 +1265,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     }
                 };
 
-                guarded.storage_proof_requests.insert(request_id, result);
+                task.storage_proof_requests.insert(request_id, result);
                 continue;
             }
             WhatHappened::Message(ToBackground::StartCallProofRequest {
@@ -1281,7 +1276,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 result,
             }) => {
                 // The call to `start_call_proof_request` below panics if we have no active connection.
-                if !guarded.network.can_start_requests(&target) {
+                if !task.network.can_start_requests(&target) {
                     let _ = result.send(Err(CallProofRequestError::NoConnection));
                     continue;
                 }
@@ -1295,7 +1290,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     config.method
                 );
 
-                let request_id = match guarded.network.start_call_proof_request(
+                let request_id = match task.network.start_call_proof_request(
                     shared.platform.now(),
                     &target,
                     chain_index,
@@ -1309,7 +1304,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     }
                 };
 
-                guarded.call_proof_requests.insert(request_id, result);
+                task.call_proof_requests.insert(request_id, result);
                 continue;
             }
             WhatHappened::Message(ToBackground::SetLocalBestBlock {
@@ -1317,8 +1312,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 best_hash,
                 best_number,
             }) => {
-                guarded
-                    .network
+                task.network
                     .set_local_best_block(chain_index, best_hash, best_number);
                 continue;
             }
@@ -1336,8 +1330,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
 
                 // TODO: log the list of peers we sent the packet to
 
-                guarded
-                    .network
+                task.network
                     .set_local_grandpa_state(chain_index, grandpa_state);
                 continue;
             }
@@ -1351,13 +1344,13 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 // TODO: keep track of which peer knows about which transaction, and don't send it again
 
                 // TODO: collecting in a Vec :-/
-                for peer in guarded
+                for peer in task
                     .network
                     .opened_transactions_substream(chain_index)
                     .cloned()
                     .collect::<Vec<_>>()
                 {
-                    if guarded
+                    if task
                         .network
                         .announce_transaction(&peer, chain_index, &transaction)
                         .is_ok()
@@ -1377,15 +1370,12 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 result,
             }) => {
                 // The call to `send_block_announce` below panics if we have no active substream.
-                if !guarded
-                    .network
-                    .can_send_block_announces(&target, chain_index)
-                {
+                if !task.network.can_send_block_announces(&target, chain_index) {
                     let _ = result.send(Err(QueueNotificationError::NoConnection));
                     continue;
                 }
 
-                let res = guarded
+                let res = task
                     .network
                     .send_block_announce(&target, chain_index, &scale_encoded_header, is_best)
                     .map_err(QueueNotificationError::Queue);
@@ -1401,10 +1391,10 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
             }) => {
                 for (peer_id, addrs) in list {
                     if important_nodes {
-                        guarded.important_nodes.insert(peer_id.clone());
+                        task.important_nodes.insert(peer_id.clone());
                     }
 
-                    guarded.network.discover(&now, chain_index, peer_id, addrs);
+                    task.network.discover(&now, chain_index, peer_id, addrs);
                 }
 
                 continue;
@@ -1414,8 +1404,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 result,
             }) => {
                 let _ = result.send(
-                    guarded
-                        .network
+                    task.network
                         .discovered_nodes(chain_index)
                         .map(|(peer_id, addresses)| {
                             (peer_id.clone(), addresses.cloned().collect::<Vec<_>>())
@@ -1426,16 +1415,16 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 continue;
             }
             WhatHappened::Message(ToBackground::PeersList { result }) => {
-                let _ = result.send(guarded.network.peers_list().cloned().collect::<Vec<_>>());
+                let _ = result.send(task.network.peers_list().cloned().collect::<Vec<_>>());
                 continue;
             }
             WhatHappened::Message(ToBackground::StartDiscovery) => {
                 for chain_index in 0..shared.log_chain_names.len() {
-                    let operation_id = guarded
+                    let operation_id = task
                         .network
                         .start_kademlia_discovery_round(shared.platform.now(), chain_index);
 
-                    let _prev_value = guarded
+                    let _prev_value = task
                         .kademlia_discovery_operations
                         .insert(operation_id, chain_index);
                     debug_assert!(_prev_value.is_none());
@@ -1538,7 +1527,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     &shared.log_chain_names[chain_index],
                     peer_id
                 );
-                guarded.unassign_slot_and_ban(&shared.platform, chain_index, peer_id);
+                task.unassign_slot_and_ban(&shared.platform, chain_index, peer_id);
                 continue;
             }
             WhatHappened::NetworkEvent(service::Event::ChainDisconnected {
@@ -1562,7 +1551,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     &shared.log_chain_names[chain_index],
                     peer_id
                 );
-                guarded.unassign_slot_and_ban(&shared.platform, chain_index, peer_id.clone());
+                task.unassign_slot_and_ban(&shared.platform, chain_index, peer_id.clone());
                 Event::Disconnected {
                     peer_id,
                     chain_index,
@@ -1572,7 +1561,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 request_id,
                 response: service::RequestResult::Blocks(response),
             }) => {
-                let _ = guarded
+                let _ = task
                     .blocks_requests
                     .remove(&request_id)
                     .unwrap()
@@ -1583,7 +1572,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 request_id,
                 response: service::RequestResult::GrandpaWarpSync(response),
             }) => {
-                let _ = guarded
+                let _ = task
                     .grandpa_warp_sync_requests
                     .remove(&request_id)
                     .unwrap()
@@ -1594,7 +1583,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 request_id,
                 response: service::RequestResult::StorageProof(response),
             }) => {
-                let _ = guarded
+                let _ = task
                     .storage_proof_requests
                     .remove(&request_id)
                     .unwrap()
@@ -1605,7 +1594,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 request_id,
                 response: service::RequestResult::CallProof(response),
             }) => {
-                let _ = guarded
+                let _ = task
                     .call_proof_requests
                     .remove(&request_id)
                     .unwrap()
@@ -1620,7 +1609,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 operation_id,
                 result,
             }) => {
-                let chain_index = guarded
+                let chain_index = task
                     .kademlia_discovery_operations
                     .remove(&operation_id)
                     .unwrap();
@@ -1648,7 +1637,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                                 }
                             }
 
-                            guarded.network.discover(
+                            task.network.discover(
                                 &shared.platform.now(),
                                 chain_index,
                                 peer_id,
@@ -1725,8 +1714,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     "Connection({}) => IdentifyRequest",
                     peer_id,
                 );
-                guarded
-                    .network
+                task.network
                     .respond_identify(request_id, &shared.identify_agent_version);
                 continue;
             }
@@ -1782,14 +1770,14 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                     error,
                 );
 
-                for chain_index in 0..guarded.network.num_chains() {
-                    guarded.unassign_slot_and_ban(&shared.platform, chain_index, peer_id.clone());
+                for chain_index in 0..task.network.num_chains() {
+                    task.unassign_slot_and_ban(&shared.platform, chain_index, peer_id.clone());
                 }
                 continue;
             }
             WhatHappened::StartConnect(start_connect) => {
                 // TODO: restore rate limiting
-                let is_important = guarded
+                let is_important = task
                     .important_nodes
                     .contains(&start_connect.expected_peer_id);
 
@@ -1822,8 +1810,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
                 // a message on the connection-to-coordinator channel, this will result in a deadlock.
                 // For this reason, the connection task is always ready to immediately accept a message
                 // on the coordinator-to-connection channel.
-                guarded
-                    .active_connections
+                task.active_connections
                     .get_mut(&connection_id)
                     .unwrap()
                     .send(message)
@@ -1836,12 +1823,12 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
         // Dispatch the event to the various senders.
 
         // We made sure that the senders were ready before generating an event.
-        let either::Left(event_senders) = &mut guarded.event_senders else {
+        let either::Left(event_senders) = &mut task.event_senders else {
             unreachable!()
         };
 
         let mut event_senders = mem::take(event_senders);
-        guarded.event_senders = either::Right(Box::pin(async move {
+        task.event_senders = either::Right(Box::pin(async move {
             // This little `if` avoids having to do `event.clone()` if we don't have to.
             if event_senders.len() == 1 {
                 let _ = event_senders[0].send(event_to_dispatch).await;
@@ -1860,7 +1847,7 @@ async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
     }
 }
 
-impl<TPlat: PlatformRef> SharedGuarded<TPlat> {
+impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
     fn unassign_slot_and_ban(&mut self, platform: &TPlat, chain_index: usize, peer_id: PeerId) {
         self.network.unassign_slot(chain_index, &peer_id);
 
