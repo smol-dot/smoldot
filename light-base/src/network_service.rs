@@ -115,15 +115,18 @@ pub struct ConfigChain {
 }
 
 pub struct NetworkService<TPlat: PlatformRef> {
-    /// Struct shared between the foreground and background.
-    shared: Arc<Shared<TPlat>>,
+    /// Names of the various chains the network service connects to. Used only for logging
+    /// purposes.
+    log_chain_names: Vec<String>,
+
+    /// Channel to send messages to the background task.
+    messages_tx: async_channel::Sender<ToBackground<TPlat>>,
 
     /// List of handles that abort all the background tasks.
     abort_handles: Vec<future::AbortHandle>,
 }
 
-/// Struct shared between the foreground and background.
-struct Shared<TPlat: PlatformRef> {
+struct BackgroundTask<TPlat: PlatformRef> {
     /// See [`Config::platform`].
     platform: TPlat,
 
@@ -136,9 +139,7 @@ struct Shared<TPlat: PlatformRef> {
 
     /// Channel to send messages to the background task.
     messages_tx: async_channel::Sender<ToBackground<TPlat>>,
-}
 
-struct BackgroundTask<TPlat: PlatformRef> {
     /// Data structure holding the entire state of the networking.
     network: service::ChainNetwork<TPlat::Instant>,
 
@@ -336,23 +337,48 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 
         let mut abort_handles = Vec::new();
 
-        let (messages_from_connections_tx, messages_from_connections_rx) =
-            async_channel::bounded(32);
+        let (messages_tx, messages_rx) = async_channel::bounded(32);
 
-        let shared = Arc::new(Shared {
-            platform: config.platform,
-            identify_agent_version: config.identify_agent_version,
-            log_chain_names,
-            messages_tx: messages_from_connections_tx,
-        });
+        // Spawn task starts a discovery request at a periodic interval.
+        // This is done through a separate task due to ease of implementation.
+        config.platform.spawn_task(
+            "network-discovery".into(),
+            Box::pin({
+                let platform = config.platform.clone();
+                let messages_tx = messages_tx.clone();
+                let future = async move {
+                    let mut next_discovery = Duration::from_secs(5);
+
+                    loop {
+                        platform.sleep(next_discovery).await;
+                        next_discovery = cmp::min(next_discovery * 2, Duration::from_secs(120));
+
+                        if messages_tx
+                            .send(ToBackground::StartDiscovery)
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                };
+
+                let (abortable, abort_handle) = future::abortable(future);
+                abort_handles.push(abort_handle);
+                abortable.map(|_| ())
+            }),
+        );
 
         // Spawn main task that processes the network service.
-        shared.platform.spawn_task(
+        config.platform.spawn_task(
             "network-service".into(),
             Box::pin({
                 let background_task_state = BackgroundTask {
+                    identify_agent_version: config.identify_agent_version,
+                    log_chain_names: log_chain_names.clone(),
+                    messages_tx: messages_tx.clone(),
                     network: service::ChainNetwork::new(service::Config {
-                        now: shared.platform.now(),
+                        now: config.platform.now(),
                         chains,
                         connections_capacity: 32,
                         peers_capacity: 8,
@@ -361,6 +387,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                         handshake_timeout: Duration::from_secs(8),
                         randomness_seed: rand::random(),
                     }),
+                    platform: config.platform.clone(),
                     event_senders: either::Left(event_senders),
                     slots_assign_backoff: HashMap::with_capacity_and_hasher(
                         32,
@@ -368,7 +395,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     ),
                     important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
                     active_connections: HashMap::with_capacity_and_hasher(32, Default::default()),
-                    messages_rx: messages_from_connections_rx,
+                    messages_rx,
                     blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
                     grandpa_warp_sync_requests: HashMap::with_capacity_and_hasher(
                         8,
@@ -385,37 +412,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     ),
                 };
 
-                let future = background_task(shared.clone(), background_task_state);
-
-                let (abortable, abort_handle) = future::abortable(future);
-                abort_handles.push(abort_handle);
-                abortable.map(|_| ())
-            }),
-        );
-
-        // Spawn task starts a discovery request at a periodic interval.
-        // This is done through a separate task due to ease of implementation.
-        shared.platform.spawn_task(
-            "network-discovery".into(),
-            Box::pin({
-                let shared = shared.clone();
-                let future = async move {
-                    let mut next_discovery = Duration::from_secs(5);
-
-                    loop {
-                        shared.platform.sleep(next_discovery).await;
-                        next_discovery = cmp::min(next_discovery * 2, Duration::from_secs(120));
-
-                        if shared
-                            .messages_tx
-                            .send(ToBackground::StartDiscovery)
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                };
+                let future = background_task(background_task_state);
 
                 let (abortable, abort_handle) = future::abortable(future);
                 abort_handles.push(abort_handle);
@@ -425,7 +422,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 
         abort_handles.shrink_to_fit();
         let final_network_service = Arc::new(NetworkService {
-            shared,
+            log_chain_names,
+            messages_tx,
             abort_handles,
         });
 
@@ -456,8 +454,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
         let (tx, rx) = oneshot::channel();
 
-        self.shared
-            .messages_tx
+        self.messages_tx
             .send(ToBackground::StartBlocksRequest {
                 target: target.clone(),
                 chain_index,
@@ -476,7 +473,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     target: "network",
                     "Connection({}) => BlocksRequest(chain={}, num_blocks={}, block_data_total_size={})",
                     target,
-                    self.shared.log_chain_names[chain_index],
+                    self.log_chain_names[chain_index],
                     blocks.len(),
                     BytesDisplay(blocks.iter().fold(0, |sum, block| {
                         let block_size = block.header.as_ref().map_or(0, |h| h.len()) +
@@ -491,7 +488,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     target: "network",
                     "Connection({}) => BlocksRequest(chain={}, error={:?})",
                     target,
-                    self.shared.log_chain_names[chain_index],
+                    self.log_chain_names[chain_index],
                     err
                 );
             }
@@ -530,8 +527,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     ) -> Result<service::EncodedGrandpaWarpSyncResponse, GrandpaWarpSyncRequestError> {
         let (tx, rx) = oneshot::channel();
 
-        self.shared
-            .messages_tx
+        self.messages_tx
             .send(ToBackground::StartGrandpaWarpSyncRequest {
                 target: target.clone(),
                 chain_index,
@@ -552,7 +548,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     target: "network",
                     "Connection({}) => GrandpaWarpSyncRequest(chain={}, num_fragments={}, finished={:?})",
                     target,
-                    self.shared.log_chain_names[chain_index],
+                    self.log_chain_names[chain_index],
                     decoded.fragments.len(),
                     decoded.is_finished,
                 );
@@ -562,7 +558,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     target: "network",
                     "Connection({}) => GrandpaWarpSyncRequest(chain={}, error={:?})",
                     target,
-                    self.shared.log_chain_names[chain_index],
+                    self.log_chain_names[chain_index],
                     err,
                 );
             }
@@ -577,8 +573,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         best_hash: [u8; 32],
         best_number: u64,
     ) {
-        self.shared
-            .messages_tx
+        self.messages_tx
             .send(ToBackground::SetLocalBestBlock {
                 chain_index,
                 best_hash,
@@ -593,8 +588,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         chain_index: usize,
         grandpa_state: service::GrandpaState,
     ) {
-        self.shared
-            .messages_tx
+        self.messages_tx
             .send(ToBackground::SetLocalGrandpaState {
                 chain_index,
                 grandpa_state,
@@ -614,8 +608,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     ) -> Result<service::EncodedMerkleProof, StorageProofRequestError> {
         let (tx, rx) = oneshot::channel();
 
-        self.shared
-            .messages_tx
+        self.messages_tx
             .send(ToBackground::StartStorageProofRequest {
                 target: target.clone(),
                 chain_index,
@@ -642,7 +635,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     target: "network",
                     "Connection({}) => StorageProofRequest(chain={}, total_size={})",
                     target,
-                    self.shared.log_chain_names[chain_index],
+                    self.log_chain_names[chain_index],
                     BytesDisplay(u64::try_from(decoded.len()).unwrap()),
                 );
             }
@@ -651,7 +644,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     target: "network",
                     "Connection({}) => StorageProofRequest(chain={}, error={:?})",
                     target,
-                    self.shared.log_chain_names[chain_index],
+                    self.log_chain_names[chain_index],
                     err
                 );
             }
@@ -673,8 +666,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     ) -> Result<EncodedMerkleProof, CallProofRequestError> {
         let (tx, rx) = oneshot::channel();
 
-        self.shared
-            .messages_tx
+        self.messages_tx
             .send(ToBackground::StartCallProofRequest {
                 target: target.clone(),
                 chain_index,
@@ -702,7 +694,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     target: "network",
                     "Connection({}) => CallProofRequest({}, total_size: {})",
                     target,
-                    self.shared.log_chain_names[chain_index],
+                    self.log_chain_names[chain_index],
                     BytesDisplay(u64::try_from(decoded.len()).unwrap())
                 );
             }
@@ -711,7 +703,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     target: "network",
                     "Connection({}) => CallProofRequest({}, {})",
                     target,
-                    self.shared.log_chain_names[chain_index],
+                    self.log_chain_names[chain_index],
                     err
                 );
             }
@@ -736,8 +728,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     ) -> Vec<PeerId> {
         let (tx, rx) = oneshot::channel();
 
-        self.shared
-            .messages_tx
+        self.messages_tx
             .send(ToBackground::AnnounceTransaction {
                 chain_index,
                 transaction: transaction.to_vec(), // TODO: ovheread
@@ -759,8 +750,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     ) -> Result<(), QueueNotificationError> {
         let (tx, rx) = oneshot::channel();
 
-        self.shared
-            .messages_tx
+        self.messages_tx
             .send(ToBackground::SendBlockAnnounce {
                 target: target.clone(), // TODO: overhead
                 chain_index,
@@ -785,8 +775,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         list: impl IntoIterator<Item = (PeerId, impl IntoIterator<Item = Multiaddr>)>,
         important_nodes: bool,
     ) {
-        self.shared
-            .messages_tx
+        self.messages_tx
             .send(ToBackground::Discover {
                 now: now.clone(), // TODO: overhead
                 chain_index,
@@ -816,8 +805,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     ) -> impl Iterator<Item = (PeerId, impl Iterator<Item = Multiaddr>)> {
         let (tx, rx) = oneshot::channel();
 
-        self.shared
-            .messages_tx
+        self.messages_tx
             .send(ToBackground::DiscoveredNodes {
                 chain_index,
                 result: tx,
@@ -835,8 +823,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// with.
     pub async fn peers_list(&self) -> impl Iterator<Item = PeerId> {
         let (tx, rx) = oneshot::channel();
-        self.shared
-            .messages_tx
+        self.messages_tx
             .send(ToBackground::PeersList { result: tx })
             .await
             .unwrap();
@@ -950,18 +937,15 @@ pub enum QueueNotificationError {
     Queue(peers::QueueNotificationError),
 }
 
-async fn background_task<TPlat: PlatformRef>(
-    shared: Arc<Shared<TPlat>>,
-    mut task: BackgroundTask<TPlat>,
-) {
+async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
     loop {
         // TODO: this is hacky; instead, should be cleaned up as a response to an event from the service; no such event exists yet
         task.active_connections.retain(|_, tx| !tx.is_closed());
 
         // TODO: handle differently
         // TODO: doc
-        for chain_index in 0..shared.log_chain_names.len() {
-            let now = shared.platform.now();
+        for chain_index in 0..task.log_chain_names.len() {
+            let now = task.platform.now();
 
             // Clean up the content of `slots_assign_backoff`.
             // TODO: the background task should be woken up when the ban expires
@@ -984,7 +968,7 @@ async fn background_task<TPlat: PlatformRef>(
                 log::debug!(
                     target: "connections",
                     "OutSlots({}) ∋ {}",
-                    &shared.log_chain_names[chain_index],
+                    &task.log_chain_names[chain_index],
                     peer_id
                 );
                 task.network.assign_out_slot(chain_index, peer_id);
@@ -1009,11 +993,11 @@ async fn background_task<TPlat: PlatformRef>(
             let service_event = async {
                 if let (true, Some(event)) = (
                     can_generate_event,
-                    task.network.next_event(shared.platform.now()),
+                    task.network.next_event(task.platform.now()),
                 ) {
                     WhatHappened::NetworkEvent(event)
                 } else if let Some(start_connect) =
-                    task.network.next_start_connect(|| shared.platform.now())
+                    task.network.next_start_connect(|| task.platform.now())
                 {
                     WhatHappened::StartConnect(start_connect)
                 } else if let Some((connection_id, message)) =
@@ -1074,15 +1058,15 @@ async fn background_task<TPlat: PlatformRef>(
                 debug_assert!(_prev_value.is_none());
 
                 //TODO: task name
-                shared.platform.spawn_task(
+                task.platform.spawn_task(
                     "".into(),
                     tasks::single_stream_connection_task::<TPlat>(
                         connection,
-                        shared.platform.clone(),
+                        task.platform.clone(),
                         connection_id,
                         connection_task,
                         coordinator_to_connection_rx,
-                        shared.messages_tx.clone(),
+                        task.messages_tx.clone(),
                     ),
                 );
 
@@ -1114,15 +1098,15 @@ async fn background_task<TPlat: PlatformRef>(
                 debug_assert!(_prev_value.is_none());
 
                 //TODO: task name
-                shared.platform.spawn_task(
+                task.platform.spawn_task(
                     "".into(),
                     tasks::webrtc_multi_stream_connection_task::<TPlat>(
                         connection,
-                        shared.platform.clone(),
+                        task.platform.clone(),
                         connection_id,
                         connection_task,
                         coordinator_to_connection_rx,
-                        shared.messages_tx.clone(),
+                        task.messages_tx.clone(),
                     ),
                 );
 
@@ -1135,11 +1119,7 @@ async fn background_task<TPlat: PlatformRef>(
             }) => {
                 task.network.pending_outcome_err(pending_id, is_bad_addr);
                 for chain_index in 0..task.network.num_chains() {
-                    task.unassign_slot_and_ban(
-                        &shared.platform,
-                        chain_index,
-                        expected_peer_id.clone(),
-                    );
+                    task.unassign_slot_and_ban(chain_index, expected_peer_id.clone());
                 }
                 continue;
             }
@@ -1169,7 +1149,7 @@ async fn background_task<TPlat: PlatformRef>(
                         log::debug!(
                             target: "network",
                             "Connection({}) <= BlocksRequest(chain={}, start={}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
-                            target, shared.log_chain_names[chain_index], HashDisplay(hash),
+                            target, task.log_chain_names[chain_index], HashDisplay(hash),
                             config.desired_count.get(),
                             matches!(config.direction, protocol::BlocksRequestDirection::Descending),
                             config.fields.header, config.fields.body, config.fields.justifications
@@ -1179,7 +1159,7 @@ async fn background_task<TPlat: PlatformRef>(
                         log::debug!(
                             target: "network",
                             "Connection({}) <= BlocksRequest(chain={}, start=#{}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
-                            target, shared.log_chain_names[chain_index], number,
+                            target, task.log_chain_names[chain_index], number,
                             config.desired_count.get(),
                             matches!(config.direction, protocol::BlocksRequestDirection::Descending),
                             config.fields.header, config.fields.body, config.fields.justifications
@@ -1188,7 +1168,7 @@ async fn background_task<TPlat: PlatformRef>(
                 }
 
                 let request_id = task.network.start_blocks_request(
-                    shared.platform.now(),
+                    task.platform.now(),
                     &target,
                     chain_index,
                     config,
@@ -1214,11 +1194,11 @@ async fn background_task<TPlat: PlatformRef>(
 
                 log::debug!(
                     target: "network", "Connection({}) <= GrandpaWarpSyncRequest(chain={}, start={})",
-                    target, shared.log_chain_names[chain_index], HashDisplay(&begin_hash)
+                    target, task.log_chain_names[chain_index], HashDisplay(&begin_hash)
                 );
 
                 let request_id = task.network.start_grandpa_warp_sync_request(
-                    shared.platform.now(),
+                    task.platform.now(),
                     &target,
                     chain_index,
                     begin_hash,
@@ -1246,12 +1226,12 @@ async fn background_task<TPlat: PlatformRef>(
                     target: "network",
                     "Connection({}) <= StorageProofRequest(chain={}, block={})",
                     target,
-                    shared.log_chain_names[chain_index],
+                    task.log_chain_names[chain_index],
                     HashDisplay(&config.block_hash)
                 );
 
                 let request_id = match task.network.start_storage_proof_request(
-                    shared.platform.now(),
+                    task.platform.now(),
                     &target,
                     chain_index,
                     config,
@@ -1285,13 +1265,13 @@ async fn background_task<TPlat: PlatformRef>(
                     target: "network",
                     "Connection({}) <= CallProofRequest({}, {}, {})",
                     target,
-                    shared.log_chain_names[chain_index],
+                    task.log_chain_names[chain_index],
                     HashDisplay(&config.block_hash),
                     config.method
                 );
 
                 let request_id = match task.network.start_call_proof_request(
-                    shared.platform.now(),
+                    task.platform.now(),
                     &target,
                     chain_index,
                     config,
@@ -1323,7 +1303,7 @@ async fn background_task<TPlat: PlatformRef>(
                 log::debug!(
                     target: "network",
                     "Chain({}) <= SetLocalGrandpaState(set_id: {}, commit_finalized_height: {})",
-                    shared.log_chain_names[chain_index],
+                    task.log_chain_names[chain_index],
                     grandpa_state.set_id,
                     grandpa_state.commit_finalized_height,
                 );
@@ -1419,10 +1399,10 @@ async fn background_task<TPlat: PlatformRef>(
                 continue;
             }
             WhatHappened::Message(ToBackground::StartDiscovery) => {
-                for chain_index in 0..shared.log_chain_names.len() {
+                for chain_index in 0..task.log_chain_names.len() {
                     let operation_id = task
                         .network
-                        .start_kademlia_discovery_round(shared.platform.now(), chain_index);
+                        .start_kademlia_discovery_round(task.platform.now(), chain_index);
 
                     let _prev_value = task
                         .kademlia_discovery_operations
@@ -1448,7 +1428,7 @@ async fn background_task<TPlat: PlatformRef>(
                             target: "network",
                             "Connection({}, {}) => ChainDisconnected",
                             peer_id,
-                            &shared.log_chain_names[chain_indices[0]],
+                            &task.log_chain_names[chain_indices[0]],
                         );
 
                         Event::Disconnected {
@@ -1471,7 +1451,7 @@ async fn background_task<TPlat: PlatformRef>(
                     target: "network",
                     "Connection({}, {}) => BlockAnnounce(best_hash={}, is_best={})",
                     peer_id,
-                    &shared.log_chain_names[chain_index],
+                    &task.log_chain_names[chain_index],
                     HashDisplay(&header::hash_from_scale_encoded_header(announce.decode().scale_encoded_header)),
                     announce.decode().is_best
                 );
@@ -1493,7 +1473,7 @@ async fn background_task<TPlat: PlatformRef>(
                     target: "network",
                     "Connection({}, {}) => ChainConnected(best_height={}, best_hash={})",
                     peer_id,
-                    &shared.log_chain_names[chain_index],
+                    &task.log_chain_names[chain_index],
                     best_number,
                     HashDisplay(&best_hash)
                 );
@@ -1514,7 +1494,7 @@ async fn background_task<TPlat: PlatformRef>(
                 log::debug!(
                     target: "network",
                     "Connection({}, {}) => ChainConnectAttemptFailed(error={:?})",
-                    &shared.log_chain_names[chain_index],
+                    &task.log_chain_names[chain_index],
                     peer_id, error,
                 );
                 log::debug!(
@@ -1524,10 +1504,10 @@ async fn background_task<TPlat: PlatformRef>(
                         service::SlotTy::Inbound => "In",
                         service::SlotTy::Outbound => "Out",
                     },
-                    &shared.log_chain_names[chain_index],
+                    &task.log_chain_names[chain_index],
                     peer_id
                 );
-                task.unassign_slot_and_ban(&shared.platform, chain_index, peer_id);
+                task.unassign_slot_and_ban(chain_index, peer_id);
                 continue;
             }
             WhatHappened::NetworkEvent(service::Event::ChainDisconnected {
@@ -1539,7 +1519,7 @@ async fn background_task<TPlat: PlatformRef>(
                     target: "network",
                     "Connection({}, {}) => ChainDisconnected",
                     peer_id,
-                    &shared.log_chain_names[chain_index],
+                    &task.log_chain_names[chain_index],
                 );
                 log::debug!(
                     target: "connections",
@@ -1548,10 +1528,10 @@ async fn background_task<TPlat: PlatformRef>(
                         service::SlotTy::Inbound => "In",
                         service::SlotTy::Outbound => "Out",
                     },
-                    &shared.log_chain_names[chain_index],
+                    &task.log_chain_names[chain_index],
                     peer_id
                 );
-                task.unassign_slot_and_ban(&shared.platform, chain_index, peer_id.clone());
+                task.unassign_slot_and_ban(chain_index, peer_id.clone());
                 Event::Disconnected {
                     peer_id,
                     chain_index,
@@ -1617,7 +1597,7 @@ async fn background_task<TPlat: PlatformRef>(
                     Ok(nodes) => {
                         log::debug!(
                             target: "connections", "On chain {}, discovered: {}",
-                            &shared.log_chain_names[chain_index],
+                            &task.log_chain_names[chain_index],
                             nodes.iter().map(|(p, _)| p.to_string()).join(", ")
                         );
 
@@ -1638,7 +1618,7 @@ async fn background_task<TPlat: PlatformRef>(
                             }
 
                             task.network.discover(
-                                &shared.platform.now(),
+                                &task.platform.now(),
                                 chain_index,
                                 peer_id,
                                 valid_addrs,
@@ -1676,14 +1656,14 @@ async fn background_task<TPlat: PlatformRef>(
                                     This might indicate that the version of Substrate used by \
                                     the chain doesn't include \
                                     <https://github.com/paritytech/substrate/pull/12545>.",
-                                    &shared.log_chain_names[chain_index]
+                                    &task.log_chain_names[chain_index]
                                 );
                             }
                             _ => {
                                 log::warn!(
                                     target: "connections",
                                     "Problem during discovery on {}: {}",
-                                    &shared.log_chain_names[chain_index],
+                                    &task.log_chain_names[chain_index],
                                     error
                                 );
                             }
@@ -1700,7 +1680,7 @@ async fn background_task<TPlat: PlatformRef>(
                 log::debug!(
                     target: "connections",
                     "InSlots({}) ∋ {}",
-                    &shared.log_chain_names[chain_index],
+                    &task.log_chain_names[chain_index],
                     peer_id
                 );
                 continue;
@@ -1715,7 +1695,7 @@ async fn background_task<TPlat: PlatformRef>(
                     peer_id,
                 );
                 task.network
-                    .respond_identify(request_id, &shared.identify_agent_version);
+                    .respond_identify(request_id, &task.identify_agent_version);
                 continue;
             }
             WhatHappened::NetworkEvent(service::Event::BlocksRequestIn { .. }) => unreachable!(),
@@ -1732,7 +1712,7 @@ async fn background_task<TPlat: PlatformRef>(
                     target: "network",
                     "Connection({}, {}) => GrandpaNeighborPacket(round_number={}, set_id={}, commit_finalized_height={})",
                     peer_id,
-                    &shared.log_chain_names[chain_index],
+                    &task.log_chain_names[chain_index],
                     state.round_number,
                     state.set_id,
                     state.commit_finalized_height,
@@ -1752,7 +1732,7 @@ async fn background_task<TPlat: PlatformRef>(
                     target: "network",
                     "Connection({}, {}) => GrandpaCommitMessage(target_block_hash={})",
                     peer_id,
-                    &shared.log_chain_names[chain_index],
+                    &task.log_chain_names[chain_index],
                     HashDisplay(message.decode().message.target_hash),
                 );
                 Event::GrandpaCommitMessage {
@@ -1771,7 +1751,7 @@ async fn background_task<TPlat: PlatformRef>(
                 );
 
                 for chain_index in 0..task.network.num_chains() {
-                    task.unassign_slot_and_ban(&shared.platform, chain_index, peer_id.clone());
+                    task.unassign_slot_and_ban(chain_index, peer_id.clone());
                 }
                 continue;
             }
@@ -1787,17 +1767,18 @@ async fn background_task<TPlat: PlatformRef>(
                 );
 
                 // Perform the connection process in a separate task.
-                let task = tasks::connection_task(
+                let connect_task = tasks::connection_task(
                     start_connect,
-                    shared.platform.clone(),
-                    shared.messages_tx.clone(),
+                    task.platform.clone(),
+                    task.messages_tx.clone(),
                     is_important,
                 );
 
                 // Sending the new task might fail in case a shutdown is happening, in which case
                 // we don't really care about the state of anything anymore.
                 // The sending here is normally very quick.
-                shared.platform.spawn_task(task_name.into(), Box::pin(task));
+                task.platform
+                    .spawn_task(task_name.into(), Box::pin(connect_task));
                 continue;
             }
             WhatHappened::MessageToConnection {
@@ -1848,10 +1829,10 @@ async fn background_task<TPlat: PlatformRef>(
 }
 
 impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
-    fn unassign_slot_and_ban(&mut self, platform: &TPlat, chain_index: usize, peer_id: PeerId) {
+    fn unassign_slot_and_ban(&mut self, chain_index: usize, peer_id: PeerId) {
         self.network.unassign_slot(chain_index, &peer_id);
 
-        let new_expiration = platform.now() + Duration::from_secs(20); // TODO: arbitrary constant
+        let new_expiration = self.platform.now() + Duration::from_secs(20); // TODO: arbitrary constant
         match self.slots_assign_backoff.entry((peer_id, chain_index)) {
             hash_map::Entry::Occupied(e) if *e.get() < new_expiration => {
                 *e.into_mut() = new_expiration;
