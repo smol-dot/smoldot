@@ -132,10 +132,6 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
                     .await
                     .unwrap();
 
-                // We wake up the background task so that the slot can potentially be
-                // assigned to a different peer.
-                shared.wake_up_main_background_task.notify(1);
-
                 // Stop the task.
                 return;
             }
@@ -330,8 +326,6 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
             if send_out.or(process_in).await.is_err() {
                 return;
             }
-
-            shared.wake_up_main_background_task.notify(1);
         }
 
         if let Some(task_update) = task_update {
@@ -577,8 +571,6 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                 if send_out.or(process_in).await.is_err() {
                     return;
                 }
-
-                shared.wake_up_main_background_task.notify(1);
             }
 
             if let Some(task_update) = task_update {

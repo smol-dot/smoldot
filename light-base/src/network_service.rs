@@ -140,13 +140,6 @@ struct Shared<TPlat: PlatformRef> {
 
     /// Channel to send messages to the background task.
     messages_tx: async_channel::Sender<ToBackground<TPlat>>,
-
-    /// Event to notify when the background task needs to be waken up.
-    ///
-    /// Waking up this event guarantees a full loop of the background task. In other words,
-    /// if the event is notified while the background task is already awake, the background task
-    /// will do an additional loop.
-    wake_up_main_background_task: event_listener::Event,
 }
 
 struct SharedGuarded<TPlat: PlatformRef> {
@@ -379,7 +372,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             identify_agent_version: config.identify_agent_version,
             log_chain_names,
             messages_tx: messages_from_connections_tx,
-            wake_up_main_background_task: event_listener::Event::new(),
         });
 
         // Spawn main task that processes the network service.
@@ -416,10 +408,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                         {
                             break;
                         }
-
-                        // Starting requests has generated messages. Wake up the main task so that
-                        // these messages are dispatched.
-                        shared.wake_up_main_background_task.notify(1);
                     }
                 };
 
@@ -473,8 +461,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             })
             .await
             .unwrap();
-
-        self.shared.wake_up_main_background_task.notify(1);
 
         let result = rx.await.unwrap();
 
@@ -550,8 +536,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             .await
             .unwrap();
 
-        self.shared.wake_up_main_background_task.notify(1);
-
         let result = rx.await.unwrap();
 
         match &result {
@@ -596,7 +580,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             })
             .await
             .unwrap();
-        self.shared.wake_up_main_background_task.notify(1);
     }
 
     pub async fn set_local_grandpa_state(
@@ -612,7 +595,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             })
             .await
             .unwrap();
-        self.shared.wake_up_main_background_task.notify(1);
     }
 
     /// Sends a storage proof request to the given peer.
@@ -644,8 +626,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             })
             .await
             .unwrap();
-
-        self.shared.wake_up_main_background_task.notify(1);
 
         let result = rx.await.unwrap();
 
@@ -707,8 +687,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             .await
             .unwrap();
 
-        self.shared.wake_up_main_background_task.notify(1);
-
         let result = rx.await.unwrap();
 
         match &result {
@@ -762,8 +740,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             .await
             .unwrap();
 
-        self.shared.wake_up_main_background_task.notify(1);
-
         rx.await.unwrap()
     }
 
@@ -788,8 +764,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             })
             .await
             .unwrap();
-
-        self.shared.wake_up_main_background_task.notify(1);
 
         rx.await.unwrap()
     }
@@ -822,8 +796,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             })
             .await
             .unwrap();
-
-        self.shared.wake_up_main_background_task.notify(1);
     }
 
     /// Returns a list of nodes (their [`PeerId`] and multiaddresses) that we know are part of
@@ -847,8 +819,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             .await
             .unwrap();
 
-        self.shared.wake_up_main_background_task.notify(1);
-
         rx.await
             .unwrap()
             .into_iter()
@@ -864,7 +834,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             .send(ToBackground::PeersList { result: tx })
             .await
             .unwrap();
-        self.shared.wake_up_main_background_task.notify(1);
         rx.await.unwrap().into_iter()
     }
 }
@@ -976,18 +945,6 @@ pub enum QueueNotificationError {
 }
 
 async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
-    loop {
-        // In order to guarantee that waking up `wake_up_background` will run an entirely
-        // loop of `update_round`, we grab the listener at the start. If `wake_up_background`
-        // is notified while `update_round` is running, the `notified.await` below will be
-        // instantaneous.
-        let notified = shared.wake_up_main_background_task.listen();
-        update_round(&shared).await;
-        notified.await;
-    }
-}
-
-async fn update_round<TPlat: PlatformRef>(shared: &Arc<Shared<TPlat>>) {
     let mut guarded = shared.guarded.lock().await;
     let guarded = &mut *guarded;
 
@@ -1554,7 +1511,6 @@ async fn update_round<TPlat: PlatformRef>(shared: &Arc<Shared<TPlat>>) {
                     peer_id
                 );
                 guarded.unassign_slot_and_ban(&shared.platform, chain_index, peer_id);
-                shared.wake_up_main_background_task.notify(1);
                 None
             }
             WhatHappened::NetworkEvent(service::Event::ChainDisconnected {
@@ -1579,7 +1535,6 @@ async fn update_round<TPlat: PlatformRef>(shared: &Arc<Shared<TPlat>>) {
                     peer_id
                 );
                 guarded.unassign_slot_and_ban(&shared.platform, chain_index, peer_id.clone());
-                shared.wake_up_main_background_task.notify(1);
                 Some(Event::Disconnected {
                     peer_id,
                     chain_index,
@@ -1802,7 +1757,6 @@ async fn update_round<TPlat: PlatformRef>(shared: &Arc<Shared<TPlat>>) {
                 for chain_index in 0..guarded.network.num_chains() {
                     guarded.unassign_slot_and_ban(&shared.platform, chain_index, peer_id.clone());
                 }
-                shared.wake_up_main_background_task.notify(1);
                 None
             }
             WhatHappened::StartConnect(start_connect) => {
