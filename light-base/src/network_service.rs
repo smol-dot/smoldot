@@ -161,6 +161,8 @@ struct SharedGuarded<TPlat: PlatformRef> {
     /// The values are the moment when the ban expires.
     slots_assign_backoff: HashMap<(PeerId, usize), TPlat::Instant, util::SipHasherBuild>,
 
+    event_senders: Vec<async_channel::Sender<Event>>,
+
     messages_rx: async_channel::Receiver<ToBackground<TPlat>>,
 
     active_connections: HashMap<
@@ -352,6 +354,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     handshake_timeout: Duration::from_secs(8),
                     randomness_seed: rand::random(),
                 }),
+                event_senders,
                 slots_assign_backoff: HashMap::with_capacity_and_hasher(
                     32,
                     util::SipHasherBuild::new(rand::random()),
@@ -383,7 +386,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             "network-service".into(),
             Box::pin({
                 let shared = shared.clone();
-                let future = background_task(shared, event_senders);
+                let future = background_task(shared);
 
                 let (abortable, abort_handle) = future::abortable(future);
                 abort_handles.push(abort_handle);
@@ -971,25 +974,19 @@ pub enum QueueNotificationError {
     Queue(peers::QueueNotificationError),
 }
 
-async fn background_task<TPlat: PlatformRef>(
-    shared: Arc<Shared<TPlat>>,
-    mut event_senders: Vec<async_channel::Sender<Event>>,
-) {
+async fn background_task<TPlat: PlatformRef>(shared: Arc<Shared<TPlat>>) {
     loop {
         // In order to guarantee that waking up `wake_up_background` will run an entirely
         // loop of `update_round`, we grab the listener at the start. If `wake_up_background`
         // is notified while `update_round` is running, the `notified.await` below will be
         // instantaneous.
         let notified = shared.wake_up_main_background_task.listen();
-        update_round(&shared, &mut event_senders).await;
+        update_round(&shared).await;
         notified.await;
     }
 }
 
-async fn update_round<TPlat: PlatformRef>(
-    shared: &Arc<Shared<TPlat>>,
-    event_senders: &mut [async_channel::Sender<Event>],
-) {
+async fn update_round<TPlat: PlatformRef>(shared: &Arc<Shared<TPlat>>) {
     let mut guarded = shared.guarded.lock().await;
 
     // Inject in the coordinator the messages that the connections have generated.
@@ -1723,10 +1720,10 @@ async fn update_round<TPlat: PlatformRef>(
         // Dispatch the event to the various senders.
 
         // This little `if` avoids having to do `event.clone()` if we don't have to.
-        if event_senders.len() == 1 {
-            let _ = event_senders[0].send(event).await;
+        if guarded.event_senders.len() == 1 {
+            let _ = guarded.event_senders[0].send(event).await;
         } else {
-            for sender in event_senders.iter_mut() {
+            for sender in guarded.event_senders.iter_mut() {
                 // For simplicity we don't get rid of closed senders because senders aren't
                 // supposed to close, and that leaving closed senders in the list doesn't have any
                 // consequence other than one extra iteration every time.
