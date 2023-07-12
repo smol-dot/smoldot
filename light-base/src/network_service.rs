@@ -170,27 +170,27 @@ struct SharedGuarded<TPlat: PlatformRef> {
 
     blocks_requests: HashMap<
         service::OutRequestId,
-        oneshot::Sender<Result<Vec<protocol::BlockData>, service::BlocksRequestError>>,
+        oneshot::Sender<Result<Vec<protocol::BlockData>, BlocksRequestError>>,
         fnv::FnvBuildHasher,
     >,
 
     grandpa_warp_sync_requests: HashMap<
         service::OutRequestId,
         oneshot::Sender<
-            Result<service::EncodedGrandpaWarpSyncResponse, service::GrandpaWarpSyncRequestError>,
+            Result<service::EncodedGrandpaWarpSyncResponse, GrandpaWarpSyncRequestError>,
         >,
         fnv::FnvBuildHasher,
     >,
 
     storage_proof_requests: HashMap<
         service::OutRequestId,
-        oneshot::Sender<Result<service::EncodedMerkleProof, service::StorageProofRequestError>>,
+        oneshot::Sender<Result<service::EncodedMerkleProof, StorageProofRequestError>>,
         fnv::FnvBuildHasher,
     >,
 
     call_proof_requests: HashMap<
         service::OutRequestId,
-        oneshot::Sender<Result<service::EncodedMerkleProof, service::CallProofRequestError>>,
+        oneshot::Sender<Result<service::EncodedMerkleProof, CallProofRequestError>>,
         fnv::FnvBuildHasher,
     >,
 
@@ -447,9 +447,11 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         if !log::log_enabled!(log::Level::Debug) {
             match &result {
                 Ok(_)
-                | Err(service::BlocksRequestError::EmptyResponse)
-                | Err(service::BlocksRequestError::NotVerifiable) => {}
-                Err(service::BlocksRequestError::Request(err)) if !err.is_protocol_error() => {}
+                | Err(BlocksRequestError::NoConnection)
+                | Err(BlocksRequestError::Request(service::BlocksRequestError::EmptyResponse))
+                | Err(BlocksRequestError::Request(service::BlocksRequestError::NotVerifiable)) => {}
+                Err(BlocksRequestError::Request(service::BlocksRequestError::Request(err)))
+                    if !err.is_protocol_error() => {}
                 Err(err) => {
                     log::warn!(
                         target: "network",
@@ -461,7 +463,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             }
         }
 
-        result.map_err(BlocksRequestError::Request)
+        result
     }
 
     /// Sends a grandpa warp sync request to the given peer.
@@ -528,7 +530,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             }
         }
 
-        result.map_err(GrandpaWarpSyncRequestError::Request)
+        result
     }
 
     pub async fn set_local_best_block(
@@ -639,7 +641,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             }
         }
 
-        result.map_err(StorageProofRequestError::Request)
+        result
     }
 
     /// Sends a call proof request to the given peer.
@@ -714,7 +716,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             }
         }
 
-        result.map_err(CallProofRequestError::Request)
+        result
     }
 
     /// Announces transaction to the peers we are connected to.
@@ -1131,7 +1133,7 @@ async fn update_round<TPlat: PlatformRef>(
                         .blocks_requests
                         .remove(&request_id)
                         .unwrap()
-                        .send(response);
+                        .send(response.map_err(BlocksRequestError::Request));
                 }
                 service::Event::RequestResult {
                     request_id,
@@ -1141,7 +1143,7 @@ async fn update_round<TPlat: PlatformRef>(
                         .grandpa_warp_sync_requests
                         .remove(&request_id)
                         .unwrap()
-                        .send(response);
+                        .send(response.map_err(GrandpaWarpSyncRequestError::Request));
                 }
                 service::Event::RequestResult {
                     request_id,
@@ -1151,7 +1153,7 @@ async fn update_round<TPlat: PlatformRef>(
                         .storage_proof_requests
                         .remove(&request_id)
                         .unwrap()
-                        .send(response);
+                        .send(response.map_err(StorageProofRequestError::Request));
                 }
                 service::Event::RequestResult {
                     request_id,
@@ -1161,7 +1163,7 @@ async fn update_round<TPlat: PlatformRef>(
                         .call_proof_requests
                         .remove(&request_id)
                         .unwrap()
-                        .send(response);
+                        .send(response.map_err(CallProofRequestError::Request));
                 }
                 service::Event::RequestResult { .. } => {
                     // We never start any other kind of requests.
