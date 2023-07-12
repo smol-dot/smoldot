@@ -237,6 +237,15 @@ enum ToBackground {
         timeout: Duration,
         result: oneshot::Sender<Result<service::EncodedMerkleProof, CallProofRequestError>>,
     },
+    SetLocalBestBlock {
+        chain_index: usize,
+        best_hash: [u8; 32],
+        best_number: u64,
+    },
+    SetLocalGrandpaState {
+        chain_index: usize,
+        grandpa_state: service::GrandpaState,
+    },
 }
 
 impl<TPlat: PlatformRef> NetworkService<TPlat> {
@@ -544,8 +553,15 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             .guarded
             .lock()
             .await
-            .network
-            .set_local_best_block(chain_index, best_hash, best_number)
+            .messages_tx
+            .send(ToBackground::SetLocalBestBlock {
+                chain_index,
+                best_hash,
+                best_number,
+            })
+            .await
+            .unwrap();
+        self.shared.wake_up_main_background_task.notify(1);
     }
 
     pub async fn set_local_grandpa_state(
@@ -553,22 +569,18 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         chain_index: usize,
         grandpa_state: service::GrandpaState,
     ) {
-        log::debug!(
-            target: "network",
-            "Chain({}) <= SetLocalGrandpaState(set_id: {}, commit_finalized_height: {})",
-            self.shared.log_chain_names[chain_index],
-            grandpa_state.set_id,
-            grandpa_state.commit_finalized_height,
-        );
-
-        // TODO: log the list of peers we sent the packet to
-
         self.shared
             .guarded
             .lock()
             .await
-            .network
-            .set_local_grandpa_state(chain_index, grandpa_state)
+            .messages_tx
+            .send(ToBackground::SetLocalGrandpaState {
+                chain_index,
+                grandpa_state,
+            })
+            .await
+            .unwrap();
+        self.shared.wake_up_main_background_task.notify(1);
     }
 
     /// Sends a storage proof request to the given peer.
@@ -1125,6 +1137,31 @@ async fn update_round<TPlat: PlatformRef>(
                 };
 
                 guarded.call_proof_requests.insert(request_id, result);
+            }
+            Some(Some(ToBackground::SetLocalBestBlock {
+                chain_index,
+                best_hash,
+                best_number,
+            })) => guarded
+                .network
+                .set_local_best_block(chain_index, best_hash, best_number),
+            Some(Some(ToBackground::SetLocalGrandpaState {
+                chain_index,
+                grandpa_state,
+            })) => {
+                log::debug!(
+                    target: "network",
+                    "Chain({}) <= SetLocalGrandpaState(set_id: {}, commit_finalized_height: {})",
+                    shared.log_chain_names[chain_index],
+                    grandpa_state.set_id,
+                    grandpa_state.commit_finalized_height,
+                );
+
+                // TODO: log the list of peers we sent the packet to
+
+                guarded
+                    .network
+                    .set_local_grandpa_state(chain_index, grandpa_state)
             }
             _ => break,
         };
