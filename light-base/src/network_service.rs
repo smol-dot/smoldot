@@ -291,6 +291,7 @@ enum ToBackground<TPlat: PlatformRef> {
     PeersList {
         result: oneshot::Sender<Vec<PeerId>>,
     },
+    StartDiscovery,
 }
 
 impl<TPlat: PlatformRef> NetworkService<TPlat> {
@@ -403,16 +404,13 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                         shared.platform.sleep(next_discovery).await;
                         next_discovery = cmp::min(next_discovery * 2, Duration::from_secs(120));
 
-                        let mut guarded = shared.guarded.lock().await;
-                        for chain_index in 0..shared.log_chain_names.len() {
-                            let operation_id = guarded
-                                .network
-                                .start_kademlia_discovery_round(shared.platform.now(), chain_index);
-
-                            let _prev_value = guarded
-                                .kademlia_discovery_operations
-                                .insert(operation_id, chain_index);
-                            debug_assert!(_prev_value.is_none());
+                        if shared
+                            .messages_tx
+                            .send(ToBackground::StartDiscovery)
+                            .await
+                            .is_err()
+                        {
+                            break;
                         }
 
                         // Starting requests has generated messages. Wake up the main task so that
@@ -1354,6 +1352,18 @@ async fn update_round<TPlat: PlatformRef>(
             }
             Some(Some(ToBackground::PeersList { result })) => {
                 let _ = result.send(guarded.network.peers_list().cloned().collect::<Vec<_>>());
+            }
+            Some(Some(ToBackground::StartDiscovery)) => {
+                for chain_index in 0..shared.log_chain_names.len() {
+                    let operation_id = guarded
+                        .network
+                        .start_kademlia_discovery_round(shared.platform.now(), chain_index);
+
+                    let _prev_value = guarded
+                        .kademlia_discovery_operations
+                        .insert(operation_id, chain_index);
+                    debug_assert!(_prev_value.is_none());
+                }
             }
             None | Some(None) => break,
         };
