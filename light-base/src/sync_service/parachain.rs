@@ -1190,16 +1190,45 @@ async fn parahead<TPlat: PlatformRef>(
                     get.inject_value(storage_value.map(|(val, ver)| (iter::once(val), ver)));
             }
             runtime_host::RuntimeHostVm::NextKey(nk) => {
-                // TODO:
-                runtime_call_lock.unlock(runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
-                return Err(ParaheadError::NextKeyMerkleValueForbidden);
+                let next_key = {
+                    let child_trie = nk.child_trie();
+                    runtime_call_lock.next_key(
+                        child_trie.as_ref().map(|c| c.as_ref()),
+                        &nk.key().collect::<Vec<_>>(),
+                        nk.or_equal(),
+                        &nk.prefix().collect::<Vec<_>>(),
+                        nk.branch_nodes(),
+                    )
+                };
+                let next_key = match next_key {
+                    Ok(v) => v,
+                    Err(err) => {
+                        runtime_call_lock
+                            .unlock(runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
+                        return Err(ParaheadError::Call(err));
+                    }
+                };
+                runtime_call = nk.inject_key(next_key.map(|k| k.iter().copied()));
             }
             runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv) => {
-                // TODO:
-                runtime_call_lock.unlock(
-                    runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv).into_prototype(),
-                );
-                return Err(ParaheadError::NextKeyMerkleValueForbidden);
+                let merkle_value = {
+                    let child_trie = mv.child_trie();
+                    runtime_call_lock.closest_descendant_merkle_value(
+                        child_trie.as_ref().map(|c| c.as_ref()),
+                        &mv.key().collect::<Vec<_>>(),
+                    )
+                };
+                let merkle_value = match merkle_value {
+                    Ok(v) => v,
+                    Err(err) => {
+                        runtime_call_lock.unlock(
+                            runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv)
+                                .into_prototype(),
+                        );
+                        return Err(ParaheadError::Call(err));
+                    }
+                };
+                runtime_call = mv.inject_merkle_value(merkle_value);
             }
             runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
                 runtime_call = sig.verify_and_resume();
@@ -1247,9 +1276,6 @@ enum ParaheadError {
     /// This indicates some kind of incompatibility between smoldot and the relay chain.
     #[display(fmt = "Error while decoding the output of the call: {_0}")]
     InvalidRuntimeOutput(para::Error),
-    /// Fetching following keys or Merkle values is not supported yet.
-    // TODO: implement and remove
-    NextKeyMerkleValueForbidden,
     /// Runtime has called an offchain worker host function.
     OffchainWorkerHostFunction,
     /// Runtime service subscription is no longer valid.
@@ -1266,7 +1292,6 @@ impl ParaheadError {
             ParaheadError::Runtime(_) => false,
             ParaheadError::NoCore => false,
             ParaheadError::InvalidRuntimeOutput(_) => false,
-            ParaheadError::NextKeyMerkleValueForbidden => false,
             ParaheadError::OffchainWorkerHostFunction => false,
             ParaheadError::ObsoleteSubscription => false,
         }
