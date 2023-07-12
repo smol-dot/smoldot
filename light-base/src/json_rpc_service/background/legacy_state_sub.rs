@@ -505,10 +505,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     Box::pin({
                         let block_hash = current_best_block.clone();
                         let sync_service = task.sync_service.clone();
-                        // TODO: a bit overcomplicated because `WeakSender` doesn't implement `Clone`: https://github.com/smol-rs/async-channel/pull/62
-                        let requests_tx = async_channel::Sender::downgrade(
-                            &task.requests_tx.upgrade().unwrap().clone(),
-                        );
+                        let requests_tx = task.requests_tx.clone();
                         async move {
                             let result = sync_service
                                 .clone()
