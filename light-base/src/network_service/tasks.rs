@@ -15,13 +15,13 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use super::{Shared, ToBackground};
+use super::ToBackground;
 use crate::platform::{
     address_parse, ConnectError, MultiStreamWebRtcConnection, PlatformRef, ReadBuffer,
     SubstreamDirection,
 };
 
-use alloc::{sync::Arc, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 use core::{cmp, iter, pin};
 use futures_lite::FutureExt as _;
 use futures_util::{future, FutureExt as _, StreamExt as _};
@@ -34,7 +34,7 @@ use smoldot::{
 /// processing of the connection after it's been open.
 pub(super) async fn connection_task<TPlat: PlatformRef>(
     start_connect: service::StartConnect<TPlat::Instant>,
-    shared: Arc<Shared<TPlat>>,
+    platform: TPlat,
     connection_to_coordinator_tx: async_channel::Sender<ToBackground<TPlat>>,
     is_important: bool,
 ) {
@@ -51,7 +51,7 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
         let address = address_parse::multiaddr_to_address(&start_connect.multiaddr)
             .ok()
             .filter(|addr| {
-                shared.platform.supports_connection_type(match &addr {
+                platform.supports_connection_type(match &addr {
                     address_parse::AddressOrMultiStreamAddress::Address(addr) => From::from(addr),
                     address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(addr) => {
                         From::from(addr)
@@ -60,14 +60,12 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
             });
         let socket = address.map(|addr| match addr {
             address_parse::AddressOrMultiStreamAddress::Address(addr) => either::Left(
-                shared
-                    .platform
+                platform
                     .connect_stream(addr)
                     .map(|res| res.map(either::Left)),
             ),
             address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(addr) => either::Right(
-                shared
-                    .platform
+                platform
                     .connect_multistream(addr)
                     .map(|res| res.map(either::Right)),
             ),
@@ -88,7 +86,7 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
 
     let socket = {
         let timeout = async {
-            shared.platform.sleep_until(start_connect.timeout).await;
+            platform.sleep_until(start_connect.timeout).await;
             Err((
                 ConnectError {
                     message: "Timeout reached".into(),
@@ -190,7 +188,7 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
 // TODO: a lot of logging disappeared
 pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
     mut connection: TPlat::Stream,
-    shared: Arc<Shared<TPlat>>,
+    platform: TPlat,
     connection_id: service::ConnectionId,
     mut connection_task: service::SingleStreamConnectionTask<TPlat::Instant>,
     coordinator_to_connection: async_channel::Receiver<
@@ -222,16 +220,16 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
             connection_task.inject_coordinator_message(message);
         }
 
-        let now = shared.platform.now();
+        let now = platform.now();
 
         let (read_bytes, written_bytes, wake_up_after) = if !connection_task.is_reset_called() {
             let write_side_was_open = write_buffer.is_some();
             let writable_bytes = cmp::min(
-                shared.platform.writable_bytes(&mut connection),
+                platform.writable_bytes(&mut connection),
                 write_buffer.as_ref().map_or(0, |b| b.len()),
             );
 
-            let incoming_buffer = match shared.platform.read_buffer(&mut connection) {
+            let incoming_buffer = match platform.read_buffer(&mut connection) {
                 ReadBuffer::Reset => {
                     connection_task.reset();
                     continue;
@@ -268,19 +266,17 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
             if written_bytes != 0 {
                 // `written_bytes`non-zero when the writing side has been closed before
                 // doesn't make sense and would indicate a bug in the networking code
-                shared.platform.send(
+                platform.send(
                     &mut connection,
                     &write_buffer.as_mut().unwrap()[..written_bytes],
                 );
             }
             if write_size_closed {
-                shared.platform.close_send(&mut connection);
+                platform.close_send(&mut connection);
                 debug_assert!(write_buffer.is_some());
                 write_buffer = None;
             }
-            shared
-                .platform
-                .advance_read_cursor(&mut connection, read_bytes);
+            platform.advance_read_cursor(&mut connection, read_bytes);
 
             (read_bytes, written_bytes, wake_up_after)
         } else {
@@ -334,7 +330,7 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
             // As documented in `update_stream`, we call this function one last time in order to
             // give the possibility to the implementation to process closing the writing side
             // before the connection is dropped.
-            shared.platform.update_stream(&mut connection).await;
+            platform.update_stream(&mut connection).await;
             return;
         }
 
@@ -356,14 +352,14 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
         } else {
             async {
                 if let Some(wake_up_after) = wake_up_after {
-                    shared.platform.sleep_until(wake_up_after).await
+                    platform.sleep_until(wake_up_after).await
                 } else {
                     future::pending().await
                 }
             }
         };
         // Future that is woken up when new data is ready on the socket or more data is writable.
-        let stream_update = shared.platform.update_stream(&mut connection);
+        let stream_update = platform.update_stream(&mut connection);
         // Future that is woken up when a new message is coming from the coordinator.
         let message_from_coordinator = async {
             pin::Pin::new(&mut coordinator_to_connection).peek().await;
@@ -386,7 +382,7 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
 // TODO: a lot of logging disappeared
 pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
     mut connection: TPlat::MultiStream,
-    shared: Arc<Shared<TPlat>>,
+    platform: TPlat,
     connection_id: service::ConnectionId,
     mut connection_task: service::MultiStreamConnectionTask<TPlat::Instant, usize>,
     coordinator_to_connection: async_channel::Receiver<
@@ -423,7 +419,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
             .desired_outbound_substreams()
             .saturating_sub(pending_opening_out_substreams)
         {
-            shared.platform.open_out_substream(&mut connection);
+            platform.open_out_substream(&mut connection);
             pending_opening_out_substreams += 1;
         }
 
@@ -450,7 +446,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
             connection_task.inject_coordinator_message(message);
         }
 
-        let now = shared.platform.now();
+        let now = platform.now();
 
         // When reading/writing substreams, the substream can ask to be woken up after a certain
         // time. This variable stores the earliest time when we should be waking up.
@@ -462,12 +458,10 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
             loop {
                 let (substream, write_side_was_open) = &mut open_substreams[substream_id];
 
-                let writable_bytes = cmp::min(
-                    shared.platform.writable_bytes(substream),
-                    write_buffer.len(),
-                );
+                let writable_bytes =
+                    cmp::min(platform.writable_bytes(substream), write_buffer.len());
 
-                let incoming_buffer = match shared.platform.read_buffer(substream) {
+                let incoming_buffer = match platform.read_buffer(substream) {
                     ReadBuffer::Open(buf) => buf,
                     ReadBuffer::Closed => panic!(), // Forbidden for WebRTC.
                     ReadBuffer::Reset => {
@@ -509,15 +503,13 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
 
                 // Now update the connection.
                 if written_bytes != 0 {
-                    shared
-                        .platform
-                        .send(substream, &write_buffer[..written_bytes]);
+                    platform.send(substream, &write_buffer[..written_bytes]);
                 }
                 if must_close_writing_side {
-                    shared.platform.close_send(substream);
+                    platform.close_send(substream);
                     *write_side_was_open = false;
                 }
-                shared.platform.advance_read_cursor(substream, read_bytes);
+                platform.advance_read_cursor(substream, read_bytes);
 
                 // If the `connection_task` requires this substream to be killed, we drop the
                 // `Stream` object.
@@ -596,7 +588,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
         } else {
             async {
                 if let Some(wake_up_after) = wake_up_after {
-                    shared.platform.sleep_until(wake_up_after).await
+                    platform.sleep_until(wake_up_after).await
                 } else {
                     future::pending().await
                 }
@@ -606,11 +598,12 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
 
         // Future that is woken up when new data is ready on any of the streams.
         let streams_updated = {
-            let list = iter::once(future::Either::Right(future::pending()))
-                .chain(open_substreams.iter_mut().map(|(_, (stream, _))| {
-                    future::Either::Left(shared.platform.update_stream(stream))
-                }))
-                .collect::<future::SelectAll<_>>();
+            let list =
+                iter::once(future::Either::Right(future::pending()))
+                    .chain(open_substreams.iter_mut().map(|(_, (stream, _))| {
+                        future::Either::Left(platform.update_stream(stream))
+                    }))
+                    .collect::<future::SelectAll<_>>();
             async move {
                 list.await;
                 None
@@ -628,7 +621,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
             if remote_has_reset {
                 future::pending().await
             } else {
-                Some(shared.platform.next_substream(&mut connection).await)
+                Some(platform.next_substream(&mut connection).await)
             }
         };
 

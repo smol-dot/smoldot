@@ -1078,7 +1078,7 @@ async fn background_task<TPlat: PlatformRef>(
                     "".into(),
                     tasks::single_stream_connection_task::<TPlat>(
                         connection,
-                        shared.clone(),
+                        shared.platform.clone(),
                         connection_id,
                         connection_task,
                         coordinator_to_connection_rx,
@@ -1118,7 +1118,7 @@ async fn background_task<TPlat: PlatformRef>(
                     "".into(),
                     tasks::webrtc_multi_stream_connection_task::<TPlat>(
                         connection,
-                        shared.clone(),
+                        shared.platform.clone(),
                         connection_id,
                         connection_task,
                         coordinator_to_connection_rx,
@@ -1789,7 +1789,7 @@ async fn background_task<TPlat: PlatformRef>(
                 // Perform the connection process in a separate task.
                 let task = tasks::connection_task(
                     start_connect,
-                    shared.clone(),
+                    shared.platform.clone(),
                     shared.messages_tx.clone(),
                     is_important,
                 );
