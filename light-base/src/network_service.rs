@@ -199,6 +199,25 @@ struct SharedGuarded<TPlat: PlatformRef> {
 }
 
 enum ToBackground<TPlat: PlatformRef> {
+    ConnectionAttemptOkSingleStream {
+        pending_id: service::PendingId,
+        connection: TPlat::Stream,
+        expected_peer_id: PeerId,
+        multiaddr: Multiaddr,
+        handshake_kind: service::SingleStreamHandshakeKind,
+    },
+    ConnectionAttemptOkMultiStream {
+        pending_id: service::PendingId,
+        connection: TPlat::MultiStream,
+        expected_peer_id: PeerId,
+        multiaddr: Multiaddr,
+        handshake_kind: service::MultiStreamHandshakeKind,
+    },
+    ConnectionAttemptErr {
+        pending_id: service::PendingId,
+        expected_peer_id: PeerId,
+        is_bad_addr: bool,
+    },
     ConnectionMessage {
         connection_id: service::ConnectionId,
         message: service::ConnectionToCoordinator,
@@ -1026,6 +1045,94 @@ async fn update_round<TPlat: PlatformRef>(
     // Inject in the coordinator the messages that the connections have generated.
     loop {
         match guarded.messages_rx.next().now_or_never() {
+            Some(Some(ToBackground::ConnectionAttemptOkSingleStream {
+                pending_id,
+                connection,
+                expected_peer_id,
+                multiaddr,
+                handshake_kind,
+            })) => {
+                let (connection_id, task) = guarded
+                    .network
+                    .pending_outcome_ok_single_stream(pending_id, handshake_kind);
+                log::debug!(
+                    target: "connections",
+                    "Pending({:?}, {}) => Connection through {}",
+                    pending_id,
+                    expected_peer_id,
+                    multiaddr
+                );
+
+                let (coordinator_to_connection_tx, coordinator_to_connection_rx) = mpsc::channel(8);
+                let _prev_value = guarded
+                    .active_connections
+                    .insert(connection_id, coordinator_to_connection_tx);
+                debug_assert!(_prev_value.is_none());
+
+                //TODO: task name
+                shared.platform.spawn_task(
+                    "".into(),
+                    tasks::single_stream_connection_task::<TPlat>(
+                        connection,
+                        shared.clone(),
+                        connection_id,
+                        task,
+                        coordinator_to_connection_rx,
+                        guarded.messages_tx.clone(),
+                    ),
+                );
+            }
+            Some(Some(ToBackground::ConnectionAttemptOkMultiStream {
+                pending_id,
+                connection,
+                expected_peer_id,
+                multiaddr,
+                handshake_kind,
+            })) => {
+                let (connection_id, task) = guarded
+                    .network
+                    .pending_outcome_ok_multi_stream(pending_id, handshake_kind);
+                log::debug!(
+                    target: "connections",
+                    "Pending({:?}, {}) => Connection through {}",
+                    pending_id,
+                    expected_peer_id,
+                    multiaddr
+                );
+
+                let (coordinator_to_connection_tx, coordinator_to_connection_rx) = mpsc::channel(8);
+                let _prev_value = guarded
+                    .active_connections
+                    .insert(connection_id, coordinator_to_connection_tx);
+                debug_assert!(_prev_value.is_none());
+
+                //TODO: task name
+                shared.platform.spawn_task(
+                    "".into(),
+                    tasks::webrtc_multi_stream_connection_task::<TPlat>(
+                        connection,
+                        shared.clone(),
+                        connection_id,
+                        task,
+                        coordinator_to_connection_rx,
+                        guarded.messages_tx.clone(),
+                    ),
+                );
+            }
+            Some(Some(ToBackground::ConnectionAttemptErr {
+                pending_id,
+                expected_peer_id,
+                is_bad_addr,
+            })) => {
+                guarded.network.pending_outcome_err(pending_id, is_bad_addr);
+                for chain_index in 0..guarded.network.num_chains() {
+                    guarded.unassign_slot_and_ban(
+                        &shared.platform,
+                        chain_index,
+                        expected_peer_id.clone(),
+                    );
+                }
+            }
             Some(Some(ToBackground::ConnectionMessage {
                 connection_id,
                 message,

@@ -25,7 +25,7 @@ use alloc::{sync::Arc, vec, vec::Vec};
 use core::{cmp, iter, pin};
 use futures_channel::mpsc;
 use futures_lite::FutureExt as _;
-use futures_util::{future, FutureExt as _, StreamExt as _};
+use futures_util::{future, FutureExt as _, SinkExt as _, StreamExt as _};
 use smoldot::{
     libp2p::{collection::SubstreamFate, read_write::ReadWrite},
     network::service,
@@ -36,7 +36,7 @@ use smoldot::{
 pub(super) async fn connection_task<TPlat: PlatformRef>(
     start_connect: service::StartConnect<TPlat::Instant>,
     shared: Arc<Shared<TPlat>>,
-    connection_to_coordinator_tx: mpsc::Sender<ToBackground<TPlat>>,
+    mut connection_to_coordinator_tx: mpsc::Sender<ToBackground<TPlat>>,
     is_important: bool,
 ) {
     log::debug!(
@@ -124,18 +124,14 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
         match result {
             Ok(connection) => connection,
             Err((_, is_bad_addr)) => {
-                let mut guarded = shared.guarded.lock().await;
-                guarded
-                    .network
-                    .pending_outcome_err(start_connect.id, is_bad_addr);
-
-                for chain_index in 0..guarded.network.num_chains() {
-                    guarded.unassign_slot_and_ban(
-                        &shared.platform,
-                        chain_index,
-                        start_connect.expected_peer_id.clone(),
-                    );
-                }
+                connection_to_coordinator_tx
+                    .send(ToBackground::ConnectionAttemptErr {
+                        pending_id: start_connect.id,
+                        expected_peer_id: start_connect.expected_peer_id,
+                        is_bad_addr,
+                    })
+                    .await
+                    .unwrap();
 
                 // We wake up the background task so that the slot can potentially be
                 // assigned to a different peer.
@@ -147,18 +143,22 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
         }
     };
 
-    // Connection process is successful. Notify the network state machine.
+    // Connection process is successful. Notify the background task.
     // There exists two different kind of connections: "single stream" (for example TCP) that is
     // then divided into substreams internally, or "multi stream" where the substreams management
     // is done by the user of the smoldot crate rather than by the smoldot crate itself.
-    let mut guarded = shared.guarded.lock().await;
-    let (connection_id, socket_and_task) = match socket {
-        either::Left(socket) => {
-            let (id, task) = guarded.network.pending_outcome_ok_single_stream(
-                start_connect.id,
-                service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
-            );
-            (id, either::Left((socket, task)))
+    match socket {
+        either::Left(connection) => {
+            connection_to_coordinator_tx
+                .send(ToBackground::ConnectionAttemptOkSingleStream {
+                    pending_id: start_connect.id,
+                    connection,
+                    expected_peer_id: start_connect.expected_peer_id,
+                    multiaddr: start_connect.multiaddr,
+                    handshake_kind: service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
+                })
+                .await
+                .unwrap();
         }
         either::Right(MultiStreamWebRtcConnection {
             connection,
@@ -174,61 +174,26 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
                 .into_iter()
                 .chain(remote_tls_certificate_sha256.into_iter())
                 .collect();
-            let (id, task) = guarded.network.pending_outcome_ok_multi_stream(
-                start_connect.id,
-                service::MultiStreamHandshakeKind::WebRtc {
-                    local_tls_certificate_multihash,
-                    remote_tls_certificate_multihash,
-                },
-            );
-            (id, either::Right((connection, task)))
-        }
-    };
-    log::debug!(
-        target: "connections",
-        "Pending({:?}, {}) => Connection through {}",
-        start_connect.id,
-        start_connect.expected_peer_id,
-        start_connect.multiaddr
-    );
-
-    let (coordinator_to_connection_tx, coordinator_to_connection_rx) = mpsc::channel(8);
-    let _prev_value = guarded
-        .active_connections
-        .insert(connection_id, coordinator_to_connection_tx);
-    debug_assert!(_prev_value.is_none());
-
-    drop(guarded);
-
-    match socket_and_task {
-        either::Left((socket, task)) => {
-            single_stream_connection_task::<TPlat>(
-                socket,
-                shared.clone(),
-                connection_id,
-                task,
-                coordinator_to_connection_rx,
-                connection_to_coordinator_tx,
-            )
-            .await
-        }
-        either::Right((socket, task)) => {
-            webrtc_multi_stream_connection_task::<TPlat>(
-                socket,
-                shared.clone(),
-                connection_id,
-                task,
-                coordinator_to_connection_rx,
-                connection_to_coordinator_tx,
-            )
-            .await
+            connection_to_coordinator_tx
+                .send(ToBackground::ConnectionAttemptOkMultiStream {
+                    pending_id: start_connect.id,
+                    connection,
+                    expected_peer_id: start_connect.expected_peer_id,
+                    multiaddr: start_connect.multiaddr,
+                    handshake_kind: service::MultiStreamHandshakeKind::WebRtc {
+                        local_tls_certificate_multihash,
+                        remote_tls_certificate_multihash,
+                    },
+                })
+                .await
+                .unwrap();
         }
     }
 }
 
 /// Asynchronous task managing a specific single-stream connection after it's been open.
 // TODO: a lot of logging disappeared
-async fn single_stream_connection_task<TPlat: PlatformRef>(
+pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
     mut connection: TPlat::Stream,
     shared: Arc<Shared<TPlat>>,
     connection_id: service::ConnectionId,
@@ -424,7 +389,7 @@ async fn single_stream_connection_task<TPlat: PlatformRef>(
 /// >           buffer to not go over the frame size limit of WebRTC. It can easily be made more
 /// >           general-purpose.
 // TODO: a lot of logging disappeared
-async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
+pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
     mut connection: TPlat::MultiStream,
     shared: Arc<Shared<TPlat>>,
     connection_id: service::ConnectionId,
