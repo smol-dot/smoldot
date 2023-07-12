@@ -126,174 +126,6 @@ pub struct NetworkService<TPlat: PlatformRef> {
     on_service_killed: event_listener::Event,
 }
 
-struct BackgroundTask<TPlat: PlatformRef> {
-    /// See [`Config::platform`].
-    platform: TPlat,
-
-    /// Value provided through [`Config::identify_agent_version`].
-    identify_agent_version: String,
-
-    /// Names of the various chains the network service connects to. Used only for logging
-    /// purposes.
-    log_chain_names: Vec<String>,
-
-    /// Channel to send messages to the background task.
-    messages_tx: async_channel::Sender<ToBackground<TPlat>>,
-
-    /// Data structure holding the entire state of the networking.
-    network: service::ChainNetwork<TPlat::Instant>,
-
-    /// List of nodes that are considered as important for logging purposes.
-    // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
-    important_nodes: HashSet<PeerId, fnv::FnvBuildHasher>,
-
-    /// List of peer and chain index tuples for which no outbound slot should be assigned.
-    ///
-    /// The values are the moment when the ban expires.
-    slots_assign_backoff: HashMap<(PeerId, usize), TPlat::Instant, util::SipHasherBuild>,
-
-    /// Sending events through the public API.
-    ///
-    /// Contains either senders, or a `Future` that is currently sending an event and will yield
-    /// the senders back once it is finished.
-    event_senders: either::Either<
-        Vec<async_channel::Sender<Event>>,
-        Pin<Box<dyn future::Future<Output = Vec<async_channel::Sender<Event>>> + Send>>,
-    >,
-
-    messages_rx: async_channel::Receiver<ToBackground<TPlat>>,
-
-    active_connections: HashMap<
-        service::ConnectionId,
-        async_channel::Sender<service::CoordinatorToConnection<TPlat::Instant>>,
-        fnv::FnvBuildHasher,
-    >,
-
-    blocks_requests: HashMap<
-        service::OutRequestId,
-        oneshot::Sender<Result<Vec<protocol::BlockData>, BlocksRequestError>>,
-        fnv::FnvBuildHasher,
-    >,
-
-    grandpa_warp_sync_requests: HashMap<
-        service::OutRequestId,
-        oneshot::Sender<
-            Result<service::EncodedGrandpaWarpSyncResponse, GrandpaWarpSyncRequestError>,
-        >,
-        fnv::FnvBuildHasher,
-    >,
-
-    storage_proof_requests: HashMap<
-        service::OutRequestId,
-        oneshot::Sender<Result<service::EncodedMerkleProof, StorageProofRequestError>>,
-        fnv::FnvBuildHasher,
-    >,
-
-    call_proof_requests: HashMap<
-        service::OutRequestId,
-        oneshot::Sender<Result<service::EncodedMerkleProof, CallProofRequestError>>,
-        fnv::FnvBuildHasher,
-    >,
-
-    kademlia_discovery_operations:
-        HashMap<service::KademliaOperationId, usize, fnv::FnvBuildHasher>,
-}
-
-enum ToBackground<TPlat: PlatformRef> {
-    ConnectionAttemptOkSingleStream {
-        pending_id: service::PendingId,
-        connection: TPlat::Stream,
-        expected_peer_id: PeerId,
-        multiaddr: Multiaddr,
-        handshake_kind: service::SingleStreamHandshakeKind,
-    },
-    ConnectionAttemptOkMultiStream {
-        pending_id: service::PendingId,
-        connection: TPlat::MultiStream,
-        expected_peer_id: PeerId,
-        multiaddr: Multiaddr,
-        handshake_kind: service::MultiStreamHandshakeKind,
-    },
-    ConnectionAttemptErr {
-        pending_id: service::PendingId,
-        expected_peer_id: PeerId,
-        is_bad_addr: bool,
-    },
-    ConnectionMessage {
-        connection_id: service::ConnectionId,
-        message: service::ConnectionToCoordinator,
-    },
-    // TODO: serialize the request before sending over channel
-    StartBlocksRequest {
-        target: PeerId, // TODO: takes by value because of future longevity issue
-        chain_index: usize,
-        config: protocol::BlocksRequestConfig,
-        timeout: Duration,
-        result: oneshot::Sender<Result<Vec<protocol::BlockData>, BlocksRequestError>>,
-    },
-    // TODO: serialize the request before sending over channel
-    StartGrandpaWarpSyncRequest {
-        target: PeerId,
-        chain_index: usize,
-        begin_hash: [u8; 32],
-        timeout: Duration,
-        result: oneshot::Sender<
-            Result<service::EncodedGrandpaWarpSyncResponse, GrandpaWarpSyncRequestError>,
-        >,
-    },
-    // TODO: serialize the request before sending over channel
-    StartStorageProofRequest {
-        chain_index: usize,
-        target: PeerId,
-        config: protocol::StorageProofRequestConfig<vec::IntoIter<Vec<u8>>>,
-        timeout: Duration,
-        result: oneshot::Sender<Result<service::EncodedMerkleProof, StorageProofRequestError>>,
-    },
-    // TODO: serialize the request before sending over channel
-    StartCallProofRequest {
-        chain_index: usize,
-        target: PeerId, // TODO: takes by value because of futures longevity issue
-        config: protocol::CallProofRequestConfig<'static, vec::IntoIter<Vec<u8>>>,
-        timeout: Duration,
-        result: oneshot::Sender<Result<service::EncodedMerkleProof, CallProofRequestError>>,
-    },
-    SetLocalBestBlock {
-        chain_index: usize,
-        best_hash: [u8; 32],
-        best_number: u64,
-    },
-    SetLocalGrandpaState {
-        chain_index: usize,
-        grandpa_state: service::GrandpaState,
-    },
-    AnnounceTransaction {
-        chain_index: usize,
-        transaction: Vec<u8>,
-        result: oneshot::Sender<Vec<PeerId>>,
-    },
-    SendBlockAnnounce {
-        target: PeerId,
-        chain_index: usize,
-        scale_encoded_header: Vec<u8>,
-        is_best: bool,
-        result: oneshot::Sender<Result<(), QueueNotificationError>>,
-    },
-    Discover {
-        now: TPlat::Instant,
-        chain_index: usize,
-        list: vec::IntoIter<(PeerId, vec::IntoIter<Multiaddr>)>,
-        important_nodes: bool,
-    },
-    DiscoveredNodes {
-        chain_index: usize,
-        result: oneshot::Sender<Vec<(PeerId, Vec<Multiaddr>)>>,
-    },
-    PeersList {
-        result: oneshot::Sender<Vec<PeerId>>,
-    },
-    StartDiscovery,
-}
-
 impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// Initializes the network service with the given configuration.
     ///
@@ -924,6 +756,174 @@ pub enum QueueNotificationError {
     /// Error during the queuing.
     #[display(fmt = "{_0}")]
     Queue(peers::QueueNotificationError),
+}
+
+enum ToBackground<TPlat: PlatformRef> {
+    ConnectionAttemptOkSingleStream {
+        pending_id: service::PendingId,
+        connection: TPlat::Stream,
+        expected_peer_id: PeerId,
+        multiaddr: Multiaddr,
+        handshake_kind: service::SingleStreamHandshakeKind,
+    },
+    ConnectionAttemptOkMultiStream {
+        pending_id: service::PendingId,
+        connection: TPlat::MultiStream,
+        expected_peer_id: PeerId,
+        multiaddr: Multiaddr,
+        handshake_kind: service::MultiStreamHandshakeKind,
+    },
+    ConnectionAttemptErr {
+        pending_id: service::PendingId,
+        expected_peer_id: PeerId,
+        is_bad_addr: bool,
+    },
+    ConnectionMessage {
+        connection_id: service::ConnectionId,
+        message: service::ConnectionToCoordinator,
+    },
+    // TODO: serialize the request before sending over channel
+    StartBlocksRequest {
+        target: PeerId, // TODO: takes by value because of future longevity issue
+        chain_index: usize,
+        config: protocol::BlocksRequestConfig,
+        timeout: Duration,
+        result: oneshot::Sender<Result<Vec<protocol::BlockData>, BlocksRequestError>>,
+    },
+    // TODO: serialize the request before sending over channel
+    StartGrandpaWarpSyncRequest {
+        target: PeerId,
+        chain_index: usize,
+        begin_hash: [u8; 32],
+        timeout: Duration,
+        result: oneshot::Sender<
+            Result<service::EncodedGrandpaWarpSyncResponse, GrandpaWarpSyncRequestError>,
+        >,
+    },
+    // TODO: serialize the request before sending over channel
+    StartStorageProofRequest {
+        chain_index: usize,
+        target: PeerId,
+        config: protocol::StorageProofRequestConfig<vec::IntoIter<Vec<u8>>>,
+        timeout: Duration,
+        result: oneshot::Sender<Result<service::EncodedMerkleProof, StorageProofRequestError>>,
+    },
+    // TODO: serialize the request before sending over channel
+    StartCallProofRequest {
+        chain_index: usize,
+        target: PeerId, // TODO: takes by value because of futures longevity issue
+        config: protocol::CallProofRequestConfig<'static, vec::IntoIter<Vec<u8>>>,
+        timeout: Duration,
+        result: oneshot::Sender<Result<service::EncodedMerkleProof, CallProofRequestError>>,
+    },
+    SetLocalBestBlock {
+        chain_index: usize,
+        best_hash: [u8; 32],
+        best_number: u64,
+    },
+    SetLocalGrandpaState {
+        chain_index: usize,
+        grandpa_state: service::GrandpaState,
+    },
+    AnnounceTransaction {
+        chain_index: usize,
+        transaction: Vec<u8>,
+        result: oneshot::Sender<Vec<PeerId>>,
+    },
+    SendBlockAnnounce {
+        target: PeerId,
+        chain_index: usize,
+        scale_encoded_header: Vec<u8>,
+        is_best: bool,
+        result: oneshot::Sender<Result<(), QueueNotificationError>>,
+    },
+    Discover {
+        now: TPlat::Instant,
+        chain_index: usize,
+        list: vec::IntoIter<(PeerId, vec::IntoIter<Multiaddr>)>,
+        important_nodes: bool,
+    },
+    DiscoveredNodes {
+        chain_index: usize,
+        result: oneshot::Sender<Vec<(PeerId, Vec<Multiaddr>)>>,
+    },
+    PeersList {
+        result: oneshot::Sender<Vec<PeerId>>,
+    },
+    StartDiscovery,
+}
+
+struct BackgroundTask<TPlat: PlatformRef> {
+    /// See [`Config::platform`].
+    platform: TPlat,
+
+    /// Value provided through [`Config::identify_agent_version`].
+    identify_agent_version: String,
+
+    /// Names of the various chains the network service connects to. Used only for logging
+    /// purposes.
+    log_chain_names: Vec<String>,
+
+    /// Channel to send messages to the background task.
+    messages_tx: async_channel::Sender<ToBackground<TPlat>>,
+
+    /// Data structure holding the entire state of the networking.
+    network: service::ChainNetwork<TPlat::Instant>,
+
+    /// List of nodes that are considered as important for logging purposes.
+    // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
+    important_nodes: HashSet<PeerId, fnv::FnvBuildHasher>,
+
+    /// List of peer and chain index tuples for which no outbound slot should be assigned.
+    ///
+    /// The values are the moment when the ban expires.
+    slots_assign_backoff: HashMap<(PeerId, usize), TPlat::Instant, util::SipHasherBuild>,
+
+    /// Sending events through the public API.
+    ///
+    /// Contains either senders, or a `Future` that is currently sending an event and will yield
+    /// the senders back once it is finished.
+    event_senders: either::Either<
+        Vec<async_channel::Sender<Event>>,
+        Pin<Box<dyn future::Future<Output = Vec<async_channel::Sender<Event>>> + Send>>,
+    >,
+
+    messages_rx: async_channel::Receiver<ToBackground<TPlat>>,
+
+    active_connections: HashMap<
+        service::ConnectionId,
+        async_channel::Sender<service::CoordinatorToConnection<TPlat::Instant>>,
+        fnv::FnvBuildHasher,
+    >,
+
+    blocks_requests: HashMap<
+        service::OutRequestId,
+        oneshot::Sender<Result<Vec<protocol::BlockData>, BlocksRequestError>>,
+        fnv::FnvBuildHasher,
+    >,
+
+    grandpa_warp_sync_requests: HashMap<
+        service::OutRequestId,
+        oneshot::Sender<
+            Result<service::EncodedGrandpaWarpSyncResponse, GrandpaWarpSyncRequestError>,
+        >,
+        fnv::FnvBuildHasher,
+    >,
+
+    storage_proof_requests: HashMap<
+        service::OutRequestId,
+        oneshot::Sender<Result<service::EncodedMerkleProof, StorageProofRequestError>>,
+        fnv::FnvBuildHasher,
+    >,
+
+    call_proof_requests: HashMap<
+        service::OutRequestId,
+        oneshot::Sender<Result<service::EncodedMerkleProof, CallProofRequestError>>,
+        fnv::FnvBuildHasher,
+    >,
+
+    kademlia_discovery_operations:
+        HashMap<service::KademliaOperationId, usize, fnv::FnvBuildHasher>,
 }
 
 async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
