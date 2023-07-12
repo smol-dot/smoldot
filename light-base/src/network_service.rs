@@ -47,8 +47,8 @@ use alloc::{
 };
 use async_lock::Mutex;
 use core::{cmp, num::NonZeroUsize, task::Poll, time::Duration};
-use futures_channel::{mpsc, oneshot};
-use futures_util::{future, stream, FutureExt as _, SinkExt as _, StreamExt as _};
+use futures_channel::oneshot;
+use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use hashbrown::{hash_map, HashMap, HashSet};
 use itertools::Itertools as _;
 use smoldot::{
@@ -137,6 +137,9 @@ struct Shared<TPlat: PlatformRef> {
     /// purposes.
     log_chain_names: Vec<String>,
 
+    /// Channel to send messages to the background task.
+    messages_tx: async_channel::Sender<ToBackground<TPlat>>,
+
     /// Event to notify when the background task needs to be waken up.
     ///
     /// Waking up this event guarantees a full loop of the background task. In other words,
@@ -158,13 +161,11 @@ struct SharedGuarded<TPlat: PlatformRef> {
     /// The values are the moment when the ban expires.
     slots_assign_backoff: HashMap<(PeerId, usize), TPlat::Instant, util::SipHasherBuild>,
 
-    messages_tx: mpsc::Sender<ToBackground<TPlat>>,
-
-    messages_rx: mpsc::Receiver<ToBackground<TPlat>>,
+    messages_rx: async_channel::Receiver<ToBackground<TPlat>>,
 
     active_connections: HashMap<
         service::ConnectionId,
-        mpsc::Sender<service::CoordinatorToConnection<TPlat::Instant>>,
+        async_channel::Sender<service::CoordinatorToConnection<TPlat::Instant>>,
         fnv::FnvBuildHasher,
     >,
 
@@ -300,7 +301,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// slowing down.
     pub async fn new(config: Config<TPlat>) -> (Arc<Self>, Vec<stream::BoxStream<'static, Event>>) {
         let (event_senders, event_receivers): (Vec<_>, Vec<_>) = (0..config.num_events_receivers)
-            .map(|_| mpsc::channel(16))
+            .map(|_| async_channel::bounded(16))
             .unzip();
 
         let num_chains = config.chains.len();
@@ -335,7 +336,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 
         let mut abort_handles = Vec::new();
 
-        let (messages_from_connections_tx, messages_from_connections_rx) = mpsc::channel(32);
+        let (messages_from_connections_tx, messages_from_connections_rx) =
+            async_channel::bounded(32);
 
         let shared = Arc::new(Shared {
             guarded: Mutex::new(SharedGuarded {
@@ -355,7 +357,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 ),
                 important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
                 active_connections: HashMap::with_capacity_and_hasher(32, Default::default()),
-                messages_tx: messages_from_connections_tx,
                 messages_rx: messages_from_connections_rx,
                 blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
                 grandpa_warp_sync_requests: HashMap::with_capacity_and_hasher(
@@ -372,6 +373,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             platform: config.platform,
             identify_agent_version: config.identify_agent_version,
             log_chain_names,
+            messages_tx: messages_from_connections_tx,
             wake_up_main_background_task: event_listener::Event::new(),
         });
 
@@ -456,24 +458,19 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         config: protocol::BlocksRequestConfig,
         timeout: Duration,
     ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
-        let rx = {
-            let mut guarded = self.shared.guarded.lock().await;
+        let (tx, rx) = oneshot::channel();
 
-            let (tx, rx) = oneshot::channel();
-            guarded
-                .messages_tx
-                .send(ToBackground::StartBlocksRequest {
-                    target: target.clone(),
-                    chain_index,
-                    config,
-                    timeout,
-                    result: tx,
-                })
-                .await
-                .unwrap();
-
-            rx
-        };
+        self.shared
+            .messages_tx
+            .send(ToBackground::StartBlocksRequest {
+                target: target.clone(),
+                chain_index,
+                config,
+                timeout,
+                result: tx,
+            })
+            .await
+            .unwrap();
 
         self.shared.wake_up_main_background_task.notify(1);
 
@@ -537,24 +534,19 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         begin_hash: [u8; 32],
         timeout: Duration,
     ) -> Result<service::EncodedGrandpaWarpSyncResponse, GrandpaWarpSyncRequestError> {
-        let rx = {
-            let mut guarded = self.shared.guarded.lock().await;
+        let (tx, rx) = oneshot::channel();
 
-            let (tx, rx) = oneshot::channel();
-            guarded
-                .messages_tx
-                .send(ToBackground::StartGrandpaWarpSyncRequest {
-                    target: target.clone(),
-                    chain_index,
-                    begin_hash,
-                    timeout,
-                    result: tx,
-                })
-                .await
-                .unwrap();
-
-            rx
-        };
+        self.shared
+            .messages_tx
+            .send(ToBackground::StartGrandpaWarpSyncRequest {
+                target: target.clone(),
+                chain_index,
+                begin_hash,
+                timeout,
+                result: tx,
+            })
+            .await
+            .unwrap();
 
         self.shared.wake_up_main_background_task.notify(1);
 
@@ -594,9 +586,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         best_number: u64,
     ) {
         self.shared
-            .guarded
-            .lock()
-            .await
             .messages_tx
             .send(ToBackground::SetLocalBestBlock {
                 chain_index,
@@ -614,9 +603,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         grandpa_state: service::GrandpaState,
     ) {
         self.shared
-            .guarded
-            .lock()
-            .await
             .messages_tx
             .send(ToBackground::SetLocalGrandpaState {
                 chain_index,
@@ -636,31 +622,26 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + Clone>>,
         timeout: Duration,
     ) -> Result<service::EncodedMerkleProof, StorageProofRequestError> {
-        let rx = {
-            let mut guarded = self.shared.guarded.lock().await;
+        let (tx, rx) = oneshot::channel();
 
-            let (tx, rx) = oneshot::channel();
-            guarded
-                .messages_tx
-                .send(ToBackground::StartStorageProofRequest {
-                    target: target.clone(),
-                    chain_index,
-                    config: protocol::StorageProofRequestConfig {
-                        block_hash: config.block_hash,
-                        keys: config
-                            .keys
-                            .map(|key| key.as_ref().to_vec()) // TODO: to_vec() overhead
-                            .collect::<Vec<_>>()
-                            .into_iter(),
-                    },
-                    timeout,
-                    result: tx,
-                })
-                .await
-                .unwrap();
-
-            rx
-        };
+        self.shared
+            .messages_tx
+            .send(ToBackground::StartStorageProofRequest {
+                target: target.clone(),
+                chain_index,
+                config: protocol::StorageProofRequestConfig {
+                    block_hash: config.block_hash,
+                    keys: config
+                        .keys
+                        .map(|key| key.as_ref().to_vec()) // TODO: to_vec() overhead
+                        .collect::<Vec<_>>()
+                        .into_iter(),
+                },
+                timeout,
+                result: tx,
+            })
+            .await
+            .unwrap();
 
         self.shared.wake_up_main_background_task.notify(1);
 
@@ -702,32 +683,27 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         config: protocol::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>>>,
         timeout: Duration,
     ) -> Result<EncodedMerkleProof, CallProofRequestError> {
-        let rx = {
-            let mut guarded = self.shared.guarded.lock().await;
+        let (tx, rx) = oneshot::channel();
 
-            let (tx, rx) = oneshot::channel();
-            guarded
-                .messages_tx
-                .send(ToBackground::StartCallProofRequest {
-                    target: target.clone(),
-                    chain_index,
-                    config: protocol::CallProofRequestConfig {
-                        block_hash: config.block_hash,
-                        method: config.method.into_owned().into(),
-                        parameter_vectored: config
-                            .parameter_vectored
-                            .map(|v| v.as_ref().to_vec()) // TODO: to_vec() overhead
-                            .collect::<Vec<_>>()
-                            .into_iter(),
-                    },
-                    timeout,
-                    result: tx,
-                })
-                .await
-                .unwrap();
-
-            rx
-        };
+        self.shared
+            .messages_tx
+            .send(ToBackground::StartCallProofRequest {
+                target: target.clone(),
+                chain_index,
+                config: protocol::CallProofRequestConfig {
+                    block_hash: config.block_hash,
+                    method: config.method.into_owned().into(),
+                    parameter_vectored: config
+                        .parameter_vectored
+                        .map(|v| v.as_ref().to_vec()) // TODO: to_vec() overhead
+                        .collect::<Vec<_>>()
+                        .into_iter(),
+                },
+                timeout,
+                result: tx,
+            })
+            .await
+            .unwrap();
 
         self.shared.wake_up_main_background_task.notify(1);
 
@@ -772,22 +748,17 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         chain_index: usize,
         transaction: &[u8],
     ) -> Vec<PeerId> {
-        let rx = {
-            let (tx, rx) = oneshot::channel();
-            self.shared
-                .guarded
-                .lock()
-                .await
-                .messages_tx
-                .send(ToBackground::AnnounceTransaction {
-                    chain_index,
-                    transaction: transaction.to_vec(), // TODO: ovheread
-                    result: tx,
-                })
-                .await
-                .unwrap();
-            rx
-        };
+        let (tx, rx) = oneshot::channel();
+
+        self.shared
+            .messages_tx
+            .send(ToBackground::AnnounceTransaction {
+                chain_index,
+                transaction: transaction.to_vec(), // TODO: ovheread
+                result: tx,
+            })
+            .await
+            .unwrap();
 
         self.shared.wake_up_main_background_task.notify(1);
 
@@ -802,24 +773,19 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         scale_encoded_header: &[u8],
         is_best: bool,
     ) -> Result<(), QueueNotificationError> {
-        let rx = {
-            let (tx, rx) = oneshot::channel();
-            self.shared
-                .guarded
-                .lock()
-                .await
-                .messages_tx
-                .send(ToBackground::SendBlockAnnounce {
-                    target: target.clone(), // TODO: overhead
-                    chain_index,
-                    scale_encoded_header: scale_encoded_header.to_vec(), // TODO: overhead
-                    is_best,
-                    result: tx,
-                })
-                .await
-                .unwrap();
-            rx
-        };
+        let (tx, rx) = oneshot::channel();
+
+        self.shared
+            .messages_tx
+            .send(ToBackground::SendBlockAnnounce {
+                target: target.clone(), // TODO: overhead
+                chain_index,
+                scale_encoded_header: scale_encoded_header.to_vec(), // TODO: overhead
+                is_best,
+                result: tx,
+            })
+            .await
+            .unwrap();
 
         self.shared.wake_up_main_background_task.notify(1);
 
@@ -838,9 +804,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         important_nodes: bool,
     ) {
         self.shared
-            .guarded
-            .lock()
-            .await
             .messages_tx
             .send(ToBackground::Discover {
                 now: now.clone(), // TODO: overhead
@@ -871,22 +834,19 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         &self,
         chain_index: usize,
     ) -> impl Iterator<Item = (PeerId, impl Iterator<Item = Multiaddr>)> {
-        let rx = {
-            let (tx, rx) = oneshot::channel();
-            self.shared
-                .guarded
-                .lock()
-                .await
-                .messages_tx
-                .send(ToBackground::DiscoveredNodes {
-                    chain_index,
-                    result: tx,
-                })
-                .await
-                .unwrap();
-            rx
-        };
+        let (tx, rx) = oneshot::channel();
+
+        self.shared
+            .messages_tx
+            .send(ToBackground::DiscoveredNodes {
+                chain_index,
+                result: tx,
+            })
+            .await
+            .unwrap();
+
         self.shared.wake_up_main_background_task.notify(1);
+
         rx.await
             .unwrap()
             .into_iter()
@@ -896,21 +856,13 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
     /// with.
     pub async fn peers_list(&self) -> impl Iterator<Item = PeerId> {
-        let rx = {
-            let (tx, rx) = oneshot::channel();
-            self.shared
-                .guarded
-                .lock()
-                .await
-                .messages_tx
-                .send(ToBackground::PeersList { result: tx })
-                .await
-                .unwrap();
-            rx
-        };
-
+        let (tx, rx) = oneshot::channel();
+        self.shared
+            .messages_tx
+            .send(ToBackground::PeersList { result: tx })
+            .await
+            .unwrap();
         self.shared.wake_up_main_background_task.notify(1);
-
         rx.await.unwrap().into_iter()
     }
 }
@@ -1023,7 +975,7 @@ pub enum QueueNotificationError {
 
 async fn background_task<TPlat: PlatformRef>(
     shared: Arc<Shared<TPlat>>,
-    mut event_senders: Vec<mpsc::Sender<Event>>,
+    mut event_senders: Vec<async_channel::Sender<Event>>,
 ) {
     loop {
         // In order to guarantee that waking up `wake_up_background` will run an entirely
@@ -1038,7 +990,7 @@ async fn background_task<TPlat: PlatformRef>(
 
 async fn update_round<TPlat: PlatformRef>(
     shared: &Arc<Shared<TPlat>>,
-    event_senders: &mut [mpsc::Sender<Event>],
+    event_senders: &mut [async_channel::Sender<Event>],
 ) {
     let mut guarded = shared.guarded.lock().await;
 
@@ -1063,7 +1015,8 @@ async fn update_round<TPlat: PlatformRef>(
                     multiaddr
                 );
 
-                let (coordinator_to_connection_tx, coordinator_to_connection_rx) = mpsc::channel(8);
+                let (coordinator_to_connection_tx, coordinator_to_connection_rx) =
+                    async_channel::bounded(8);
                 let _prev_value = guarded
                     .active_connections
                     .insert(connection_id, coordinator_to_connection_tx);
@@ -1078,7 +1031,7 @@ async fn update_round<TPlat: PlatformRef>(
                         connection_id,
                         task,
                         coordinator_to_connection_rx,
-                        guarded.messages_tx.clone(),
+                        shared.messages_tx.clone(),
                     ),
                 );
             }
@@ -1100,7 +1053,8 @@ async fn update_round<TPlat: PlatformRef>(
                     multiaddr
                 );
 
-                let (coordinator_to_connection_tx, coordinator_to_connection_rx) = mpsc::channel(8);
+                let (coordinator_to_connection_tx, coordinator_to_connection_rx) =
+                    async_channel::bounded(8);
                 let _prev_value = guarded
                     .active_connections
                     .insert(connection_id, coordinator_to_connection_tx);
@@ -1115,7 +1069,7 @@ async fn update_round<TPlat: PlatformRef>(
                         connection_id,
                         task,
                         coordinator_to_connection_rx,
-                        guarded.messages_tx.clone(),
+                        shared.messages_tx.clone(),
                     ),
                 );
             }
@@ -1834,7 +1788,7 @@ async fn update_round<TPlat: PlatformRef>(
         let task = tasks::connection_task(
             start_connect,
             shared.clone(),
-            guarded.messages_tx.clone(),
+            shared.messages_tx.clone(),
             is_important,
         );
 

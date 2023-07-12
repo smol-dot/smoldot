@@ -23,9 +23,8 @@ use crate::platform::{
 
 use alloc::{sync::Arc, vec, vec::Vec};
 use core::{cmp, iter, pin};
-use futures_channel::mpsc;
 use futures_lite::FutureExt as _;
-use futures_util::{future, FutureExt as _, SinkExt as _, StreamExt as _};
+use futures_util::{future, FutureExt as _, StreamExt as _};
 use smoldot::{
     libp2p::{collection::SubstreamFate, read_write::ReadWrite},
     network::service,
@@ -36,7 +35,7 @@ use smoldot::{
 pub(super) async fn connection_task<TPlat: PlatformRef>(
     start_connect: service::StartConnect<TPlat::Instant>,
     shared: Arc<Shared<TPlat>>,
-    mut connection_to_coordinator_tx: mpsc::Sender<ToBackground<TPlat>>,
+    connection_to_coordinator_tx: async_channel::Sender<ToBackground<TPlat>>,
     is_important: bool,
 ) {
     log::debug!(
@@ -198,8 +197,10 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
     shared: Arc<Shared<TPlat>>,
     connection_id: service::ConnectionId,
     mut connection_task: service::SingleStreamConnectionTask<TPlat::Instant>,
-    coordinator_to_connection: mpsc::Receiver<service::CoordinatorToConnection<TPlat::Instant>>,
-    mut connection_to_coordinator: mpsc::Sender<ToBackground<TPlat>>,
+    coordinator_to_connection: async_channel::Receiver<
+        service::CoordinatorToConnection<TPlat::Instant>,
+    >,
+    connection_to_coordinator: async_channel::Sender<ToBackground<TPlat>>,
 ) {
     // We need to use `peek()` on this future later down this function.
     let mut coordinator_to_connection = coordinator_to_connection.peekable();
@@ -394,8 +395,10 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
     shared: Arc<Shared<TPlat>>,
     connection_id: service::ConnectionId,
     mut connection_task: service::MultiStreamConnectionTask<TPlat::Instant, usize>,
-    coordinator_to_connection: mpsc::Receiver<service::CoordinatorToConnection<TPlat::Instant>>,
-    mut connection_to_coordinator: mpsc::Sender<ToBackground<TPlat>>,
+    coordinator_to_connection: async_channel::Receiver<
+        service::CoordinatorToConnection<TPlat::Instant>,
+    >,
+    connection_to_coordinator: async_channel::Sender<ToBackground<TPlat>>,
 ) {
     // We need to use `peek()` on this future later down this function.
     let mut coordinator_to_connection = coordinator_to_connection.peekable();
