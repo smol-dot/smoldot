@@ -24,7 +24,6 @@ use core::{
     num::{NonZeroU32, NonZeroUsize},
     time::Duration,
 };
-use futures_channel::mpsc;
 use futures_lite::FutureExt as _;
 use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use hashbrown::HashMap;
@@ -48,7 +47,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
     relay_chain_block_number_bytes: usize,
     parachain_id: u32,
-    from_foreground: mpsc::Receiver<ToBackground>,
+    from_foreground: async_channel::Receiver<ToBackground>,
     network_chain_index: usize,
     from_network_service: stream::BoxStream<'static, network_service::Event>,
 ) {
@@ -113,7 +112,7 @@ struct ParachainBackgroundTask<TPlat: PlatformRef> {
     platform: TPlat,
 
     /// Channel receiving message from the sync service frontend.
-    from_foreground: mpsc::Receiver<ToBackground>,
+    from_foreground: async_channel::Receiver<ToBackground>,
 
     /// Number of bytes to use to encode the parachain block numbers in headers.
     block_number_bytes: usize,
@@ -159,7 +158,7 @@ enum ParachainBackgroundState<TPlat: PlatformRef> {
         ///
         /// These subscriptions are pending and no notification should be sent to them until the
         /// subscription to the relay chain runtime service is finished.
-        all_subscriptions: Vec<mpsc::Sender<super::Notification>>,
+        all_subscriptions: Vec<async_channel::Sender<super::Notification>>,
 
         /// Future when the subscription has finished.
         subscribe_future: future::BoxFuture<'static, runtime_service::SubscribeAll<TPlat>>,
@@ -171,7 +170,7 @@ enum ParachainBackgroundState<TPlat: PlatformRef> {
 
 struct ParachainBackgroundTaskAfterSubscription<TPlat: PlatformRef> {
     /// List of senders that get notified when the tree of blocks is modified.
-    all_subscriptions: Vec<mpsc::Sender<super::Notification>>,
+    all_subscriptions: Vec<async_channel::Sender<super::Notification>>,
 
     /// Stream of blocks of the relay chain this parachain is registered on.
     /// The buffer size should be large enough so that, if the CPU is busy, it doesn't become full
@@ -430,7 +429,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     all_subscriptions, ..
                 },
             ) => {
-                let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
+                let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
 
                 // No known finalized parahead.
                 let _ = send_back.send(super::SubscribeAll {
@@ -450,7 +449,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 },
                 ParachainBackgroundState::Subscribed(runtime_subscription),
             ) => {
-                let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
+                let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
 
                 // There are two possibilities here: either we know of any recent finalized
                 // parahead, or we don't. In case where we don't know of any finalized parahead
@@ -894,7 +893,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     // Elements in `all_subscriptions` are removed one by one and
                     // inserted back if the channel is still open.
                     for index in (0..runtime_subscription.all_subscriptions.len()).rev() {
-                        let mut sender = runtime_subscription.all_subscriptions.swap_remove(index);
+                        let sender = runtime_subscription.all_subscriptions.swap_remove(index);
                         let notif = super::Notification::Finalized {
                             hash,
                             best_block_hash,
@@ -939,8 +938,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         // Elements in `all_subscriptions` are removed one by one and
                         // inserted back if the channel is still open.
                         for index in (0..runtime_subscription.all_subscriptions.len()).rev() {
-                            let mut sender =
-                                runtime_subscription.all_subscriptions.swap_remove(index);
+                            let sender = runtime_subscription.all_subscriptions.swap_remove(index);
                             let notif = super::Notification::BestBlockChanged { hash: parahash };
                             if sender.try_send(notif).is_ok() {
                                 runtime_subscription.all_subscriptions.push(sender);
@@ -996,7 +994,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                             // Elements in `all_subscriptions` are removed one by one and
                             // inserted back if the channel is still open.
                             for index in (0..runtime_subscription.all_subscriptions.len()).rev() {
-                                let mut sender =
+                                let sender =
                                     runtime_subscription.all_subscriptions.swap_remove(index);
                                 let notif =
                                     super::Notification::BestBlockChanged { hash: parahash };
@@ -1037,7 +1035,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     // Elements in `all_subscriptions` are removed one by one and
                     // inserted back if the channel is still open.
                     for index in (0..runtime_subscription.all_subscriptions.len()).rev() {
-                        let mut sender = runtime_subscription.all_subscriptions.swap_remove(index);
+                        let sender = runtime_subscription.all_subscriptions.swap_remove(index);
                         let notif = super::Notification::Block(super::BlockNotification {
                             is_new_best,
                             parent_hash,
