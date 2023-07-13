@@ -347,9 +347,7 @@ impl Noise {
             // continue receiving messages if it is desired.
             self.rx_buffer_encrypted.clear();
 
-            if let Err(err) = result {
-                return Err(err);
-            }
+            result?;
         }
     }
 
@@ -427,7 +425,7 @@ impl<'a> Encrypt<'a> {
                 if len_avail < 19 {
                     return None;
                 }
-                return Some(&mut buffer[2..cmp::min(len, len_avail - 16)]);
+                Some(&mut buffer[2..cmp::min(len, len_avail - 16)])
             });
 
         let (dest1_first, dest1_rest) = self.destination.1.split_at_mut(cmp::min(
@@ -452,7 +450,7 @@ impl<'a> Encrypt<'a> {
                 if len < 19 {
                     return None;
                 }
-                return Some(&mut buffer[2..len - 16]);
+                Some(&mut buffer[2..len - 16])
             });
 
         dest0
@@ -492,14 +490,14 @@ impl<'a> Encrypt<'a> {
             // Write the libp2p length prefix and advance `self.destination`.
             {
                 let message_length_prefix = u16::try_from(next_message_size).unwrap().to_be_bytes();
-                if self.destination.0.len() >= 1 {
+                if !self.destination.0.is_empty() {
                     self.destination.0[0] = message_length_prefix[0];
                     self.destination.0 = &mut self.destination.0[1..];
                 } else {
                     self.destination.1[0] = message_length_prefix[0];
                     self.destination.1 = &mut self.destination.1[1..];
                 }
-                if self.destination.0.len() >= 1 {
+                if !self.destination.0.is_empty() {
                     self.destination.0[0] = message_length_prefix[1];
                     self.destination.0 = &mut self.destination.0[1..];
                 } else {
@@ -655,10 +653,10 @@ impl HandshakeInProgress {
                 hash[PROTOCOL_NAME.len()..].fill(0);
             } else {
                 let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
-                sha2::Digest::update(&mut hasher, &PROTOCOL_NAME);
+                sha2::Digest::update(&mut hasher, PROTOCOL_NAME);
                 sha2::Digest::finalize_into(
                     hasher,
-                    &mut sha2::digest::generic_array::GenericArray::from_mut_slice(&mut hash),
+                    sha2::digest::generic_array::GenericArray::from_mut_slice(&mut hash),
                 );
             }
         }
@@ -677,7 +675,7 @@ impl HandshakeInProgress {
             hash,
             local_ephemeral_private_key,
             local_static_private_key: config.key.private_key.clone(),
-            local_static_public_key: config.key.public_key.clone(),
+            local_static_public_key: config.key.public_key,
             remote_ephemeral_public_key: x25519_dalek::PublicKey::from([0; 32]),
             remote_static_public_key: x25519_dalek::PublicKey::from([0; 32]),
             remote_public_key: None,
@@ -1376,10 +1374,7 @@ impl CipherState {
                     [..intermediary_buffer_len - (payload0_length - first_chunk_end_offset)],
             );
             chacha20::cipher::StreamCipher::apply_keystream(&mut cipher, &mut intermediary_buffer);
-            poly1305::universal_hash::UniversalHash::update_padded(
-                &mut mac,
-                &mut intermediary_buffer,
-            );
+            poly1305::universal_hash::UniversalHash::update_padded(&mut mac, &intermediary_buffer);
             destination.0[first_chunk_end_offset..payload0_length]
                 .copy_from_slice(&intermediary_buffer[..payload0_length - first_chunk_end_offset]);
             destination.1[..intermediary_buffer_len - (payload0_length - first_chunk_end_offset)]
@@ -1523,7 +1518,7 @@ impl CipherState {
         let obtained_mac_bytes = &message_data[message_data.len() - 16..];
         if poly1305::universal_hash::UniversalHash::verify(
             mac,
-            &poly1305::universal_hash::generic_array::GenericArray::from_slice(obtained_mac_bytes),
+            poly1305::universal_hash::generic_array::GenericArray::from_slice(obtained_mac_bytes),
         )
         .is_err()
         {
@@ -1581,11 +1576,11 @@ impl CipherState {
 // Implementation of `MixHash`. See <https://noiseprotocol.org/noise.html#the-symmetricstate-object>.
 fn mix_hash(hash: &mut [u8; 32], data: &[u8]) {
     let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
-    sha2::Digest::update(&mut hasher, &*hash);
+    sha2::Digest::update(&mut hasher, *hash);
     sha2::Digest::update(&mut hasher, data);
     sha2::Digest::finalize_into(
         hasher,
-        &mut sha2::digest::generic_array::GenericArray::from_mut_slice(hash),
+        sha2::digest::generic_array::GenericArray::from_mut_slice(hash),
     );
 }
 
@@ -1610,7 +1605,7 @@ fn hkdf(chaining_key: &[u8; 32], input_key_material: &[u8]) -> ([u8; 32], [u8; 3
 
         let intermediary_result = {
             let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
-            sha2::Digest::update(&mut hasher, &ipad);
+            sha2::Digest::update(&mut hasher, ipad);
             for data in data {
                 sha2::Digest::update(&mut hasher, data);
             }
@@ -1618,8 +1613,8 @@ fn hkdf(chaining_key: &[u8; 32], input_key_material: &[u8]) -> ([u8; 32], [u8; 3
         };
 
         let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
-        sha2::Digest::update(&mut hasher, &opad);
-        sha2::Digest::update(&mut hasher, &intermediary_result);
+        sha2::Digest::update(&mut hasher, opad);
+        sha2::Digest::update(&mut hasher, intermediary_result);
         sha2::Digest::finalize(hasher).into()
     }
 

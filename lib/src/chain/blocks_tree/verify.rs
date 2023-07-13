@@ -78,7 +78,7 @@ impl<T> NonFinalizedTree<T> {
                 let parent = self.blocks.get(parent_tree_index).unwrap();
                 (
                     Some(parent.consensus.clone()),
-                    parent.best_score.clone(),
+                    parent.best_score,
                     parent.finality.clone(),
                 )
             } else {
@@ -121,7 +121,7 @@ impl<T> NonFinalizedTree<T> {
                     }
                 };
 
-                (consensus, self.finalized_best_score.clone(), finality)
+                (consensus, self.finalized_best_score, finality)
             };
 
         let parent_block_header = if let Some(parent_tree_index) = parent_tree_index {
@@ -505,7 +505,7 @@ impl<T> NonFinalizedTree<T> {
                 hash: verified_header.hash,
                 consensus: verified_header.consensus_update,
                 finality: verified_header.finality_update,
-                best_score: best_score.clone(),
+                best_score,
                 user_data,
             },
         );

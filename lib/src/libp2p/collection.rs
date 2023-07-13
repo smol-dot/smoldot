@@ -428,7 +428,7 @@ where
                 self.randomness_seeds.fill_bytes(&mut *ephemeral_secret_key);
                 single_stream_handshake::HealthyHandshake::noise_yamux(
                     noise_key,
-                    &*ephemeral_secret_key,
+                    &ephemeral_secret_key,
                     is_initiator,
                 )
             },
@@ -523,7 +523,7 @@ where
                 // It's the "server" that initiates the Noise handshake.
                 is_initiator: !is_initiator,
                 prologue: &noise_prologue,
-                ephemeral_secret_key: &*noise_ephemeral_key,
+                ephemeral_secret_key: &noise_ephemeral_key,
             })
         };
 

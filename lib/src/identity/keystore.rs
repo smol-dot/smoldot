@@ -535,7 +535,7 @@ impl Keystore {
         // TODO: `to_bytes` isn't zeroize-friendly
         let bytes = key.to_bytes();
         let mut phrase = zeroize::Zeroizing::new(vec![0; bytes.len() * 2]);
-        hex::encode_to_slice(&bytes, &mut phrase).unwrap();
+        hex::encode_to_slice(bytes, &mut phrase).unwrap();
         Self::write_to_file(path, &phrase).await
     }
 

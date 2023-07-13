@@ -241,7 +241,7 @@ pub async fn start(mut config: Config<'_>) -> Client {
     let noise_key = {
         let mut noise_static_key = zeroize::Zeroizing::new([0u8; 32]);
         rand::thread_rng().fill_bytes(&mut *noise_static_key);
-        connection::NoiseKey::new(&config.libp2p_key, &*noise_static_key)
+        connection::NoiseKey::new(&config.libp2p_key, &noise_static_key)
     };
     zeroize::Zeroize::zeroize(&mut *config.libp2p_key);
     let local_peer_id =

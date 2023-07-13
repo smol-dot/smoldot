@@ -403,7 +403,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     .unwrap()
                     .scale_encoded_header;
                 let best_block_json_rpc_header = match methods::Header::from_scale_encoded_header(
-                    &best_block_header,
+                    best_block_header,
                     task.runtime_service.block_number_bytes(),
                 ) {
                     Ok(h) => h,
@@ -509,7 +509,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 task.platform.spawn_task(
                     format!("{}-storage-subscriptions-fetch", task.log_target).into(),
                     Box::pin({
-                        let block_hash = current_best_block.clone();
+                        let block_hash = *current_best_block;
                         let sync_service = task.sync_service.clone();
                         let requests_tx = task.requests_tx.clone();
                         async move {

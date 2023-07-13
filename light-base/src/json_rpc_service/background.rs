@@ -151,7 +151,7 @@ pub(super) fn start<TPlat: PlatformRef>(
         sync_service: config.sync_service.clone(),
         runtime_service: config.runtime_service.clone(),
         transactions_service: config.transactions_service.clone(),
-        to_legacy: Mutex::new(to_legacy_tx.clone()),
+        to_legacy: Mutex::new(to_legacy_tx),
         state_get_keys_paged_cache: Mutex::new(lru::LruCache::with_hasher(
             NonZeroUsize::new(2).unwrap(),
             util::SipHasherBuild::new({

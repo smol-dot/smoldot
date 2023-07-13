@@ -551,8 +551,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             existing_runtime
         } else {
             // No identical runtime was found. Try compiling the new runtime.
-            let runtime =
-                SuccessfulRuntime::from_storage::<TPlat>(&storage_code, &storage_heap_pages).await;
+            let runtime = SuccessfulRuntime::from_storage(&storage_code, &storage_heap_pages).await;
             let runtime = Arc::new(Runtime {
                 heap_pages: storage_heap_pages,
                 runtime_code: storage_code,
@@ -1641,8 +1640,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let runtime = if let Some(existing_runtime) = existing_runtime {
             existing_runtime
         } else {
-            let runtime =
-                SuccessfulRuntime::from_storage::<TPlat>(&storage_code, &storage_heap_pages).await;
+            let runtime = SuccessfulRuntime::from_storage(&storage_code, &storage_heap_pages).await;
             match &runtime {
                 Ok(runtime) => {
                     log::info!(
@@ -2176,7 +2174,7 @@ struct SuccessfulRuntime {
 }
 
 impl SuccessfulRuntime {
-    async fn from_storage<TPlat: PlatformRef>(
+    async fn from_storage(
         code: &Option<Vec<u8>>,
         heap_pages: &Option<Vec<u8>>,
     ) -> Result<Self, RuntimeError> {

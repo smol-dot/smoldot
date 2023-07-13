@@ -219,9 +219,9 @@ pub fn decode_database(encoded: &str, block_number_bytes: usize) -> Result<Datab
         decoded.code_closest_ancestor_excluding,
     ) {
         (Some(mv), Some(sv), Some(an)) => Some(DatabaseContentRuntimeCodeHint {
-            code: base64::Engine::decode(&base64::engine::general_purpose::STANDARD_NO_PAD, &sv)
+            code: base64::Engine::decode(&base64::engine::general_purpose::STANDARD_NO_PAD, sv)
                 .map_err(|_| ())?,
-            code_merkle_value: hex::decode(&mv).map_err(|_| ())?,
+            code_merkle_value: hex::decode(mv).map_err(|_| ())?,
             closest_ancestor_excluding: an
                 .as_bytes()
                 .iter()

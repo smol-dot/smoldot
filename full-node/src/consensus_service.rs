@@ -1234,7 +1234,7 @@ impl SyncBackground {
                 });
                 let parent_runtime_arc = parent_info
                     .as_ref()
-                    .map(|i| i.clone())
+                    .cloned()
                     .unwrap_or_else(|| self.finalized_runtime.clone());
                 let parent_runtime = parent_runtime_arc.try_lock().unwrap().take().unwrap();
 
