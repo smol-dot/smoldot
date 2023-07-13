@@ -65,7 +65,8 @@ child_process.execSync(
 // Some optional Wasm features are enabled during the compilation in order to speed up the
 // execution of smoldot.
 // SIMD is intentionally not enabled, because WASM engines seem to allow only SIMD instructions
-// on specific hardware. See for example <https://bugzilla.mozilla.org/show_bug.cgi?id=1840710>.
+// on specific hardware. See for example <https://bugzilla.mozilla.org/show_bug.cgi?id=1625130#c11>
+// and <https://bugzilla.mozilla.org/show_bug.cgi?id=1840710>.
 //
 // Note that this doesn't enable these features in the Rust standard library (which comes
 // precompiled), but the missing optimizations shouldn't be too much of a problem. The Rust
