@@ -295,16 +295,12 @@ pub fn validate_transaction(
 ) -> Query {
     // The parameters of the function, and whether to call `Core_initialize_block` beforehand,
     // depend on the API version.
-    let api_version = {
-        let expected = blake2_rfc::blake2b::blake2b(8, &[], b"TaggedTransactionQueue");
-        config
-            .runtime
-            .runtime_version()
-            .decode()
-            .apis
-            .find(|api| api.name_hash == expected.as_ref())
-            .map(|api| api.version)
-    };
+    let api_version = config
+        .runtime
+        .runtime_version()
+        .decode()
+        .apis
+        .find_version("TaggedTransactionQueue");
 
     match api_version {
         Some(2) => {
