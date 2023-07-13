@@ -585,7 +585,7 @@ impl ChainInformationBuild {
                         parent_hash: &[0; 32],
                         number: 0,
                         state_root: &state_trie_root_hash,
-                        extrinsics_root: &trie::EMPTY_TRIE_MERKLE_VALUE,
+                        extrinsics_root: &trie::EMPTY_BLAKE2_TRIE_MERKLE_VALUE,
                         digest: header::DigestRef::empty(),
                     }
                     .scale_encoding_vec(inner.block_number_bytes);

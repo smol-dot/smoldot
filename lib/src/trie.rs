@@ -116,6 +116,7 @@ pub mod trie_node;
 pub mod trie_structure;
 
 use alloc::collections::BTreeSet;
+
 pub use nibble::{
     all_nibbles, bytes_to_nibbles, nibbles_to_bytes_prefix_extend, nibbles_to_bytes_suffix_extend,
     nibbles_to_bytes_truncate, BytesToNibbles, Nibble, NibbleFromU8Error,
@@ -156,10 +157,23 @@ impl From<TrieEntryVersion> for u8 {
     }
 }
 
-/// Merkle value of the root node of an empty trie.
-pub const EMPTY_TRIE_MERKLE_VALUE: [u8; 32] = [
+/// Hash algorithm used during trie calculations.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum HashFunction {
+    Blake2,
+    Keccak256,
+}
+
+/// Merkle value of the root node of an empty trie using [`HashFunction::Blake2`].
+pub const EMPTY_BLAKE2_TRIE_MERKLE_VALUE: [u8; 32] = [
     3, 23, 10, 46, 117, 151, 183, 183, 227, 216, 76, 5, 57, 29, 19, 154, 98, 177, 87, 231, 135,
     134, 216, 192, 130, 242, 157, 207, 76, 17, 19, 20,
+];
+
+/// Merkle value of the root node of an empty trie using [`HashFunction::Keccak256`].
+pub const EMPTY_KECCAK256_TRIE_MERKLE_VALUE: [u8; 32] = [
+    188, 54, 120, 158, 122, 30, 40, 20, 54, 70, 66, 41, 130, 143, 129, 125, 102, 18, 247, 180, 119,
+    214, 101, 145, 255, 150, 169, 224, 100, 188, 201, 138,
 ];
 
 /// Returns the Merkle value of a trie containing the entries passed as parameter. The entries
@@ -171,9 +185,10 @@ pub const EMPTY_TRIE_MERKLE_VALUE: [u8; 32] = [
 // TODO: this function is actually used for real by the host, should we maybe sort entries or something?
 pub fn trie_root(
     version: TrieEntryVersion,
+    hash_function: HashFunction,
     unordered_entries: &[(impl AsRef<[u8]>, impl AsRef<[u8]>)],
 ) -> [u8; 32] {
-    let mut calculation = calculate_root::root_merkle_value();
+    let mut calculation = calculate_root::root_merkle_value(hash_function);
 
     loop {
         match calculation {
@@ -221,7 +236,11 @@ pub fn trie_root(
 ///
 /// > **Note**: In isolation, this function seems highly specific. In practice, it is notably used
 /// >           in order to build the trie root of the list of extrinsics of a block.
-pub fn ordered_root(version: TrieEntryVersion, entries: &[impl AsRef<[u8]>]) -> [u8; 32] {
+pub fn ordered_root(
+    version: TrieEntryVersion,
+    hash_function: HashFunction,
+    entries: &[impl AsRef<[u8]>],
+) -> [u8; 32] {
     const USIZE_COMPACT_BYTES: usize = 1 + (usize::BITS as usize) / 8;
 
     // Mapping numbers to SCALE-encoded numbers changes the ordering, so we have to sort the keys
@@ -230,7 +249,7 @@ pub fn ordered_root(version: TrieEntryVersion, entries: &[impl AsRef<[u8]>]) -> 
         .map(|num| util::encode_scale_compact_usize(num).as_ref().to_vec())
         .collect::<BTreeSet<_>>();
 
-    let mut calculation = calculate_root::root_merkle_value();
+    let mut calculation = calculate_root::root_merkle_value(hash_function);
 
     loop {
         match calculation {
@@ -274,11 +293,11 @@ pub fn ordered_root(version: TrieEntryVersion, entries: &[impl AsRef<[u8]>]) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::trie_node;
+    use super::{trie_node, HashFunction};
     use core::iter;
 
     #[test]
-    fn empty_trie() {
+    fn empty_trie_blake2() {
         let calculated_through_function = *<&[u8; 32]>::try_from(
             trie_node::calculate_merkle_value(
                 trie_node::Decoded {
@@ -286,6 +305,7 @@ mod tests {
                     partial_key: iter::empty(),
                     storage_value: trie_node::StorageValue::None,
                 },
+                HashFunction::Blake2,
                 true,
             )
             .unwrap()
@@ -296,13 +316,43 @@ mod tests {
         let calculated_manually = blake2_rfc::blake2b::blake2b(32, &[], &[0x0]);
 
         assert_eq!(calculated_through_function, calculated_manually.as_bytes());
-        assert_eq!(calculated_through_function, super::EMPTY_TRIE_MERKLE_VALUE);
+        assert_eq!(
+            calculated_through_function,
+            super::EMPTY_BLAKE2_TRIE_MERKLE_VALUE
+        );
     }
 
     #[test]
-    fn trie_root_example_v0() {
+    fn empty_trie_keccak256() {
+        let calculated_through_function = *<&[u8; 32]>::try_from(
+            trie_node::calculate_merkle_value(
+                trie_node::Decoded {
+                    children: [None::<&'static [u8]>; 16],
+                    partial_key: iter::empty(),
+                    storage_value: trie_node::StorageValue::None,
+                },
+                HashFunction::Keccak256,
+                true,
+            )
+            .unwrap()
+            .as_ref(),
+        )
+        .unwrap();
+
+        let calculated_manually = <sha3::Keccak256 as sha3::Digest>::digest(&[0x0]);
+
+        assert_eq!(calculated_through_function, calculated_manually.as_ref());
+        assert_eq!(
+            calculated_through_function,
+            super::EMPTY_KECCAK256_TRIE_MERKLE_VALUE
+        );
+    }
+
+    #[test]
+    fn trie_root_example_v0_blake2() {
         let obtained = super::trie_root(
             super::TrieEntryVersion::V0,
+            super::HashFunction::Blake2,
             &[(&b"foo"[..], &b"bar"[..]), (&b"foobar"[..], &b"baz"[..])],
         );
 
@@ -316,9 +366,27 @@ mod tests {
     }
 
     #[test]
-    fn trie_root_example_v1() {
+    fn trie_root_example_v0_keccak() {
+        let obtained = super::trie_root(
+            super::TrieEntryVersion::V0,
+            super::HashFunction::Keccak256,
+            &[(&b"foo"[..], &b"bar"[..]), (&b"foobar"[..], &b"baz"[..])],
+        );
+
+        assert_eq!(
+            obtained,
+            [
+                109, 13, 46, 4, 44, 192, 37, 121, 213, 230, 248, 34, 108, 36, 86, 23, 164, 52, 162,
+                165, 248, 111, 236, 65, 142, 71, 118, 196, 44, 205, 139, 145
+            ]
+        );
+    }
+
+    #[test]
+    fn trie_root_example_v1_blake2() {
         let obtained = super::trie_root(
             super::TrieEntryVersion::V1,
+            super::HashFunction::Blake2,
             &[
                 (&b"bar"[..], &b"foo"[..]),
                 (&b"barfoo"[..], &b"hello"[..]),
@@ -331,6 +399,27 @@ mod tests {
             [
                 68, 24, 7, 195, 69, 202, 122, 223, 136, 189, 33, 171, 27, 60, 186, 219, 21, 97,
                 106, 187, 137, 22, 126, 185, 254, 40, 93, 213, 206, 205, 4, 200
+            ]
+        );
+    }
+
+    #[test]
+    fn trie_root_example_v1_keccak() {
+        let obtained = super::trie_root(
+            super::TrieEntryVersion::V1,
+            super::HashFunction::Keccak256,
+            &[
+                (&b"bar"[..], &b"foo"[..]),
+                (&b"barfoo"[..], &b"hello"[..]),
+                (&b"anotheritem"[..], &b"anothervalue"[..]),
+            ],
+        );
+
+        assert_eq!(
+            obtained,
+            [
+                163, 182, 101, 58, 113, 93, 97, 19, 25, 39, 58, 170, 167, 225, 212, 187, 157, 3,
+                230, 21, 92, 129, 196, 38, 212, 190, 49, 103, 242, 0, 4, 65
             ]
         );
     }
