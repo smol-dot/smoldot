@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Add support for the `ext_trie_keccak_256_root_version_1`, `ext_trie_keccak_256_root_version_2`, `ext_trie_keccak_256_ordered_root_version_1`, and `ext_trie_keccak_256_ordered_root_version_2` host functions. ([#906](https://github.com/smol-dot/smoldot/pull/906))
+
 ### Changed
 
 - The smoldot binary now longer has SIMD enabled, in order to make it work on a greater range of hardware. It was previously assumed that SIMD instructions were emulated on hardware that doesn't natively support them, but this doesn't seem to be the case for some browser engines. ([#903](https://github.com/smol-dot/smoldot/pull/903))

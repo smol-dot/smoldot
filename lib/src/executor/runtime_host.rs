@@ -1361,7 +1361,7 @@ impl Inner {
                         main_trie_key.extend_from_slice(DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX);
                         main_trie_key.extend_from_slice(child_trie);
 
-                        if trie_root_hash != trie::EMPTY_TRIE_MERKLE_VALUE {
+                        if trie_root_hash != trie::EMPTY_BLAKE2_TRIE_MERKLE_VALUE {
                             self.pending_storage_changes
                                 .trie_diffs
                                 .entry(None)

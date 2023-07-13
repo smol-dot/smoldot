@@ -2228,6 +2228,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha3"
+version = "0.10.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75872d278a8f37ef87fa0ddbda7802605cb18344497949862c0d4dcb291eba60"
+dependencies = [
+ "digest 0.10.7",
+ "keccak",
+]
+
+[[package]]
 name = "signal-hook"
 version = "0.3.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2341,12 +2351,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.7",
+ "sha3",
  "siphasher",
  "slab",
  "smallvec",
  "soketto",
  "tempfile",
- "tiny-keccak",
  "twox-hash",
  "wasmi",
  "wasmtime",
@@ -2629,15 +2639,6 @@ dependencies = [
  "log",
  "ordered-float",
  "threadpool",
-]
-
-[[package]]
-name = "tiny-keccak"
-version = "2.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c9d3793400a45f954c52e73d068316d76b6f4e36977e3fcebb13a2721e80237"
-dependencies = [
- "crunchy",
 ]
 
 [[package]]

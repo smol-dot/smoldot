@@ -32,14 +32,14 @@
 //!
 //! ```
 //! use std::{collections::BTreeMap, ops::Bound};
-//! use smoldot::trie::{TrieEntryVersion, calculate_root};
+//! use smoldot::trie::{HashFunction, TrieEntryVersion, calculate_root};
 //!
 //! // In this example, the storage consists in a binary tree map.
 //! let mut storage = BTreeMap::<Vec<u8>, (Vec<u8>, TrieEntryVersion)>::new();
 //! storage.insert(b"foo".to_vec(), (b"bar".to_vec(), TrieEntryVersion::V1));
 //!
 //! let trie_root = {
-//!     let mut calculation = calculate_root::root_merkle_value();
+//!     let mut calculation = calculate_root::root_merkle_value(HashFunction::Blake2);
 //!     loop {
 //!         match calculation {
 //!             calculate_root::RootMerkleValueCalculation::Finished { hash, .. } => break hash,
@@ -81,15 +81,17 @@
 use super::{
     branch_search,
     nibble::{nibbles_to_bytes_suffix_extend, Nibble},
-    trie_node, TrieEntryVersion, EMPTY_TRIE_MERKLE_VALUE,
+    trie_node, HashFunction, TrieEntryVersion, EMPTY_BLAKE2_TRIE_MERKLE_VALUE,
+    EMPTY_KECCAK256_TRIE_MERKLE_VALUE,
 };
 
 use alloc::vec::Vec;
 use core::array;
 
 /// Start calculating the Merkle value of the root node.
-pub fn root_merkle_value() -> RootMerkleValueCalculation {
+pub fn root_merkle_value(hash_function: HashFunction) -> RootMerkleValueCalculation {
     CalcInner {
+        hash_function,
         stack: Vec::with_capacity(8),
     }
     .next()
@@ -116,6 +118,8 @@ pub enum RootMerkleValueCalculation {
 /// Calculation of the Merkle value is ready to continue.
 /// Shared by all the public-facing structs.
 struct CalcInner {
+    /// Hash function used by the trie.
+    hash_function: HashFunction,
     /// Stack of nodes whose value is currently being calculated.
     stack: Vec<Node>,
 }
@@ -174,6 +178,7 @@ impl CalcInner {
                         partial_key: calculated_elem.partial_key.iter().copied(),
                         storage_value: trie_node::StorageValue::None,
                     },
+                    self.hash_function,
                     self.stack.is_empty(),
                 )
                 .unwrap_or_else(|_| unreachable!());
@@ -269,7 +274,10 @@ impl NextKey {
                 } else {
                     // Trie is completely empty.
                     RootMerkleValueCalculation::Finished {
-                        hash: EMPTY_TRIE_MERKLE_VALUE,
+                        hash: match self.calculation.hash_function {
+                            HashFunction::Blake2 => EMPTY_BLAKE2_TRIE_MERKLE_VALUE,
+                            HashFunction::Keccak256 => EMPTY_KECCAK256_TRIE_MERKLE_VALUE,
+                        },
                     }
                 }
             }
@@ -326,6 +334,7 @@ impl StorageValue {
                     (None, _) => trie_node::StorageValue::None,
                 },
             },
+            self.calculation.hash_function,
             self.calculation.stack.is_empty(),
         )
         .unwrap_or_else(|_| unreachable!());
@@ -345,12 +354,12 @@ impl StorageValue {
 
 #[cfg(test)]
 mod tests {
-    use crate::trie::TrieEntryVersion;
+    use crate::trie::{HashFunction, TrieEntryVersion};
     use alloc::collections::BTreeMap;
     use core::ops::Bound;
 
     fn calculate_root(version: TrieEntryVersion, trie: &BTreeMap<Vec<u8>, Vec<u8>>) -> [u8; 32] {
-        let mut calculation = super::root_merkle_value();
+        let mut calculation = super::root_merkle_value(HashFunction::Blake2);
 
         loop {
             match calculation {

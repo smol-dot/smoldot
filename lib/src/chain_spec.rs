@@ -126,7 +126,8 @@ impl ChainSpec {
                     match self.genesis_storage() {
                         GenesisStorage::TrieRootHash(hash) => *hash,
                         GenesisStorage::Items(genesis_storage) => {
-                            let mut calculation = trie::calculate_root::root_merkle_value();
+                            let mut calculation =
+                                trie::calculate_root::root_merkle_value(trie::HashFunction::Blake2);
 
                             loop {
                                 match calculation {

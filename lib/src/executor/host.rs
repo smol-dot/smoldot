@@ -202,8 +202,6 @@ use alloc::{
     vec::Vec,
 };
 use core::{fmt, hash::Hasher as _, iter, str};
-use sha2::Digest as _;
-use tiny_keccak::Hasher as _;
 
 pub mod runtime_version;
 
@@ -1608,31 +1606,21 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_hashing_keccak_256_version_1 => {
-                let mut keccak = tiny_keccak::Keccak::v256();
-                keccak.update(expect_pointer_size!(0).as_ref());
-                let mut out = [0u8; 32];
-                keccak.finalize(&mut out);
-
+                let hash =
+                    <sha3::Keccak256 as sha3::Digest>::digest(expect_pointer_size!(0).as_ref());
                 self.inner
-                    .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out))
+                    .alloc_write_and_return_pointer(host_fn.name(), iter::once(&hash))
             }
             HostFunction::ext_hashing_keccak_512_version_1 => {
-                let mut keccak = tiny_keccak::Keccak::v512();
-                keccak.update(expect_pointer_size!(0).as_ref());
-                let mut out = [0u8; 64];
-                keccak.finalize(&mut out);
-
+                let hash =
+                    <sha3::Keccak512 as sha3::Digest>::digest(expect_pointer_size!(0).as_ref());
                 self.inner
-                    .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out))
+                    .alloc_write_and_return_pointer(host_fn.name(), iter::once(&hash))
             }
             HostFunction::ext_hashing_sha2_256_version_1 => {
-                let mut hasher = sha2::Sha256::new();
-                hasher.update(expect_pointer_size!(0));
-
-                self.inner.alloc_write_and_return_pointer(
-                    host_fn.name(),
-                    iter::once(hasher.finalize().as_slice()),
-                )
+                let hash = <sha2::Sha256 as sha2::Digest>::digest(expect_pointer_size!(0).as_ref());
+                self.inner
+                    .alloc_write_and_return_pointer(host_fn.name(), iter::once(&hash))
             }
             HostFunction::ext_hashing_blake2_128_version_1 => {
                 let out = {
@@ -1815,13 +1803,18 @@ impl ReadyToRun {
                 host_fn_not_implemented!()
             }
             HostFunction::ext_trie_blake2_256_root_version_1
-            | HostFunction::ext_trie_blake2_256_root_version_2 => {
-                let state_version =
-                    if matches!(host_fn, HostFunction::ext_trie_blake2_256_root_version_2) {
-                        expect_state_version!(1)
-                    } else {
-                        TrieEntryVersion::V0
-                    };
+            | HostFunction::ext_trie_blake2_256_root_version_2
+            | HostFunction::ext_trie_keccak_256_root_version_1
+            | HostFunction::ext_trie_keccak_256_root_version_2 => {
+                let state_version = if matches!(
+                    host_fn,
+                    HostFunction::ext_trie_blake2_256_root_version_2
+                        | HostFunction::ext_trie_keccak_256_root_version_2
+                ) {
+                    expect_state_version!(1)
+                } else {
+                    TrieEntryVersion::V0
+                };
 
                 let result = {
                     let input = expect_pointer_size!(0);
@@ -1848,7 +1841,19 @@ impl ReadyToRun {
                         .map(|(_, parse_result)| parse_result);
 
                     match parsing_result {
-                        Ok(elements) => Ok(trie::trie_root(state_version, &elements[..])),
+                        Ok(elements) => Ok(trie::trie_root(
+                            state_version,
+                            if matches!(
+                                host_fn,
+                                HostFunction::ext_trie_blake2_256_root_version_1
+                                    | HostFunction::ext_trie_blake2_256_root_version_2
+                            ) {
+                                trie::HashFunction::Blake2
+                            } else {
+                                trie::HashFunction::Keccak256
+                            },
+                            &elements[..],
+                        )),
                         Err(_) => Err(()),
                     }
                 };
@@ -1864,10 +1869,13 @@ impl ReadyToRun {
                 }
             }
             HostFunction::ext_trie_blake2_256_ordered_root_version_1
-            | HostFunction::ext_trie_blake2_256_ordered_root_version_2 => {
+            | HostFunction::ext_trie_blake2_256_ordered_root_version_2
+            | HostFunction::ext_trie_keccak_256_ordered_root_version_1
+            | HostFunction::ext_trie_keccak_256_ordered_root_version_2 => {
                 let state_version = if matches!(
                     host_fn,
                     HostFunction::ext_trie_blake2_256_ordered_root_version_2
+                        | HostFunction::ext_trie_keccak_256_ordered_root_version_2
                 ) {
                     expect_state_version!(1)
                 } else {
@@ -1893,7 +1901,19 @@ impl ReadyToRun {
                         .map(|(_, parse_result)| parse_result);
 
                     match parsing_result {
-                        Ok(elements) => Ok(trie::ordered_root(state_version, &elements[..])),
+                        Ok(elements) => Ok(trie::ordered_root(
+                            state_version,
+                            if matches!(
+                                host_fn,
+                                HostFunction::ext_trie_blake2_256_ordered_root_version_1
+                                    | HostFunction::ext_trie_blake2_256_ordered_root_version_2
+                            ) {
+                                trie::HashFunction::Blake2
+                            } else {
+                                trie::HashFunction::Keccak256
+                            },
+                            &elements[..],
+                        )),
                         Err(_) => Err(()),
                     }
                 };
@@ -1908,10 +1928,6 @@ impl ReadyToRun {
                     },
                 }
             }
-            HostFunction::ext_trie_keccak_256_root_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_trie_keccak_256_root_version_2 => host_fn_not_implemented!(),
-            HostFunction::ext_trie_keccak_256_ordered_root_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_trie_keccak_256_ordered_root_version_2 => host_fn_not_implemented!(),
             HostFunction::ext_trie_blake2_256_verify_proof_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_trie_blake2_256_verify_proof_version_2 => host_fn_not_implemented!(),
             HostFunction::ext_trie_keccak_256_verify_proof_version_1 => host_fn_not_implemented!(),
