@@ -202,7 +202,6 @@ use alloc::{
     vec::Vec,
 };
 use core::{fmt, hash::Hasher as _, iter, str};
-use sha2::Digest as _;
 
 pub mod runtime_version;
 
@@ -1619,13 +1618,9 @@ impl ReadyToRun {
                     .alloc_write_and_return_pointer(host_fn.name(), iter::once(&hash))
             }
             HostFunction::ext_hashing_sha2_256_version_1 => {
-                let mut hasher = sha2::Sha256::new();
-                hasher.update(expect_pointer_size!(0));
-
-                self.inner.alloc_write_and_return_pointer(
-                    host_fn.name(),
-                    iter::once(hasher.finalize().as_slice()),
-                )
+                let hash = <sha2::Sha256 as sha2::Digest>::digest(expect_pointer_size!(0).as_ref());
+                self.inner
+                    .alloc_write_and_return_pointer(host_fn.name(), iter::once(&hash))
             }
             HostFunction::ext_hashing_blake2_128_version_1 => {
                 let out = {
