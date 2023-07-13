@@ -203,7 +203,6 @@ use alloc::{
 };
 use core::{fmt, hash::Hasher as _, iter, str};
 use sha2::Digest as _;
-use tiny_keccak::Hasher as _;
 
 pub mod runtime_version;
 
@@ -1608,22 +1607,16 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_hashing_keccak_256_version_1 => {
-                let mut keccak = tiny_keccak::Keccak::v256();
-                keccak.update(expect_pointer_size!(0).as_ref());
-                let mut out = [0u8; 32];
-                keccak.finalize(&mut out);
-
+                let hash =
+                    <sha3::Keccak256 as sha3::Digest>::digest(expect_pointer_size!(0).as_ref());
                 self.inner
-                    .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out))
+                    .alloc_write_and_return_pointer(host_fn.name(), iter::once(&hash))
             }
             HostFunction::ext_hashing_keccak_512_version_1 => {
-                let mut keccak = tiny_keccak::Keccak::v512();
-                keccak.update(expect_pointer_size!(0).as_ref());
-                let mut out = [0u8; 64];
-                keccak.finalize(&mut out);
-
+                let hash =
+                    <sha3::Keccak512 as sha3::Digest>::digest(expect_pointer_size!(0).as_ref());
                 self.inner
-                    .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out))
+                    .alloc_write_and_return_pointer(host_fn.name(), iter::once(&hash))
             }
             HostFunction::ext_hashing_sha2_256_version_1 => {
                 let mut hasher = sha2::Sha256::new();
