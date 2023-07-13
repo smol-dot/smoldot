@@ -701,6 +701,7 @@ async fn open_database(
                             partial_key,
                             storage_value,
                         },
+                        trie::HashFunction::Blake2,
                         is_root_node,
                     )
                     .unwrap();
