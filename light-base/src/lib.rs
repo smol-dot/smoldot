@@ -318,7 +318,7 @@ impl JsonRpcResponses {
     /// Returns the next response or notification, or `None` if the chain has been removed.
     pub async fn next(&mut self) -> Option<String> {
         if let Some(frontend) = self.inner.as_mut() {
-            match futures_lite::future::or(
+            if let Some(response) = futures_lite::future::or(
                 async { Some(frontend.next_json_rpc_response().await) },
                 async {
                     (&mut self.public_api_chain_destroyed).await;
@@ -327,8 +327,7 @@ impl JsonRpcResponses {
             )
             .await
             {
-                Some(response) => return Some(response),
-                None => {}
+                return Some(response);
             }
         }
 
@@ -677,7 +676,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     self.platform.fill_random_bytes(&mut *noise_static_key);
                     let mut libp2p_key = zeroize::Zeroizing::new([0u8; 32]);
                     self.platform.fill_random_bytes(&mut *libp2p_key);
-                    connection::NoiseKey::new(&*libp2p_key, &*noise_static_key)
+                    connection::NoiseKey::new(&libp2p_key, &noise_static_key)
                 };
 
                 // Version of the client when requested through the networking.

@@ -694,7 +694,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                             &trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>();
 
                         let closest_descendant_merkle_value = match decoded_proof
-                            .closest_descendant_merkle_value(main_trie_root_hash, &key_nibbles)
+                            .closest_descendant_merkle_value(main_trie_root_hash, key_nibbles)
                         {
                             Ok(Some(merkle_value)) => Some(merkle_value.as_ref().to_vec()),
                             Ok(None) => None,
@@ -705,7 +705,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         };
 
                         let found_closest_ancestor_excluding = match decoded_proof
-                            .closest_ancestor_in_proof(main_trie_root_hash, &key_nibbles)
+                            .closest_ancestor_in_proof(main_trie_root_hash, key_nibbles)
                         {
                             Ok(Some(ancestor)) => Some(ancestor.to_vec()),
                             Ok(None) => None,

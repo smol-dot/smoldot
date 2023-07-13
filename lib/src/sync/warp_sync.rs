@@ -685,7 +685,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                             block_hash: ref b,
                             ref keys,
                         } if *b == header.hash(self.block_number_bytes)
-                            && keys.iter().any(|k| &*k == &*code_key_to_request)
+                            && keys.iter().any(|k| *k == *code_key_to_request)
                             && keys.iter().any(|k| k == b":heappages"))
             }) {
                 Some((
