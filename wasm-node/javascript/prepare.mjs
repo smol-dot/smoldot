@@ -64,6 +64,9 @@ child_process.execSync(
 // code. This generates a `wasm` file in `target/wasm32-wasi`.
 // Some optional Wasm features are enabled during the compilation in order to speed up the
 // execution of smoldot.
+// SIMD is intentionally not enabled, because WASM engines seem to allow only SIMD instructions
+// on specific hardware. See for example <https://bugzilla.mozilla.org/show_bug.cgi?id=1840710>.
+//
 // Note that this doesn't enable these features in the Rust standard library (which comes
 // precompiled), but the missing optimizations shouldn't be too much of a problem. The Rust
 // standard library could be compiled with these features using the `-Z build-std` flag, but at
@@ -75,7 +78,7 @@ child_process.execSync(
 child_process.execSync(
     "cargo +" + rustVersion + " build --package smoldot-light-wasm --target wasm32-wasi --no-default-features " +
     (buildProfile == 'debug' ? '' : ("--profile " + buildProfile)),
-    { 'stdio': 'inherit', 'env': { 'RUSTFLAGS': '-C target-feature=+bulk-memory,+sign-ext,+simd128', ...process.env } }
+    { 'stdio': 'inherit', 'env': { 'RUSTFLAGS': '-C target-feature=+bulk-memory,+sign-ext', ...process.env } }
 );
 const rustOutput = "../../target/wasm32-wasi/" + buildProfile + "/smoldot_light_wasm.wasm";
 
