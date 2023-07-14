@@ -572,7 +572,7 @@ async fn open_database(
 ) -> (full_sqlite::SqliteFullDatabase, bool) {
     // The `unwrap()` here can panic for example in case of access denied.
     match full_sqlite::open(full_sqlite::Config {
-        block_number_bytes: sqlite_cache_size,
+        block_number_bytes: chain_spec.block_number_bytes().into(),
         cache_size: sqlite_cache_size,
         ty: if let Some(path) = &db_path {
             full_sqlite::ConfigTy::Disk {
