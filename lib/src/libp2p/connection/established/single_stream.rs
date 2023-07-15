@@ -209,7 +209,7 @@ where
                 && self.inner.yamux.goaway_sent()
                 && self.inner.yamux.received_goaway().is_some()
             {
-                read_write.close_write_if_empty();
+                read_write.close_write();
             }
 
             // Any meaningful activity within this loop can set this value to `true`. If this
