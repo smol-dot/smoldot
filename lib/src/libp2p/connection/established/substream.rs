@@ -424,7 +424,7 @@ where
                 // have been eagerly sending data (assuming that the negotiation would
                 // succeed), which should be silently discarded.
                 read_write.discard_all_incoming();
-                read_write.close_write_if_empty();
+                read_write.close_write();
                 if read_write.is_dead() {
                     (None, None)
                 } else {
@@ -436,7 +436,7 @@ where
                 // Substream has failed to negotiate a protocol. The substream is expected to
                 // close soon.
                 read_write.discard_all_incoming();
-                read_write.close_write_if_empty();
+                read_write.close_write();
                 (
                     if read_write.is_dead() {
                         None
@@ -603,7 +603,7 @@ where
             }
             SubstreamInner::NotificationsOutClosed => {
                 read_write.discard_all_incoming();
-                read_write.close_write_if_empty();
+                read_write.close_write();
                 (
                     if read_write.is_dead() {
                         None
@@ -625,7 +625,7 @@ where
                 // `read_write` the response arrived after the timeout. It is the responsibility
                 // of the user to call `read_write` in an appropriate way for this to not happen.
                 if timeout < read_write.now {
-                    read_write.close_write_if_empty();
+                    read_write.close_write();
                     return (
                         None,
                         Some(Event::Response {
@@ -669,7 +669,7 @@ where
                     .map_or(true, |n| n.can_write_protocol_data())
                 {
                     if request.is_empty() {
-                        read_write.close_write_if_empty();
+                        read_write.close_write();
                     } else {
                         read_write.write_from_vec_deque(&mut request);
                     }
@@ -679,7 +679,7 @@ where
                     let incoming_buffer = match read_write.incoming_buffer {
                         Some(buf) => buf,
                         None => {
-                            read_write.close_write_if_empty();
+                            read_write.close_write();
                             return (
                                 None,
                                 Some(Event::Response {
@@ -692,7 +692,7 @@ where
                     match response.update(incoming_buffer) {
                         Ok((num_read, leb128::Framed::Finished(response))) => {
                             read_write.advance_read(num_read);
-                            read_write.close_write_if_empty();
+                            read_write.close_write();
                             (
                                 None,
                                 Some(Event::Response {
@@ -776,7 +776,7 @@ where
             SubstreamInner::RequestInApiWait => (Some(SubstreamInner::RequestInApiWait), None),
             SubstreamInner::RequestInRespond { mut response } => {
                 if response.is_empty() {
-                    read_write.close_write_if_empty();
+                    read_write.close_write();
                     (None, None)
                 } else {
                     read_write.write_from_vec_deque(&mut response);
@@ -788,7 +788,7 @@ where
                 let incoming_buffer = match read_write.incoming_buffer {
                     Some(buf) => buf,
                     None => {
-                        read_write.close_write_if_empty();
+                        read_write.close_write();
                         return (
                             None,
                             Some(Event::InboundError {
@@ -836,7 +836,7 @@ where
             }
             SubstreamInner::NotificationsInRefused => {
                 read_write.discard_all_incoming();
-                read_write.close_write_if_empty();
+                read_write.close_write();
                 (
                     if read_write.is_dead() {
                         None
@@ -855,13 +855,13 @@ where
                 read_write.write_from_vec_deque(&mut handshake);
 
                 if close_desired && handshake.is_empty() {
-                    read_write.close_write_if_empty();
+                    read_write.close_write();
                 }
 
                 let incoming_buffer = match read_write.incoming_buffer {
                     Some(buf) => buf,
                     None => {
-                        read_write.close_write_if_empty();
+                        read_write.close_write();
                         return (
                             Some(SubstreamInner::NotificationsInClosed),
                             Some(Event::NotificationsInClose { outcome: Ok(()) }),
@@ -909,7 +909,7 @@ where
             }
             SubstreamInner::NotificationsInClosed => {
                 read_write.discard_all_incoming();
-                read_write.close_write_if_empty();
+                read_write.close_write();
                 (
                     if read_write.is_dead() {
                         None
@@ -949,7 +949,7 @@ where
             }
 
             SubstreamInner::PingOutFailed { mut queued_pings } => {
-                read_write.close_write_if_empty();
+                read_write.close_write();
                 if !queued_pings.is_empty() {
                     queued_pings.remove(0);
                     (
