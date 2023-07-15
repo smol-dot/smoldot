@@ -685,6 +685,9 @@ impl HandshakeInProgress {
             // Don't even read the data from the remote.
             read_write.write_from_vec_deque(&mut self.0.pending_out_data);
             if !self.0.pending_out_data.is_empty() {
+                if read_write.outgoing_buffer.is_none() {
+                    return Err(HandshakeError::WriteClosed);
+                }
                 return Ok(NoiseHandshake::InProgress(self));
             }
 
