@@ -1270,8 +1270,6 @@ pub enum HandshakeError {
     PayloadDecode(PayloadDecodeError),
     /// Key passed as part of the payload failed to decode into a libp2p public key.
     InvalidKey,
-    /// Received a payload as part of a handshake message when none was expected.
-    UnexpectedPayload,
     /// Signature of the noise public key by the libp2p key failed.
     #[display(fmt = "Signature of the noise public key by the libp2p key failed.")]
     SignatureVerificationFailed(SignatureVerifyFailed),
