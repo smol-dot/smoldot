@@ -673,7 +673,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
 
     /// Start fetching parachain headers of new blocks whose parachain block needs to be fetched.
     fn start_paraheads_fetch(&mut self) {
-        let mut runtime_subscription = match &mut self.subscription_state {
+        let runtime_subscription = match &mut self.subscription_state {
             ParachainBackgroundState::NotSubscribed { .. } => return,
             ParachainBackgroundState::Subscribed(s) => s,
         };
