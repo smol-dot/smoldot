@@ -1631,6 +1631,8 @@ impl ReadyToRun {
                     };
                 }
 
+                self.inner.signatures_batch_verification = Some(true);
+
                 HostVm::ReadyToRun(ReadyToRun {
                     resume_value: None,
                     inner: self.inner,
