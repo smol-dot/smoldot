@@ -697,7 +697,10 @@ impl HandshakeInProgress {
                 debug_assert!(self.0.receive_buffer.is_empty());
 
                 // Perform the `Split()`.
-                let (init_to_resp, resp_to_init, _) = hkdf(&self.0.chaining_key, &[]);
+                let HkdfOutput {
+                    output1: init_to_resp,
+                    output2: resp_to_init,
+                } = hkdf(&self.0.chaining_key, &[]);
                 let (out_key, in_key) = match self.0.is_initiator {
                     true => (init_to_resp, resp_to_init),
                     false => (resp_to_init, init_to_resp),
@@ -773,7 +776,10 @@ impl HandshakeInProgress {
                     mix_hash(&mut self.0.hash, local_ephemeral_public_key.as_bytes());
 
                     // Process `ee`. Call MixKey(DH(e, re)).
-                    let (chaining_key_update, key_update, _) = hkdf(
+                    let HkdfOutput {
+                        output1: chaining_key_update,
+                        output2: key_update,
+                    } = hkdf(
                         &self.0.chaining_key,
                         self.0
                             .local_ephemeral_private_key
@@ -799,7 +805,10 @@ impl HandshakeInProgress {
                     mix_hash(&mut self.0.hash, &encrypted_static_public_key);
 
                     // Process `es`. Call MixKey(DH(s, re)).
-                    let (chaining_key_update, key_update, _) = hkdf(
+                    let HkdfOutput {
+                        output1: chaining_key_update,
+                        output2: key_update,
+                    } = hkdf(
                         &self.0.chaining_key,
                         self.0
                             .local_static_private_key
@@ -853,7 +862,10 @@ impl HandshakeInProgress {
                     mix_hash(&mut self.0.hash, &encrypted_static_public_key);
 
                     // Process `se`. Call MixKey(DH(s, re)).
-                    let (chaining_key_update, key_update, _) = hkdf(
+                    let HkdfOutput {
+                        output1: chaining_key_update,
+                        output2: key_update,
+                    } = hkdf(
                         &self.0.chaining_key,
                         self.0
                             .local_static_private_key
@@ -1031,7 +1043,10 @@ impl HandshakeInProgress {
                     );
 
                     // Process `ee`. Call MixKey(DH(e, re)).
-                    let (chaining_key_update, key_update, _) = hkdf(
+                    let HkdfOutput {
+                        output1: chaining_key_update,
+                        output2: key_update,
+                    } = hkdf(
                         &self.0.chaining_key,
                         self.0
                             .local_ephemeral_private_key
@@ -1055,7 +1070,10 @@ impl HandshakeInProgress {
                     mix_hash(&mut self.0.hash, remote_static_public_key_encrypted);
 
                     // Process `es`. Call MixKey(DH(e, rs)).
-                    let (chaining_key_update, key_update, _) = hkdf(
+                    let HkdfOutput {
+                        output1: chaining_key_update,
+                        output2: key_update,
+                    } = hkdf(
                         &self.0.chaining_key,
                         self.0
                             .local_ephemeral_private_key
@@ -1154,7 +1172,10 @@ impl HandshakeInProgress {
                     mix_hash(&mut self.0.hash, remote_static_public_key_encrypted);
 
                     // Process `se`. Call MixKey(DH(e, rs)).
-                    let (chaining_key_update, key_update, _) = hkdf(
+                    let HkdfOutput {
+                        output1: chaining_key_update,
+                        output2: key_update,
+                    } = hkdf(
                         &self.0.chaining_key,
                         self.0
                             .local_ephemeral_private_key
@@ -1557,16 +1578,9 @@ fn mix_hash(hash: &mut [u8; 32], data: &[u8]) {
 
 // Implementation of `HKDF`. See <https://noiseprotocol.org/noise.html#hash-functions>.
 //
-// Contrary to the version in the Noise specification, this always returns 3 outputs. We trust the
-// compiler to optimize out the calculation of the third output.
-fn hkdf(
-    chaining_key: &[u8; 32],
-    input_key_material: &[u8],
-) -> (
-    zeroize::Zeroizing<[u8; 32]>,
-    zeroize::Zeroizing<[u8; 32]>,
-    zeroize::Zeroizing<[u8; 32]>,
-) {
+// Contrary to the version in the Noise specification, this always returns 2 outputs. The third
+// output version is never used in this module.
+fn hkdf(chaining_key: &[u8; 32], input_key_material: &[u8]) -> HkdfOutput {
     fn hmac_hash<'a>(
         key: &[u8; 32],
         data: impl IntoIterator<Item = &'a [u8]>,
@@ -1608,8 +1622,13 @@ fn hkdf(
     let temp_key = hmac_hash(chaining_key, [input_key_material]);
     let output1 = hmac_hash(&temp_key, [&[0x01][..]]);
     let output2 = hmac_hash(&temp_key, [&*output1, &[0x02][..]]);
-    let output3 = hmac_hash(&temp_key, [&*output2, &[0x03][..]]);
-    (output1, output2, output3)
+    HkdfOutput { output1, output2 }
+}
+
+/// Output of the [`hkdf`] function.
+struct HkdfOutput {
+    output1: zeroize::Zeroizing<[u8; 32]>,
+    output2: zeroize::Zeroizing<[u8; 32]>,
 }
 
 #[cfg(test)]
