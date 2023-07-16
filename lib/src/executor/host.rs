@@ -2974,8 +2974,10 @@ impl SignatureVerification {
     }
 
     fn resume(mut self, success: bool) -> HostVm {
+        debug_assert!(
+            !self.is_batch_verification || self.inner.signatures_batch_verification.is_some()
+        );
         if self.is_batch_verification && !success {
-            debug_assert!(self.inner.signatures_batch_verification.is_some());
             self.inner.signatures_batch_verification = Some(false);
         }
 
