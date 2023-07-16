@@ -147,15 +147,31 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         &self,
         connection_type: smoldot_light::platform::ConnectionType,
     ) -> bool {
-        // TODO: no, should ask the JS code what it supports
-        match connection_type {
-            smoldot_light::platform::ConnectionType::WebRtc => true,
-            smoldot_light::platform::ConnectionType::WebSocket {
-                secure,
-                remote_is_localhost,
-            } => secure || remote_is_localhost,
-            smoldot_light::platform::ConnectionType::Tcp => false,
-        }
+        let ty = match connection_type {
+            smoldot_light::platform::ConnectionType::TcpIpv4 => 0,
+            smoldot_light::platform::ConnectionType::TcpIpv6 => 1,
+            smoldot_light::platform::ConnectionType::TcpDns => 2,
+            smoldot_light::platform::ConnectionType::WebSocketIpv4 {
+                remote_is_localhost: true,
+                ..
+            }
+            | smoldot_light::platform::ConnectionType::WebSocketIpv6 {
+                remote_is_localhost: true,
+                ..
+            }
+            | smoldot_light::platform::ConnectionType::WebSocketDns {
+                secure: false,
+                remote_is_localhost: true,
+            } => 7,
+            smoldot_light::platform::ConnectionType::WebSocketIpv4 { .. } => 4,
+            smoldot_light::platform::ConnectionType::WebSocketIpv6 { .. } => 5,
+            smoldot_light::platform::ConnectionType::WebSocketDns { secure: false, .. } => 6,
+            smoldot_light::platform::ConnectionType::WebSocketDns { secure: true, .. } => 14,
+            smoldot_light::platform::ConnectionType::WebRtcIpv4 => 16,
+            smoldot_light::platform::ConnectionType::WebRtcIpv6 => 17,
+        };
+
+        unsafe { bindings::connection_type_supported(ty) != 0 }
     }
 
     fn connect_stream(

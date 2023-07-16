@@ -268,10 +268,30 @@ pub enum SubstreamDirection {
 /// Connection type passed to [`PlatformRef::supports_connection_type`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ConnectionType {
-    /// TCP/IP connections.
-    Tcp,
-    /// WebSocket connections.
-    WebSocket {
+    /// TCP/IP connection.
+    TcpIpv4,
+    /// TCP/IP connection.
+    TcpIpv6,
+    /// TCP/IP connection.
+    TcpDns,
+    /// Non-secure WebSocket connection.
+    WebSocketIpv4 {
+        /// `true` if the target of the connection is `localhost`.
+        ///
+        /// > **Note**: Some platforms (namely browsers) sometimes only accept non-secure WebSocket
+        /// >           connections only towards `localhost`.
+        remote_is_localhost: bool,
+    },
+    /// Non-secure WebSocket connection.
+    WebSocketIpv6 {
+        /// `true` if the target of the connection is `localhost`.
+        ///
+        /// > **Note**: Some platforms (namely browsers) sometimes only accept non-secure WebSocket
+        /// >           connections only towards `localhost`.
+        remote_is_localhost: bool,
+    },
+    /// WebSocket connection.
+    WebSocketDns {
         /// `true` for WebSocket secure connections.
         secure: bool,
         /// `true` if the target of the connection is `localhost`.
@@ -281,28 +301,34 @@ pub enum ConnectionType {
         remote_is_localhost: bool,
     },
     /// Libp2p-specific WebRTC flavour.
-    WebRtc,
+    WebRtcIpv4,
+    /// Libp2p-specific WebRTC flavour.
+    WebRtcIpv6,
 }
 
 impl<'a> From<&'a Address<'a>> for ConnectionType {
     fn from(address: &'a Address<'a>) -> ConnectionType {
         match address {
-            Address::TcpDns { .. } | Address::TcpIp { .. } => ConnectionType::Tcp,
+            Address::TcpIp {
+                ip: IpAddr::V4(_), ..
+            } => ConnectionType::TcpIpv4,
+            Address::TcpIp {
+                ip: IpAddr::V6(_), ..
+            } => ConnectionType::TcpIpv6,
+            Address::TcpDns { .. } => ConnectionType::TcpDns,
             Address::WebSocketIp {
                 ip: IpAddr::V4(ip), ..
-            } => ConnectionType::WebSocket {
-                secure: false,
+            } => ConnectionType::WebSocketIpv4 {
                 remote_is_localhost: no_std_net::Ipv4Addr::from(*ip).is_loopback(),
             },
             Address::WebSocketIp {
                 ip: IpAddr::V6(ip), ..
-            } => ConnectionType::WebSocket {
-                secure: false,
+            } => ConnectionType::WebSocketIpv6 {
                 remote_is_localhost: no_std_net::Ipv6Addr::from(*ip).is_loopback(),
             },
             Address::WebSocketDns {
                 hostname, secure, ..
-            } => ConnectionType::WebSocket {
+            } => ConnectionType::WebSocketDns {
                 secure: *secure,
                 remote_is_localhost: hostname.eq_ignore_ascii_case("localhost"),
             },
@@ -313,7 +339,12 @@ impl<'a> From<&'a Address<'a>> for ConnectionType {
 impl<'a> From<&'a MultiStreamAddress> for ConnectionType {
     fn from(address: &'a MultiStreamAddress) -> ConnectionType {
         match address {
-            MultiStreamAddress::WebRtc { .. } => ConnectionType::WebRtc,
+            MultiStreamAddress::WebRtc {
+                ip: IpAddr::V4(_), ..
+            } => ConnectionType::WebRtcIpv4,
+            MultiStreamAddress::WebRtc {
+                ip: IpAddr::V6(_), ..
+            } => ConnectionType::WebRtcIpv6,
         }
     }
 }

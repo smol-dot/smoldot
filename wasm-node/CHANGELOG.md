@@ -11,6 +11,10 @@
 
 - The smoldot binary now longer has SIMD enabled, in order to make it work on a greater range of hardware. It was previously assumed that SIMD instructions were emulated on hardware that doesn't natively support them, but this doesn't seem to be the case for some browser engines. ([#903](https://github.com/smol-dot/smoldot/pull/903))
 
+### Fixed
+
+- Fix regression introduced in version 1.0.12 where only WebSocket secure and WebRTC connections were ever opened, regardless of the `forbid*` configuration flags. ([#923](https://github.com/smol-dot/smoldot/pull/923))
+
 ## 1.0.12 - 2023-07-10
 
 ### Changed
